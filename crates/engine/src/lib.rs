@@ -120,3 +120,80 @@ impl<P: Provider> Engine<P> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proof_type_display() {
+        assert_eq!(ProofType::Risc0.to_string(), "risc0");
+        assert_eq!(ProofType::Sp1.to_string(), "sp1");
+        assert_eq!(ProofType::Native.to_string(), "native");
+    }
+
+    #[test]
+    fn test_proof_type_from_str() {
+        assert_eq!("risc0".parse::<ProofType>().unwrap(), ProofType::Risc0);
+        assert_eq!("RISC0".parse::<ProofType>().unwrap(), ProofType::Risc0);
+        assert_eq!("sp1".parse::<ProofType>().unwrap(), ProofType::Sp1);
+        assert_eq!("SP1".parse::<ProofType>().unwrap(), ProofType::Sp1);
+        assert_eq!("native".parse::<ProofType>().unwrap(), ProofType::Native);
+        assert_eq!("Native".parse::<ProofType>().unwrap(), ProofType::Native);
+
+        assert!("invalid".parse::<ProofType>().is_err());
+    }
+
+    #[test]
+    fn test_proof_type_equality() {
+        assert_eq!(ProofType::Risc0, ProofType::Risc0);
+        assert_ne!(ProofType::Risc0, ProofType::Sp1);
+    }
+
+    #[test]
+    fn test_generate_output_empty_input() {
+        use alloy_primitives::{Address, map::AddressMap};
+        use alloy_trie::TrieAccount;
+        use raiko2_primitives::RaizenResult;
+        use reth_ethereum_primitives::Block;
+        use reth_stateless::ExecutionWitness;
+
+        // Create a mock provider
+        struct MockProvider;
+
+        impl Provider for MockProvider {
+            async fn batch_blocks(&self, _blocks: &[u64]) -> RaizenResult<Vec<Block>> {
+                Ok(vec![])
+            }
+
+            async fn batch_accounts(
+                &self,
+                _blocks: &[u64],
+                _accounts: &[Vec<Address>],
+            ) -> RaizenResult<Vec<AddressMap<TrieAccount>>> {
+                Ok(vec![])
+            }
+
+            async fn batch_witnesses(
+                &self,
+                _blocks: &[u64],
+            ) -> RaizenResult<Vec<ExecutionWitness>> {
+                Ok(vec![])
+            }
+        }
+
+        let driver = Driver;
+        let provider = MockProvider;
+        let engine = Engine::new(driver, provider);
+
+        let empty_input = GuestInput::default();
+        let result = engine.generate_output(&empty_input);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No blocks in input")
+        );
+    }
+}

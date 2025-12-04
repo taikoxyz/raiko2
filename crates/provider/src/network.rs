@@ -1,11 +1,22 @@
-use alloy_primitives::{map::AddressMap, Address};
+use alloy_primitives::{Address, map::AddressMap};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types::{Account, BlockNumberOrTag};
+use alloy_trie::TrieAccount;
 use raiko2_primitives::{RaizenError, RaizenResult};
 use reth_ethereum_primitives::Block as RethBlock;
 use reth_stateless::ExecutionWitness;
 
 use crate::Provider;
+
+/// Convert RPC Account to TrieAccount for state trie operations.
+fn rpc_account_to_trie_account(account: Account) -> TrieAccount {
+    TrieAccount {
+        nonce: account.nonce,
+        balance: account.balance,
+        storage_root: account.storage_root,
+        code_hash: account.code_hash,
+    }
+}
 
 #[derive(Clone)]
 pub struct NetworkProvider {
@@ -64,7 +75,7 @@ impl Provider for NetworkProvider {
         &self,
         block_numbers: &[u64],
         addresses: &[Vec<Address>],
-    ) -> RaizenResult<Vec<AddressMap<Account>>> {
+    ) -> RaizenResult<Vec<AddressMap<TrieAccount>>> {
         const MAX_BATCH_SIZE: usize = 250;
         let mut result = Vec::with_capacity(block_numbers.len());
         for (block_number, addresses) in block_numbers.iter().zip(addresses.iter()) {
@@ -83,8 +94,7 @@ impl Provider for NetworkProvider {
                                 )
                                 .map_err(|_| {
                                     RaizenError::RPC(
-                                        "Failed adding eth_getTransactionCount call to batch"
-                                            .to_owned(),
+                                        "Failed adding eth_getAccount call to batch".to_owned(),
                                     )
                                 })?,
                         ),
@@ -98,12 +108,10 @@ impl Provider for NetworkProvider {
 
                 // Collect the data from the batch
                 for (address, request) in requests {
-                    accounts.insert(
-                        *address,
-                        request.await.map_err(|e| {
-                            RaizenError::RPC(format!("Error collecting request data: {e}"))
-                        })?,
-                    );
+                    let rpc_account: Account = request.await.map_err(|e| {
+                        RaizenError::RPC(format!("Error collecting request data: {e}"))
+                    })?;
+                    accounts.insert(*address, rpc_account_to_trie_account(rpc_account));
                 }
             }
             result.push(accounts);

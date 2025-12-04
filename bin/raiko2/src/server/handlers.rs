@@ -7,9 +7,9 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{error, info};
 
-use super::state::AppState;
+use super::state::{AppState, ProofJob, ProofJobStatus};
 
 /// Health check response.
 #[derive(Serialize)]
@@ -45,7 +45,7 @@ pub async fn get_info(State(state): State<AppState>) -> Json<InfoResponse> {
 
 /// Batch proof request.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields will be used when proof generation is implemented
+#[allow(dead_code)] // Fields will be used when full proof generation is implemented
 pub struct BatchProofRequest {
     pub batch_id: u64,
     pub l1_inclusion_block: u64,
@@ -77,9 +77,21 @@ pub enum ProofStatus {
     Cancelled,
 }
 
+impl From<ProofJobStatus> for ProofStatus {
+    fn from(status: ProofJobStatus) -> Self {
+        match status {
+            ProofJobStatus::Pending => ProofStatus::Pending,
+            ProofJobStatus::Proving => ProofStatus::Proving,
+            ProofJobStatus::Completed => ProofStatus::Completed,
+            ProofJobStatus::Failed => ProofStatus::Failed,
+            ProofJobStatus::Cancelled => ProofStatus::Cancelled,
+        }
+    }
+}
+
 /// Request a batch proof.
 pub async fn request_batch_proof(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<BatchProofRequest>,
 ) -> Result<Json<ProofResponse>, ApiError> {
     info!(
@@ -87,15 +99,73 @@ pub async fn request_batch_proof(
         req.batch_id, req.l1_inclusion_block
     );
 
-    // TODO: Implement actual proof generation
-    // For now, return a placeholder response
-
     let proof_id = format!(
         "proof-{}-{}-{}",
         req.batch_id,
         req.l1_inclusion_block,
         chrono_lite_timestamp()
     );
+
+    // Create job entry
+    let job = ProofJob {
+        id: proof_id.clone(),
+        batch_id: req.batch_id,
+        status: ProofJobStatus::Pending,
+        proof: None,
+        error: None,
+    };
+    state.add_job(job).await;
+
+    // Spawn background task to generate proof
+    let state_clone = state.clone();
+    let proof_id_clone = proof_id.clone();
+    let batch_id = req.batch_id;
+
+    tokio::spawn(async move {
+        info!(
+            "Starting proof generation for job: {}, batch_id: {}",
+            proof_id_clone, batch_id
+        );
+
+        // Update status to proving
+        state_clone
+            .update_job(&proof_id_clone, ProofJobStatus::Proving, None, None)
+            .await;
+
+        // TODO: Fetch actual GuestInput from provider based on batch_id
+        // For now, create a placeholder input
+        let input = raiko2_primitives::GuestInput::default();
+        let prover_config = raiko2_primitives::ProverConfig::default();
+
+        // Generate proof using the prover
+        match state_clone.prover.prove(input, &prover_config).await {
+            Ok(proof) => {
+                info!("Proof generated successfully for job: {}", proof_id_clone);
+                state_clone
+                    .update_job(
+                        &proof_id_clone,
+                        ProofJobStatus::Completed,
+                        proof.proof,
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                error!(
+                    "Proof generation failed for job {}: {:?}",
+                    proof_id_clone, e
+                );
+                state_clone
+                    .update_job(
+                        &proof_id_clone,
+                        ProofJobStatus::Failed,
+                        None,
+                        Some(e.to_string()),
+                    )
+                    .await;
+            }
+        }
+    });
 
     Ok(Json(ProofResponse {
         id: proof_id,
@@ -105,18 +175,23 @@ pub async fn request_batch_proof(
 
 /// Get proof status.
 pub async fn get_proof_status(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Getting proof status for: {}", id);
 
-    // TODO: Implement actual status lookup
-    Ok(Json(ProofStatusResponse {
-        id,
-        status: ProofStatus::Pending,
-        proof: None,
-        error: None,
-    }))
+    match state.get_job(&id).await {
+        Some(job) => Ok(Json(ProofStatusResponse {
+            id: job.id,
+            status: job.status.into(),
+            proof: job.proof,
+            error: job.error,
+        })),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("Proof job not found: {}", id),
+        }),
+    }
 }
 
 /// Proof status response.
@@ -132,18 +207,32 @@ pub struct ProofStatusResponse {
 
 /// Cancel proof request.
 pub async fn cancel_proof(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Cancelling proof: {}", id);
 
-    // TODO: Implement actual cancellation
-    Ok(Json(ProofStatusResponse {
-        id,
-        status: ProofStatus::Cancelled,
-        proof: None,
-        error: None,
-    }))
+    match state.get_job(&id).await {
+        Some(job) => {
+            // Only cancel if still pending or proving
+            if job.status == ProofJobStatus::Pending || job.status == ProofJobStatus::Proving {
+                state
+                    .update_job(&id, ProofJobStatus::Cancelled, None, None)
+                    .await;
+            }
+            let updated_job = state.get_job(&id).await.unwrap();
+            Ok(Json(ProofStatusResponse {
+                id: updated_job.id,
+                status: updated_job.status.into(),
+                proof: updated_job.proof,
+                error: updated_job.error,
+            }))
+        }
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("Proof job not found: {}", id),
+        }),
+    }
 }
 
 /// API error type.

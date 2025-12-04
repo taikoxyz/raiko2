@@ -8632,6 +8632,7 @@ dependencies = [
  "raiko2-engine",
  "raiko2-primitives",
  "raiko2-protocol",
+ "raiko2-prover",
  "raiko2-provider",
  "reth",
  "serde",

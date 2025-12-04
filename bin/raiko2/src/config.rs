@@ -1,9 +1,25 @@
 //! Configuration management for Raiko V2.
 
 use crate::cli::Cli;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Configuration validation error messages.
+mod validation {
+    pub const INVALID_HOST: &str = "Invalid host address";
+    pub const INVALID_PORT: &str = "Port must be between 1 and 65535";
+    pub const INVALID_RPC_URL: &str = "Invalid RPC URL format";
+    pub const INVALID_CHAIN_ID: &str = "Chain ID must be greater than 0";
+}
+
+/// Validate that a string is a valid URL.
+fn is_valid_url(url: &str) -> bool {
+    url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("ws://")
+        || url.starts_with("wss://")
+}
 
 /// Server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +34,19 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
         }
+    }
+}
+
+impl ServerConfig {
+    /// Validate server configuration.
+    pub fn validate(&self) -> Result<()> {
+        if self.host.is_empty() {
+            bail!("{}", validation::INVALID_HOST);
+        }
+        if self.port == 0 {
+            bail!("{}", validation::INVALID_PORT);
+        }
+        Ok(())
     }
 }
 
@@ -38,6 +67,33 @@ impl Default for RpcConfig {
             l1_chain_id: 1,
             l2_chain_id: 167000,
         }
+    }
+}
+
+impl RpcConfig {
+    /// Validate RPC configuration.
+    pub fn validate(&self) -> Result<()> {
+        if !is_valid_url(&self.l1_rpc) {
+            bail!(
+                "{}: l1_rpc = '{}'",
+                validation::INVALID_RPC_URL,
+                self.l1_rpc
+            );
+        }
+        if !is_valid_url(&self.l2_rpc) {
+            bail!(
+                "{}: l2_rpc = '{}'",
+                validation::INVALID_RPC_URL,
+                self.l2_rpc
+            );
+        }
+        if self.l1_chain_id == 0 {
+            bail!("{}: l1_chain_id", validation::INVALID_CHAIN_ID);
+        }
+        if self.l2_chain_id == 0 {
+            bail!("{}: l2_chain_id", validation::INVALID_CHAIN_ID);
+        }
+        Ok(())
     }
 }
 
@@ -138,6 +194,9 @@ impl Config {
 
         config.prover.prover_type = cli.prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
+        // Validate configuration
+        config.validate()?;
+
         Ok(config)
     }
 
@@ -146,5 +205,112 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
         toml::from_str(&content).with_context(|| format!("Failed to parse config file: {:?}", path))
+    }
+
+    /// Validate the entire configuration.
+    pub fn validate(&self) -> Result<()> {
+        self.server
+            .validate()
+            .context("Server configuration error")?;
+        self.rpc.validate().context("RPC configuration error")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_config_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.port, 8080);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_server_config_invalid_host() {
+        let config = ServerConfig {
+            host: "".to_string(),
+            port: 8080,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_invalid_port() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 0,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_rpc_config_default() {
+        let config = RpcConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rpc_config_valid_urls() {
+        let config = RpcConfig {
+            l1_rpc: "https://eth.llamarpc.com".to_string(),
+            l2_rpc: "wss://taiko-rpc.example.com".to_string(),
+            l1_chain_id: 1,
+            l2_chain_id: 167000,
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rpc_config_invalid_l1_url() {
+        let config = RpcConfig {
+            l1_rpc: "not-a-valid-url".to_string(),
+            l2_rpc: "http://localhost:9545".to_string(),
+            l1_chain_id: 1,
+            l2_chain_id: 167000,
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("l1_rpc"));
+    }
+
+    #[test]
+    fn test_rpc_config_invalid_chain_id() {
+        let config = RpcConfig {
+            l1_rpc: "http://localhost:8545".to_string(),
+            l2_rpc: "http://localhost:9545".to_string(),
+            l1_chain_id: 0,
+            l2_chain_id: 167000,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_prover_type_from_str() {
+        assert_eq!("risc0".parse::<ProverType>().unwrap(), ProverType::Risc0);
+        assert_eq!("RISC0".parse::<ProverType>().unwrap(), ProverType::Risc0);
+        assert_eq!("sp1".parse::<ProverType>().unwrap(), ProverType::Sp1);
+        assert_eq!("SP1".parse::<ProverType>().unwrap(), ProverType::Sp1);
+        assert!("invalid".parse::<ProverType>().is_err());
+    }
+
+    #[test]
+    fn test_config_default_validates() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_url() {
+        assert!(is_valid_url("http://localhost:8545"));
+        assert!(is_valid_url("https://eth.llamarpc.com"));
+        assert!(is_valid_url("ws://localhost:8546"));
+        assert!(is_valid_url("wss://rpc.example.com"));
+        assert!(!is_valid_url("localhost:8545"));
+        assert!(!is_valid_url("ftp://files.example.com"));
+        assert!(!is_valid_url(""));
     }
 }

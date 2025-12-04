@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -156,6 +156,45 @@ fn decode_manifest_payload(bytes: &[u8], offset: usize) -> Result<Option<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
+
+    #[test]
+    fn test_block_manifest_default() {
+        let manifest = BlockManifest::default();
+        assert_eq!(manifest.timestamp, 0);
+        assert_eq!(manifest.coinbase, Address::ZERO);
+        assert_eq!(manifest.anchor_block_number, 0);
+        assert_eq!(manifest.gas_limit, 0);
+        assert!(manifest.transactions.is_empty());
+    }
+
+    #[test]
+    fn test_block_manifest_with_values() {
+        let coinbase = address!("0000000000000000000000000000000000000001");
+        let manifest = BlockManifest {
+            timestamp: 1700000000,
+            coinbase,
+            anchor_block_number: 100,
+            gas_limit: 30_000_000,
+            transactions: Bytes::from(vec![0x01, 0x02, 0x03]),
+        };
+
+        assert_eq!(manifest.timestamp, 1700000000);
+        assert_eq!(manifest.coinbase, coinbase);
+        assert_eq!(manifest.anchor_block_number, 100);
+        assert_eq!(manifest.gas_limit, 30_000_000);
+        assert_eq!(manifest.transactions.len(), 3);
+    }
+
+    #[test]
+    fn test_derivation_source_manifest_new() {
+        let prover_auth = Bytes::from(vec![0xaa, 0xbb, 0xcc]);
+        let blocks = vec![BlockManifest::default()];
+        let manifest = DerivationSourceManifest::new(prover_auth.clone(), blocks);
+
+        assert_eq!(manifest.prover_auth_bytes, prover_auth);
+        assert_eq!(manifest.blocks.len(), 1);
+    }
 
     #[test]
     fn test_derivation_source_manifest_encode_decode() {
@@ -170,11 +209,91 @@ mod tests {
     }
 
     #[test]
+    fn test_derivation_source_manifest_with_blocks() {
+        let blocks = vec![
+            BlockManifest {
+                timestamp: 1000,
+                coinbase: Address::ZERO,
+                anchor_block_number: 1,
+                gas_limit: 1_000_000,
+                transactions: Bytes::default(),
+            },
+            BlockManifest {
+                timestamp: 2000,
+                coinbase: Address::ZERO,
+                anchor_block_number: 2,
+                gas_limit: 2_000_000,
+                transactions: Bytes::default(),
+            },
+        ];
+
+        let manifest = DerivationSourceManifest::new(Bytes::default(), blocks);
+        let encoded = manifest.encode_and_compress().unwrap();
+        let decoded = DerivationSourceManifest::decompress_and_decode(&encoded, 0).unwrap();
+
+        assert_eq!(decoded.blocks.len(), 2);
+        assert_eq!(decoded.blocks[0].timestamp, 1000);
+        assert_eq!(decoded.blocks[1].timestamp, 2000);
+    }
+
+    #[test]
     fn test_decode_manifest_payload_version_mismatch() {
         let mut payload = vec![0u8; 64];
         payload[31] = SHASTA_PAYLOAD_VERSION + 1;
 
         let decoded = decode_manifest_payload(&payload, 0).unwrap();
         assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn test_decode_manifest_payload_insufficient_bytes() {
+        let payload = vec![0u8; 32]; // Less than required 64 bytes
+        let decoded = decode_manifest_payload(&payload, 0).unwrap();
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn test_decode_manifest_payload_with_offset() {
+        let manifest = DerivationSourceManifest::default();
+        let encoded = manifest.encode_and_compress().unwrap();
+
+        // Add prefix bytes
+        let mut with_prefix = vec![0xaa, 0xbb, 0xcc];
+        with_prefix.extend_from_slice(&encoded);
+
+        let decoded = DerivationSourceManifest::decompress_and_decode(&with_prefix, 3).unwrap();
+        assert_eq!(decoded.blocks.len(), manifest.blocks.len());
+    }
+
+    #[test]
+    fn test_block_manifest_rlp_roundtrip() {
+        let manifest = BlockManifest {
+            timestamp: 12345,
+            coinbase: address!("0000000000000000000000000000000000000042"),
+            anchor_block_number: 100,
+            gas_limit: 15_000_000,
+            transactions: Bytes::from(vec![0x01, 0x02]),
+        };
+
+        let encoded = alloy_rlp::encode(&manifest);
+        let decoded = BlockManifest::decode(&mut encoded.as_slice()).unwrap();
+
+        assert_eq!(decoded.timestamp, manifest.timestamp);
+        assert_eq!(decoded.coinbase, manifest.coinbase);
+        assert_eq!(decoded.anchor_block_number, manifest.anchor_block_number);
+        assert_eq!(decoded.gas_limit, manifest.gas_limit);
+        assert_eq!(decoded.transactions, manifest.transactions);
+    }
+
+    #[test]
+    fn test_derivation_source_manifest_serialization() {
+        let manifest =
+            DerivationSourceManifest::new(Bytes::from(vec![0x01]), vec![BlockManifest::default()]);
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let deserialized: DerivationSourceManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.prover_auth_bytes, manifest.prover_auth_bytes);
+        assert_eq!(deserialized.blocks.len(), manifest.blocks.len());
     }
 }

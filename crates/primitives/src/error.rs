@@ -27,6 +27,15 @@ pub enum RaikoError {
     #[error("Invalid conversion: {0}")]
     Conversion(String),
 
+    /// For RPC errors with context.
+    #[error("RPC error ({context}): {message}")]
+    RpcWithContext {
+        /// The RPC method or operation that failed.
+        context: String,
+        /// The error message.
+        message: String,
+    },
+
     /// For RPC errors.
     #[error("There was an error with the RPC provider: {0}")]
     RPC(String),
@@ -40,9 +49,27 @@ pub enum RaikoError {
     #[schema(value_type = Value)]
     Guest(#[from] ProverError),
 
+    /// For I/O errors with path context.
+    #[error("I/O error on '{path}': {message}")]
+    IoWithPath {
+        /// The file path involved.
+        path: String,
+        /// The error message.
+        message: String,
+    },
+
     /// For I/O errors.
     #[error("There was an I/O error: {0}")]
     Io(String),
+
+    /// For serialization errors with format context.
+    #[error("Serialization error ({format}): {message}")]
+    SerializationWithFormat {
+        /// The serialization format (json, bincode, etc).
+        format: String,
+        /// The error message.
+        message: String,
+    },
 
     /// For serialization errors.
     #[error("Serialization error: {0}")]
@@ -52,9 +79,66 @@ pub enum RaikoError {
     #[error("Error: {0}")]
     Anyhow(String),
 
+    /// For stateless validation errors with details.
+    #[error("Stateless validation failed: {reason}")]
+    StatelessValidationDetailed {
+        /// The validation failure reason.
+        reason: String,
+        /// Optional block number context.
+        block_number: Option<u64>,
+    },
+
     /// For stateless validation errors.
     #[error("Stateless validation error: {0}")]
     StatelessValidation(String),
+
+    /// For configuration errors.
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
+    /// For provider/data fetching errors.
+    #[error("Provider error: {0}")]
+    Provider(String),
+}
+
+impl RaikoError {
+    /// Create an RPC error with context.
+    pub fn rpc_with_context(context: impl Into<String>, message: impl Into<String>) -> Self {
+        RaikoError::RpcWithContext {
+            context: context.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Create an I/O error with path context.
+    pub fn io_with_path(path: impl Into<String>, message: impl Into<String>) -> Self {
+        RaikoError::IoWithPath {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Create a serialization error with format context.
+    pub fn serialization_with_format(
+        format: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        RaikoError::SerializationWithFormat {
+            format: format.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Create a detailed stateless validation error.
+    pub fn stateless_validation_detailed(
+        reason: impl Into<String>,
+        block_number: Option<u64>,
+    ) -> Self {
+        RaikoError::StatelessValidationDetailed {
+            reason: reason.into(),
+            block_number,
+        }
+    }
 }
 
 impl From<std::io::Error> for RaikoError {
@@ -65,7 +149,10 @@ impl From<std::io::Error> for RaikoError {
 
 impl From<serde_json::Error> for RaikoError {
     fn from(e: serde_json::Error) -> Self {
-        RaikoError::Serialization(e.to_string())
+        RaikoError::SerializationWithFormat {
+            format: "json".to_string(),
+            message: e.to_string(),
+        }
     }
 }
 
@@ -77,7 +164,23 @@ impl From<anyhow::Error> for RaikoError {
 
 impl From<reth_stateless::validation::StatelessValidationError> for RaikoError {
     fn from(e: reth_stateless::validation::StatelessValidationError) -> Self {
-        RaikoError::StatelessValidation(format!("{:?}", e))
+        // Extract more meaningful information from the error
+        let reason = match &e {
+            reth_stateless::validation::StatelessValidationError::SignerRecovery => {
+                "Failed to recover transaction signer".to_string()
+            }
+            reth_stateless::validation::StatelessValidationError::MissingAncestorHeader => {
+                "Missing ancestor header in witness".to_string()
+            }
+            reth_stateless::validation::StatelessValidationError::InvalidAncestorChain => {
+                "Invalid ancestor chain: headers are not contiguous".to_string()
+            }
+            _ => format!("{:?}", e),
+        };
+        RaikoError::StatelessValidationDetailed {
+            reason,
+            block_number: None,
+        }
     }
 }
 
@@ -112,7 +215,8 @@ mod tests {
     fn test_error_from_serde() {
         let json_err = serde_json::from_str::<()>("invalid").unwrap_err();
         let err: RaikoError = json_err.into();
-        assert!(matches!(err, RaikoError::Serialization(_)));
+        assert!(matches!(err, RaikoError::SerializationWithFormat { .. }));
+        assert!(err.to_string().contains("json"));
     }
 
     #[test]
@@ -124,20 +228,74 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_with_context() {
+        let err = RaikoError::rpc_with_context("eth_getBlockByNumber", "connection refused");
+        assert!(err.to_string().contains("eth_getBlockByNumber"));
+        assert!(err.to_string().contains("connection refused"));
+    }
+
+    #[test]
+    fn test_io_with_path() {
+        let err = RaikoError::io_with_path("/etc/config.toml", "file not found");
+        assert!(err.to_string().contains("/etc/config.toml"));
+        assert!(err.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn test_serialization_with_format() {
+        let err = RaikoError::serialization_with_format("bincode", "invalid data");
+        assert!(err.to_string().contains("bincode"));
+        assert!(err.to_string().contains("invalid data"));
+    }
+
+    #[test]
+    fn test_stateless_validation_detailed() {
+        let err = RaikoError::stateless_validation_detailed("state root mismatch", Some(12345));
+        if let RaikoError::StatelessValidationDetailed {
+            reason,
+            block_number,
+        } = err
+        {
+            assert_eq!(reason, "state root mismatch");
+            assert_eq!(block_number, Some(12345));
+        } else {
+            panic!("Expected StatelessValidationDetailed");
+        }
+    }
+
+    #[test]
     fn test_all_error_variants() {
         // Ensure all error variants have proper Display impl
-        let errors = vec![
+        let errors: Vec<RaikoError> = vec![
             RaikoError::InvalidProofType("test".into()),
             RaikoError::InvalidBlobOption("test".into()),
             RaikoError::InvalidRequestConfig("test".into()),
             RaikoError::FeatureNotSupportedError("test".into()),
             RaikoError::Conversion("test".into()),
+            RaikoError::RpcWithContext {
+                context: "test".into(),
+                message: "test".into(),
+            },
             RaikoError::RPC("test".into()),
             RaikoError::Preflight("test".into()),
+            RaikoError::IoWithPath {
+                path: "test".into(),
+                message: "test".into(),
+            },
             RaikoError::Io("test".into()),
+            RaikoError::SerializationWithFormat {
+                format: "test".into(),
+                message: "test".into(),
+            },
             RaikoError::Serialization("test".into()),
             RaikoError::Anyhow("test".into()),
+            RaikoError::StatelessValidationDetailed {
+                reason: "test".into(),
+                block_number: Some(1),
+            },
             RaikoError::StatelessValidation("test".into()),
+            RaikoError::Configuration("test".into()),
+            RaikoError::Provider("test".into()),
         ];
 
         for err in errors {

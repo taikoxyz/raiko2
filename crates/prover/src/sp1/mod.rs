@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 #[cfg(feature = "sp1")]
-use sp1_sdk::{ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey};
+use sp1_sdk::{HashableKey, ProverClient, SP1ProofMode, SP1Stdin};
 
 // Generated ELF binaries from guest build
 pub mod elf;
@@ -155,9 +155,8 @@ impl crate::Prover for Sp1Prover {
         }
 
         // Encode proof
-        let proof_bytes = bincode::serialize(&proof).map_err(|e| {
-            ProverError::GuestError(format!("Failed to serialize proof: {}", e))
-        })?;
+        let proof_bytes = bincode::serialize(&proof)
+            .map_err(|e| ProverError::GuestError(format!("Failed to serialize proof: {}", e)))?;
 
         Ok(Sp1Response {
             proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),

@@ -22,11 +22,11 @@ async-trait.workspace = true
 # Alloy types
 alloy-primitives.workspace = true
 
-# RISC0 dependencies (optional)
-risc0-zkvm = { version = "2.2.0", optional = true }
+# RISC0 dependencies (optional - temporarily disabled due to bytemuck version conflict with reth)
+risc0-zkvm = { workspace = true, optional = true }
 
 # SP1 dependencies (optional)
-sp1-sdk = { version = "5.0.0", optional = true }
+sp1-sdk = { workspace = true, optional = true }
 
 [features]
 default = []

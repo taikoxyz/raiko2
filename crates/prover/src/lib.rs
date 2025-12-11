@@ -18,13 +18,9 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
-mod risc0;
-mod sgx;
-mod sp1;
-
-pub use risc0::{Risc0Config, Risc0Prover};
-pub use sgx::SgxProver;
-pub use sp1::{Sp1Config, Sp1Prover};
+pub mod risc0;
+pub mod sgx;
+pub mod sp1;
 
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
 

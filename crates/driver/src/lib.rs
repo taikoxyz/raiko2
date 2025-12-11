@@ -13,6 +13,7 @@
 //! ```
 
 use raiko2_primitives::{ProofContext, RaikoResult, TaikoManifest, TaikoProverData};
+use raiko2_protocol::ShastaEventData;
 use reth_ethereum_primitives::Block;
 use tracing::info;
 
@@ -48,35 +49,34 @@ impl Driver {
         // TODO: Implement actual L1 batch proposal fetching using raiko2-protocol
         // For now, return a placeholder manifest
 
+        let prover_address = ctx
+            .request
+            .prover
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+
         let prover_data = TaikoProverData {
-            prover: ctx
-                .request
-                .prover
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
+            actual_prover: prover_address,
+            designated_prover: None,
             graffiti: ctx
                 .request
                 .graffiti
                 .as_ref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
+            parent_transition_hash: None,
+            checkpoint: None,
+            last_anchor_block_number: None,
         };
 
         Ok(TaikoManifest {
             batch_id: ctx.request.batch_id,
             l1_header: alloy_consensus::Header::default(),
-            tx_data_from_calldata: vec![],
-            tx_data_from_blob: vec![],
-            blob_commitments: None,
-            blob_proofs: None,
-            blob_proof_type: ctx
-                .request
-                .blob_proof_type
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
+            batch_proposed: ShastaEventData::default(),
+            chain_spec: Default::default(),
             prover_data,
+            data_sources: Vec::new(),
         })
     }
 }
@@ -100,17 +100,22 @@ mod tests {
     #[test]
     fn test_taiko_prover_data_default() {
         let data = TaikoProverData::default();
-        assert_eq!(data.prover, alloy_primitives::Address::ZERO);
+        assert_eq!(data.actual_prover, alloy_primitives::Address::ZERO);
+        assert!(data.designated_prover.is_none());
         assert_eq!(data.graffiti, alloy_primitives::B256::ZERO);
+        assert!(data.parent_transition_hash.is_none());
+        assert!(data.checkpoint.is_none());
+        assert!(data.last_anchor_block_number.is_none());
     }
 
     #[test]
     fn test_taiko_manifest_default() {
         let manifest = TaikoManifest::default();
         assert_eq!(manifest.batch_id, 0);
-        assert!(manifest.tx_data_from_calldata.is_empty());
-        assert!(manifest.tx_data_from_blob.is_empty());
-        assert!(manifest.blob_commitments.is_none());
-        assert!(manifest.blob_proofs.is_none());
+        assert!(manifest.data_sources.is_empty());
+        assert_eq!(
+            manifest.prover_data.actual_prover,
+            alloy_primitives::Address::ZERO
+        );
     }
 }

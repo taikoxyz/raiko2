@@ -41,16 +41,16 @@ impl AppState {
     pub fn new(config: Config) -> Result<Self> {
         let prover: Arc<dyn Prover> = match config.prover.prover_type {
             ProverType::Risc0 => {
-                let risc0_config = raiko2_prover::Risc0Config {
+                let risc0_config = raiko2_prover::risc0::Risc0Config {
                     bonsai: config.prover.risc0.bonsai,
                     snark: config.prover.risc0.snark,
                     profile: false,
                     execution_po2: 20,
                 };
-                Arc::new(raiko2_prover::Risc0Prover::new(risc0_config))
+                Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config))
             }
             ProverType::Sp1 => {
-                let sp1_config = raiko2_prover::Sp1Config {
+                let sp1_config = raiko2_prover::sp1::Sp1Config {
                     recursion: if config.prover.sp1.plonk {
                         raiko2_prover::sp1::RecursionMode::Plonk
                     } else {
@@ -63,7 +63,7 @@ impl AppState {
                     },
                     verify: true,
                 };
-                Arc::new(raiko2_prover::Sp1Prover::new(sp1_config))
+                Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config))
             }
         };
 

@@ -272,11 +272,8 @@ pub trait Prover: Send + Sync {
     ) -> ProverResult<Proof>;
 }
 
-#[cfg(feature = "risc0")]
-pub mod risc0;
-
-#[cfg(feature = "sp1")]
-pub mod sp1;
+mod risc0;
+mod sp1;
 ```
 
 ---

@@ -1,7 +1,8 @@
 mod remote;
 
+use async_trait::async_trait;
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
-use remote::{RemoteSgxProver, SgxParam, SgxResponse};
+use remote::RemoteSgxProver;
 
 /// High level SGX prover wrapper that picks the appropriate backend.
 #[derive(Clone, Debug)]
@@ -24,6 +25,7 @@ impl Default for SgxProver {
     }
 }
 
+#[async_trait]
 impl crate::Prover for SgxProver {
     async fn prove(&self, input: GuestInput, config: &ProverConfig) -> ProverResult<Proof> {
         self.inner.prove(input, config).await

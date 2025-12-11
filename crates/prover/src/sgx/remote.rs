@@ -3,9 +3,11 @@ use std::{
     panic::{self, AssertUnwindSafe},
 };
 
-use raiko_lib::input::{AggregationGuestInput, RawAggregationGuestInput, RawProof};
-use raiko_lib::primitives::B256;
-use raiko2_primitives::{GuestInput, Proof, ProverConfig, ProverError, ProverResult};
+use alloy_primitives::B256;
+use raiko2_primitives::{
+    AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverError, ProverResult,
+    RawAggregationGuestInput, RawProof,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -102,11 +104,14 @@ impl RemoteSgxProver {
             input.taiko.chain_spec.active_fork(number, timestamp)
         }))
         .ok()
-        .and_then(Result::ok);
+        .and_then(|res| res.ok());
 
         if let Some(spec_id) = spec_id {
-            params.instance_ids.get(&spec_id).cloned().ok_or_else(|| {
-                ProverError::GuestError(format!("no SGX instance id configured for spec {spec_id}"))
+            let spec_key = spec_id as u8;
+            params.instance_ids.get(&spec_key).cloned().ok_or_else(|| {
+                ProverError::GuestError(format!(
+                    "no SGX instance id configured for spec {spec_id:?}"
+                ))
             })
         } else {
             Err(ProverError::GuestError(

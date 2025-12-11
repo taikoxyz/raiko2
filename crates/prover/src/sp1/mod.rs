@@ -8,10 +8,8 @@ use raiko2_primitives::{
     AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverError, ProverResult,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
-
-#[cfg(feature = "sp1")]
 use sp1_sdk::{HashableKey, ProverClient, SP1ProofMode, SP1Stdin};
+use tracing::info;
 
 // Generated ELF binaries from guest build
 pub mod elf;
@@ -56,7 +54,6 @@ pub enum RecursionMode {
     Plonk,
 }
 
-#[cfg(feature = "sp1")]
 impl From<RecursionMode> for SP1ProofMode {
     fn from(value: RecursionMode) -> Self {
         match value {
@@ -111,7 +108,6 @@ impl Sp1Prover {
     }
 }
 
-#[cfg(feature = "sp1")]
 #[async_trait::async_trait]
 impl crate::Prover for Sp1Prover {
     async fn prove(&self, input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
@@ -182,26 +178,6 @@ impl crate::Prover for Sp1Prover {
 
         Err(ProverError::GuestError(
             "SP1 aggregation not yet implemented in V2".to_string(),
-        ))
-    }
-}
-
-#[cfg(not(feature = "sp1"))]
-#[async_trait::async_trait]
-impl crate::Prover for Sp1Prover {
-    async fn prove(&self, _input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-        Err(ProverError::GuestError(
-            "SP1 feature not enabled".to_string(),
-        ))
-    }
-
-    async fn aggregate(
-        &self,
-        _input: AggregationGuestInput,
-        _config: &ProverConfig,
-    ) -> ProverResult<Proof> {
-        Err(ProverError::GuestError(
-            "SP1 feature not enabled".to_string(),
         ))
     }
 }

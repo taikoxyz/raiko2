@@ -18,19 +18,15 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
-#[cfg(feature = "risc0")]
-pub mod risc0;
+mod risc0;
+mod sgx;
+mod sp1;
 
-#[cfg(feature = "sp1")]
-pub mod sp1;
+pub use risc0::{Risc0Config, Risc0Prover};
+pub use sgx::SgxProver;
+pub use sp1::{Sp1Config, Sp1Prover};
 
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
-
-#[cfg(feature = "risc0")]
-pub use risc0::{Risc0Config, Risc0Prover};
-
-#[cfg(feature = "sp1")]
-pub use sp1::{Sp1Config, Sp1Prover};
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]

@@ -23,12 +23,10 @@ async-trait.workspace = true
 alloy-primitives.workspace = true
 
 # RISC0 dependencies (optional)
-risc0-zkvm = { workspace = true, optional = true }
+risc0-zkvm.workspace = true
 
 # SP1 dependencies (optional)
-sp1-sdk = { workspace = true, optional = true }
+sp1-sdk.workspace = true
 
 [features]
 default = []
-risc0 = ["dep:risc0-zkvm"]
-sp1 = ["dep:sp1-sdk"]

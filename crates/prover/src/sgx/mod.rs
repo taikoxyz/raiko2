@@ -1,8 +1,7 @@
 mod remote;
 
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
-
-pub use remote::{RemoteSgxProver, SgxParam, SgxResponse};
+use remote::{RemoteSgxProver, SgxParam, SgxResponse};
 
 /// High level SGX prover wrapper that picks the appropriate backend.
 #[derive(Clone, Debug)]

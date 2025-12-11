@@ -10,7 +10,6 @@ use raiko2_primitives::{
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-#[cfg(feature = "risc0")]
 use risc0_zkvm::{ExecutorEnv, ProverOpts, default_prover, serde::to_vec};
 
 // Generated methods from guest build
@@ -73,13 +72,11 @@ impl Risc0Prover {
     }
 }
 
-#[cfg(feature = "risc0")]
 #[async_trait::async_trait]
 impl crate::Prover for Risc0Prover {
     async fn prove(&self, input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-        let _encoded_input = to_vec(&input).map_err(|e| {
-            ProverError::GuestError(format!("Failed to serialize input: {}", e))
-        })?;
+        let _encoded_input = to_vec(&input)
+            .map_err(|e| ProverError::GuestError(format!("Failed to serialize input: {}", e)))?;
 
         let env = ExecutorEnv::builder()
             .write(&input)
@@ -135,26 +132,6 @@ impl crate::Prover for Risc0Prover {
 
         Err(ProverError::GuestError(
             "RISC0 aggregation not yet implemented in V2".to_string(),
-        ))
-    }
-}
-
-#[cfg(not(feature = "risc0"))]
-#[async_trait::async_trait]
-impl crate::Prover for Risc0Prover {
-    async fn prove(&self, _input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-        Err(ProverError::GuestError(
-            "RISC0 feature not enabled".to_string(),
-        ))
-    }
-
-    async fn aggregate(
-        &self,
-        _input: AggregationGuestInput,
-        _config: &ProverConfig,
-    ) -> ProverResult<Proof> {
-        Err(ProverError::GuestError(
-            "RISC0 feature not enabled".to_string(),
         ))
     }
 }

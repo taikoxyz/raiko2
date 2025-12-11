@@ -1,6 +1,8 @@
 //! Error types for raiko2.
 
 use crate::proof::ProverError;
+use reth_stateless::validation::StatelessValidationError;
+use std::io;
 use utoipa::ToSchema;
 
 /// Main error type for Raiko operations.
@@ -141,8 +143,8 @@ impl RaikoError {
     }
 }
 
-impl From<std::io::Error> for RaikoError {
-    fn from(e: std::io::Error) -> Self {
+impl From<io::Error> for RaikoError {
+    fn from(e: io::Error) -> Self {
         RaikoError::Io(e.to_string())
     }
 }
@@ -162,17 +164,17 @@ impl From<anyhow::Error> for RaikoError {
     }
 }
 
-impl From<reth_stateless::validation::StatelessValidationError> for RaikoError {
-    fn from(e: reth_stateless::validation::StatelessValidationError) -> Self {
+impl From<StatelessValidationError> for RaikoError {
+    fn from(e: StatelessValidationError) -> Self {
         // Extract more meaningful information from the error
         let reason = match &e {
-            reth_stateless::validation::StatelessValidationError::SignerRecovery => {
+            StatelessValidationError::SignerRecovery => {
                 "Failed to recover transaction signer".to_string()
             }
-            reth_stateless::validation::StatelessValidationError::MissingAncestorHeader => {
+            StatelessValidationError::MissingAncestorHeader => {
                 "Missing ancestor header in witness".to_string()
             }
-            reth_stateless::validation::StatelessValidationError::InvalidAncestorChain => {
+            StatelessValidationError::InvalidAncestorChain => {
                 "Invalid ancestor chain: headers are not contiguous".to_string()
             }
             _ => format!("{:?}", e),
@@ -184,14 +186,8 @@ impl From<reth_stateless::validation::StatelessValidationError> for RaikoError {
     }
 }
 
-/// Alias for backwards compatibility.
-pub type RaizenError = RaikoError;
-
 /// Result type for Raiko operations.
 pub type RaikoResult<T> = Result<T, RaikoError>;
-
-/// Alias for backwards compatibility.
-pub type RaizenResult<T> = RaikoResult<T>;
 
 #[cfg(test)]
 mod tests {

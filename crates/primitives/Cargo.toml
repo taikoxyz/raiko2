@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+raiko2-protocol.workspace = true
+
 alethia-reth-node.workspace = true
 alethia-reth-evm.workspace = true
 

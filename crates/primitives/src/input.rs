@@ -1,15 +1,16 @@
 //! Input types for raiko2 guest programs.
 
-use alloy_consensus::TrieAccount;
-use alloy_primitives::{map::AddressMap, Address, B256};
-use anyhow::{anyhow, Error};
+use alloy_consensus::{Header, TrieAccount};
+use alloy_primitives::{Address, B256, map::AddressMap};
+use anyhow::{Error, anyhow};
 use core::str::FromStr;
+use raiko2_protocol::{Checkpoint, ShastaEventData};
 use reth_ethereum_primitives::Block;
 use reth_stateless::ExecutionWitness;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::proof::Proof;
+use crate::{chain_spec::ChainSpec, proof::Proof};
 
 /// Blob proof type for Taiko.
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -38,8 +39,12 @@ impl FromStr for BlobProofType {
 /// Taiko prover data.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct TaikoProverData {
-    pub prover: Address,
+    pub actual_prover: Address,
+    pub designated_prover: Option<Address>,
     pub graffiti: B256,
+    pub parent_transition_hash: Option<B256>,
+    pub checkpoint: Option<Checkpoint>,
+    pub last_anchor_block_number: Option<u64>,
 }
 
 /// Taiko batch input for guest programs.
@@ -47,13 +52,21 @@ pub struct TaikoProverData {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TaikoManifest {
     pub batch_id: u64,
-    pub l1_header: alloy_consensus::Header,
+    pub l1_header: Header,
+    pub batch_proposed: ShastaEventData,
+    pub chain_spec: ChainSpec,
+    pub prover_data: TaikoProverData,
+    pub data_sources: Vec<InputDataSource>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct InputDataSource {
     pub tx_data_from_calldata: Vec<u8>,
     pub tx_data_from_blob: Vec<Vec<u8>>,
     pub blob_commitments: Option<Vec<Vec<u8>>>,
     pub blob_proofs: Option<Vec<Vec<u8>>>,
     pub blob_proof_type: BlobProofType,
-    pub prover_data: TaikoProverData,
+    pub is_forced_inclusion: bool,
 }
 
 /// Guest program input.

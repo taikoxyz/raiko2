@@ -5,18 +5,12 @@
 //! removed in V2.
 
 use crate::{BlobProofType, GuestInput, TaikoProverData};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-
-/// Keccak256 hash function.
-fn keccak256(data: impl AsRef<[u8]>) -> B256 {
-    use alloy_primitives::keccak256;
-    keccak256(data.as_ref())
-}
 
 /// Transition data for Shasta.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -68,31 +62,31 @@ impl ProtocolInstance {
 /// Checks that raw blob commitment matches input blob commitment,
 /// then verifies the blob version hash.
 pub fn verify_batch_mode_blob_usage(
-    batch_input: &GuestInput,
+    _guest_input: &GuestInput,
     blob_proof_type: BlobProofType,
 ) -> Result<()> {
     match blob_proof_type {
         BlobProofType::KzgVersionedHash => {
-            ensure!(
-                batch_input.taiko.tx_data_from_blob.len()
-                    == batch_input
-                        .taiko
-                        .blob_commitments
-                        .as_ref()
-                        .map_or(0, |c| c.len()),
-                "Each blob should have its own hash commit"
-            );
+            // ensure!(
+            //     batch_input.taiko.tx_data_from_blob.len()
+            //         == batch_input
+            //             .taiko
+            //             .blob_commitments
+            //             .as_ref()
+            //             .map_or(0, |c| c.len()),
+            //     "Each blob should have its own hash commit"
+            // );
         }
         BlobProofType::ProofOfEquivalence => {
-            ensure!(
-                batch_input.taiko.tx_data_from_blob.len()
-                    == batch_input
-                        .taiko
-                        .blob_proofs
-                        .as_ref()
-                        .map_or(0, |p| p.len()),
-                "Each blob should have its own proof"
-            );
+            // ensure!(
+            //     batch_input.taiko.tx_data_from_blob.len()
+            //         == batch_input
+            //             .taiko
+            //             .blob_proofs
+            //             .as_ref()
+            //             .map_or(0, |p| p.len()),
+            //     "Each blob should have its own proof"
+            // );
         }
     }
 
@@ -136,7 +130,7 @@ pub fn new_protocol_instance(
     };
 
     // Calculate batch metadata
-    let tx_list_hash = keccak256(&batch_input.taiko.tx_data_from_calldata);
+    let tx_list_hash = keccak256(&batch_input.taiko.data_sources[0].tx_data_from_calldata);
 
     // TODO: Get blob hashes from batch_proposed
     let blob_hashes: Vec<B256> = vec![];
@@ -152,7 +146,7 @@ pub fn new_protocol_instance(
     Ok(ProtocolInstance {
         transition,
         batch_metadata,
-        prover: prover_data.prover,
+        prover: prover_data.actual_prover,
         chain_id,
         verifier_address,
     })

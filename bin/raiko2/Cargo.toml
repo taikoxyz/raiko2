@@ -56,5 +56,3 @@ dotenvy = "0.15"
 
 [features]
 default = []
-risc0 = ["raiko2-prover/risc0"]
-sp1 = ["raiko2-prover/sp1"]

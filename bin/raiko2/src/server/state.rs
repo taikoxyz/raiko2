@@ -40,7 +40,6 @@ impl AppState {
     /// Create new application state.
     pub fn new(config: Config) -> Result<Self> {
         let prover: Arc<dyn Prover> = match config.prover.prover_type {
-            #[cfg(feature = "risc0")]
             ProverType::Risc0 => {
                 let risc0_config = raiko2_prover::Risc0Config {
                     bonsai: config.prover.risc0.bonsai,
@@ -50,7 +49,6 @@ impl AppState {
                 };
                 Arc::new(raiko2_prover::Risc0Prover::new(risc0_config))
             }
-            #[cfg(feature = "sp1")]
             ProverType::Sp1 => {
                 let sp1_config = raiko2_prover::Sp1Config {
                     recursion: if config.prover.sp1.plonk {
@@ -66,18 +64,6 @@ impl AppState {
                     verify: true,
                 };
                 Arc::new(raiko2_prover::Sp1Prover::new(sp1_config))
-            }
-            #[cfg(not(feature = "risc0"))]
-            ProverType::Risc0 => {
-                anyhow::bail!(
-                    "Risc0 prover requested but 'risc0' feature is not enabled. Build with --features risc0"
-                );
-            }
-            #[cfg(not(feature = "sp1"))]
-            ProverType::Sp1 => {
-                anyhow::bail!(
-                    "SP1 prover requested but 'sp1' feature is not enabled. Build with --features sp1"
-                );
             }
         };
 

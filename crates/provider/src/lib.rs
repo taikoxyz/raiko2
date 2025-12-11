@@ -4,7 +4,7 @@ pub mod network;
 
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::RaizenResult;
+use raiko2_primitives::RaikoResult;
 use reth_ethereum_primitives::Block;
 use reth_stateless::ExecutionWitness;
 
@@ -21,17 +21,17 @@ pub use network::NetworkProvider;
 /// - [`batch_accounts`]: Fetches account state data for multiple blocks and sets of addresses.
 /// - [`batch_witnesses`]: Fetches execution witnesses for a batch of blocks.
 ///
-/// All methods return a [`RaizenResult`] wrapping the respective data type.
+/// All methods return a [`RaikoResult`] wrapping the respective data type.
 pub trait Provider {
-    async fn batch_blocks(&self, blocks: &[u64]) -> RaizenResult<Vec<Block>>;
+    async fn batch_blocks(&self, blocks: &[u64]) -> RaikoResult<Vec<Block>>;
 
     async fn batch_accounts(
         &self,
         blocks: &[u64],
         accounts: &[Vec<Address>],
-    ) -> RaizenResult<Vec<AddressMap<TrieAccount>>>;
+    ) -> RaikoResult<Vec<AddressMap<TrieAccount>>>;
 
-    async fn batch_witnesses(&self, blocks: &[u64]) -> RaizenResult<Vec<ExecutionWitness>>;
+    async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
 }
 
 #[cfg(test)]

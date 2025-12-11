@@ -2,7 +2,7 @@ use alloy_primitives::{Address, map::AddressMap};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types::{Account, BlockNumberOrTag};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::{RaizenError, RaizenResult};
+use raiko2_primitives::{RaikoError, RaikoResult};
 use reth_ethereum_primitives::Block as RethBlock;
 use reth_stateless::ExecutionWitness;
 
@@ -24,9 +24,9 @@ pub struct NetworkProvider {
 }
 
 impl NetworkProvider {
-    pub fn new(rpc_url: &str) -> RaizenResult<Self> {
+    pub fn new(rpc_url: &str) -> RaikoResult<Self> {
         let url = reqwest::Url::parse(rpc_url)
-            .map_err(|e| RaizenError::RPC(format!("Invalid RPC URL: {e}")))?;
+            .map_err(|e| RaikoError::RPC(format!("Invalid RPC URL: {e}")))?;
 
         Ok(Self {
             client: RpcClient::builder().http(url),
@@ -35,7 +35,7 @@ impl NetworkProvider {
 }
 
 impl Provider for NetworkProvider {
-    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaizenResult<Vec<RethBlock>> {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
         const MAX_BATCH_SIZE: usize = 32;
         let mut blocks = Vec::with_capacity(block_numbers.len());
         for block_numbers in block_numbers.chunks(MAX_BATCH_SIZE) {
@@ -49,22 +49,24 @@ impl Provider for NetworkProvider {
                             &(BlockNumberOrTag::from(*block_number), true),
                         )
                         .map_err(|_| {
-                            RaizenError::RPC(
+                            RaikoError::RPC(
                                 "Failed adding eth_getBlockByNumber call to batch".to_owned(),
                             )
                         })?,
                 ));
             }
             batch.send().await.map_err(|e| {
-                RaizenError::RPC(format!(
+                RaikoError::RPC(format!(
                     "Error sending batch request for block {block_numbers:?}: {e}"
                 ))
             })?;
             // Collect the data from the batch
             for request in requests {
-                blocks.push(request.await.map_err(|e| {
-                    RaizenError::RPC(format!("Error collecting request data: {e}"))
-                })?);
+                blocks.push(
+                    request.await.map_err(|e| {
+                        RaikoError::RPC(format!("Error collecting request data: {e}"))
+                    })?,
+                );
             }
         }
 
@@ -75,7 +77,7 @@ impl Provider for NetworkProvider {
         &self,
         block_numbers: &[u64],
         addresses: &[Vec<Address>],
-    ) -> RaizenResult<Vec<AddressMap<TrieAccount>>> {
+    ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
         const MAX_BATCH_SIZE: usize = 250;
         let mut result = Vec::with_capacity(block_numbers.len());
         for (block_number, addresses) in block_numbers.iter().zip(addresses.iter()) {
@@ -93,7 +95,7 @@ impl Provider for NetworkProvider {
                                     &(*address, BlockNumberOrTag::from(*block_number)),
                                 )
                                 .map_err(|_| {
-                                    RaizenError::RPC(
+                                    RaikoError::RPC(
                                         "Failed adding eth_getAccount call to batch".to_owned(),
                                     )
                                 })?,
@@ -104,12 +106,12 @@ impl Provider for NetworkProvider {
                 batch
                     .send()
                     .await
-                    .map_err(|e| RaizenError::RPC(format!("Error sending batch request {e}")))?;
+                    .map_err(|e| RaikoError::RPC(format!("Error sending batch request {e}")))?;
 
                 // Collect the data from the batch
                 for (address, request) in requests {
                     let rpc_account: Account = request.await.map_err(|e| {
-                        RaizenError::RPC(format!("Error collecting request data: {e}"))
+                        RaikoError::RPC(format!("Error collecting request data: {e}"))
                     })?;
                     accounts.insert(*address, rpc_account_to_trie_account(rpc_account));
                 }
@@ -120,7 +122,7 @@ impl Provider for NetworkProvider {
         Ok(result)
     }
 
-    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaizenResult<Vec<ExecutionWitness>> {
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         const MAX_BATCH_SIZE: usize = 32;
         let mut witnesses = Vec::with_capacity(block_numbers.len());
         for block_numbers in block_numbers.chunks(MAX_BATCH_SIZE) {
@@ -134,22 +136,24 @@ impl Provider for NetworkProvider {
                             &(BlockNumberOrTag::from(*block_number),),
                         )
                         .map_err(|_| {
-                            RaizenError::RPC(
+                            RaikoError::RPC(
                                 "Failed adding debug_executionWitness call to batch".to_owned(),
                             )
                         })?,
                 ));
             }
             batch.send().await.map_err(|e| {
-                RaizenError::RPC(format!(
+                RaikoError::RPC(format!(
                     "Error sending batch request for block {block_numbers:?}: {e}"
                 ))
             })?;
             // Collect the data from the batch
             for request in requests {
-                witnesses.push(request.await.map_err(|e| {
-                    RaizenError::RPC(format!("Error collecting request data: {e}"))
-                })?);
+                witnesses.push(
+                    request.await.map_err(|e| {
+                        RaikoError::RPC(format!("Error collecting request data: {e}"))
+                    })?,
+                );
             }
         }
 

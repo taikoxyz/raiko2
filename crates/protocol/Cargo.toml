@@ -9,6 +9,7 @@ description = "Taiko Shasta protocol types and codecs for Raiko V2"
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-rlp = { workspace = true, features = ["derive"] }
+alloy-sol-types.workspace = true
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }

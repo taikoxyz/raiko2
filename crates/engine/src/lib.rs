@@ -8,6 +8,8 @@
 //! Note: Prover integration temporarily disabled due to version conflicts.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
 
+use std::{fmt, str};
+
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_driver::Driver;
 use raiko2_primitives::{
@@ -27,8 +29,8 @@ pub enum ProofType {
     Native,
 }
 
-impl std::fmt::Display for ProofType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ProofType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProofType::Risc0 => write!(f, "risc0"),
             ProofType::Sp1 => write!(f, "sp1"),
@@ -37,7 +39,7 @@ impl std::fmt::Display for ProofType {
     }
 }
 
-impl std::str::FromStr for ProofType {
+impl str::FromStr for ProofType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {

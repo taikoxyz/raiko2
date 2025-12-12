@@ -12,7 +12,7 @@ mod output;
 mod proof;
 mod proof_type;
 
-pub use context::ProofContext;
+pub use context::{ProofContext, ProofRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{
     AggregationGuestInput, BlobProofType, GuestInput, RawAggregationGuestInput, RawProof,

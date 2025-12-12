@@ -5,7 +5,8 @@
 //! - Local validation of inputs
 //! - Proof generation using zkVM provers
 //!
-//! Note: Prover integration temporarily disabled due to version conflicts.
+//! Prover integration is provided via `raiko2-prover` and wired through
+//! `queue::EngineQueue` / `tasks::EngineTask`.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
 
 use alloy_consensus::transaction::SignerRecoverable;
@@ -15,6 +16,10 @@ use raiko2_primitives::{
 };
 use raiko2_provider::Provider;
 use tracing::info;
+
+pub mod input_builder;
+pub mod queue;
+pub mod tasks;
 
 /// The main proving engine.
 #[derive(Debug)]
@@ -114,10 +119,7 @@ mod tests {
                 Ok(vec![])
             }
 
-            async fn batch_witnesses(
-                &self,
-                _blocks: &[u64],
-            ) -> RaikoResult<Vec<ExecutionWitness>> {
+            async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
                 Ok(vec![])
             }
         }

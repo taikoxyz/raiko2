@@ -8,6 +8,7 @@ members = [
     "crates/engine",
     "crates/prover",
     "crates/protocol",
+    "crates/queue",
     "bin/raiko2",
     "bin/rpc-proxy",
 ]
@@ -34,6 +35,7 @@ raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
+raiko2-queue = { path = "./crates/queue" }
 
 # zkVM
 risc0-zkvm = "3.0.4"

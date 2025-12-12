@@ -49,6 +49,17 @@ pub struct ProofContext {
     pub config: ProverConfig,
 }
 
+impl ProofContext {
+    pub fn new(request: ProofRequest, config: ProverConfig) -> Self {
+        Self {
+            l1_chain_spec: Arc::new(RethChainSpec::default()),
+            l2_chain_spec: Arc::new(TaikoChainSpec::default()),
+            request,
+            config,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

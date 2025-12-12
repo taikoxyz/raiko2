@@ -162,12 +162,88 @@ impl Default for Sp1Config {
     }
 }
 
+fn default_queue_namespace() -> String {
+    "raiko2:queue".to_string()
+}
+
+/// Queue backend type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QueueBackend {
+    #[default]
+    Memory,
+    Redis,
+}
+
+impl std::str::FromStr for QueueBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "memory" => Ok(QueueBackend::Memory),
+            "redis" => Ok(QueueBackend::Redis),
+            _ => Err(format!("Unknown queue backend: {}", s)),
+        }
+    }
+}
+
+/// Queue configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueConfig {
+    #[serde(default)]
+    pub backend: QueueBackend,
+    #[serde(default = "default_queue_namespace")]
+    pub namespace: String,
+    #[serde(default)]
+    pub redis_url: Option<String>,
+    #[serde(default = "default_queue_workers")]
+    pub workers: usize,
+}
+
+fn default_queue_workers() -> usize {
+    1
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            backend: QueueBackend::Memory,
+            namespace: default_queue_namespace(),
+            redis_url: None,
+            workers: default_queue_workers(),
+        }
+    }
+}
+
+impl QueueConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.workers == 0 {
+            bail!("Queue workers must be > 0");
+        }
+
+        match self.backend {
+            QueueBackend::Memory => Ok(()),
+            QueueBackend::Redis => {
+                if self.redis_url.as_deref().unwrap_or_default().is_empty() {
+                    bail!("Redis queue backend requires redis_url to be set");
+                }
+                if self.namespace.is_empty() {
+                    bail!("Redis queue backend requires namespace to be non-empty");
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Full application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
     pub prover: ProverConfig,
+    #[serde(default)]
+    pub queue: QueueConfig,
 }
 
 impl Config {
@@ -194,6 +270,16 @@ impl Config {
 
         config.prover.prover_type = cli.prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
+        config.queue.backend = cli
+            .queue_backend
+            .parse()
+            .map_err(|e: String| anyhow::anyhow!(e))?;
+        config.queue.namespace = cli.queue_namespace.clone();
+        config.queue.workers = cli.queue_workers;
+        if let Some(redis_url) = &cli.redis_url {
+            config.queue.redis_url = Some(redis_url.clone());
+        }
+
         // Validate configuration
         config.validate()?;
 
@@ -213,6 +299,7 @@ impl Config {
             .validate()
             .context("Server configuration error")?;
         self.rpc.validate().context("RPC configuration error")?;
+        self.queue.validate().context("Queue configuration error")?;
         Ok(())
     }
 }

@@ -7,7 +7,8 @@
 pub const RISC0_BATCH_ELF: &[u8] = include_bytes!("methods/risc0_batch.elf");
 
 /// Shasta aggregation ELF binary
-pub const RISC0_SHASTA_AGGREGATION_ELF: &[u8] = include_bytes!("methods/risc0_shasta_aggregation.elf");
+pub const RISC0_SHASTA_AGGREGATION_ELF: &[u8] =
+    include_bytes!("methods/risc0_shasta_aggregation.elf");
 
 // Image IDs are computed at runtime from ELF
 // use risc0_zkvm::compute_image_id to get them

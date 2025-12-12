@@ -18,7 +18,7 @@ pub use state::AppState;
 /// Run the HTTP server.
 pub async fn run_server(config: Config) -> Result<()> {
     // Create application state
-    let state = AppState::new(config.clone())?;
+    let state = AppState::new(config.clone()).await?;
 
     // Build router
     let app = Router::new()

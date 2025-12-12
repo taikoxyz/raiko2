@@ -47,4 +47,20 @@ pub struct Cli {
     /// L2 chain ID
     #[arg(long, env = "RAIKO2_L2_CHAIN_ID", default_value = "167000")]
     pub l2_chain_id: u64,
+
+    /// Queue backend (memory, redis)
+    #[arg(long, env = "RAIKO2_QUEUE_BACKEND", default_value = "memory")]
+    pub queue_backend: String,
+
+    /// Redis URL for queue backend (e.g. redis://localhost:6379/)
+    #[arg(long, env = "RAIKO2_REDIS_URL")]
+    pub redis_url: Option<String>,
+
+    /// Queue namespace/prefix for Redis keys
+    #[arg(long, env = "RAIKO2_QUEUE_NAMESPACE", default_value = "raiko2:queue")]
+    pub queue_namespace: String,
+
+    /// Number of queue worker loops
+    #[arg(long, env = "RAIKO2_QUEUE_WORKERS", default_value = "1")]
+    pub queue_workers: usize,
 }

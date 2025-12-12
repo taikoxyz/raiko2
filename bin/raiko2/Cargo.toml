@@ -19,6 +19,7 @@ raiko2-driver.workspace = true
 raiko2-provider.workspace = true
 raiko2-prover.workspace = true
 raiko2-protocol.workspace = true
+raiko2-queue.workspace = true
 
 # Alethia reth
 alethia-reth-node.workspace = true
@@ -56,3 +57,4 @@ dotenvy = "0.15"
 
 [features]
 default = []
+redis-queue = ["raiko2-queue/redis"]

@@ -8,8 +8,6 @@
 //! Note: Prover integration temporarily disabled due to version conflicts.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
 
-use std::{fmt, str};
-
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_driver::Driver;
 use raiko2_primitives::{
@@ -17,40 +15,6 @@ use raiko2_primitives::{
 };
 use raiko2_provider::Provider;
 use tracing::info;
-
-/// Proof type enum for raiko2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProofType {
-    /// RISC0 zkVM proof
-    Risc0,
-    /// SP1 zkVM proof
-    Sp1,
-    /// Native execution (no proof)
-    Native,
-}
-
-impl fmt::Display for ProofType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProofType::Risc0 => write!(f, "risc0"),
-            ProofType::Sp1 => write!(f, "sp1"),
-            ProofType::Native => write!(f, "native"),
-        }
-    }
-}
-
-impl str::FromStr for ProofType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "risc0" => Ok(ProofType::Risc0),
-            "sp1" => Ok(ProofType::Sp1),
-            "native" => Ok(ProofType::Native),
-            _ => Err(format!("Unknown proof type: {}", s)),
-        }
-    }
-}
 
 /// The main proving engine.
 #[derive(Debug)]
@@ -127,35 +91,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_proof_type_display() {
-        assert_eq!(ProofType::Risc0.to_string(), "risc0");
-        assert_eq!(ProofType::Sp1.to_string(), "sp1");
-        assert_eq!(ProofType::Native.to_string(), "native");
-    }
-
-    #[test]
-    fn test_proof_type_from_str() {
-        assert_eq!("risc0".parse::<ProofType>().unwrap(), ProofType::Risc0);
-        assert_eq!("RISC0".parse::<ProofType>().unwrap(), ProofType::Risc0);
-        assert_eq!("sp1".parse::<ProofType>().unwrap(), ProofType::Sp1);
-        assert_eq!("SP1".parse::<ProofType>().unwrap(), ProofType::Sp1);
-        assert_eq!("native".parse::<ProofType>().unwrap(), ProofType::Native);
-        assert_eq!("Native".parse::<ProofType>().unwrap(), ProofType::Native);
-
-        assert!("invalid".parse::<ProofType>().is_err());
-    }
-
-    #[test]
-    fn test_proof_type_equality() {
-        assert_eq!(ProofType::Risc0, ProofType::Risc0);
-        assert_ne!(ProofType::Risc0, ProofType::Sp1);
-    }
-
-    #[test]
     fn test_generate_output_empty_input() {
         use alloy_primitives::{Address, map::AddressMap};
         use alloy_trie::TrieAccount;
-        use raiko2_primitives::RaizenResult;
+        use raiko2_primitives::RaikoResult;
         use reth_ethereum_primitives::Block;
         use reth_stateless::ExecutionWitness;
 
@@ -163,7 +102,7 @@ mod tests {
         struct MockProvider;
 
         impl Provider for MockProvider {
-            async fn batch_blocks(&self, _blocks: &[u64]) -> RaizenResult<Vec<Block>> {
+            async fn batch_blocks(&self, _blocks: &[u64]) -> RaikoResult<Vec<Block>> {
                 Ok(vec![])
             }
 
@@ -171,14 +110,14 @@ mod tests {
                 &self,
                 _blocks: &[u64],
                 _accounts: &[Vec<Address>],
-            ) -> RaizenResult<Vec<AddressMap<TrieAccount>>> {
+            ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
                 Ok(vec![])
             }
 
             async fn batch_witnesses(
                 &self,
                 _blocks: &[u64],
-            ) -> RaizenResult<Vec<ExecutionWitness>> {
+            ) -> RaikoResult<Vec<ExecutionWitness>> {
                 Ok(vec![])
             }
         }

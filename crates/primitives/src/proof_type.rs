@@ -16,22 +16,11 @@ pub enum ProofType {
     /// Uses the SP1 prover to build the block.
     #[serde(alias = "SP1")]
     Sp1 = 1u8,
-    /// # Sgx
-    ///
-    /// Builds the block on a SGX supported CPU to create a proof.
-    #[serde(alias = "SGX")]
-    Sgx = 2u8,
     /// # Risc0
     ///
     /// Uses the RISC0 prover to build the block.
     #[serde(alias = "RISC0")]
     Risc0 = 3u8,
-
-    /// # SGX on geth
-    ///
-    /// Uses the SGX on geth prover to build the block.
-    #[serde(alias = "SGXGETH")]
-    SgxGeth = 4u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -39,9 +28,7 @@ impl std::fmt::Display for ProofType {
         f.write_str(match self {
             ProofType::Native => "native",
             ProofType::Sp1 => "sp1",
-            ProofType::Sgx => "sgx",
             ProofType::Risc0 => "risc0",
-            ProofType::SgxGeth => "sgxgeth",
         })
     }
 }
@@ -53,9 +40,7 @@ impl std::str::FromStr for ProofType {
         match s.trim().to_lowercase().as_str() {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
-            "sgx" => Ok(ProofType::Sgx),
             "risc0" => Ok(ProofType::Risc0),
-            "sgxgeth" => Ok(ProofType::SgxGeth),
             _ => Err(format!("Unknown proof type {}", s)),
         }
     }
@@ -68,9 +53,7 @@ impl TryFrom<u8> for ProofType {
         match value {
             0 => Ok(Self::Native),
             1 => Ok(Self::Sp1),
-            2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
-            4 => Ok(Self::SgxGeth),
             _ => Err(format!("Unknown proof type {}", value)),
         }
     }
@@ -94,5 +77,22 @@ pub mod lowercase {
     {
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProofType;
+
+    #[test]
+    fn rejects_sgx_variants_by_string() {
+        assert!("sgx".parse::<ProofType>().is_err());
+        assert!("sgxgeth".parse::<ProofType>().is_err());
+    }
+
+    #[test]
+    fn rejects_sgx_variants_by_u8() {
+        assert!(ProofType::try_from(2u8).is_err());
+        assert!(ProofType::try_from(4u8).is_err());
     }
 }

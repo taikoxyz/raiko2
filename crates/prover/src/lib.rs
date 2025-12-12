@@ -19,7 +19,6 @@
 //! ```
 
 pub mod risc0;
-pub mod sgx;
 pub mod sp1;
 
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};

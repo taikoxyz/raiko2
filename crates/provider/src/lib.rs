@@ -45,7 +45,7 @@ mod tests {
     }
 
     impl Provider for MockProvider {
-        async fn batch_blocks(&self, block_numbers: &[u64]) -> RaizenResult<Vec<Block>> {
+        async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Block>> {
             Ok(self
                 .blocks
                 .iter()
@@ -58,11 +58,11 @@ mod tests {
             &self,
             _blocks: &[u64],
             _accounts: &[Vec<Address>],
-        ) -> RaizenResult<Vec<AddressMap<TrieAccount>>> {
+        ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             Ok(vec![])
         }
 
-        async fn batch_witnesses(&self, _blocks: &[u64]) -> RaizenResult<Vec<ExecutionWitness>> {
+        async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
             Ok(vec![])
         }
     }

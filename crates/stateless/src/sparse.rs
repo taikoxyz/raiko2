@@ -1,13 +1,12 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::{
-    keccak256,
+    Address, B256, Bytes, KECCAK256_EMPTY, U256, keccak256,
     map::{AddressMap, B256Map},
-    Address, Bytes, B256, KECCAK256_EMPTY, U256,
 };
 use alloy_trie::EMPTY_ROOT_HASH;
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
-use reth_stateless::{validation::StatelessValidationError, ExecutionWitness, StatelessTrie};
+use reth_stateless::{ExecutionWitness, StatelessTrie, validation::StatelessValidationError};
 use reth_trie_common::HashedPostState;
 use risc0_ethereum_trie::CachedTrie;
 use std::{cell::RefCell, collections::hash_map::Entry, marker::PhantomData};

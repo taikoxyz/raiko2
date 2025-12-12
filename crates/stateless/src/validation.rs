@@ -1,14 +1,14 @@
 use crate::{sparse::SparseState, trie::StatelessTrieExt, witness_db::WitnessDatabase};
 use alloy_consensus::{BlockHeader, Header, TrieAccount};
-use alloy_primitives::{map::AddressMap, B256};
+use alloy_primitives::{B256, map::AddressMap};
 use alloy_rlp::Decodable;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_consensus::{Consensus, HeaderValidator};
-use reth_ethereum_consensus::{validate_block_post_execution, EthBeaconConsensus};
+use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
 use reth_ethereum_primitives::{Block, EthPrimitives};
-use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_evm::{ConfigureEvm, execute::Executor};
 use reth_primitives_traits::{Block as _, RecoveredBlock};
-use reth_stateless::{validation::StatelessValidationError, ExecutionWitness};
+use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
@@ -151,7 +151,7 @@ fn compute_ancestor_hashes(
 
         if parent_header.number + 1 != child_header.number {
             return Err(StatelessValidationError::InvalidAncestorChain); // Header number should be
-                                                                        // contiguous
+            // contiguous
         }
 
         child_header = parent_header

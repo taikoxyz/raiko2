@@ -166,6 +166,76 @@ fn default_queue_namespace() -> String {
     "raiko2:queue".to_string()
 }
 
+fn default_queue_maintenance_interval_ms() -> u64 {
+    200
+}
+
+fn default_queue_retry_max_attempts() -> u32 {
+    3
+}
+
+fn default_queue_retry_fixed_delay_ms() -> u64 {
+    1_000
+}
+
+fn default_queue_retry_base_delay_ms() -> u64 {
+    1_000
+}
+
+fn default_queue_retry_max_delay_ms() -> u64 {
+    30_000
+}
+
+/// Queue retry strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RetryStrategy {
+    None,
+    Fixed,
+    #[default]
+    Exponential,
+}
+
+impl std::str::FromStr for RetryStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "none" => Ok(RetryStrategy::None),
+            "fixed" => Ok(RetryStrategy::Fixed),
+            "exponential" | "exp" => Ok(RetryStrategy::Exponential),
+            _ => Err(format!("Unknown retry strategy: {s}")),
+        }
+    }
+}
+
+/// Queue retry configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    #[serde(default)]
+    pub strategy: RetryStrategy,
+    #[serde(default = "default_queue_retry_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_queue_retry_fixed_delay_ms")]
+    pub fixed_delay_ms: u64,
+    #[serde(default = "default_queue_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+    #[serde(default = "default_queue_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            strategy: RetryStrategy::default(),
+            max_attempts: default_queue_retry_max_attempts(),
+            fixed_delay_ms: default_queue_retry_fixed_delay_ms(),
+            base_delay_ms: default_queue_retry_base_delay_ms(),
+            max_delay_ms: default_queue_retry_max_delay_ms(),
+        }
+    }
+}
+
 /// Queue backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -198,6 +268,10 @@ pub struct QueueConfig {
     pub redis_url: Option<String>,
     #[serde(default = "default_queue_workers")]
     pub workers: usize,
+    #[serde(default = "default_queue_maintenance_interval_ms")]
+    pub maintenance_interval_ms: u64,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 fn default_queue_workers() -> usize {
@@ -211,6 +285,8 @@ impl Default for QueueConfig {
             namespace: default_queue_namespace(),
             redis_url: None,
             workers: default_queue_workers(),
+            maintenance_interval_ms: default_queue_maintenance_interval_ms(),
+            retry: RetryConfig::default(),
         }
     }
 }
@@ -219,6 +295,14 @@ impl QueueConfig {
     pub fn validate(&self) -> Result<()> {
         if self.workers == 0 {
             bail!("Queue workers must be > 0");
+        }
+
+        if self.maintenance_interval_ms == 0 {
+            bail!("Queue maintenance_interval_ms must be > 0");
+        }
+
+        if self.retry.strategy != RetryStrategy::None && self.retry.max_attempts == 0 {
+            bail!("Queue retry max_attempts must be > 0 when retry is enabled");
         }
 
         match self.backend {
@@ -270,12 +354,37 @@ impl Config {
 
         config.prover.prover_type = cli.prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
-        config.queue.backend = cli
-            .queue_backend
-            .parse()
-            .map_err(|e: String| anyhow::anyhow!(e))?;
-        config.queue.namespace = cli.queue_namespace.clone();
-        config.queue.workers = cli.queue_workers;
+        if let Some(queue_backend) = &cli.queue_backend {
+            config.queue.backend = queue_backend
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+        }
+        if let Some(queue_namespace) = &cli.queue_namespace {
+            config.queue.namespace = queue_namespace.clone();
+        }
+        if let Some(queue_workers) = cli.queue_workers {
+            config.queue.workers = queue_workers;
+        }
+        if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
+            config.queue.maintenance_interval_ms = interval_ms;
+        }
+        if let Some(strategy) = &cli.queue_retry_strategy {
+            config.queue.retry.strategy = strategy
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+        }
+        if let Some(max_attempts) = cli.queue_retry_max_attempts {
+            config.queue.retry.max_attempts = max_attempts;
+        }
+        if let Some(fixed_delay_ms) = cli.queue_retry_fixed_delay_ms {
+            config.queue.retry.fixed_delay_ms = fixed_delay_ms;
+        }
+        if let Some(base_delay_ms) = cli.queue_retry_base_delay_ms {
+            config.queue.retry.base_delay_ms = base_delay_ms;
+        }
+        if let Some(max_delay_ms) = cli.queue_retry_max_delay_ms {
+            config.queue.retry.max_delay_ms = max_delay_ms;
+        }
         if let Some(redis_url) = &cli.redis_url {
             config.queue.redis_url = Some(redis_url.clone());
         }

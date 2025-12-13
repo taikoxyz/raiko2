@@ -26,6 +26,19 @@ where
     async fn push_ready(&self, prio: Priority, id: TaskId);
     async fn pop_ready(&self, prio: Priority) -> Option<TaskId>;
     async fn take_ready(&self, id: &TaskId, worker: &str) -> Option<(P, TaskKind, Priority, u32)>;
+
+    async fn pop_ready_and_take(
+        &self,
+        prio: Priority,
+        worker: &str,
+    ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+        loop {
+            let id = self.pop_ready(prio).await?;
+            if let Some((payload, kind, priority, attempt)) = self.take_ready(&id, worker).await {
+                return Some((id, payload, kind, priority, attempt));
+            }
+        }
+    }
     async fn put_payload(&self, id: &TaskId, payload: P);
     async fn schedule(&self, id: TaskId, not_before_ms: u64);
     async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize;

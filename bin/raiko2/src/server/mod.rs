@@ -7,13 +7,16 @@ mod state;
 use crate::config::Config;
 use anyhow::Result;
 use axum::Router;
-use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 pub use state::AppState;
+
+fn bind_addr(config: &Config) -> String {
+    format!("{}:{}", config.server.host, config.server.port)
+}
 
 /// Run the HTTP server.
 pub async fn run_server(config: Config) -> Result<()> {
@@ -33,8 +36,8 @@ pub async fn run_server(config: Config) -> Result<()> {
         .with_state(state);
 
     // Bind to address
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
-    let listener = TcpListener::bind(addr).await?;
+    let addr = bind_addr(&config);
+    let listener = TcpListener::bind(&addr).await?;
 
     info!("Server listening on http://{}", addr);
 
@@ -42,4 +45,21 @@ pub async fn run_server(config: Config) -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+
+    #[test]
+    fn bind_addr_respects_config_host() {
+        let mut config = Config::default();
+        config.server = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 1234,
+        };
+
+        assert_eq!(bind_addr(&config), "127.0.0.1:1234");
+    }
 }

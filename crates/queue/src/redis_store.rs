@@ -418,6 +418,72 @@ return redis.call('HGET', KEYS[1], ARGV[5])
         id.and_then(|s| s.parse().ok())
     }
 
+    async fn pop_ready_and_take(
+        &self,
+        prio: Priority,
+        worker: &str,
+    ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+        let ready_key = self.ready_key(prio);
+        let running_key = self.running_key();
+
+        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
+        let lease_until_ms = now_millis().saturating_add(lease_ms);
+        let script = redis::Script::new(
+            r#"
+while true do
+  local id = redis.call('LPOP', KEYS[1])
+  if not id then
+    return nil
+  end
+
+  local task_key = ARGV[1] .. id
+  local state = redis.call('HGET', task_key, ARGV[2])
+  if state == ARGV[3] then
+    redis.call('HSET', task_key, ARGV[2], ARGV[4], ARGV[5], ARGV[6], ARGV[7], ARGV[8])
+    local attempt = redis.call('HINCRBY', task_key, ARGV[9], 1)
+    redis.call('ZADD', KEYS[2], ARGV[8], id)
+
+    local payload = redis.call('HGET', task_key, ARGV[10])
+    local kind = redis.call('HGET', task_key, ARGV[11])
+    local priority = redis.call('HGET', task_key, ARGV[12])
+    return {id, payload, kind, priority, attempt}
+  end
+end
+"#,
+        );
+
+        let mut conn = self.conn.lock().await;
+        let result: Option<(String, Vec<u8>, String, String, i64)> = script
+            .key(ready_key)
+            .key(running_key)
+            .arg(self.task_key_prefix())
+            .arg(FIELD_STATE)
+            .arg(STATE_READY)
+            .arg(STATE_RUNNING)
+            .arg(FIELD_WORKER)
+            .arg(worker)
+            .arg(FIELD_LEASE_UNTIL_MS)
+            .arg(lease_until_ms as i64)
+            .arg(FIELD_ATTEMPT)
+            .arg(FIELD_PAYLOAD)
+            .arg(FIELD_KIND)
+            .arg(FIELD_PRIORITY)
+            .invoke_async(&mut *conn)
+            .await
+            .ok()?;
+
+        let (id, payload_bytes, kind, prio, attempt) = result?;
+        let id: TaskId = id.parse().ok()?;
+        let payload: P = bincode::deserialize(&payload_bytes).ok()?;
+        Some((
+            id,
+            payload,
+            parse_kind(kind.as_str())?,
+            parse_prio(prio.as_str())?,
+            attempt.max(0) as u32,
+        ))
+    }
+
     async fn take_ready(&self, id: &TaskId, worker: &str) -> Option<(P, TaskKind, Priority, u32)> {
         let task_key = self.task_key(id);
         let running_key = self.running_key();

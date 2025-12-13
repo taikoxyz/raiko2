@@ -146,15 +146,9 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
 
     pub async fn next_ready(&self, worker: &str) -> Option<TaskLease<P>> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
-            loop {
-                let Some(id) = self.store.pop_ready(prio).await else {
-                    break;
-                };
-                let Some((payload, kind, priority, attempt)) =
-                    self.store.take_ready(&id, worker).await
-                else {
-                    continue;
-                };
+            if let Some((id, payload, kind, priority, attempt)) =
+                self.store.pop_ready_and_take(prio, worker).await
+            {
                 return Some(TaskLease {
                     id,
                     payload,
@@ -358,6 +352,88 @@ mod tests {
     use crate::MemoryStore;
     use std::time::Duration;
 
+    struct BuggyTakeStore<P, O> {
+        inner: MemoryStore<P, O>,
+    }
+
+    #[async_trait::async_trait]
+    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O>
+        for BuggyTakeStore<P, O>
+    {
+        async fn insert_task(
+            &self,
+            id: TaskId,
+            kind: TaskKind,
+            payload: P,
+            prio: Priority,
+            deps: Vec<TaskId>,
+        ) {
+            self.inner
+                .insert_task(id, kind, payload, prio, deps)
+                .await;
+        }
+
+        async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>> {
+            self.inner.get_state(id).await
+        }
+
+        async fn set_state(&self, id: &TaskId, state: TaskState<O>) {
+            self.inner.set_state(id, state).await;
+        }
+
+        async fn get_view(&self, id: &TaskId) -> Option<(TaskState<O>, TaskKind, Priority)> {
+            self.inner.get_view(id).await
+        }
+
+        async fn dependents_of(&self, dep: &TaskId) -> Vec<TaskId> {
+            self.inner.dependents_of(dep).await
+        }
+
+        async fn dec_remaining_deps(&self, id: &TaskId) -> usize {
+            self.inner.dec_remaining_deps(id).await
+        }
+
+        async fn try_mark_ready(&self, id: &TaskId) -> Option<Priority> {
+            self.inner.try_mark_ready(id).await
+        }
+
+        async fn push_ready(&self, prio: Priority, id: TaskId) {
+            self.inner.push_ready(prio, id).await;
+        }
+
+        async fn pop_ready(&self, prio: Priority) -> Option<TaskId> {
+            self.inner.pop_ready(prio).await
+        }
+
+        async fn take_ready(&self, _id: &TaskId, _worker: &str) -> Option<(P, TaskKind, Priority, u32)> {
+            None
+        }
+
+        async fn pop_ready_and_take(
+            &self,
+            prio: Priority,
+            worker: &str,
+        ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+            self.inner.pop_ready_and_take(prio, worker).await
+        }
+
+        async fn put_payload(&self, id: &TaskId, payload: P) {
+            self.inner.put_payload(id, payload).await;
+        }
+
+        async fn schedule(&self, id: TaskId, not_before_ms: u64) {
+            self.inner.schedule(id, not_before_ms).await;
+        }
+
+        async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize {
+            self.inner.promote_scheduled(now_ms, limit).await
+        }
+
+        async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> usize {
+            self.inner.requeue_expired_leases(now_ms, limit).await
+        }
+    }
+
     #[tokio::test]
     async fn next_ready_picks_high_before_low() {
         let sched: Scheduler<&'static str, ()> = Scheduler::new(MemoryStore::new());
@@ -387,6 +463,26 @@ mod tests {
         assert_eq!(first.id, b);
         let second = sched.next_ready("w").await.unwrap();
         assert_eq!(second.id, a);
+    }
+
+    #[tokio::test]
+    async fn next_ready_uses_atomic_store_take_when_available() {
+        let sched: Scheduler<&'static str, ()> = Scheduler::new(BuggyTakeStore {
+            inner: MemoryStore::new(),
+        });
+
+        let _ = sched
+            .submit(
+                NewTask {
+                    kind: TaskKind::Preflight,
+                    priority: Priority::Medium,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await;
+
+        assert!(sched.next_ready("w").await.is_some());
     }
 
     #[tokio::test]

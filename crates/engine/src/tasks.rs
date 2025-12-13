@@ -47,7 +47,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let a2 = sched
             .submit(
                 NewTask {
@@ -60,7 +61,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -73,19 +75,22 @@ mod tests {
                 },
                 vec![a1, a2],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let t1 = sched.next_ready("w").await.unwrap();
-        let t2 = sched.next_ready("w").await.unwrap();
-        assert!(sched.next_ready("w").await.is_none());
+        let t1 = sched.next_ready("w").await.unwrap().unwrap();
+        let t2 = sched.next_ready("w").await.unwrap().unwrap();
+        assert!(sched.next_ready("w").await.unwrap().is_none());
 
         sched
             .complete(t1, Ok(EngineOutput::Proof(Default::default())))
-            .await;
+            .await
+            .unwrap();
         sched
             .complete(t2, Ok(EngineOutput::Proof(Default::default())))
-            .await;
+            .await
+            .unwrap();
 
-        assert_eq!(sched.next_ready("w").await.unwrap().id, b);
+        assert_eq!(sched.next_ready("w").await.unwrap().unwrap().id, b);
     }
 }

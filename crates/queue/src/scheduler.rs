@@ -1,4 +1,4 @@
-use crate::{Priority, TaskId, TaskKind, TaskState, TaskStore};
+use crate::{Priority, TaskId, TaskKind, TaskState, TaskStore, TaskStoreError};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,38 +144,43 @@ impl<P, O: Clone> Scheduler<P, O> {
 }
 
 impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
-    pub async fn submit(&self, task: NewTask<P>, deps: Vec<TaskId>) -> TaskId {
+    pub async fn submit(&self, task: NewTask<P>, deps: Vec<TaskId>) -> Result<TaskId, TaskStoreError> {
         let id = TaskId::new();
         self.store
             .insert_task(id, task.kind, task.payload, task.priority, deps)
-            .await;
-        if let Some(priority) = self.store.try_mark_ready(&id).await {
-            self.store.push_ready(priority, id).await;
+            .await?;
+        if let Some(priority) = self.store.try_mark_ready(&id).await? {
+            self.store.push_ready(priority, id).await?;
             self.notify.notify_one();
         }
-        id
+
+        Ok(id)
     }
 
-    pub async fn next_ready(&self, worker: &str) -> Option<TaskLease<P>> {
+    pub async fn next_ready(&self, worker: &str) -> Result<Option<TaskLease<P>>, TaskStoreError> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
             if let Some((id, payload, kind, priority, attempt)) =
-                self.store.pop_ready_and_take(prio, worker).await
+                self.store.pop_ready_and_take(prio, worker).await?
             {
-                return Some(TaskLease {
+                return Ok(Some(TaskLease {
                     id,
                     payload,
                     kind,
                     priority,
                     attempt,
                     worker: worker.to_string(),
-                });
+                }));
             }
         }
 
-        None
+        Ok(None)
     }
 
-    pub async fn complete(&self, lease: TaskLease<P>, result: Result<O, String>) {
+    pub async fn complete(
+        &self,
+        lease: TaskLease<P>,
+        result: Result<O, String>,
+    ) -> Result<(), TaskStoreError> {
         let TaskLease {
             id,
             payload,
@@ -185,9 +190,9 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
             worker,
         } = lease;
 
-        let Some(current) = self.store.get_state(&id).await else {
+        let Some(current) = self.store.get_state(&id).await? else {
             self.notify.notify_one();
-            return;
+            return Ok(());
         };
 
         if matches!(
@@ -195,7 +200,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
             TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
         ) {
             self.notify.notify_one();
-            return;
+            return Ok(());
         }
 
         let TaskState::Running {
@@ -203,29 +208,29 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         } = current
         else {
             self.notify.notify_one();
-            return;
+            return Ok(());
         };
 
         if current_worker != worker {
             self.notify.notify_one();
-            return;
+            return Ok(());
         }
 
         match result {
             Ok(output) => {
                 self.store
                     .set_state(&id, TaskState::Succeeded { output })
-                    .await;
+                    .await?;
             }
             Err(error) => {
                 if let Some(delay) = self.config.retry.retry_delay(attempt) {
-                    self.store.put_payload(&id, payload).await;
+                    self.store.put_payload(&id, payload).await?;
 
                     if delay == Duration::ZERO {
-                        self.store.set_state(&id, TaskState::Ready).await;
-                        self.store.push_ready(priority, id).await;
+                        self.store.set_state(&id, TaskState::Ready).await?;
+                        self.store.push_ready(priority, id).await?;
                         self.notify.notify_one();
-                        return;
+                        return Ok(());
                     }
 
                     let now_ms = now_millis();
@@ -239,10 +244,10 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                                 next_ready_at_ms,
                             },
                         )
-                        .await;
-                    self.store.schedule(id, next_ready_at_ms).await;
+                        .await?;
+                    self.store.schedule(id, next_ready_at_ms).await?;
                     self.notify.notify_one();
-                    return;
+                    return Ok(());
                 }
 
                 self.store
@@ -253,30 +258,31 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                             caused_by_dep: None,
                         },
                     )
-                    .await;
-                self.fail_dependents(id, "dependency failed".to_string())
-                    .await;
+                    .await?;
+                self.fail_dependents(id, "dependency failed".to_string()).await?;
                 self.notify.notify_one();
-                return;
+                return Ok(());
             }
         }
 
-        for dependent in self.store.dependents_of(&id).await {
-            let remaining = self.store.dec_remaining_deps(&dependent).await;
+        for dependent in self.store.dependents_of(&id).await? {
+            let remaining = self.store.dec_remaining_deps(&dependent).await?;
             if remaining == 0
-                && let Some(priority) = self.store.try_mark_ready(&dependent).await
+                && let Some(priority) = self.store.try_mark_ready(&dependent).await?
             {
-                self.store.push_ready(priority, dependent).await;
+                self.store.push_ready(priority, dependent).await?;
             }
         }
 
         self.notify.notify_one();
+
+        Ok(())
     }
 
-    pub async fn cancel(&self, id: TaskId) {
-        let Some(current) = self.store.get_state(&id).await else {
+    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+        let Some(current) = self.store.get_state(&id).await? else {
             self.notify.notify_one();
-            return;
+            return Ok(());
         };
 
         if matches!(
@@ -284,47 +290,50 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
             TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
         ) {
             self.notify.notify_one();
-            return;
+            return Ok(());
         }
 
-        self.store.set_state(&id, TaskState::Cancelled).await;
-        self.fail_dependents(id, "dependency cancelled".to_string())
-            .await;
+        self.store.set_state(&id, TaskState::Cancelled).await?;
+        self.fail_dependents(id, "dependency cancelled".to_string()).await?;
         self.notify.notify_one();
+
+        Ok(())
     }
 
-    pub async fn get(&self, id: TaskId) -> Option<TaskView<O>> {
-        let (state, kind, priority) = self.store.get_view(&id).await?;
-        Some(TaskView {
+    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<O>>, TaskStoreError> {
+        let Some((state, kind, priority)) = self.store.get_view(&id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(TaskView {
             id,
             state,
             kind,
             priority,
-        })
+        }))
     }
 
-    pub async fn maintenance_tick(&self) -> usize {
+    pub async fn maintenance_tick(&self) -> Result<usize, TaskStoreError> {
         self.maintenance_tick_at(now_millis()).await
     }
 
-    pub async fn maintenance_tick_at(&self, now_ms: u64) -> usize {
+    pub async fn maintenance_tick_at(&self, now_ms: u64) -> Result<usize, TaskStoreError> {
         let moved_scheduled = self
             .store
             .promote_scheduled(now_ms, MAINTENANCE_TICK_LIMIT)
-            .await;
+            .await?;
         let moved_leases = self
             .store
             .requeue_expired_leases(now_ms, MAINTENANCE_TICK_LIMIT)
-            .await;
+            .await?;
         let moved = moved_scheduled + moved_leases;
         if moved > 0 {
             self.notify.notify_one();
         }
-        moved
+        Ok(moved)
     }
 
-    async fn fail_dependents(&self, root: TaskId, error: String) {
-        let mut queue: VecDeque<TaskId> = self.store.dependents_of(&root).await.into();
+    async fn fail_dependents(&self, root: TaskId, error: String) -> Result<(), TaskStoreError> {
+        let mut queue: VecDeque<TaskId> = self.store.dependents_of(&root).await?.into();
         let mut visited = HashSet::new();
 
         while let Some(id) = queue.pop_front() {
@@ -332,7 +341,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                 continue;
             }
 
-            let state = self.store.get_state(&id).await;
+            let state = self.store.get_state(&id).await?;
             if !matches!(
                 state,
                 Some(TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. })
@@ -345,13 +354,15 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                             caused_by_dep: Some(root),
                         },
                     )
-                    .await;
+                    .await?;
             }
 
-            for dependent in self.store.dependents_of(&id).await {
+            for dependent in self.store.dependents_of(&id).await? {
                 queue.push_back(dependent);
             }
         }
+
+        Ok(())
     }
 }
 
@@ -385,39 +396,42 @@ mod tests {
             payload: P,
             prio: Priority,
             deps: Vec<TaskId>,
-        ) {
-            self.inner.insert_task(id, kind, payload, prio, deps).await;
+        ) -> crate::StoreResult<()> {
+            self.inner.insert_task(id, kind, payload, prio, deps).await
         }
 
-        async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>> {
+        async fn get_state(&self, id: &TaskId) -> crate::StoreResult<Option<TaskState<O>>> {
             self.inner.get_state(id).await
         }
 
-        async fn set_state(&self, id: &TaskId, state: TaskState<O>) {
-            self.inner.set_state(id, state).await;
+        async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> crate::StoreResult<()> {
+            self.inner.set_state(id, state).await
         }
 
-        async fn get_view(&self, id: &TaskId) -> Option<(TaskState<O>, TaskKind, Priority)> {
+        async fn get_view(
+            &self,
+            id: &TaskId,
+        ) -> crate::StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
             self.inner.get_view(id).await
         }
 
-        async fn dependents_of(&self, dep: &TaskId) -> Vec<TaskId> {
+        async fn dependents_of(&self, dep: &TaskId) -> crate::StoreResult<Vec<TaskId>> {
             self.inner.dependents_of(dep).await
         }
 
-        async fn dec_remaining_deps(&self, id: &TaskId) -> usize {
+        async fn dec_remaining_deps(&self, id: &TaskId) -> crate::StoreResult<usize> {
             self.inner.dec_remaining_deps(id).await
         }
 
-        async fn try_mark_ready(&self, id: &TaskId) -> Option<Priority> {
+        async fn try_mark_ready(&self, id: &TaskId) -> crate::StoreResult<Option<Priority>> {
             self.inner.try_mark_ready(id).await
         }
 
-        async fn push_ready(&self, prio: Priority, id: TaskId) {
-            self.inner.push_ready(prio, id).await;
+        async fn push_ready(&self, prio: Priority, id: TaskId) -> crate::StoreResult<()> {
+            self.inner.push_ready(prio, id).await
         }
 
-        async fn pop_ready(&self, prio: Priority) -> Option<TaskId> {
+        async fn pop_ready(&self, prio: Priority) -> crate::StoreResult<Option<TaskId>> {
             self.inner.pop_ready(prio).await
         }
 
@@ -425,31 +439,31 @@ mod tests {
             &self,
             _id: &TaskId,
             _worker: &str,
-        ) -> Option<(P, TaskKind, Priority, u32)> {
-            None
+        ) -> crate::StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+            Ok(None)
         }
 
         async fn pop_ready_and_take(
             &self,
             prio: Priority,
             worker: &str,
-        ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+        ) -> crate::StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
             self.inner.pop_ready_and_take(prio, worker).await
         }
 
-        async fn put_payload(&self, id: &TaskId, payload: P) {
-            self.inner.put_payload(id, payload).await;
+        async fn put_payload(&self, id: &TaskId, payload: P) -> crate::StoreResult<()> {
+            self.inner.put_payload(id, payload).await
         }
 
-        async fn schedule(&self, id: TaskId, not_before_ms: u64) {
-            self.inner.schedule(id, not_before_ms).await;
+        async fn schedule(&self, id: TaskId, not_before_ms: u64) -> crate::StoreResult<()> {
+            self.inner.schedule(id, not_before_ms).await
         }
 
-        async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize {
+        async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> crate::StoreResult<usize> {
             self.inner.promote_scheduled(now_ms, limit).await
         }
 
-        async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> usize {
+        async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> crate::StoreResult<usize> {
             self.inner.requeue_expired_leases(now_ms, limit).await
         }
     }
@@ -467,7 +481,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -477,11 +492,12 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let first = sched.next_ready("w").await.unwrap();
+        let first = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(first.id, b);
-        let second = sched.next_ready("w").await.unwrap();
+        let second = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(second.id, a);
     }
 
@@ -500,9 +516,10 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
-        assert!(sched.next_ready("w").await.is_some());
+        assert!(sched.next_ready("w").await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -518,7 +535,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let _a2 = sched
             .submit(
                 NewTask {
@@ -528,7 +546,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
         let b = sched
             .submit(
@@ -539,19 +558,20 @@ mod tests {
                 },
                 vec![_a1, _a2],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let t1 = sched.next_ready("w").await.unwrap();
+        let t1 = sched.next_ready("w").await.unwrap().unwrap();
         assert_ne!(t1.id, b);
-        let t2 = sched.next_ready("w").await.unwrap();
+        let t2 = sched.next_ready("w").await.unwrap().unwrap();
         assert_ne!(t2.id, b);
-        assert!(sched.next_ready("w").await.is_none());
+        assert!(sched.next_ready("w").await.unwrap().is_none());
 
-        sched.complete(t1, Ok("ok")).await;
-        assert!(sched.next_ready("w").await.is_none());
+        sched.complete(t1, Ok("ok")).await.unwrap();
+        assert!(sched.next_ready("w").await.unwrap().is_none());
 
-        sched.complete(t2, Ok("ok")).await;
-        assert_eq!(sched.next_ready("w").await.unwrap().id, b);
+        sched.complete(t2, Ok("ok")).await.unwrap();
+        assert_eq!(sched.next_ready("w").await.unwrap().unwrap().id, b);
     }
 
     #[tokio::test]
@@ -567,7 +587,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -577,13 +598,14 @@ mod tests {
                 },
                 vec![a],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let lease = sched.next_ready("w").await.unwrap();
+        let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
-        sched.complete(lease, Err("boom".to_string())).await;
+        sched.complete(lease, Err("boom".to_string())).await.unwrap();
 
-        let b_state = sched.get(b).await.unwrap().state;
+        let b_state = sched.get(b).await.unwrap().unwrap().state;
         assert!(matches!(b_state, TaskState::Failed { .. }));
     }
 
@@ -600,7 +622,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -610,7 +633,8 @@ mod tests {
                 },
                 vec![a],
             )
-            .await;
+            .await
+            .unwrap();
         let c = sched
             .submit(
                 NewTask {
@@ -620,18 +644,19 @@ mod tests {
                 },
                 vec![b],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let lease = sched.next_ready("w").await.unwrap();
+        let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
-        sched.complete(lease, Err("boom".to_string())).await;
+        sched.complete(lease, Err("boom".to_string())).await.unwrap();
 
         assert!(matches!(
-            sched.get(b).await.unwrap().state,
+            sched.get(b).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
         assert!(matches!(
-            sched.get(c).await.unwrap().state,
+            sched.get(c).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
     }
@@ -649,7 +674,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -659,11 +685,12 @@ mod tests {
                 },
                 vec![a],
             )
-            .await;
+            .await
+            .unwrap();
 
-        sched.cancel(a).await;
+        sched.cancel(a).await.unwrap();
         assert!(matches!(
-            sched.get(b).await.unwrap().state,
+            sched.get(b).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
     }
@@ -681,16 +708,17 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let lease = sched.next_ready("w").await.unwrap();
+        let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
 
-        sched.cancel(a).await;
-        sched.complete(lease, Ok("late-ok")).await;
+        sched.cancel(a).await.unwrap();
+        sched.complete(lease, Ok("late-ok")).await.unwrap();
 
         assert!(matches!(
-            sched.get(a).await.unwrap().state,
+            sched.get(a).await.unwrap().unwrap().state,
             TaskState::Cancelled
         ));
     }
@@ -708,16 +736,17 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let lease = sched.next_ready("w").await.unwrap();
+        let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
 
-        sched.complete(lease, Ok("ok")).await;
-        sched.cancel(a).await;
+        sched.complete(lease, Ok("ok")).await.unwrap();
+        sched.cancel(a).await.unwrap();
 
         assert!(matches!(
-            sched.get(a).await.unwrap().state,
+            sched.get(a).await.unwrap().unwrap().state,
             TaskState::Succeeded { .. }
         ));
     }
@@ -736,17 +765,19 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
 
-        let lease1 = sched.next_ready("w1").await.unwrap();
+        let lease1 = sched.next_ready("w1").await.unwrap().unwrap();
         assert_eq!(lease1.id, id);
         assert_eq!(lease1.attempt, 1);
 
         sched
             .maintenance_tick_at(super::now_millis().saturating_add(10_000))
-            .await;
+            .await
+            .unwrap();
 
-        let lease2 = sched.next_ready("w2").await.unwrap();
+        let lease2 = sched.next_ready("w2").await.unwrap().unwrap();
         assert_eq!(lease2.id, id);
         assert_eq!(lease2.attempt, 2);
     }
@@ -773,7 +804,8 @@ mod tests {
                 },
                 vec![],
             )
-            .await;
+            .await
+            .unwrap();
         let b = sched
             .submit(
                 NewTask {
@@ -783,21 +815,25 @@ mod tests {
                 },
                 vec![a],
             )
-            .await;
+            .await
+            .unwrap();
 
         for attempt in 1..=3 {
-            let lease = sched.next_ready("w").await.unwrap();
+            let lease = sched.next_ready("w").await.unwrap().unwrap();
             assert_eq!(lease.id, a);
             assert_eq!(lease.attempt, attempt);
-            sched.complete(lease, Err("boom".to_string())).await;
+            sched
+                .complete(lease, Err("boom".to_string()))
+                .await
+                .unwrap();
         }
 
         assert!(matches!(
-            sched.get(a).await.unwrap().state,
+            sched.get(a).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
         assert!(matches!(
-            sched.get(b).await.unwrap().state,
+            sched.get(b).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
     }

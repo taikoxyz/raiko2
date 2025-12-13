@@ -100,7 +100,14 @@ pub async fn request_batch_proof(
         req.batch_id, req.l1_inclusion_block
     );
 
-    let id = state.engine.submit_batch_proof(req.batch_id).await;
+    let id = state
+        .engine
+        .submit_batch_proof(req.batch_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to enqueue proof job: {e}"),
+        })?;
 
     Ok(Json(ProofResponse {
         id: id.to_string(),
@@ -120,10 +127,18 @@ pub async fn get_proof_status(
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    let view = state.engine.get(task_id).await.ok_or(ApiError {
-        status: StatusCode::NOT_FOUND,
-        message: format!("Proof job not found: {id}"),
-    })?;
+    let view = state
+        .engine
+        .get(task_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to read proof status: {e}"),
+        })?
+        .ok_or(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("Proof job not found: {id}"),
+        })?;
 
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {
@@ -165,12 +180,23 @@ pub async fn cancel_proof(
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    state.engine.cancel(task_id).await;
-
-    let view = state.engine.get(task_id).await.ok_or(ApiError {
-        status: StatusCode::NOT_FOUND,
-        message: format!("Proof job not found: {id}"),
+    state.engine.cancel(task_id).await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Failed to cancel proof job: {e}"),
     })?;
+
+    let view = state
+        .engine
+        .get(task_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to read proof status: {e}"),
+        })?
+        .ok_or(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("Proof job not found: {id}"),
+        })?;
 
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {

@@ -1,4 +1,4 @@
-use crate::{Priority, TaskId, TaskKind, TaskState, TaskStore};
+use crate::{Priority, StoreResult, TaskId, TaskKind, TaskState, TaskStore, TaskStoreError};
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use serde::{Serialize, de::DeserializeOwned};
@@ -136,9 +136,10 @@ where
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
-    ) {
+    ) -> StoreResult<()> {
         let task_key = self.task_key(&id);
-        let payload = bincode::serialize(&payload).expect("serialize payload");
+        let payload = bincode::serialize(&payload)
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize payload: {e}")))?;
 
         let mut conn = self.conn.lock().await;
         let _: () = redis::cmd("HSET")
@@ -157,7 +158,7 @@ where
             .arg(0i64)
             .query_async(&mut *conn)
             .await
-            .expect("redis HSET task");
+            .map_err(TaskStoreError::backend)?;
 
         for dep in deps {
             let dep_key = self.dependents_key(&dep);
@@ -166,58 +167,118 @@ where
                 .arg(id.to_string())
                 .query_async(&mut *conn)
                 .await
-                .expect("redis SADD dependent");
+                .map_err(TaskStoreError::backend)?;
         }
+
+        Ok(())
     }
 
-    async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>> {
+    async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
 
-        let state: Option<String> = conn.hget(&task_key, FIELD_STATE).await.ok()?;
-        let state = state?;
+        let state: Option<String> = conn
+            .hget(&task_key, FIELD_STATE)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
 
         match state.as_str() {
             STATE_PENDING => {
-                let remaining: i64 = conn.hget(&task_key, FIELD_REMAINING).await.ok()?;
-                Some(TaskState::pending(remaining.max(0) as usize))
+                let remaining: Option<i64> = conn
+                    .hget(&task_key, FIELD_REMAINING)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let remaining = remaining.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing remaining_deps for pending task")
+                })?;
+                Ok(Some(TaskState::pending(remaining.max(0) as usize)))
             }
-            STATE_READY => Some(TaskState::Ready),
+            STATE_READY => Ok(Some(TaskState::Ready)),
             STATE_RUNNING => {
-                let worker: String = conn.hget(&task_key, FIELD_WORKER).await.ok()?;
-                Some(TaskState::Running { worker })
+                let worker: Option<String> = conn
+                    .hget(&task_key, FIELD_WORKER)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let worker = worker
+                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing worker for running task"))?;
+                Ok(Some(TaskState::Running { worker }))
             }
             STATE_RETRYING => {
-                let error: String = conn.hget(&task_key, FIELD_ERROR).await.ok()?;
-                let attempt: i64 = conn.hget(&task_key, FIELD_ATTEMPT).await.ok()?;
-                let next_ready_at_ms: i64 =
-                    conn.hget(&task_key, FIELD_NEXT_READY_AT_MS).await.ok()?;
-                Some(TaskState::Retrying {
+                let error: Option<String> = conn
+                    .hget(&task_key, FIELD_ERROR)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let error = error
+                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing error for retrying task"))?;
+
+                let attempt: Option<i64> = conn
+                    .hget(&task_key, FIELD_ATTEMPT)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let attempt = attempt
+                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing attempt for retrying task"))?;
+
+                let next_ready_at_ms: Option<i64> = conn
+                    .hget(&task_key, FIELD_NEXT_READY_AT_MS)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let next_ready_at_ms = next_ready_at_ms.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing next_ready_at_ms for retrying task")
+                })?;
+
+                Ok(Some(TaskState::Retrying {
                     error,
                     attempt: attempt.max(0) as u32,
                     next_ready_at_ms: next_ready_at_ms.max(0) as u64,
-                })
+                }))
             }
             STATE_SUCCEEDED => {
-                let output: Vec<u8> = conn.hget(&task_key, FIELD_OUTPUT).await.ok()?;
-                let output: O = bincode::deserialize(&output).ok()?;
-                Some(TaskState::Succeeded { output })
+                let output: Option<Vec<u8>> = conn
+                    .hget(&task_key, FIELD_OUTPUT)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let output = output
+                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing output for succeeded task"))?;
+                let output: O = bincode::deserialize(&output)
+                    .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize output: {e}")))?;
+                Ok(Some(TaskState::Succeeded { output }))
             }
             STATE_FAILED => {
-                let error: String = conn.hget(&task_key, FIELD_ERROR).await.ok()?;
-                let caused_by: Option<String> = conn.hget(&task_key, FIELD_CAUSED_BY).await.ok()?;
-                let caused_by_dep = caused_by.and_then(|s| s.parse().ok());
-                Some(TaskState::Failed {
+                let error: Option<String> = conn
+                    .hget(&task_key, FIELD_ERROR)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let error = error
+                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing error for failed task"))?;
+
+                let caused_by: Option<String> = conn
+                    .hget(&task_key, FIELD_CAUSED_BY)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let caused_by_dep = match caused_by {
+                    Some(s) => Some(
+                        s.parse()
+                            .map_err(|e| TaskStoreError::corrupt_msg(format!("invalid caused_by_dep: {e}")))?,
+                    ),
+                    None => None,
+                };
+
+                Ok(Some(TaskState::Failed {
                     error,
                     caused_by_dep,
-                })
+                }))
             }
-            STATE_CANCELLED => Some(TaskState::Cancelled),
-            _ => None,
+            STATE_CANCELLED => Ok(Some(TaskState::Cancelled)),
+            other => Err(TaskStoreError::corrupt_msg(format!(
+                "unknown task state: {other}"
+            ))),
         }
     }
 
-    async fn set_state(&self, id: &TaskId, state: TaskState<O>) {
+    async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
 
@@ -228,14 +289,14 @@ where
                 .arg(id.to_string())
                 .query_async(&mut *conn)
                 .await
-                .expect("redis ZREM running");
+                .map_err(TaskStoreError::backend)?;
             let _: () = redis::cmd("HDEL")
                 .arg(&task_key)
                 .arg(FIELD_WORKER)
                 .arg(FIELD_LEASE_UNTIL_MS)
                 .query_async(&mut *conn)
                 .await
-                .expect("redis HDEL running fields");
+                .map_err(TaskStoreError::backend)?;
         }
 
         match state {
@@ -248,13 +309,13 @@ where
                     .arg(remaining_deps as i64)
                     .query_async(&mut *conn)
                     .await
-                    .expect("redis HSET pending");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Ready => {
                 let _: () = conn
                     .hset(&task_key, FIELD_STATE, STATE_READY)
                     .await
-                    .expect("redis HSET ready");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Running { worker } => {
                 let _: () = redis::cmd("HSET")
@@ -265,7 +326,7 @@ where
                     .arg(worker)
                     .query_async(&mut *conn)
                     .await
-                    .expect("redis HSET running");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Retrying {
                 error,
@@ -284,10 +345,11 @@ where
                     .arg(next_ready_at_ms as i64)
                     .query_async(&mut *conn)
                     .await
-                    .expect("redis HSET retrying");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Succeeded { output } => {
-                let output = bincode::serialize(&output).expect("serialize output");
+                let output = bincode::serialize(&output)
+                    .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize output: {e}")))?;
                 let _: () = redis::cmd("HSET")
                     .arg(&task_key)
                     .arg(FIELD_STATE)
@@ -296,7 +358,7 @@ where
                     .arg(output)
                     .query_async(&mut *conn)
                     .await
-                    .expect("redis HSET succeeded");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Failed {
                 error,
@@ -315,46 +377,64 @@ where
                     let _: () = conn
                         .hdel(&task_key, FIELD_CAUSED_BY)
                         .await
-                        .expect("redis HDEL caused_by_dep");
+                        .map_err(TaskStoreError::backend)?;
                 }
 
                 let _: () = cmd
                     .query_async(&mut *conn)
                     .await
-                    .expect("redis HSET failed");
+                    .map_err(TaskStoreError::backend)?;
             }
             TaskState::Cancelled => {
                 let _: () = conn
                     .hset(&task_key, FIELD_STATE, STATE_CANCELLED)
                     .await
-                    .expect("redis HSET cancelled");
+                    .map_err(TaskStoreError::backend)?;
             }
         }
+
+        Ok(())
     }
 
-    async fn get_view(&self, id: &TaskId) -> Option<(TaskState<O>, TaskKind, Priority)> {
+    async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
 
-        let kind: Option<String> = conn.hget(&task_key, FIELD_KIND).await.ok()?;
-        let kind = parse_kind(kind?.as_str())?;
+        let kind: Option<String> = conn
+            .hget(&task_key, FIELD_KIND)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let Some(kind) = kind else {
+            return Ok(None);
+        };
+        let kind = parse_kind(kind.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
 
-        let prio: Option<String> = conn.hget(&task_key, FIELD_PRIORITY).await.ok()?;
-        let priority = parse_prio(prio?.as_str())?;
+        let prio: Option<String> = conn
+            .hget(&task_key, FIELD_PRIORITY)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let Some(prio) = prio else {
+            return Ok(None);
+        };
+        let priority = parse_prio(prio.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
 
         drop(conn);
-        let state = self.get_state(id).await?;
-        Some((state, kind, priority))
+        let Some(state) = self.get_state(id).await? else {
+            return Ok(None);
+        };
+        Ok(Some((state, kind, priority)))
     }
 
-    async fn dependents_of(&self, dep: &TaskId) -> Vec<TaskId> {
+    async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
         let dep_key = self.dependents_key(dep);
         let mut conn = self.conn.lock().await;
-        let ids: Vec<String> = conn.smembers(dep_key).await.unwrap_or_default();
-        ids.into_iter().filter_map(|s| s.parse().ok()).collect()
+        let ids: Vec<String> = conn.smembers(dep_key).await.map_err(TaskStoreError::backend)?;
+        Ok(ids.into_iter().filter_map(|s| s.parse().ok()).collect())
     }
 
-    async fn dec_remaining_deps(&self, id: &TaskId) -> usize {
+    async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
         let remaining: i64 = redis::cmd("HINCRBY")
@@ -363,12 +443,12 @@ where
             .arg(-1i64)
             .query_async(&mut *conn)
             .await
-            .expect("redis HINCRBY remaining_deps");
+            .map_err(TaskStoreError::backend)?;
 
-        remaining.max(0) as usize
+        Ok(remaining.max(0) as usize)
     }
 
-    async fn try_mark_ready(&self, id: &TaskId) -> Option<Priority> {
+    async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>> {
         let task_key = self.task_key(id);
         let script = redis::Script::new(
             r#"
@@ -397,32 +477,40 @@ return redis.call('HGET', KEYS[1], ARGV[5])
             .arg(FIELD_PRIORITY)
             .invoke_async(&mut *conn)
             .await
-            .ok()?;
+            .map_err(TaskStoreError::backend)?;
 
-        parse_prio(prio?.as_str())
+        let Some(prio) = prio else {
+            return Ok(None);
+        };
+
+        let parsed = parse_prio(prio.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
+        Ok(Some(parsed))
     }
 
-    async fn push_ready(&self, prio: Priority, id: TaskId) {
+    async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()> {
         let key = self.ready_key(prio);
         let mut conn = self.conn.lock().await;
         let _: () = conn
             .rpush(key, id.to_string())
             .await
-            .expect("redis RPUSH ready");
+            .map_err(TaskStoreError::backend)?;
+
+        Ok(())
     }
 
-    async fn pop_ready(&self, prio: Priority) -> Option<TaskId> {
+    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
         let key = self.ready_key(prio);
         let mut conn = self.conn.lock().await;
-        let id: Option<String> = conn.lpop(key, None).await.ok()?;
-        id.and_then(|s| s.parse().ok())
+        let id: Option<String> = conn.lpop(key, None).await.map_err(TaskStoreError::backend)?;
+        Ok(id.and_then(|s| s.parse().ok()))
     }
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+    ) -> StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
         let ready_key = self.ready_key(prio);
         let running_key = self.running_key();
 
@@ -470,21 +558,28 @@ end
             .arg(FIELD_PRIORITY)
             .invoke_async(&mut *conn)
             .await
-            .ok()?;
+            .map_err(TaskStoreError::backend)?;
 
-        let (id, payload_bytes, kind, prio, attempt) = result?;
-        let id: TaskId = id.parse().ok()?;
-        let payload: P = bincode::deserialize(&payload_bytes).ok()?;
-        Some((
-            id,
-            payload,
-            parse_kind(kind.as_str())?,
-            parse_prio(prio.as_str())?,
-            attempt.max(0) as u32,
-        ))
+        let Some((id, payload_bytes, kind, prio, attempt)) = result else {
+            return Ok(None);
+        };
+        let id: TaskId = id
+            .parse()
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("invalid task id: {e}")))?;
+        let payload: P = bincode::deserialize(&payload_bytes)
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
+        let kind = parse_kind(kind.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
+        let prio = parse_prio(prio.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
+        Ok(Some((id, payload, kind, prio, attempt.max(0) as u32)))
     }
 
-    async fn take_ready(&self, id: &TaskId, worker: &str) -> Option<(P, TaskKind, Priority, u32)> {
+    async fn take_ready(
+        &self,
+        id: &TaskId,
+        worker: &str,
+    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
         let task_key = self.task_key(id);
         let running_key = self.running_key();
 
@@ -526,29 +621,34 @@ return {payload, kind, priority, attempt}
             .arg(id.to_string())
             .invoke_async(&mut *conn)
             .await
-            .ok()?;
+            .map_err(TaskStoreError::backend)?;
 
-        let (payload_bytes, kind, prio, attempt) = result?;
-        let payload: P = bincode::deserialize(&payload_bytes).ok()?;
-        Some((
-            payload,
-            parse_kind(kind.as_str())?,
-            parse_prio(prio.as_str())?,
-            attempt.max(0) as u32,
-        ))
+        let Some((payload_bytes, kind, prio, attempt)) = result else {
+            return Ok(None);
+        };
+        let payload: P = bincode::deserialize(&payload_bytes)
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
+        let kind = parse_kind(kind.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
+        let prio = parse_prio(prio.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
+        Ok(Some((payload, kind, prio, attempt.max(0) as u32)))
     }
 
-    async fn put_payload(&self, id: &TaskId, payload: P) {
+    async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
         let task_key = self.task_key(id);
-        let payload = bincode::serialize(&payload).expect("serialize payload");
+        let payload = bincode::serialize(&payload)
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize payload: {e}")))?;
         let mut conn = self.conn.lock().await;
         let _: () = conn
             .hset(task_key, FIELD_PAYLOAD, payload)
             .await
-            .expect("redis HSET payload");
+            .map_err(TaskStoreError::backend)?;
+
+        Ok(())
     }
 
-    async fn schedule(&self, id: TaskId, not_before_ms: u64) {
+    async fn schedule(&self, id: TaskId, not_before_ms: u64) -> StoreResult<()> {
         let key = self.scheduled_key();
         let mut conn = self.conn.lock().await;
         let _: () = redis::cmd("ZADD")
@@ -557,10 +657,12 @@ return {payload, kind, priority, attempt}
             .arg(id.to_string())
             .query_async(&mut *conn)
             .await
-            .expect("redis ZADD scheduled");
+            .map_err(TaskStoreError::backend)?;
+
+        Ok(())
     }
 
-    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize {
+    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize> {
         let scheduled_key = self.scheduled_key();
         let ready_high = self.ready_key(Priority::High);
         let ready_medium = self.ready_key(Priority::Medium);
@@ -608,12 +710,12 @@ return moved
             .arg(FIELD_PRIORITY)
             .invoke_async(&mut *conn)
             .await
-            .unwrap_or(0);
+            .map_err(TaskStoreError::backend)?;
 
-        moved.max(0) as usize
+        Ok(moved.max(0) as usize)
     }
 
-    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> usize {
+    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize> {
         let running_key = self.running_key();
         let ready_high = self.ready_key(Priority::High);
         let ready_medium = self.ready_key(Priority::Medium);
@@ -664,8 +766,8 @@ return moved
             .arg(FIELD_PRIORITY)
             .invoke_async(&mut *conn)
             .await
-            .unwrap_or(0);
+            .map_err(TaskStoreError::backend)?;
 
-        moved.max(0) as usize
+        Ok(moved.max(0) as usize)
     }
 }

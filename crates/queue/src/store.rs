@@ -1,8 +1,60 @@
 use crate::{Priority, TaskId, TaskKind, TaskState};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::error::Error;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+pub type StoreResult<T> = Result<T, TaskStoreError>;
+
+#[derive(Debug)]
+pub enum TaskStoreError {
+    /// Underlying storage/backend failure (e.g. Redis unavailable, network errors, timeouts).
+    Backend(Box<dyn Error + Send + Sync>),
+    /// Data is missing or cannot be decoded (e.g. schema mismatch, corrupt payload).
+    CorruptData(Box<dyn Error + Send + Sync>),
+}
+
+impl TaskStoreError {
+    pub fn backend<E>(err: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::Backend(Box::new(err))
+    }
+
+    pub fn corrupt_data<E>(err: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::CorruptData(Box::new(err))
+    }
+
+    pub fn corrupt_msg(msg: impl Into<String>) -> Self {
+        Self::CorruptData(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            msg.into(),
+        )))
+    }
+}
+
+impl std::fmt::Display for TaskStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskStoreError::Backend(err) => write!(f, "task store backend error: {err}"),
+            TaskStoreError::CorruptData(err) => write!(f, "task store corrupt data: {err}"),
+        }
+    }
+}
+
+impl Error for TaskStoreError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            TaskStoreError::Backend(err) => Some(err.as_ref()),
+            TaskStoreError::CorruptData(err) => Some(err.as_ref()),
+        }
+    }
+}
 
 #[async_trait]
 pub trait TaskStore<P, O>: Send + Sync
@@ -16,33 +68,42 @@ where
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
-    );
-    async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>>;
-    async fn set_state(&self, id: &TaskId, state: TaskState<O>);
-    async fn get_view(&self, id: &TaskId) -> Option<(TaskState<O>, TaskKind, Priority)>;
-    async fn dependents_of(&self, dep: &TaskId) -> Vec<TaskId>;
-    async fn dec_remaining_deps(&self, id: &TaskId) -> usize;
-    async fn try_mark_ready(&self, id: &TaskId) -> Option<Priority>;
-    async fn push_ready(&self, prio: Priority, id: TaskId);
-    async fn pop_ready(&self, prio: Priority) -> Option<TaskId>;
-    async fn take_ready(&self, id: &TaskId, worker: &str) -> Option<(P, TaskKind, Priority, u32)>;
+    ) -> StoreResult<()>;
+    async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>>;
+    async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()>;
+    async fn get_view(
+        &self,
+        id: &TaskId,
+    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>>;
+    async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>>;
+    async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize>;
+    async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>>;
+    async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()>;
+    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>>;
+    async fn take_ready(
+        &self,
+        id: &TaskId,
+        worker: &str,
+    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> Option<(TaskId, P, TaskKind, Priority, u32)> {
+    ) -> StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
         loop {
-            let id = self.pop_ready(prio).await?;
-            if let Some((payload, kind, priority, attempt)) = self.take_ready(&id, worker).await {
-                return Some((id, payload, kind, priority, attempt));
+            let Some(id) = self.pop_ready(prio).await? else {
+                return Ok(None);
+            };
+            if let Some((payload, kind, priority, attempt)) = self.take_ready(&id, worker).await? {
+                return Ok(Some((id, payload, kind, priority, attempt)));
             }
         }
     }
-    async fn put_payload(&self, id: &TaskId, payload: P);
-    async fn schedule(&self, id: TaskId, not_before_ms: u64);
-    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize;
-    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> usize;
+    async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()>;
+    async fn schedule(&self, id: TaskId, not_before_ms: u64) -> StoreResult<()>;
+    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
+    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
 }
 
 pub struct MemoryStore<P, O> {
@@ -105,7 +166,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
-    ) {
+    ) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         g.remaining.insert(id, deps.len());
         for dep in deps {
@@ -123,14 +184,16 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
                 lease_until_ms: None,
             },
         );
+
+        Ok(())
     }
 
-    async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>> {
+    async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>> {
         let g = self.inner.lock().await;
-        g.tasks.get(id).map(|r| &r.state).cloned()
+        Ok(g.tasks.get(id).map(|r| &r.state).cloned())
     }
 
-    async fn set_state(&self, id: &TaskId, state: TaskState<O>) {
+    async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         if let Some(r) = g.tasks.get_mut(id) {
             r.state = state;
@@ -138,20 +201,25 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
                 r.lease_until_ms = None;
             }
         }
+
+        Ok(())
     }
 
-    async fn get_view(&self, id: &TaskId) -> Option<(TaskState<O>, TaskKind, Priority)> {
+    async fn get_view(
+        &self,
+        id: &TaskId,
+    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
         let g = self.inner.lock().await;
-        let record = g.tasks.get(id)?;
-        Some((record.state.clone(), record.kind, record.priority))
+        let record = g.tasks.get(id);
+        Ok(record.map(|r| (r.state.clone(), r.kind, r.priority)))
     }
 
-    async fn dependents_of(&self, dep: &TaskId) -> Vec<TaskId> {
+    async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
         let g = self.inner.lock().await;
-        g.dependents.get(dep).cloned().unwrap_or_default()
+        Ok(g.dependents.get(dep).cloned().unwrap_or_default())
     }
 
-    async fn dec_remaining_deps(&self, id: &TaskId) -> usize {
+    async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize> {
         let mut g = self.inner.lock().await;
         let remaining = {
             let entry = g.remaining.entry(*id).or_insert(0);
@@ -167,50 +235,64 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
             record.state = TaskState::pending(remaining);
         }
 
-        remaining
+        Ok(remaining)
     }
 
-    async fn try_mark_ready(&self, id: &TaskId) -> Option<Priority> {
+    async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>> {
         let mut g = self.inner.lock().await;
         let remaining = g.remaining.get(id).copied().unwrap_or(0);
         if remaining != 0 {
-            return None;
+            return Ok(None);
         }
-        let record = g.tasks.get_mut(id)?;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(None);
+        };
         match record.state {
             TaskState::Pending { .. } => {
                 record.state = TaskState::Ready;
-                Some(record.priority)
+                Ok(Some(record.priority))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
-    async fn push_ready(&self, prio: Priority, id: TaskId) {
+    async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         match prio {
             Priority::High => g.ready_high.push_back(id),
             Priority::Medium => g.ready_med.push_back(id),
             Priority::Low => g.ready_low.push_back(id),
         }
+
+        Ok(())
     }
 
-    async fn pop_ready(&self, prio: Priority) -> Option<TaskId> {
+    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
         let mut g = self.inner.lock().await;
-        match prio {
+        let id = match prio {
             Priority::High => g.ready_high.pop_front(),
             Priority::Medium => g.ready_med.pop_front(),
             Priority::Low => g.ready_low.pop_front(),
-        }
+        };
+        Ok(id)
     }
 
-    async fn take_ready(&self, id: &TaskId, worker: &str) -> Option<(P, TaskKind, Priority, u32)> {
+    async fn take_ready(
+        &self,
+        id: &TaskId,
+        worker: &str,
+    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
         let mut g = self.inner.lock().await;
-        let record = g.tasks.get_mut(id)?;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(None);
+        };
         if !matches!(record.state, TaskState::Ready) {
-            return None;
+            return Ok(None);
         }
-        let payload = record.payload.as_ref()?.clone();
+        let Some(payload) = record.payload.as_ref() else {
+            return Ok(None);
+        };
+        let payload = payload.clone();
         record.attempt = record.attempt.saturating_add(1);
         let attempt = record.attempt;
         record.state = TaskState::Running {
@@ -218,22 +300,25 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         };
         let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
-        Some((payload, record.kind, record.priority, attempt))
+        Ok(Some((payload, record.kind, record.priority, attempt)))
     }
 
-    async fn put_payload(&self, id: &TaskId, payload: P) {
+    async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         if let Some(record) = g.tasks.get_mut(id) {
             record.payload = Some(payload);
         }
+
+        Ok(())
     }
 
-    async fn schedule(&self, id: TaskId, not_before_ms: u64) {
+    async fn schedule(&self, id: TaskId, not_before_ms: u64) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         g.scheduled.entry(not_before_ms).or_default().push_back(id);
+        Ok(())
     }
 
-    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> usize {
+    async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize> {
         let mut g = self.inner.lock().await;
         let mut moved = 0usize;
 
@@ -282,10 +367,10 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
             }
         }
 
-        moved
+        Ok(moved)
     }
 
-    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> usize {
+    async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize> {
         let mut g = self.inner.lock().await;
         let mut expired = Vec::new();
 
@@ -320,7 +405,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
             }
         }
 
-        expired.len()
+        Ok(expired.len())
     }
 }
 
@@ -342,9 +427,9 @@ mod tests {
         let store: MemoryStore<(), ()> = MemoryStore::new();
         let a = TaskId::new();
         let b = TaskId::new();
-        store.push_ready(Priority::Low, a).await;
-        store.push_ready(Priority::High, b).await;
-        assert_eq!(store.pop_ready(Priority::High).await, Some(b));
-        assert_eq!(store.pop_ready(Priority::Low).await, Some(a));
+        store.push_ready(Priority::Low, a).await.unwrap();
+        store.push_ready(Priority::High, b).await.unwrap();
+        assert_eq!(store.pop_ready(Priority::High).await.unwrap(), Some(b));
+        assert_eq!(store.pop_ready(Priority::Low).await.unwrap(), Some(a));
     }
 }

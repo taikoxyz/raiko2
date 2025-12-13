@@ -4,7 +4,7 @@ use raiko2_primitives::{AggregationGuestInput, ProverConfig};
 use raiko2_prover::Prover;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskKind,
-    TaskState, TaskView,
+    TaskState, TaskStoreError, TaskView,
 };
 
 use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
@@ -65,7 +65,7 @@ impl EngineQueue {
         }
     }
 
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> TaskId {
+    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
         let input_task = self
             .inner
             .scheduler
@@ -77,7 +77,7 @@ impl EngineQueue {
                 },
                 vec![],
             )
-            .await;
+            .await?;
 
         self.inner
             .scheduler
@@ -95,22 +95,22 @@ impl EngineQueue {
             .await
     }
 
-    pub async fn get(&self, id: TaskId) -> Option<TaskView<EngineOutput>> {
+    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<EngineOutput>>, TaskStoreError> {
         self.inner.scheduler.get(id).await
     }
 
-    pub async fn cancel(&self, id: TaskId) {
-        self.inner.scheduler.cancel(id).await;
+    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+        self.inner.scheduler.cancel(id).await
     }
 
-    pub async fn run_one(&self, worker: &str) -> bool {
-        let Some(lease) = self.inner.scheduler.next_ready(worker).await else {
-            return false;
+    pub async fn run_one(&self, worker: &str) -> Result<bool, TaskStoreError> {
+        let Some(lease) = self.inner.scheduler.next_ready(worker).await? else {
+            return Ok(false);
         };
 
         let result = self.execute(lease.payload.clone()).await;
-        self.inner.scheduler.complete(lease, result).await;
-        true
+        self.inner.scheduler.complete(lease, result).await?;
+        Ok(true)
     }
 
     pub fn start_workers(&self, concurrency: usize) {
@@ -121,10 +121,14 @@ impl EngineQueue {
             let worker = format!("engine-{i}");
             tokio::spawn(async move {
                 loop {
-                    if engine.run_one(&worker).await {
-                        continue;
+                    match engine.run_one(&worker).await {
+                        Ok(true) => continue,
+                        Ok(false) => notify.notified().await,
+                        Err(err) => {
+                            tracing::warn!(worker = %worker, error = %err, "engine worker tick failed");
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
                     }
-                    notify.notified().await;
                 }
             });
         }
@@ -134,7 +138,9 @@ impl EngineQueue {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                engine.inner.scheduler.maintenance_tick().await;
+                if let Err(err) = engine.inner.scheduler.maintenance_tick().await {
+                    tracing::warn!(error = %err, "scheduler maintenance tick failed");
+                }
             }
         });
     }
@@ -156,6 +162,7 @@ impl EngineQueue {
                     .scheduler
                     .get(input_task)
                     .await
+                    .map_err(|e| e.to_string())?
                     .ok_or_else(|| "missing input task".to_string())?;
 
                 let guest_input = match input_view.state {
@@ -187,6 +194,7 @@ impl EngineQueue {
                         .scheduler
                         .get(proof_task)
                         .await
+                        .map_err(|e| e.to_string())?
                         .ok_or_else(|| "missing dependency proof task".to_string())?;
                     match view.state {
                         TaskState::Succeeded {
@@ -270,13 +278,13 @@ mod tests {
             Arc::new(MockGuestInputBuilder),
         );
 
-        let job_id = engine.submit_batch_proof(1).await;
+        let job_id = engine.submit_batch_proof(1).await.unwrap();
 
-        assert!(engine.run_one("w1").await);
-        assert!(engine.run_one("w1").await);
-        assert!(!engine.run_one("w1").await);
+        assert!(engine.run_one("w1").await.unwrap());
+        assert!(engine.run_one("w1").await.unwrap());
+        assert!(!engine.run_one("w1").await.unwrap());
 
-        let view = engine.get(job_id).await.unwrap();
+        let view = engine.get(job_id).await.unwrap().unwrap();
         match view.state {
             TaskState::Succeeded {
                 output: EngineOutput::Proof(proof),

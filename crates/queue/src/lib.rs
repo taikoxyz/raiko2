@@ -7,5 +7,5 @@ mod types;
 #[cfg(feature = "redis")]
 pub use redis_store::RedisStore;
 pub use scheduler::{NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskLease, TaskView};
-pub use store::{MemoryStore, TaskStore};
+pub use store::{MemoryStore, StoreResult, TaskStore, TaskStoreError};
 pub use types::{Priority, TaskId, TaskKind, TaskState};

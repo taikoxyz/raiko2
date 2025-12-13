@@ -98,6 +98,18 @@ pub struct Scheduler<P, O: Clone> {
     _phantom: core::marker::PhantomData<fn(P, O)>,
 }
 
+/// Maximum number of tasks to promote/requeue per maintenance tick.
+///
+/// This bounds the amount of work done in a single tick so that a periodic
+/// maintenance loop stays responsive (i.e. doesn't monopolize the executor or
+/// hold store-internal locks for too long when there is a large backlog).
+///
+/// For high-throughput systems where scheduled tasks / expired leases can
+/// accumulate faster than they are drained, this limit may become a bottleneck.
+/// In that case, consider calling `maintenance_tick` more frequently or in a
+/// loop until it returns `0`, or make this value configurable.
+const MAINTENANCE_TICK_LIMIT: usize = 128;
+
 impl<P, O: Clone> Scheduler<P, O> {
     pub fn new<S>(store: S) -> Self
     where
@@ -296,8 +308,14 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
     }
 
     pub async fn maintenance_tick_at(&self, now_ms: u64) -> usize {
-        let moved_scheduled = self.store.promote_scheduled(now_ms, 128).await;
-        let moved_leases = self.store.requeue_expired_leases(now_ms, 128).await;
+        let moved_scheduled = self
+            .store
+            .promote_scheduled(now_ms, MAINTENANCE_TICK_LIMIT)
+            .await;
+        let moved_leases = self
+            .store
+            .requeue_expired_leases(now_ms, MAINTENANCE_TICK_LIMIT)
+            .await;
         let moved = moved_scheduled + moved_leases;
         if moved > 0 {
             self.notify.notify_one();
@@ -342,7 +360,7 @@ fn now_millis() -> u64 {
 
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
+        .expect("System time is before UNIX_EPOCH")
         .as_millis() as u64
 }
 
@@ -368,9 +386,7 @@ mod tests {
             prio: Priority,
             deps: Vec<TaskId>,
         ) {
-            self.inner
-                .insert_task(id, kind, payload, prio, deps)
-                .await;
+            self.inner.insert_task(id, kind, payload, prio, deps).await;
         }
 
         async fn get_state(&self, id: &TaskId) -> Option<TaskState<O>> {
@@ -405,7 +421,11 @@ mod tests {
             self.inner.pop_ready(prio).await
         }
 
-        async fn take_ready(&self, _id: &TaskId, _worker: &str) -> Option<(P, TaskKind, Priority, u32)> {
+        async fn take_ready(
+            &self,
+            _id: &TaskId,
+            _worker: &str,
+        ) -> Option<(P, TaskKind, Priority, u32)> {
             None
         }
 

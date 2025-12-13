@@ -369,9 +369,8 @@ impl Config {
             config.queue.maintenance_interval_ms = interval_ms;
         }
         if let Some(strategy) = &cli.queue_retry_strategy {
-            config.queue.retry.strategy = strategy
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+            config.queue.retry.strategy =
+                strategy.parse().map_err(|e: String| anyhow::anyhow!(e))?;
         }
         if let Some(max_attempts) = cli.queue_retry_max_attempts {
             config.queue.retry.max_attempts = max_attempts;

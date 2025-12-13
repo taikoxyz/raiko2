@@ -297,6 +297,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         let attempt = record.attempt;
         record.state = TaskState::Running {
             worker: worker.to_string(),
+            attempt,
         };
         let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));

@@ -54,6 +54,7 @@ pub enum TaskState<O> {
     Ready,
     Running {
         worker: String,
+        attempt: u32,
     },
     Retrying {
         error: String,

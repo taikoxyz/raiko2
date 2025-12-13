@@ -202,24 +202,39 @@ where
                     .hget(&task_key, FIELD_WORKER)
                     .await
                     .map_err(TaskStoreError::backend)?;
-                let worker = worker
-                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing worker for running task"))?;
-                Ok(Some(TaskState::Running { worker }))
+                let worker = worker.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing worker for running task")
+                })?;
+
+                let attempt: Option<i64> = conn
+                    .hget(&task_key, FIELD_ATTEMPT)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                let attempt = attempt.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing attempt for running task")
+                })?;
+
+                Ok(Some(TaskState::Running {
+                    worker,
+                    attempt: attempt.max(0).min(u32::MAX as i64) as u32,
+                }))
             }
             STATE_RETRYING => {
                 let error: Option<String> = conn
                     .hget(&task_key, FIELD_ERROR)
                     .await
                     .map_err(TaskStoreError::backend)?;
-                let error = error
-                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing error for retrying task"))?;
+                let error = error.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing error for retrying task")
+                })?;
 
                 let attempt: Option<i64> = conn
                     .hget(&task_key, FIELD_ATTEMPT)
                     .await
                     .map_err(TaskStoreError::backend)?;
-                let attempt = attempt
-                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing attempt for retrying task"))?;
+                let attempt = attempt.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing attempt for retrying task")
+                })?;
 
                 let next_ready_at_ms: Option<i64> = conn
                     .hget(&task_key, FIELD_NEXT_READY_AT_MS)
@@ -240,8 +255,9 @@ where
                     .hget(&task_key, FIELD_OUTPUT)
                     .await
                     .map_err(TaskStoreError::backend)?;
-                let output = output
-                    .ok_or_else(|| TaskStoreError::corrupt_msg("missing output for succeeded task"))?;
+                let output = output.ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("missing output for succeeded task")
+                })?;
                 let output: O = bincode::deserialize(&output)
                     .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize output: {e}")))?;
                 Ok(Some(TaskState::Succeeded { output }))
@@ -259,10 +275,9 @@ where
                     .await
                     .map_err(TaskStoreError::backend)?;
                 let caused_by_dep = match caused_by {
-                    Some(s) => Some(
-                        s.parse()
-                            .map_err(|e| TaskStoreError::corrupt_msg(format!("invalid caused_by_dep: {e}")))?,
-                    ),
+                    Some(s) => Some(s.parse().map_err(|e| {
+                        TaskStoreError::corrupt_msg(format!("invalid caused_by_dep: {e}"))
+                    })?),
                     None => None,
                 };
 
@@ -317,13 +332,15 @@ where
                     .await
                     .map_err(TaskStoreError::backend)?;
             }
-            TaskState::Running { worker } => {
+            TaskState::Running { worker, attempt } => {
                 let _: () = redis::cmd("HSET")
                     .arg(&task_key)
                     .arg(FIELD_STATE)
                     .arg(STATE_RUNNING)
                     .arg(FIELD_WORKER)
                     .arg(worker)
+                    .arg(FIELD_ATTEMPT)
+                    .arg(attempt as i64)
                     .query_async(&mut *conn)
                     .await
                     .map_err(TaskStoreError::backend)?;
@@ -396,7 +413,10 @@ where
         Ok(())
     }
 
-    async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+    async fn get_view(
+        &self,
+        id: &TaskId,
+    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
 
@@ -430,7 +450,10 @@ where
     async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
         let dep_key = self.dependents_key(dep);
         let mut conn = self.conn.lock().await;
-        let ids: Vec<String> = conn.smembers(dep_key).await.map_err(TaskStoreError::backend)?;
+        let ids: Vec<String> = conn
+            .smembers(dep_key)
+            .await
+            .map_err(TaskStoreError::backend)?;
         Ok(ids.into_iter().filter_map(|s| s.parse().ok()).collect())
     }
 
@@ -502,7 +525,10 @@ return redis.call('HGET', KEYS[1], ARGV[5])
     async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
         let key = self.ready_key(prio);
         let mut conn = self.conn.lock().await;
-        let id: Option<String> = conn.lpop(key, None).await.map_err(TaskStoreError::backend)?;
+        let id: Option<String> = conn
+            .lpop(key, None)
+            .await
+            .map_err(TaskStoreError::backend)?;
         Ok(id.and_then(|s| s.parse().ok()))
     }
 

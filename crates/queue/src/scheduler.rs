@@ -144,8 +144,23 @@ impl<P, O: Clone> Scheduler<P, O> {
 }
 
 impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
-    pub async fn submit(&self, task: NewTask<P>, deps: Vec<TaskId>) -> Result<TaskId, TaskStoreError> {
+    pub async fn submit(
+        &self,
+        task: NewTask<P>,
+        deps: Vec<TaskId>,
+    ) -> Result<TaskId, TaskStoreError> {
         let id = TaskId::new();
+
+        // Normalize dependency list to avoid backend-specific behavior.
+        //
+        // Some stores may de-duplicate dependents (e.g. Redis sets) while still
+        // counting `remaining_deps` from the raw list length. If callers pass
+        // duplicated deps, that mismatch can strand the task in `Pending`.
+        let deps = {
+            let mut seen = HashSet::with_capacity(deps.len());
+            deps.into_iter().filter(|dep| seen.insert(*dep)).collect()
+        };
+
         self.store
             .insert_task(id, task.kind, task.payload, task.priority, deps)
             .await?;
@@ -205,13 +220,14 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
 
         let TaskState::Running {
             worker: current_worker,
+            attempt: current_attempt,
         } = current
         else {
             self.notify.notify_one();
             return Ok(());
         };
 
-        if current_worker != worker {
+        if current_worker != worker || current_attempt != attempt {
             self.notify.notify_one();
             return Ok(());
         }
@@ -259,7 +275,8 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                         },
                     )
                     .await?;
-                self.fail_dependents(id, "dependency failed".to_string()).await?;
+                self.fail_dependents(id, "dependency failed".to_string())
+                    .await?;
                 self.notify.notify_one();
                 return Ok(());
             }
@@ -294,7 +311,8 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         }
 
         self.store.set_state(&id, TaskState::Cancelled).await?;
-        self.fail_dependents(id, "dependency cancelled".to_string()).await?;
+        self.fail_dependents(id, "dependency cancelled".to_string())
+            .await?;
         self.notify.notify_one();
 
         Ok(())
@@ -379,10 +397,219 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
     use crate::MemoryStore;
+    use crate::StoreResult;
+    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
+    use tokio::sync::Mutex;
 
     struct BuggyTakeStore<P, O> {
         inner: MemoryStore<P, O>,
+    }
+
+    struct UniqueDependentsStore<P, O> {
+        inner: Mutex<UniqueDependentsInner<P, O>>,
+    }
+
+    struct UniqueDependentsInner<P, O> {
+        tasks: HashMap<TaskId, UniqueTaskRecord<P, O>>,
+        dependents: HashMap<TaskId, HashSet<TaskId>>,
+        remaining: HashMap<TaskId, usize>,
+        ready_high: VecDeque<TaskId>,
+        ready_medium: VecDeque<TaskId>,
+        ready_low: VecDeque<TaskId>,
+    }
+
+    struct UniqueTaskRecord<P, O> {
+        payload: Option<P>,
+        state: TaskState<O>,
+        priority: Priority,
+        kind: TaskKind,
+        attempt: u32,
+    }
+
+    impl<P, O> UniqueDependentsStore<P, O> {
+        fn new() -> Self {
+            Self {
+                inner: Mutex::new(UniqueDependentsInner {
+                    tasks: HashMap::new(),
+                    dependents: HashMap::new(),
+                    remaining: HashMap::new(),
+                    ready_high: VecDeque::new(),
+                    ready_medium: VecDeque::new(),
+                    ready_low: VecDeque::new(),
+                }),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O>
+        for UniqueDependentsStore<P, O>
+    {
+        async fn insert_task(
+            &self,
+            id: TaskId,
+            kind: TaskKind,
+            payload: P,
+            prio: Priority,
+            deps: Vec<TaskId>,
+        ) -> StoreResult<()> {
+            let mut guard = self.inner.lock().await;
+            guard.remaining.insert(id, deps.len());
+            for dep in deps {
+                guard.dependents.entry(dep).or_default().insert(id);
+            }
+            let remaining = guard.remaining.get(&id).copied().unwrap_or(0);
+            guard.tasks.insert(
+                id,
+                UniqueTaskRecord {
+                    payload: Some(payload),
+                    state: TaskState::pending(remaining),
+                    priority: prio,
+                    kind,
+                    attempt: 0,
+                },
+            );
+            Ok(())
+        }
+
+        async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>> {
+            let guard = self.inner.lock().await;
+            Ok(guard.tasks.get(id).map(|record| record.state.clone()))
+        }
+
+        async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()> {
+            let mut guard = self.inner.lock().await;
+            if let Some(record) = guard.tasks.get_mut(id) {
+                record.state = state;
+            }
+            Ok(())
+        }
+
+        async fn get_view(
+            &self,
+            id: &TaskId,
+        ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+            let guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get(id) else {
+                return Ok(None);
+            };
+            Ok(Some((record.state.clone(), record.kind, record.priority)))
+        }
+
+        async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
+            let guard = self.inner.lock().await;
+            Ok(guard
+                .dependents
+                .get(dep)
+                .map(|set| set.iter().copied().collect())
+                .unwrap_or_default())
+        }
+
+        async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize> {
+            let mut guard = self.inner.lock().await;
+            let entry = guard.remaining.entry(*id).or_insert(0);
+            if *entry > 0 {
+                *entry -= 1;
+            }
+            let remaining = *entry;
+
+            if let Some(record) = guard.tasks.get_mut(id)
+                && matches!(record.state, TaskState::Pending { .. })
+            {
+                record.state = TaskState::pending(remaining);
+            }
+
+            Ok(remaining)
+        }
+
+        async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>> {
+            let mut guard = self.inner.lock().await;
+            let remaining = guard.remaining.get(id).copied().unwrap_or(0);
+            if remaining != 0 {
+                return Ok(None);
+            }
+            let Some(record) = guard.tasks.get_mut(id) else {
+                return Ok(None);
+            };
+            match record.state {
+                TaskState::Pending { .. } => {
+                    record.state = TaskState::Ready;
+                    Ok(Some(record.priority))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()> {
+            let mut guard = self.inner.lock().await;
+            match prio {
+                Priority::High => guard.ready_high.push_back(id),
+                Priority::Medium => guard.ready_medium.push_back(id),
+                Priority::Low => guard.ready_low.push_back(id),
+            }
+            Ok(())
+        }
+
+        async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
+            let mut guard = self.inner.lock().await;
+            let id = match prio {
+                Priority::High => guard.ready_high.pop_front(),
+                Priority::Medium => guard.ready_medium.pop_front(),
+                Priority::Low => guard.ready_low.pop_front(),
+            };
+            Ok(id)
+        }
+
+        async fn take_ready(
+            &self,
+            id: &TaskId,
+            worker: &str,
+        ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+            let mut guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get_mut(id) else {
+                return Ok(None);
+            };
+            if !matches!(record.state, TaskState::Ready) {
+                return Ok(None);
+            }
+            let Some(payload) = record.payload.as_ref() else {
+                return Ok(None);
+            };
+
+            record.attempt = record.attempt.saturating_add(1);
+            let attempt = record.attempt;
+            record.state = TaskState::Running {
+                worker: worker.to_string(),
+                attempt,
+            };
+            Ok(Some((
+                payload.clone(),
+                record.kind,
+                record.priority,
+                attempt,
+            )))
+        }
+
+        async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
+            let mut guard = self.inner.lock().await;
+            if let Some(record) = guard.tasks.get_mut(id) {
+                record.payload = Some(payload);
+            }
+            Ok(())
+        }
+
+        async fn schedule(&self, _id: TaskId, _not_before_ms: u64) -> StoreResult<()> {
+            Ok(())
+        }
+
+        async fn promote_scheduled(&self, _now_ms: u64, _limit: usize) -> StoreResult<usize> {
+            Ok(0)
+        }
+
+        async fn requeue_expired_leases(&self, _now_ms: u64, _limit: usize) -> StoreResult<usize> {
+            Ok(0)
+        }
     }
 
     #[async_trait::async_trait]
@@ -463,7 +690,11 @@ mod tests {
             self.inner.promote_scheduled(now_ms, limit).await
         }
 
-        async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> crate::StoreResult<usize> {
+        async fn requeue_expired_leases(
+            &self,
+            now_ms: u64,
+            limit: usize,
+        ) -> crate::StoreResult<usize> {
             self.inner.requeue_expired_leases(now_ms, limit).await
         }
     }
@@ -520,6 +751,42 @@ mod tests {
             .unwrap();
 
         assert!(sched.next_ready("w").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn duplicate_dependencies_do_not_block_dependents() {
+        let sched: Scheduler<&'static str, &'static str> =
+            Scheduler::new(UniqueDependentsStore::new());
+
+        let a = sched
+            .submit(
+                NewTask {
+                    kind: TaskKind::Preflight,
+                    priority: Priority::Medium,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        let b = sched
+            .submit(
+                NewTask {
+                    kind: TaskKind::Aggregation,
+                    priority: Priority::High,
+                    payload: "b",
+                },
+                vec![a, a],
+            )
+            .await
+            .unwrap();
+
+        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        assert_eq!(lease.id, a);
+        sched.complete(lease, Ok("ok")).await.unwrap();
+
+        let dependent = sched.next_ready("w").await.unwrap().unwrap();
+        assert_eq!(dependent.id, b);
     }
 
     #[tokio::test]
@@ -603,7 +870,10 @@ mod tests {
 
         let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
-        sched.complete(lease, Err("boom".to_string())).await.unwrap();
+        sched
+            .complete(lease, Err("boom".to_string()))
+            .await
+            .unwrap();
 
         let b_state = sched.get(b).await.unwrap().unwrap().state;
         assert!(matches!(b_state, TaskState::Failed { .. }));
@@ -649,7 +919,10 @@ mod tests {
 
         let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
-        sched.complete(lease, Err("boom".to_string())).await.unwrap();
+        sched
+            .complete(lease, Err("boom".to_string()))
+            .await
+            .unwrap();
 
         assert!(matches!(
             sched.get(b).await.unwrap().unwrap().state,
@@ -780,6 +1053,49 @@ mod tests {
         let lease2 = sched.next_ready("w2").await.unwrap().unwrap();
         assert_eq!(lease2.id, id);
         assert_eq!(lease2.attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_completion_is_ignored_after_task_is_reacquired() {
+        let store = MemoryStore::with_lease(Duration::from_millis(1));
+        let sched: Scheduler<&'static str, &'static str> = Scheduler::new(store);
+
+        let id = sched
+            .submit(
+                NewTask {
+                    kind: TaskKind::Preflight,
+                    priority: Priority::Medium,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let lease1 = sched.next_ready("w").await.unwrap().unwrap();
+        assert_eq!(lease1.id, id);
+        assert_eq!(lease1.attempt, 1);
+
+        // Force the lease to expire and requeue the task.
+        sched
+            .maintenance_tick_at(super::now_millis().saturating_add(10_000))
+            .await
+            .unwrap();
+
+        let lease2 = sched.next_ready("w").await.unwrap().unwrap();
+        assert_eq!(lease2.id, id);
+        assert_eq!(lease2.attempt, 2);
+
+        // Complete in the wrong order: the stale lease completes after the task was
+        // already re-leased. The stale completion must not win.
+        sched.complete(lease1, Ok("old")).await.unwrap();
+        sched.complete(lease2, Ok("new")).await.unwrap();
+
+        let view = sched.get(id).await.unwrap().unwrap();
+        match view.state {
+            TaskState::Succeeded { output } => assert_eq!(output, "new"),
+            other => panic!("unexpected task state: {other:?}"),
+        }
     }
 
     #[tokio::test]

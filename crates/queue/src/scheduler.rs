@@ -56,10 +56,10 @@ impl RetryPolicy {
                     return None;
                 }
 
-                let exponent = attempt.saturating_sub(1).min(31);
+                let exponent = attempt.saturating_sub(1);
                 let base_ms = base_delay.as_millis().min(u64::MAX as u128) as u64;
                 let max_ms = max_delay.as_millis().min(u64::MAX as u128) as u64;
-                let factor = 1u64 << exponent;
+                let factor = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
                 let delay_ms = base_ms.saturating_mul(factor).min(max_ms);
                 Some(Duration::from_millis(delay_ms))
             }
@@ -836,5 +836,16 @@ mod tests {
             sched.get(b).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn exponential_retry_delay_saturates_without_shift_overflow() {
+        let policy = RetryPolicy::Exponential {
+            max_attempts: u32::MAX,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(250),
+        };
+
+        assert_eq!(policy.retry_delay(1_000), Some(Duration::from_millis(250)));
     }
 }

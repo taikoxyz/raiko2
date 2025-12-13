@@ -414,7 +414,7 @@ fn now_millis() -> u64 {
 
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
+        .expect("System time is before UNIX_EPOCH")
         .as_millis() as u64
 }
 

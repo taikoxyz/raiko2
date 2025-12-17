@@ -1,6 +1,7 @@
 //! Proof types for raiko2.
 
-use alloy_primitives::{B256, ChainId};
+use alloy_primitives::{Address, B256, ChainId};
+use raiko2_protocol::Checkpoint;
 use serde::{Deserialize, Serialize};
 
 /// Prover error types.
@@ -31,8 +32,36 @@ pub type ProverConfig = serde_json::Value;
 /// Key for identifying a proof: (chain_id, block_number, block_hash, proof_type).
 pub type ProofKey = (ChainId, u64, B256, u8);
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[allow(non_snake_case)]
+// In Shasta, each sub proposal signs this structure to prove the proposal's transition.
+// We keep ABI-compatible field names.
+pub struct ShastaTransitionInput {
+    pub proposer: Address,
+    pub designatedProver: Address,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TransitionInputData {
+    pub proposal_id: u64,
+    pub proposal_hash: B256,
+    pub parent_proposal_hash: B256,
+    pub parent_checkpoint_hash: B256,
+    pub actual_prover: Address,
+    pub transition: ShastaTransitionInput,
+    pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProofCarryData {
+    pub chain_id: ChainId,
+    pub verifier: Address,
+    pub transition_input: TransitionInputData,
+}
+
 /// The response body of a proof request.
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Proof {
     /// The proof either TEE or ZK.
     pub proof: Option<String>,
@@ -44,6 +73,8 @@ pub struct Proof {
     pub uuid: Option<String>,
     /// The kzg proof.
     pub kzg_proof: Option<String>,
+    /// the extra data of Proof
+    pub extra_data: Option<ProofCarryData>,
 }
 
 impl std::fmt::Display for Proof {

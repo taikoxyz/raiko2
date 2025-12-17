@@ -16,7 +16,8 @@ pub use context::{ProofContext, ProofRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{
     AggregationGuestInput, BlobProofType, GuestInput, RawAggregationGuestInput, RawProof,
-    StatelessInput, TaikoManifest, TaikoProverData, ZkAggregationGuestInput,
+    ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, StatelessInput, TaikoManifest,
+    TaikoProverData,
 };
 pub use output::{AggregationGuestOutput, GuestBatchOutput, GuestOutput};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig, ProverError, ProverResult};

@@ -23,10 +23,12 @@
 //! let manifest = TaikoManifest::default();
 //! ```
 
-pub mod manifest;
-pub mod shasta;
+mod libhash;
+mod manifest;
+mod shasta;
 
 // Re-export shasta types
+pub use libhash::*;
 pub use shasta::*;
 
 // Re-export manifest types

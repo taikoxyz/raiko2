@@ -1,13 +1,7 @@
-[workspace]
-
 [package]
 name = "raiko2-guest-sp1"
 version = "0.1.0"
 edition = "2021"
-
-[lib]
-name = "zk_op"
-path = "src/zk_op.rs"
 
 # Shasta-only binary targets for Raiko V2
 [[bin]]
@@ -18,51 +12,13 @@ path = "src/batch.rs"
 name = "sp1-shasta-aggregation"
 path = "src/shasta_aggregation.rs"
 
-[[bin]]
-name = "sha256"
-path = "src/benchmark/sha256.rs"
-
-[[bin]]
-name = "ecdsa"
-path = "src/benchmark/ecdsa.rs"
-
-[[bin]]
-name = "bn254_add"
-path = "src/benchmark/bn254_add.rs"
-
-[[bin]]
-name = "bn254_mul"
-path = "src/benchmark/bn254_mul.rs"
-
-
-# [[test]]
-# name = "main"
-# path = "src/main.rs"
-# harness = false
-
 [dependencies]
-raiko-lib = { path = "../../../lib", features = ["std", "sp1"] }
+raiko2-primitives = { workspace = true }
 sp1-zkvm = { version = "5.2.3", features = ["verify"] }
-sp1-curves = { version = "5.2.3" }
 sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-4.0.0" }
-harness-core = { path = "../../../harness/core" }
-harness = { path = "../../../harness/macro", features = ["sp1"] }
-substrate-bn = { git = "https://github.com/sp1-patches/bn", tag = "patch-0.6.0-sp1-5.0.0" }
-revm-precompile = { git = "https://github.com/taikoxyz/revm.git", branch = "v36-taiko", default-features = false, features = [
-    "taiko",
-    "std",
-    "c-kzg",
-] }
-bincode = "2.0.1"
-taiko-reth = { git = "https://github.com/TatsujinLabs/taiko-reth.git" }
-lazy_static = "1.5.0"
-num-bigint = { version = "0.4.6", default-features = false }
-k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-5.0.0" }
+bincode.workspace = true
 
 [patch.crates-io]
-revm = { git = "https://github.com/taikoxyz/revm.git", branch = "v36-taiko" }
-revm-primitives = { git = "https://github.com/taikoxyz/revm.git", branch = "v36-taiko" }
-revm-precompile = { git = "https://github.com/taikoxyz/revm.git", branch = "v36-taiko" }
 c-kzg = { git = "https://github.com/brechtpd/c-kzg-4844", branch = "for-alpha7" }
 blst = { git = "https://github.com/CeciliaZ030/blst.git", branch = "v0.3.12-serialize" }
 sha2-v0-10-8 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-4.0.0" }
@@ -79,8 +35,4 @@ p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p2
 secp256k1 = { git = "https://github.com/sp1-patches/rust-secp256k1", tag = "patch-0.29.1-sp1-5.0.0" }
 
 [features]
-default = ["sp1-cycle-tracker"]
-sp1-cycle-tracker = [
-    "raiko-lib/sp1-cycle-tracker",
-    "revm-precompile/sp1-cycle-tracker",
-]
+default = []

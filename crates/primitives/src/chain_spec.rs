@@ -1,9 +1,60 @@
 use crate::proof_type::ProofType;
-use alloy_primitives::{Address, BlockNumber, ChainId, U256, uint};
+use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
-use reth::revm::primitives::hardfork::SpecId;
+use reth_revm::primitives::hardfork::SpecId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::Value;
+use std::{collections::BTreeMap, path::PathBuf};
+
+const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
+
+#[derive(Clone, Debug)]
+pub struct SupportedChainSpecs(HashMap<String, ChainSpec>);
+
+impl Default for SupportedChainSpecs {
+    fn default() -> Self {
+        let deserialized: Vec<ChainSpec> =
+            serde_json::from_str(DEFAULT_CHAIN_SPECS).unwrap_or_default();
+        let chain_spec_list = deserialized
+            .into_iter()
+            .map(|cs| (cs.name.clone(), cs))
+            .collect::<HashMap<String, ChainSpec>>();
+        SupportedChainSpecs(chain_spec_list)
+    }
+}
+
+impl SupportedChainSpecs {
+    pub fn merge_from_file(file_path: PathBuf) -> Result<SupportedChainSpecs> {
+        let mut known_chain_specs = SupportedChainSpecs::default();
+        let file = std::fs::File::open(file_path)?;
+        let reader = std::io::BufReader::new(file);
+        let config: Value = serde_json::from_reader(reader)?;
+        let chain_spec_list: Vec<ChainSpec> = serde_json::from_value(config)?;
+        let new_chain_specs = chain_spec_list
+            .into_iter()
+            .map(|cs| (cs.name.clone(), cs))
+            .collect::<HashMap<String, ChainSpec>>();
+
+        // override known specs
+        known_chain_specs.0.extend(new_chain_specs);
+        Ok(known_chain_specs)
+    }
+
+    pub fn supported_networks(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+
+    pub fn get_chain_spec(&self, network: &str) -> Option<ChainSpec> {
+        self.0.get(network).cloned()
+    }
+
+    pub fn get_chain_spec_with_chain_id(&self, chain_id: u64) -> Option<ChainSpec> {
+        self.0
+            .values()
+            .find(|spec| spec.chain_id == chain_id)
+            .cloned()
+    }
+}
 
 /// The condition at which a fork is activated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

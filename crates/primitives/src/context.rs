@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::proof::ProverConfig;
 use alethia_reth_node::chainspec::spec::TaikoChainSpec;
-use reth::chainspec::ChainSpec as RethChainSpec;
+use reth_chainspec::ChainSpec as RethChainSpec;
 use serde::{Deserialize, Serialize};
 
 /// Proof request parameters.

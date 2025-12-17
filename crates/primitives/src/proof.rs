@@ -2,7 +2,6 @@
 
 use alloy_primitives::{B256, ChainId};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Prover error types.
 #[derive(thiserror::Error, Debug)]
@@ -33,9 +32,7 @@ pub type ProverConfig = serde_json::Value;
 pub type ProofKey = (ChainId, u64, B256, u8);
 
 /// The response body of a proof request.
-#[derive(
-    Clone, Debug, Serialize, ToSchema, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Proof {
     /// The proof either TEE or ZK.
     pub proof: Option<String>,

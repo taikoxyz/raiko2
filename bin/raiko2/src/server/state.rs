@@ -29,6 +29,7 @@ impl AppState {
                     snark: config.prover.risc0.snark,
                     profile: false,
                     execution_po2: 20,
+                    verify: true,
                 };
                 Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config))
             }

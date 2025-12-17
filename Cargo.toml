@@ -10,6 +10,7 @@ members = [
     "crates/protocol",
     "crates/queue",
     "crates/guest-sp1",
+    "crates/guest-risc0",
     "bin/raiko2",
     "bin/rpc-proxy",
 ]

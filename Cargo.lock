@@ -8861,6 +8861,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "raiko2-guest-risc0"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "bincode",
+ "raiko2-primitives",
+ "raiko2-protocol",
+ "raiko2-stateless",
+ "reth-chainspec",
+ "reth-evm-ethereum",
+ "risc0-zkvm",
+]
+
+[[package]]
 name = "raiko2-guest-sp1"
 version = "0.1.0"
 dependencies = [

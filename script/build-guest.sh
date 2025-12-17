@@ -88,7 +88,7 @@ build_risc0() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("risc0-batch" "risc0-shasta-aggregation")
+    local bins=("risc0-proposal" "risc0-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa")
     fi
@@ -149,7 +149,7 @@ build_sp1() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("sp1-batch" "sp1-shasta-aggregation")
+    local bins=("sp1-proposal" "sp1-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa" "bn254_add" "bn254_mul")
     fi

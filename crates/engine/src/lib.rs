@@ -5,6 +5,13 @@
 //! - Local validation of inputs
 //! - Proof generation using zkVM provers
 //!
+//! ## Module Structure
+//!
+//! - `queue` - Task queue and scheduling for proof jobs
+//! - `worker` - Supervised worker management with auto-restart
+//! - `tasks` - Task types and outputs
+//! - `input_builder` - Guest input construction
+//!
 //! Prover integration is provided via `raiko2-prover` and wired through
 //! `queue::EngineQueue` / `tasks::EngineTask`.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
@@ -20,6 +27,7 @@ use tracing::info;
 pub mod input_builder;
 pub mod queue;
 pub mod tasks;
+pub mod worker;
 
 /// The main proving engine.
 #[derive(Debug)]

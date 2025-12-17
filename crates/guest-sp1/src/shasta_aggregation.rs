@@ -2,9 +2,15 @@
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
+use alloy_primitives::B256;
 use raiko2_primitives::{
-    input::ShastaZkAggregationGuestInput, instance::shasta_aggregation_output,
+    instance::{
+        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
+        shasta_zk_aggregation_output, words_to_bytes_be,
+    },
+    ShastaZkAggregationGuestInput,
 };
+use raiko2_protocol::hash_shasta_subproof_input;
 use sha2::{Digest, Sha256};
 
 pub fn main() {

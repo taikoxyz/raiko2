@@ -8864,8 +8864,10 @@ dependencies = [
 name = "raiko2-guest-sp1"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "bincode",
  "raiko2-primitives",
+ "raiko2-protocol",
  "sha2 0.10.8",
  "sp1-zkvm",
 ]

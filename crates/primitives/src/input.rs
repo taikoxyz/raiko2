@@ -1,8 +1,9 @@
 //! Input types for raiko2 guest programs.
 
-use crate::proof::{Proof, ProofCarryData};
+use crate::proof::Proof;
 use alloy_consensus::TrieAccount;
 use alloy_primitives::{Address, B256, map::AddressMap};
+use raiko2_protocol::ProofCarryData;
 use reth_ethereum_primitives::Block;
 use reth_stateless::ExecutionWitness;
 use serde::{Deserialize, Serialize};

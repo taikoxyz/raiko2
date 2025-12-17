@@ -14,8 +14,10 @@ path = "src/shasta_aggregation.rs"
 
 [dependencies]
 raiko2-primitives = { workspace = true }
+raiko2-protocol = { workspace = true }
 sp1-zkvm = { version = "5.2.3", features = ["verify"] }
 sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-4.0.0" }
+alloy-primitives.workspace = true
 bincode.workspace = true
 
 [patch.crates-io]

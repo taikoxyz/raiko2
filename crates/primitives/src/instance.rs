@@ -6,17 +6,68 @@
 
 use crate::{
     BlobProofType, GuestInput, TaikoProverData, input::ShastaRawAggregationGuestInput,
-    proof::ProofCarryData,
+    proof_type::ProofType,
 };
 use alloy_primitives::{Address, B256, Uint, keccak256};
 use alloy_sol_types::SolValue;
 use anyhow::{Result, ensure};
 use raiko2_protocol::{
-    Commitment, Transition, hash_checkpoint, hash_commitment, hash_public_input, hash_two_values,
+    Commitment, ProofCarryData, Transition, hash_checkpoint, hash_commitment, hash_public_input,
+    hash_two_values,
 };
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+// Make sure the verifier supports the blob proof type
+fn get_blob_proof_type(
+    proof_type: ProofType,
+    blob_proof_type_hint: BlobProofType,
+) -> BlobProofType {
+    // Enforce different blob proof type for different provers
+    // due to performance considerations
+    match proof_type {
+        ProofType::Native => blob_proof_type_hint,
+        ProofType::Sgx => BlobProofType::KzgVersionedHash,
+        ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
+    }
+}
+
+fn bytes_to_bytes32(input: &[u8]) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    let len = core::cmp::min(input.len(), 32);
+    bytes[..len].copy_from_slice(&input[..len]);
+    bytes
+}
+
+pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    for i in 0..8 {
+        let word_bytes = words[i].to_le_bytes();
+        bytes[i * 4..(i + 1) * 4].copy_from_slice(&word_bytes);
+    }
+    bytes
+}
+
+pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    for i in 0..8 {
+        let word_bytes = words[i].to_be_bytes();
+        bytes[i * 4..(i + 1) * 4].copy_from_slice(&word_bytes);
+    }
+    bytes
+}
+
+pub fn aggregation_output_combine(public_inputs: Vec<B256>) -> Vec<u8> {
+    let mut output = Vec::with_capacity(public_inputs.len() * 32);
+    for public_input in public_inputs.iter() {
+        output.extend_from_slice(&public_input.0);
+    }
+    output
+}
+
+pub fn aggregation_output(program: B256, public_inputs: Vec<B256>) -> Vec<u8> {
+    aggregation_output_combine([vec![program], public_inputs].concat())
+}
 
 pub fn validate_shasta_aggregate_proof_carry_data(
     aggregation_input: &ShastaRawAggregationGuestInput,

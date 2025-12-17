@@ -2,7 +2,7 @@
 //!
 //! This module contains all Shasta-specific protocol types and codecs.
 
-use alloy_primitives::{Address, B256, Uint};
+use alloy_primitives::{Address, B256, ChainId, Uint};
 use alloy_sol_types::{SolValue, sol};
 use core::fmt::Debug;
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,34 @@ sol! {
 
     #[derive(Debug, Default, Deserialize, Serialize)]
     event Proved(bytes data);
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[allow(non_snake_case)]
+// In Shasta, each sub proposal signs this structure to prove the proposal's transition.
+// We keep ABI-compatible field names.
+pub struct ShastaTransitionInput {
+    pub proposer: Address,
+    pub designatedProver: Address,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TransitionInputData {
+    pub proposal_id: u64,
+    pub proposal_hash: B256,
+    pub parent_proposal_hash: B256,
+    pub parent_checkpoint_hash: B256,
+    pub actual_prover: Address,
+    pub transition: ShastaTransitionInput,
+    pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProofCarryData {
+    pub chain_id: ChainId,
+    pub verifier: Address,
+    pub transition_input: TransitionInputData,
 }
 
 /// Decoded Shasta event data containing the proposal and related information

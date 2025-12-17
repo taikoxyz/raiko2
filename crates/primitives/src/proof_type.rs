@@ -16,6 +16,11 @@ pub enum ProofType {
     /// Uses the SP1 prover to build the block.
     #[serde(alias = "SP1")]
     Sp1 = 1u8,
+    /// # Sgx
+    ///
+    /// Builds the block on a SGX supported CPU to create a proof.
+    #[serde(alias = "SGX")]
+    Sgx = 2u8,
     /// # Risc0
     ///
     /// Uses the RISC0 prover to build the block.
@@ -28,6 +33,7 @@ impl std::fmt::Display for ProofType {
         f.write_str(match self {
             ProofType::Native => "native",
             ProofType::Sp1 => "sp1",
+            ProofType::Sgx => "sgx",
             ProofType::Risc0 => "risc0",
         })
     }

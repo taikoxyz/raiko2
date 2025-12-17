@@ -19,7 +19,8 @@
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_driver::Driver;
 use raiko2_primitives::{
-    GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult, StatelessInput,
+    ChainSpec, GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult, StatelessInput,
+    SupportedChainSpecs,
 };
 use raiko2_provider::Provider;
 use tracing::info;
@@ -70,6 +71,14 @@ impl<P: Provider> Engine<P> {
             .batch_accounts(&block_numbers, &all_signers)
             .await?;
 
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .unwrap_or_else(|| ChainSpec {
+                name: "unknown".to_string(),
+                chain_id: ctx.request.l2_chain_id,
+                ..Default::default()
+            });
+
         Ok(GuestInput {
             taiko: taiko_manifest,
             witnesses: blocks
@@ -78,6 +87,7 @@ impl<P: Provider> Engine<P> {
                 .zip(accounts)
                 .map(|((block, witness), accounts)| StatelessInput {
                     block,
+                    chain_spec: chain_spec.clone(),
                     witness,
                     accounts,
                 })

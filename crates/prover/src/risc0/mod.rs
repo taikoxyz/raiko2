@@ -56,6 +56,7 @@ impl From<Risc0Response> for Proof {
             input: Some(value.input),
             uuid: Some(value.uuid),
             kzg_proof: None,
+            extra_data: None,
         }
     }
 }

@@ -12,6 +12,7 @@ mod output;
 mod proof;
 mod proof_type;
 
+pub use chain_spec::{ChainSpec, SupportedChainSpecs};
 pub use context::{ProofContext, ProofRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{

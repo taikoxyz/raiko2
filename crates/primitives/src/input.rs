@@ -1,6 +1,6 @@
 //! Input types for raiko2 guest programs.
 
-use crate::proof::Proof;
+use crate::{chain_spec::ChainSpec, proof::Proof};
 use alloy_consensus::TrieAccount;
 use alloy_primitives::{Address, B256, map::AddressMap};
 use raiko2_protocol::ProofCarryData;
@@ -31,6 +31,8 @@ pub struct StatelessInput {
         as = "reth_primitives_traits::serde_bincode_compat::Block<reth_ethereum_primitives::TransactionSigned, alloy_consensus::Header>"
     )]
     pub block: Block,
+    /// The network to generate the proof for
+    pub chain_spec: ChainSpec,
     /// `ExecutionWitness` for the stateless validation function.
     pub witness: ExecutionWitness,
     /// The accounts being accessed in the stateless validation function.

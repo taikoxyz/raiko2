@@ -8868,6 +8868,9 @@ dependencies = [
  "bincode",
  "raiko2-primitives",
  "raiko2-protocol",
+ "raiko2-stateless",
+ "reth-chainspec",
+ "reth-evm-ethereum",
  "sha2 0.10.8",
  "sp1-zkvm",
 ]
@@ -8926,6 +8929,7 @@ dependencies = [
  "bincode",
  "hex",
  "raiko2-primitives",
+ "raiko2-protocol",
  "reqwest",
  "risc0-zkvm",
  "serde",

@@ -17,20 +17,19 @@ pub fn hash_checkpoint(checkpoint: &Checkpoint) -> B256 {
     )
 }
 
-/// Returns `keccak256(abi.encode(value0, .., valueN))` - equivalent to Solidity's EfficientHashLib.hash
+/// Returns `keccak256(abi.encode(value0, value1))`.
 ///
-/*
-       assembly {
-           let m := mload(0x40)
-           mstore(m, v0)
-           mstore(add(m, 0x20), v1)
-           ...
-           mstore(add(m, 0xa0), vN)
-           result := keccak256(m, 0x20 * N)
-       }
-*/
-
-/// Returns `keccak256(abi.encode(value0, value1))` - equivalent to Solidity's EfficientHashLib.hash
+/// This is equivalent to Solidity's `EfficientHashLib.hash`.
+///
+/// Equivalent Solidity assembly:
+/// ```text
+/// assembly {
+///     let m := mload(0x40)
+///     mstore(m, v0)
+///     mstore(add(m, 0x20), v1)
+///     result := keccak256(m, 0x40)
+/// }
+/// ```
 pub fn hash_two_values(value0: B256, value1: B256) -> B256 {
     hash_values_impl(&[value0, value1])
 }

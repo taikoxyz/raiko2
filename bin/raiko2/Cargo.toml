@@ -7,6 +7,9 @@ authors = ["Taiko Labs"]
 license = "MIT"
 workspace = "../.."
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "raiko2"
 path = "src/main.rs"

@@ -3,6 +3,9 @@ name = "raiko2-queue"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = []
 redis = ["dep:bincode", "dep:redis"]

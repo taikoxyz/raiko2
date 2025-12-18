@@ -3,8 +3,12 @@ name = "raiko2-primitives"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 raiko2-protocol.workspace = true
+raiko2-stateless.workspace = true
 
 alethia-reth-node.workspace = true
 alethia-reth-evm.workspace = true

@@ -218,7 +218,7 @@ impl ShastaEventData {
         let value = u64::from_be_bytes([
             0,
             0,
-            data[pos + 0],
+            data[pos],
             data[pos + 1],
             data[pos + 2],
             data[pos + 3],

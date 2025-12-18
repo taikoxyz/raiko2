@@ -3,6 +3,9 @@ name = "raiko2-engine"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 raiko2-driver.workspace = true
 raiko2-provider.workspace = true

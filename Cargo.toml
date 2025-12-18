@@ -20,6 +20,14 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
 
+[workspace.lints.rust]
+unreachable_pub = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+redundant_pub_crate = "warn"
+missing_const_for_fn = "warn"
+
 # Always optimize for performance
 [profile.dev]
 opt-level = 3

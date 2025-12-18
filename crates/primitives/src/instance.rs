@@ -4,10 +4,7 @@
 //! for the Shasta hardfork. Legacy fork support (Hekla, Ontake, Pacaya) has been
 //! removed in V2.
 
-use crate::{
-    BlobProofType, GuestInput, TaikoProverData, input::ShastaRawAggregationGuestInput,
-    proof_type::ProofType,
-};
+use crate::{BlobProofType, GuestInput, TaikoProverData, input::ShastaRawAggregationGuestInput};
 use alloy_primitives::{Address, B256, Uint, keccak256};
 use alloy_sol_types::SolValue;
 use anyhow::{Result, ensure};
@@ -18,26 +15,6 @@ use raiko2_protocol::{
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-// Make sure the verifier supports the blob proof type
-fn get_blob_proof_type(
-    proof_type: ProofType,
-    blob_proof_type_hint: BlobProofType,
-) -> BlobProofType {
-    // Enforce different blob proof type for different provers
-    // due to performance considerations
-    match proof_type {
-        ProofType::Native => blob_proof_type_hint,
-        ProofType::Sgx => BlobProofType::KzgVersionedHash,
-        ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
-    }
-}
-
-fn bytes_to_bytes32(input: &[u8]) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    let len = core::cmp::min(input.len(), 32);
-    bytes[..len].copy_from_slice(&input[..len]);
-    bytes
-}
 
 pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -174,7 +151,7 @@ pub fn shasta_aggregation_output(
     verifier_address: Address,
     sgx_instance: Address,
 ) -> B256 {
-    let prove_input_hash = hash_commitment(&prove_input);
+    let prove_input_hash = hash_commitment(prove_input);
     hash_public_input(prove_input_hash, chain_id, verifier_address, sgx_instance)
 }
 

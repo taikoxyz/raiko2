@@ -8904,6 +8904,7 @@ dependencies = [
  "async-trait",
  "hex",
  "raiko2-protocol",
+ "raiko2-stateless",
  "reth-chainspec",
  "reth-ethereum-primitives",
  "reth-primitives-traits",

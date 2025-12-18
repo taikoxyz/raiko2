@@ -6,6 +6,7 @@
 mod chain_spec;
 mod context;
 mod error;
+pub mod guest;
 mod input;
 pub mod instance;
 mod output;

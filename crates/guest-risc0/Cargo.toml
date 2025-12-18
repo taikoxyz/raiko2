@@ -3,6 +3,9 @@ name = "raiko2-guest-risc0"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 # Shasta-only binary targets for Raiko V2
 [[bin]]
 name = "risc0-proposal"

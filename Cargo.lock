@@ -8997,6 +8997,7 @@ dependencies = [
 name = "raiko2-stateless"
 version = "0.1.0"
 dependencies = [
+ "alethia-reth-node",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
@@ -9009,6 +9010,7 @@ dependencies = [
  "reth-evm",
  "reth-evm-ethereum",
  "reth-primitives-traits",
+ "reth-provider",
  "reth-revm",
  "reth-stateless",
  "reth-trie-common",

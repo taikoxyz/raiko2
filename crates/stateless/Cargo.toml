@@ -28,3 +28,5 @@ reth-revm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-evm.workspace = true
 reth-chainspec.workspace = true
+reth-provider.workspace = true
+alethia-reth-node.workspace = true

@@ -1,31 +1,37 @@
 use crate::{sparse::SparseState, trie::StatelessTrieExt, witness_db::WitnessDatabase};
+use alethia_reth_node::{
+    block::config::TaikoEvmConfig,
+    chainspec::spec::TaikoChainSpec,
+    consensus::validation::{
+        TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
+    },
+};
 use alloy_consensus::{BlockHeader, Header, TrieAccount};
 use alloy_primitives::{B256, map::AddressMap};
 use alloy_rlp::Decodable;
-use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_consensus::{Consensus, HeaderValidator};
-use reth_ethereum_consensus::{EthBeaconConsensus, validate_block_post_execution};
-use reth_ethereum_primitives::{Block, EthPrimitives};
+use reth_ethereum_consensus::validate_block_post_execution;
+use reth_ethereum_primitives::Block;
 use reth_evm::{ConfigureEvm, execute::Executor};
-use reth_primitives_traits::{Block as _, RecoveredBlock};
+use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
+use reth_provider::ProviderResult;
 use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// Performs stateless validation of a block using the provided witness data.
 #[inline]
-pub fn validate_block<C, E>(
+pub fn validate_block(
     block: Block,
     witness: ExecutionWitness,
     callers: AddressMap<TrieAccount>,
-    chain_spec: Arc<C>,
-    config: E,
-) -> Result<B256, StatelessValidationError>
-where
-    C: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
-    E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
-{
-    stateless_validation_with_trie::<SparseState, _, _>(block, witness, callers, chain_spec, config)
+    chain_spec: Arc<TaikoChainSpec>,
+    config: TaikoEvmConfig,
+) -> Result<B256, StatelessValidationError> {
+    stateless_validation_with_trie::<SparseState>(block, witness, callers, chain_spec, config)
 }
 
 // Performs stateless validation of a block using a custom `StatelessTrie` implementation.
@@ -34,17 +40,15 @@ where
 // implementation of the `StatelessTrie` for custom trie backends or optimizations.
 //
 // See `stateless_validation` for detailed documentation of the validation process.
-fn stateless_validation_with_trie<T, ChainSpec, E>(
+fn stateless_validation_with_trie<T>(
     current_block: Block,
     witness: ExecutionWitness,
     callers: AddressMap<TrieAccount>,
-    chain_spec: Arc<ChainSpec>,
-    evm_config: E,
+    chain_spec: Arc<TaikoChainSpec>,
+    evm_config: TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError>
 where
     T: StatelessTrieExt,
-    ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
-    E: ConfigureEvm<Primitives = EthPrimitives> + Clone + 'static,
 {
     let current_block = current_block
         .try_into_recovered()
@@ -64,7 +68,7 @@ where
     ancestor_headers.sort_by_key(|header| header.number());
 
     // Validate block against pre-execution consensus rules
-    validate_block_consensus(chain_spec.clone(), &current_block)?;
+    validate_block_consensus(chain_spec.clone(), &current_block, &ancestor_headers)?;
 
     // Check that the ancestor headers form a contiguous chain and are not just random headers.
     let ancestor_hashes = compute_ancestor_hashes(&current_block, &ancestor_headers)?;
@@ -102,6 +106,9 @@ where
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
+    validate_anchor_transaction_in_block(&current_block, chain_spec.as_ref())
+        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+
     // Compute and check the post state root
     let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
     let state_root = trie.calculate_state_root(hashed_state)?;
@@ -116,16 +123,46 @@ where
     Ok(current_block.hash_slow())
 }
 
-fn validate_block_consensus<ChainSpec>(
-    chain_spec: Arc<ChainSpec>,
+#[derive(Debug, Clone)]
+struct WitnessTaikoBlockReader {
+    timestamps_by_hash: HashMap<B256, u64>,
+}
+
+impl WitnessTaikoBlockReader {
+    fn from_headers(headers: &[Header]) -> Self {
+        let timestamps_by_hash = headers
+            .iter()
+            .map(|header| (header.hash_slow(), header.timestamp()))
+            .collect();
+
+        Self { timestamps_by_hash }
+    }
+}
+
+impl TaikoBlockReader for WitnessTaikoBlockReader {
+    fn block_timestamp_by_hash(&self, hash: B256) -> ProviderResult<Option<u64>> {
+        Ok(self.timestamps_by_hash.get(&hash).copied())
+    }
+}
+
+fn validate_block_consensus(
+    chain_spec: Arc<TaikoChainSpec>,
     block: &RecoveredBlock<Block>,
-) -> Result<(), StatelessValidationError>
-where
-    ChainSpec: Send + Sync + EthChainSpec<Header = Header> + EthereumHardforks + Debug,
-{
-    let consensus = EthBeaconConsensus::new(chain_spec);
+    ancestor_headers: &[Header],
+) -> Result<(), StatelessValidationError> {
+    let parent_header = match ancestor_headers.last() {
+        Some(header) => header,
+        None => return Err(StatelessValidationError::MissingAncestorHeader),
+    };
+
+    let parent_header = SealedHeader::seal_slow(parent_header.clone());
+
+    let block_reader = Arc::new(WitnessTaikoBlockReader::from_headers(ancestor_headers));
+    let consensus = TaikoBeaconConsensus::new(chain_spec, block_reader);
 
     consensus.validate_header(block.sealed_header())?;
+
+    consensus.validate_header_against_parent(block.sealed_header(), &parent_header)?;
 
     consensus.validate_block_pre_execution(block)?;
 
@@ -158,4 +195,66 @@ fn compute_ancestor_hashes(
     }
 
     Ok(ancestor_hashes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_block;
+    use alethia_reth_node::{block::config::TaikoEvmConfig, chainspec::TAIKO_DEVNET};
+    use alloy_consensus::{Header, proofs};
+    use alloy_primitives::Bytes;
+    use reth_ethereum_primitives::{Block, BlockBody};
+    use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
+
+    fn empty_shanghai_body() -> BlockBody {
+        BlockBody {
+            withdrawals: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+
+    fn shanghai_header(number: u64, timestamp: u64, parent_hash: alloy_primitives::B256) -> Header {
+        let body = empty_shanghai_body();
+        let mut header = Header {
+            number,
+            timestamp,
+            parent_hash,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+
+        header.transactions_root = proofs::calculate_transaction_root(body.transactions.as_slice());
+        header.ommers_hash = body.calculate_ommers_root();
+        header.withdrawals_root = body.calculate_withdrawals_root();
+
+        header
+    }
+
+    #[test]
+    fn shasta_equal_timestamp_must_fail_consensus() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+
+        let parent_header = shanghai_header(0, 100, alloy_primitives::B256::ZERO);
+        let parent_hash = parent_header.hash_slow();
+
+        let header = shanghai_header(1, 100, parent_hash);
+        let body = empty_shanghai_body();
+        let block = Block { header, body };
+
+        let witness = ExecutionWitness {
+            headers: vec![Bytes::from(alloy_rlp::encode(&parent_header))],
+            ..Default::default()
+        };
+
+        let callers = Default::default();
+        let result = validate_block(block, witness, callers, chain_spec, evm_config);
+
+        // Shasta requires timestamps to strictly increase.
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::ConsensusValidationFailed(_))
+        ));
+    }
 }

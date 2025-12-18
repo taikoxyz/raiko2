@@ -17,7 +17,8 @@ use std::{collections::btree_map::BTreeMap, format};
 /// This is designed for stateless execution scenarios where direct access to a full node's
 /// database is not available or desired.
 #[derive(Debug)]
-pub(crate) struct WitnessDatabase<'a, T>
+#[allow(clippy::redundant_pub_crate)]
+pub(super) struct WitnessDatabase<'a, T>
 where
     T: StatelessTrie,
 {
@@ -55,7 +56,7 @@ where
     ///    to 256 including the current block number). It assumes these hashes correspond to a
     ///    contiguous chain of blocks. The caller is responsible for verifying the contiguity and
     ///    the block limit.
-    pub(crate) const fn new(
+    pub(super) const fn new(
         trie: &'a T,
         bytecode: B256Map<Bytecode>,
         ancestor_hashes: BTreeMap<u64, B256>,

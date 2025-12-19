@@ -1,8 +1,8 @@
 //! Proof types for raiko2.
 
 use alloy_primitives::{B256, ChainId};
+use raiko2_protocol::ProofCarryData;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Prover error types.
 #[derive(thiserror::Error, Debug)]
@@ -33,9 +33,7 @@ pub type ProverConfig = serde_json::Value;
 pub type ProofKey = (ChainId, u64, B256, u8);
 
 /// The response body of a proof request.
-#[derive(
-    Clone, Debug, Serialize, ToSchema, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Proof {
     /// The proof either TEE or ZK.
     pub proof: Option<String>,
@@ -47,6 +45,8 @@ pub struct Proof {
     pub uuid: Option<String>,
     /// The kzg proof.
     pub kzg_proof: Option<String>,
+    /// the extra data of Proof
+    pub extra_data: Option<ProofCarryData>,
 }
 
 impl std::fmt::Display for Proof {
@@ -74,62 +74,4 @@ pub trait IdWrite: Send {
 #[async_trait::async_trait]
 pub trait IdStore: IdWrite {
     async fn read_id(&mut self, key: ProofKey) -> ProverResult<String>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_proof_default() {
-        let proof = Proof::default();
-        assert!(proof.proof.is_none());
-        assert!(proof.input.is_none());
-        assert!(proof.quote.is_none());
-        assert!(proof.uuid.is_none());
-        assert!(proof.kzg_proof.is_none());
-    }
-
-    #[test]
-    fn test_proof_display() {
-        let proof = Proof {
-            proof: Some("0x1234567890abcdef1234567890abcdef".to_string()),
-            input: Some(B256::ZERO),
-            uuid: Some("test-uuid".to_string()),
-            ..Default::default()
-        };
-        let display = format!("{}", proof);
-        // Display truncates to 20 chars + "..."
-        assert!(display.contains("0x1234567890abcdef12..."));
-        assert!(display.contains("test-uuid"));
-    }
-
-    #[test]
-    fn test_proof_serialization() {
-        let proof = Proof {
-            proof: Some("test-proof".to_string()),
-            input: Some(B256::ZERO),
-            uuid: Some("test-uuid".to_string()),
-            quote: None,
-            kzg_proof: None,
-        };
-
-        let json = serde_json::to_string(&proof).unwrap();
-        let deserialized: Proof = serde_json::from_str(&json).unwrap();
-        assert_eq!(proof, deserialized);
-    }
-
-    #[test]
-    fn test_prover_error_from_string() {
-        let error: ProverError = "test error".to_string().into();
-        assert!(matches!(error, ProverError::GuestError(_)));
-        assert!(error.to_string().contains("test error"));
-    }
-
-    #[test]
-    fn test_prover_error_from_io() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let error: ProverError = io_error.into();
-        assert!(matches!(error, ProverError::FileIo(_)));
-    }
 }

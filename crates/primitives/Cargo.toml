@@ -3,13 +3,18 @@ name = "raiko2-primitives"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 raiko2-protocol.workspace = true
+raiko2-stateless.workspace = true
 
 alethia-reth-node.workspace = true
 alethia-reth-evm.workspace = true
 
-reth.workspace = true
+reth-revm.workspace = true
+reth-chainspec.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-stateless.workspace = true
@@ -29,4 +34,3 @@ tracing.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
-utoipa.workspace = true

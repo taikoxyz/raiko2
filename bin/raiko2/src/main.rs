@@ -52,14 +52,13 @@ async fn main() -> Result<()> {
 }
 
 fn init_logging(cli: &Cli) -> Result<()> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            if cli.verbose {
-                EnvFilter::new("debug")
-            } else {
-                EnvFilter::new("info")
-            }
-        });
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if cli.verbose {
+            EnvFilter::new("debug")
+        } else {
+            EnvFilter::new("info")
+        }
+    });
 
     if cli.json_logs {
         tracing_subscriber::registry()

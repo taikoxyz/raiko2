@@ -47,4 +47,44 @@ pub struct Cli {
     /// L2 chain ID
     #[arg(long, env = "RAIKO2_L2_CHAIN_ID", default_value = "167000")]
     pub l2_chain_id: u64,
+
+    /// Queue backend (memory, redis)
+    #[arg(long, env = "RAIKO2_QUEUE_BACKEND")]
+    pub queue_backend: Option<String>,
+
+    /// Redis URL for queue backend (e.g. redis://localhost:6379/)
+    #[arg(long, env = "RAIKO2_REDIS_URL")]
+    pub redis_url: Option<String>,
+
+    /// Queue namespace/prefix for Redis keys
+    #[arg(long, env = "RAIKO2_QUEUE_NAMESPACE")]
+    pub queue_namespace: Option<String>,
+
+    /// Number of queue worker loops
+    #[arg(long, env = "RAIKO2_QUEUE_WORKERS")]
+    pub queue_workers: Option<usize>,
+
+    /// Scheduler maintenance tick interval in milliseconds
+    #[arg(long, env = "RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS")]
+    pub queue_maintenance_interval_ms: Option<u64>,
+
+    /// Queue retry strategy (none, fixed, exponential)
+    #[arg(long, env = "RAIKO2_QUEUE_RETRY_STRATEGY")]
+    pub queue_retry_strategy: Option<String>,
+
+    /// Maximum attempts for retry (when retry is enabled)
+    #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_ATTEMPTS")]
+    pub queue_retry_max_attempts: Option<u32>,
+
+    /// Fixed retry delay in milliseconds (when retry_strategy=fixed)
+    #[arg(long, env = "RAIKO2_QUEUE_RETRY_FIXED_DELAY_MS")]
+    pub queue_retry_fixed_delay_ms: Option<u64>,
+
+    /// Exponential retry base delay in milliseconds (when retry_strategy=exponential)
+    #[arg(long, env = "RAIKO2_QUEUE_RETRY_BASE_DELAY_MS")]
+    pub queue_retry_base_delay_ms: Option<u64>,
+
+    /// Exponential retry maximum delay in milliseconds (when retry_strategy=exponential)
+    #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_DELAY_MS")]
+    pub queue_retry_max_delay_ms: Option<u64>,
 }

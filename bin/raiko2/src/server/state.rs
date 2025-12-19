@@ -1,44 +1,27 @@
 //! Application state for the HTTP server.
 
-use crate::config::{Config, ProverType};
+use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
+use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
+use raiko2_engine::queue::EngineQueue;
 use raiko2_prover::Prover;
-use std::collections::HashMap;
+use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::Duration;
 
-/// Proof job tracking.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // batch_id will be used for job queries
-pub struct ProofJob {
-    pub id: String,
-    pub batch_id: u64,
-    pub status: ProofJobStatus,
-    pub proof: Option<String>,
-    pub error: Option<String>,
-}
-
-/// Proof job status.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProofJobStatus {
-    Pending,
-    Proving,
-    Completed,
-    Failed,
-    Cancelled,
-}
+#[cfg(feature = "redis-queue")]
+use raiko2_engine::tasks::{EngineOutput, EngineTask};
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub prover: Arc<dyn Prover>,
-    pub jobs: Arc<RwLock<HashMap<String, ProofJob>>>,
+    pub engine: EngineQueue,
 }
 
 impl AppState {
     /// Create new application state.
-    pub fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: Config) -> Result<Self> {
         let prover: Arc<dyn Prover> = match config.prover.prover_type {
             ProverType::Risc0 => {
                 let risc0_config = raiko2_prover::risc0::Risc0Config {
@@ -46,6 +29,7 @@ impl AppState {
                     snark: config.prover.risc0.snark,
                     profile: false,
                     execution_po2: 20,
+                    verify: true,
                 };
                 Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config))
             }
@@ -67,38 +51,80 @@ impl AppState {
             }
         };
 
+        let proof_type = match config.prover.prover_type {
+            ProverType::Risc0 => "risc0".to_string(),
+            ProverType::Sp1 => "sp1".to_string(),
+        };
+        let guest_input_builder: Arc<dyn GuestInputBuilder> = Arc::new(
+            NetworkGuestInputBuilder::new(
+                &config.rpc.l2_rpc,
+                config.rpc.l1_chain_id,
+                config.rpc.l2_chain_id,
+                proof_type,
+                raiko2_primitives::ProverConfig::default(),
+            )
+            .map_err(|e| anyhow::anyhow!(e))?,
+        );
+
+        let retry_policy = match config.queue.retry.strategy {
+            RetryStrategy::None => RetryPolicy::None,
+            RetryStrategy::Fixed => RetryPolicy::Fixed {
+                max_attempts: config.queue.retry.max_attempts,
+                delay: Duration::from_millis(config.queue.retry.fixed_delay_ms),
+            },
+            RetryStrategy::Exponential => RetryPolicy::Exponential {
+                max_attempts: config.queue.retry.max_attempts,
+                base_delay: Duration::from_millis(config.queue.retry.base_delay_ms),
+                max_delay: Duration::from_millis(config.queue.retry.max_delay_ms),
+            },
+        };
+        let scheduler_config = SchedulerConfig {
+            lease_duration: Duration::from_secs(60),
+            retry: retry_policy,
+        };
+
+        let engine = match config.queue.backend {
+            QueueBackend::Memory => EngineQueue::with_store_and_builder_and_scheduler_config(
+                prover,
+                raiko2_queue::MemoryStore::new(),
+                guest_input_builder.clone(),
+                scheduler_config.clone(),
+            ),
+            QueueBackend::Redis => {
+                #[cfg(feature = "redis-queue")]
+                {
+                    let url = config.queue.redis_url.clone().unwrap_or_default();
+                    let store = raiko2_queue::RedisStore::<EngineTask, EngineOutput>::connect(
+                        &url,
+                        &config.queue.namespace,
+                        Duration::from_secs(60),
+                    )
+                    .await?;
+                    EngineQueue::with_store_and_builder_and_scheduler_config(
+                        prover,
+                        store,
+                        guest_input_builder.clone(),
+                        scheduler_config.clone(),
+                    )
+                }
+
+                #[cfg(not(feature = "redis-queue"))]
+                {
+                    anyhow::bail!(
+                        "queue backend redis requires building raiko2 with `--features redis-queue`"
+                    );
+                }
+            }
+        };
+
+        engine.start_workers_with_maintenance_interval(
+            config.queue.workers,
+            Duration::from_millis(config.queue.maintenance_interval_ms),
+        );
+
         Ok(Self {
             config: Arc::new(config),
-            prover,
-            jobs: Arc::new(RwLock::new(HashMap::new())),
+            engine,
         })
-    }
-
-    /// Add a new proof job.
-    pub async fn add_job(&self, job: ProofJob) {
-        let mut jobs = self.jobs.write().await;
-        jobs.insert(job.id.clone(), job);
-    }
-
-    /// Get a proof job by ID.
-    pub async fn get_job(&self, id: &str) -> Option<ProofJob> {
-        let jobs = self.jobs.read().await;
-        jobs.get(id).cloned()
-    }
-
-    /// Update a proof job.
-    pub async fn update_job(
-        &self,
-        id: &str,
-        status: ProofJobStatus,
-        proof: Option<String>,
-        error: Option<String>,
-    ) {
-        let mut jobs = self.jobs.write().await;
-        if let Some(job) = jobs.get_mut(id) {
-            job.status = status;
-            job.proof = proof;
-            job.error = error;
-        }
     }
 }

@@ -6,17 +6,20 @@
 mod chain_spec;
 mod context;
 mod error;
+pub mod guest;
 mod input;
 pub mod instance;
 mod output;
 mod proof;
 mod proof_type;
 
-pub use context::ProofContext;
+pub use chain_spec::{ChainSpec, SupportedChainSpecs};
+pub use context::{ProofContext, ProofRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{
     AggregationGuestInput, BlobProofType, GuestInput, RawAggregationGuestInput, RawProof,
-    StatelessInput, TaikoManifest, TaikoProverData, ZkAggregationGuestInput,
+    ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, StatelessInput, TaikoManifest,
+    TaikoProverData,
 };
 pub use output::{AggregationGuestOutput, GuestBatchOutput, GuestOutput};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig, ProverError, ProverResult};

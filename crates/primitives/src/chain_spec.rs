@@ -1,9 +1,60 @@
 use crate::proof_type::ProofType;
-use alloy_primitives::{Address, BlockNumber, ChainId, U256, uint};
+use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
-use reth::revm::primitives::hardfork::SpecId;
+use reth_revm::primitives::hardfork::SpecId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::Value;
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+
+const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
+
+#[derive(Clone, Debug)]
+pub struct SupportedChainSpecs(HashMap<String, ChainSpec>);
+
+impl Default for SupportedChainSpecs {
+    fn default() -> Self {
+        let deserialized: Vec<ChainSpec> =
+            serde_json::from_str(DEFAULT_CHAIN_SPECS).unwrap_or_default();
+        let chain_spec_list = deserialized
+            .into_iter()
+            .map(|cs| (cs.name.clone(), cs))
+            .collect::<HashMap<String, ChainSpec>>();
+        SupportedChainSpecs(chain_spec_list)
+    }
+}
+
+impl SupportedChainSpecs {
+    pub fn merge_from_file(file_path: PathBuf) -> Result<SupportedChainSpecs> {
+        let mut known_chain_specs = SupportedChainSpecs::default();
+        let file = std::fs::File::open(file_path)?;
+        let reader = std::io::BufReader::new(file);
+        let config: Value = serde_json::from_reader(reader)?;
+        let chain_spec_list: Vec<ChainSpec> = serde_json::from_value(config)?;
+        let new_chain_specs = chain_spec_list
+            .into_iter()
+            .map(|cs| (cs.name.clone(), cs))
+            .collect::<HashMap<String, ChainSpec>>();
+
+        // override known specs
+        known_chain_specs.0.extend(new_chain_specs);
+        Ok(known_chain_specs)
+    }
+
+    pub fn supported_networks(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+
+    pub fn get_chain_spec(&self, network: &str) -> Option<ChainSpec> {
+        self.0.get(network).cloned()
+    }
+
+    pub fn get_chain_spec_with_chain_id(&self, chain_id: u64) -> Option<ChainSpec> {
+        self.0
+            .values()
+            .find(|spec| spec.chain_id == chain_id)
+            .cloned()
+    }
+}
 
 /// The condition at which a fork is activated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -165,7 +216,131 @@ impl ChainSpec {
         self.is_taiko
     }
 
+    /// Convert this config-level [`ChainSpec`] into Alethia Reth's Taiko chain spec.
+    ///
+    /// This conversion is only supported for Taiko networks where Alethia provides a built-in
+    /// genesis chainspec:
+    ///
+    /// - `167000` (Taiko Mainnet)
+    /// - `167001` (Taiko Devnet)
+    /// - `167013` (Taiko Hoodi)
+    ///
+    /// Returns an error for non-Taiko chains or unknown Taiko chain IDs.
+    pub fn to_taiko_chain_spec(
+        &self,
+    ) -> Result<Arc<alethia_reth_node::chainspec::spec::TaikoChainSpec>> {
+        if !self.is_taiko {
+            bail!(
+                "chain spec is not a Taiko chain and cannot be converted (chain_id={})",
+                self.chain_id
+            );
+        }
+
+        match self.chain_id {
+            167000 => Ok(alethia_reth_node::chainspec::TAIKO_MAINNET.clone()),
+            167001 => Ok(alethia_reth_node::chainspec::TAIKO_DEVNET.clone()),
+            167013 => Ok(alethia_reth_node::chainspec::TAIKO_HOODI.clone()),
+            other => bail!(
+                "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
+            ),
+        }
+    }
+
     pub fn network(&self) -> String {
         self.name.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alethia_reth_node::chainspec::{
+        TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
+    };
+
+    #[test]
+    fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() {
+        let spec = ChainSpec::new_single(
+            "taiko_mainnet".to_string(),
+            167000,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        let taiko = spec
+            .to_taiko_chain_spec()
+            .expect("failed to convert to TaikoChainSpec");
+
+        assert_eq!(
+            taiko.inner.genesis_header.hash_slow(),
+            TAIKO_MAINNET_GENESIS_HASH
+        );
+    }
+
+    #[test]
+    fn converts_taiko_devnet_to_alethia_taiko_chain_spec() {
+        let spec = ChainSpec::new_single(
+            "taiko_devnet".to_string(),
+            167001,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        let taiko = spec
+            .to_taiko_chain_spec()
+            .expect("failed to convert to TaikoChainSpec");
+
+        assert_eq!(
+            taiko.inner.genesis_header.hash_slow(),
+            TAIKO_DEVNET_GENESIS_HASH
+        );
+    }
+
+    #[test]
+    fn converts_taiko_hoodi_to_alethia_taiko_chain_spec() {
+        let spec = ChainSpec::new_single(
+            "taiko_hoodi".to_string(),
+            167013,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        let taiko = spec
+            .to_taiko_chain_spec()
+            .expect("failed to convert to TaikoChainSpec");
+
+        assert_eq!(
+            taiko.inner.genesis_header.hash_slow(),
+            TAIKO_HOODI_GENESIS_HASH
+        );
+    }
+
+    #[test]
+    fn rejects_non_taiko_chain_spec() {
+        let spec = ChainSpec::new_single(
+            "ethereum".to_string(),
+            1,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            false,
+        );
+
+        assert!(spec.to_taiko_chain_spec().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_taiko_chain_id_without_builtin_genesis() {
+        let spec = ChainSpec::new_single(
+            "taiko_custom".to_string(),
+            9_999_999,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        assert!(spec.to_taiko_chain_spec().is_err());
     }
 }

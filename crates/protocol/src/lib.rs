@@ -6,22 +6,32 @@
 //! - Decoding Shasta inbox events (Proposed, Proved)
 //! - Encoding/decoding derivation source manifests
 //! - Block manifest structures for batch proposals
+//! - Taiko batch manifest types for zkVM guest programs
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use raiko2_protocol::shasta::{
-//!     manifest::DerivationSourceManifest,
-//!     codec::decode_proposed_event,
+//! use raiko2_protocol::{
+//!     ShastaEventData,
+//!     TaikoManifest, TaikoProverData, InputDataSource,
 //! };
 //!
 //! // Decode a proposed event
-//! let payload = decode_proposed_event(&event_data)?;
+//! let event_data = ShastaEventData::from_event_data(&bytes)?;
 //!
-//! // Decompress and decode a manifest
-//! let manifest = DerivationSourceManifest::decompress_and_decode(&blob_data, 0)?;
+//! // Create a manifest for proof generation
+//! let manifest = TaikoManifest::default();
 //! ```
 
-pub mod shasta;
+mod libhash;
+mod manifest;
+mod shasta;
 
+// Re-export shasta types
+pub use libhash::*;
 pub use shasta::*;
+
+// Re-export manifest types
+pub use manifest::{
+    BlobProofType, InputDataSource, ManifestChainSpec, TaikoManifest, TaikoProverData,
+};

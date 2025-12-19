@@ -6,10 +6,12 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use raiko2_engine::tasks::EngineOutput;
+use raiko2_queue::{TaskId, TaskState};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::info;
 
-use super::state::{AppState, ProofJob, ProofJobStatus};
+use super::state::AppState;
 
 /// Health check response.
 #[derive(Serialize)]
@@ -77,15 +79,14 @@ pub enum ProofStatus {
     Cancelled,
 }
 
-impl From<ProofJobStatus> for ProofStatus {
-    fn from(status: ProofJobStatus) -> Self {
-        match status {
-            ProofJobStatus::Pending => ProofStatus::Pending,
-            ProofJobStatus::Proving => ProofStatus::Proving,
-            ProofJobStatus::Completed => ProofStatus::Completed,
-            ProofJobStatus::Failed => ProofStatus::Failed,
-            ProofJobStatus::Cancelled => ProofStatus::Cancelled,
-        }
+fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus {
+    match state {
+        TaskState::Pending { .. } | TaskState::Ready => ProofStatus::Pending,
+        TaskState::Retrying { .. } => ProofStatus::Pending,
+        TaskState::Running { .. } => ProofStatus::Proving,
+        TaskState::Succeeded { .. } => ProofStatus::Completed,
+        TaskState::Failed { .. } => ProofStatus::Failed,
+        TaskState::Cancelled => ProofStatus::Cancelled,
     }
 }
 
@@ -99,76 +100,17 @@ pub async fn request_batch_proof(
         req.batch_id, req.l1_inclusion_block
     );
 
-    let proof_id = format!(
-        "proof-{}-{}-{}",
-        req.batch_id,
-        req.l1_inclusion_block,
-        chrono_lite_timestamp()
-    );
-
-    // Create job entry
-    let job = ProofJob {
-        id: proof_id.clone(),
-        batch_id: req.batch_id,
-        status: ProofJobStatus::Pending,
-        proof: None,
-        error: None,
-    };
-    state.add_job(job).await;
-
-    // Spawn background task to generate proof
-    let state_clone = state.clone();
-    let proof_id_clone = proof_id.clone();
-    let batch_id = req.batch_id;
-
-    tokio::spawn(async move {
-        info!(
-            "Starting proof generation for job: {}, batch_id: {}",
-            proof_id_clone, batch_id
-        );
-
-        // Update status to proving
-        state_clone
-            .update_job(&proof_id_clone, ProofJobStatus::Proving, None, None)
-            .await;
-
-        // TODO: Fetch actual GuestInput from provider based on batch_id
-        // For now, create a placeholder input
-        let input = raiko2_primitives::GuestInput::default();
-        let prover_config = raiko2_primitives::ProverConfig::default();
-
-        // Generate proof using the prover
-        match state_clone.prover.prove(input, &prover_config).await {
-            Ok(proof) => {
-                info!("Proof generated successfully for job: {}", proof_id_clone);
-                state_clone
-                    .update_job(
-                        &proof_id_clone,
-                        ProofJobStatus::Completed,
-                        proof.proof,
-                        None,
-                    )
-                    .await;
-            }
-            Err(e) => {
-                error!(
-                    "Proof generation failed for job {}: {:?}",
-                    proof_id_clone, e
-                );
-                state_clone
-                    .update_job(
-                        &proof_id_clone,
-                        ProofJobStatus::Failed,
-                        None,
-                        Some(e.to_string()),
-                    )
-                    .await;
-            }
-        }
-    });
+    let id = state
+        .engine
+        .submit_batch_proof(req.batch_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to enqueue proof job: {e}"),
+        })?;
 
     Ok(Json(ProofResponse {
-        id: proof_id,
+        id: id.to_string(),
         status: ProofStatus::Pending,
     }))
 }
@@ -180,18 +122,39 @@ pub async fn get_proof_status(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Getting proof status for: {}", id);
 
-    match state.get_job(&id).await {
-        Some(job) => Ok(Json(ProofStatusResponse {
-            id: job.id,
-            status: job.status.into(),
-            proof: job.proof,
-            error: job.error,
-        })),
-        None => Err(ApiError {
+    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("Invalid task id '{id}': {e}"),
+    })?;
+
+    let view = state
+        .engine
+        .get(task_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to read proof status: {e}"),
+        })?
+        .ok_or(ApiError {
             status: StatusCode::NOT_FOUND,
-            message: format!("Proof job not found: {}", id),
-        }),
-    }
+            message: format!("Proof job not found: {id}"),
+        })?;
+
+    let (proof, error) = match view.state.clone() {
+        TaskState::Succeeded {
+            output: EngineOutput::Proof(proof),
+        } => (proof.proof, None),
+        TaskState::Failed { error, .. } => (None, Some(error)),
+        TaskState::Retrying { error, .. } => (None, Some(error)),
+        _ => (None, None),
+    };
+
+    Ok(Json(ProofStatusResponse {
+        id,
+        status: status_from_task_state(&view.state),
+        proof,
+        error,
+    }))
 }
 
 /// Proof status response.
@@ -212,27 +175,43 @@ pub async fn cancel_proof(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Cancelling proof: {}", id);
 
-    match state.get_job(&id).await {
-        Some(job) => {
-            // Only cancel if still pending or proving
-            if job.status == ProofJobStatus::Pending || job.status == ProofJobStatus::Proving {
-                state
-                    .update_job(&id, ProofJobStatus::Cancelled, None, None)
-                    .await;
-            }
-            let updated_job = state.get_job(&id).await.unwrap();
-            Ok(Json(ProofStatusResponse {
-                id: updated_job.id,
-                status: updated_job.status.into(),
-                proof: updated_job.proof,
-                error: updated_job.error,
-            }))
-        }
-        None => Err(ApiError {
+    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("Invalid task id '{id}': {e}"),
+    })?;
+
+    state.engine.cancel(task_id).await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Failed to cancel proof job: {e}"),
+    })?;
+
+    let view = state
+        .engine
+        .get(task_id)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to read proof status: {e}"),
+        })?
+        .ok_or(ApiError {
             status: StatusCode::NOT_FOUND,
-            message: format!("Proof job not found: {}", id),
-        }),
-    }
+            message: format!("Proof job not found: {id}"),
+        })?;
+
+    let (proof, error) = match view.state.clone() {
+        TaskState::Succeeded {
+            output: EngineOutput::Proof(proof),
+        } => (proof.proof, None),
+        TaskState::Failed { error, .. } => (None, Some(error)),
+        _ => (None, None),
+    };
+
+    Ok(Json(ProofStatusResponse {
+        id,
+        status: status_from_task_state(&view.state),
+        proof,
+        error,
+    }))
 }
 
 /// API error type.
@@ -258,13 +237,4 @@ impl From<anyhow::Error> for ApiError {
             message: err.to_string(),
         }
     }
-}
-
-/// Simple timestamp for proof IDs (no external dependency).
-fn chrono_lite_timestamp() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }

@@ -5,16 +5,30 @@
 //! - Local validation of inputs
 //! - Proof generation using zkVM provers
 //!
-//! Note: Prover integration temporarily disabled due to version conflicts.
+//! ## Module Structure
+//!
+//! - `queue` - Task queue and scheduling for proof jobs
+//! - `worker` - Supervised worker management with auto-restart
+//! - `tasks` - Task types and outputs
+//! - `input_builder` - Guest input construction
+//!
+//! Prover integration is provided via `raiko2-prover` and wired through
+//! `queue::EngineQueue` / `tasks::EngineTask`.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
 
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_driver::Driver;
 use raiko2_primitives::{
-    GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult, StatelessInput,
+    ChainSpec, GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult, StatelessInput,
+    SupportedChainSpecs,
 };
 use raiko2_provider::Provider;
 use tracing::info;
+
+pub mod input_builder;
+pub mod queue;
+pub mod tasks;
+pub mod worker;
 
 /// The main proving engine.
 #[derive(Debug)]
@@ -57,6 +71,14 @@ impl<P: Provider> Engine<P> {
             .batch_accounts(&block_numbers, &all_signers)
             .await?;
 
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .unwrap_or_else(|| ChainSpec {
+                name: "unknown".to_string(),
+                chain_id: ctx.request.l2_chain_id,
+                ..Default::default()
+            });
+
         Ok(GuestInput {
             taiko: taiko_manifest,
             witnesses: blocks
@@ -65,6 +87,7 @@ impl<P: Provider> Engine<P> {
                 .zip(accounts)
                 .map(|((block, witness), accounts)| StatelessInput {
                     block,
+                    chain_spec: chain_spec.clone(),
                     witness,
                     accounts,
                 })
@@ -114,10 +137,7 @@ mod tests {
                 Ok(vec![])
             }
 
-            async fn batch_witnesses(
-                &self,
-                _blocks: &[u64],
-            ) -> RaikoResult<Vec<ExecutionWitness>> {
+            async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
                 Ok(vec![])
             }
         }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::proof::ProverConfig;
 use alethia_reth_node::chainspec::spec::TaikoChainSpec;
-use reth::chainspec::ChainSpec as RethChainSpec;
+use reth_chainspec::ChainSpec as RethChainSpec;
 use serde::{Deserialize, Serialize};
 
 /// Proof request parameters.
@@ -47,6 +47,17 @@ pub struct ProofContext {
     pub l2_chain_spec: Arc<TaikoChainSpec>,
     pub request: ProofRequest,
     pub config: ProverConfig,
+}
+
+impl ProofContext {
+    pub fn new(request: ProofRequest, config: ProverConfig) -> Self {
+        Self {
+            l1_chain_spec: Arc::new(RethChainSpec::default()),
+            l2_chain_spec: Arc::new(TaikoChainSpec::default()),
+            request,
+            config,
+        }
+    }
 }
 
 #[cfg(test)]

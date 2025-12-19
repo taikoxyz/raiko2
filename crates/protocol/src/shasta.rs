@@ -2,7 +2,7 @@
 //!
 //! This module contains all Shasta-specific protocol types and codecs.
 
-use alloy_primitives::{Address, B256, Uint};
+use alloy_primitives::{Address, B256, ChainId, Uint};
 use alloy_sol_types::{SolValue, sol};
 use core::fmt::Debug;
 use serde::{Deserialize, Serialize};
@@ -20,22 +20,7 @@ sol! {
         uint48 timestamp;
     }
 
-    #[derive(Debug, Deserialize, Serialize)]
-    enum BondType {
-        NONE,
-        PROVABILITY,
-        LIVENESS
-    }
-
-    #[derive(Debug, Deserialize, Serialize)]
-    struct BondInstruction {
-        uint48 proposalId;
-        BondType bondType;
-        address payer;
-        address receiver;
-    }
-
-    #[derive(Debug, Default, Deserialize, Serialize)]
+    #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
     struct Checkpoint {
         uint48 blockNumber;
         bytes32 blockHash;
@@ -80,25 +65,43 @@ sol! {
         uint48 endOfSubmissionWindowTimestamp;
         /// @notice Address of the proposer.
         address proposer;
-        /// @notice The current hash of coreState
-        bytes32 coreStateHash;
+        /// @notice Hash of the parent proposal (zero for genesis).
+        bytes32 parentProposalHash;
         /// @notice Hash of the Derivation struct containing additional proposal data.
         bytes32 derivationHash;
     }
 
-    #[derive(Debug, Default, Deserialize, Serialize)]
+    #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+    /// @notice Transition data for a proposal used in prove
     struct Transition {
-        bytes32 proposalHash;
-        bytes32 parentTransitionHash;
-        Checkpoint checkpoint;
+        /// @notice Address of the proposer.
+        address proposer;
+        /// @notice Address of the designated prover.
+        address designatedProver;
+        /// @notice Timestamp of the proposal.
+        uint48 timestamp;
+        /// @notice checkpoint hash for the proposal.
+        bytes32 checkpointHash;
     }
 
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    struct TransitionMetadata {
-        /// @notice The designated prover for this transition.
-        address designatedProver;
-        /// @notice The actual prover who submitted the proof.
+    #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
+    /// @notice Commitment data that the prover commits to when submitting a proof.
+    struct Commitment {
+        /// @notice The ID of the first proposal being proven.
+        uint48 firstProposalId;
+        /// @notice The checkpoint hash of the parent of the first proposal, this is used
+        /// to verify checkpoint continuity in the proof.
+        bytes32 firstProposalParentBlockHash;
+        /// @notice The hash of the last proposal being proven.
+        bytes32 lastProposalHash;
+        /// @notice The actual prover who generated the proof.
         address actualProver;
+        /// @notice The block number for the end L2 block in this proposal.
+        uint48 endBlockNumber;
+        /// @notice The state root for the end L2 block in this proposal.
+        bytes32 endStateRoot;
+        /// @notice Array of transitions for each proposal in the proof range.
+        Transition[] transitions;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize)]
@@ -115,15 +118,14 @@ sol! {
         uint48 lastCheckpointTimestamp;
         /// @notice The hash of the last finalized transition.
         bytes32 lastFinalizedTransitionHash;
-        /// @notice The hash of all bond instructions.
-        bytes32 bondInstructionsHash;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize)]
     struct ProposedEventPayload {
+        /// @notice The proposal that was created.
         Proposal proposal;
+        /// @notice The derivation data for the proposal.
         Derivation derivation;
-        CoreState coreState;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize)]
@@ -138,9 +140,34 @@ sol! {
 
     #[derive(Debug, Default, Deserialize, Serialize)]
     event Proved(bytes data);
+}
 
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    event BondInstructed(BondInstruction[] instructions);
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[allow(non_snake_case)]
+// In Shasta, each sub proposal signs this structure to prove the proposal's transition.
+// We keep ABI-compatible field names.
+pub struct ShastaTransitionInput {
+    pub proposer: Address,
+    pub designatedProver: Address,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TransitionInputData {
+    pub proposal_id: u64,
+    pub proposal_hash: B256,
+    pub parent_proposal_hash: B256,
+    pub parent_checkpoint_hash: B256,
+    pub actual_prover: Address,
+    pub transition: ShastaTransitionInput,
+    pub checkpoint: Checkpoint,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProofCarryData {
+    pub chain_id: ChainId,
+    pub verifier: Address,
+    pub transition_input: TransitionInputData,
 }
 
 /// Decoded Shasta event data containing the proposal and related information
@@ -148,7 +175,6 @@ sol! {
 pub struct ShastaEventData {
     pub proposal: Proposal,
     pub derivation: Derivation,
-    pub core_state: CoreState,
 }
 
 impl ShastaEventData {
@@ -162,14 +188,10 @@ impl ShastaEventData {
         Ok(Self {
             proposal: payload.proposal,
             derivation: payload.derivation,
-            core_state: payload.coreState,
         })
     }
 
-    fn unpack_uint24(
-        data: &[u8],
-        pos: usize,
-    ) -> Result<(Uint<24, 1>, usize), alloy_sol_types::Error> {
+    fn unpack_uint24(data: &[u8], pos: usize) -> Result<(u32, usize), alloy_sol_types::Error> {
         // Ensure we have enough data for a 3-byte value
         if pos + 3 > data.len() {
             return Err(alloy_sol_types::Error::custom(
@@ -178,7 +200,6 @@ impl ShastaEventData {
         }
 
         let value = u32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]);
-        let value = Uint::<24, 1>::from_limbs([value as u64]);
         // New position is old position + 3 bytes
         let new_pos = pos + 3;
         Ok((value, new_pos))
@@ -186,10 +207,7 @@ impl ShastaEventData {
 
     /// Unpacks a uint48 value from the data buffer at the given position
     /// Matches the Solidity mload behavior by reading a full 32-byte word and extracting 6 bytes
-    fn unpack_uint48(
-        data: &[u8],
-        pos: usize,
-    ) -> Result<(Uint<48, 1>, usize), alloy_sol_types::Error> {
+    fn unpack_uint48(data: &[u8], pos: usize) -> Result<(u64, usize), alloy_sol_types::Error> {
         // Ensure we have enough data for a full 32-byte word
         if pos + 6 > data.len() {
             return Err(alloy_sol_types::Error::custom(
@@ -207,7 +225,6 @@ impl ShastaEventData {
             data[pos + 4],
             data[pos + 5],
         ]);
-        let value = Uint::<48, 1>::from_limbs([value]);
         // New position is old position + 6 bytes
         let new_pos = pos + 6;
         Ok((value, new_pos))
@@ -277,6 +294,8 @@ impl ShastaEventData {
         ptr = new_ptr;
         let (end_of_submission_window_timestamp, new_ptr) = Self::unpack_uint48(data, ptr)?;
         ptr = new_ptr;
+        let (parent_proposal_hash, new_ptr) = Self::unpack_hash(data, ptr)?;
+        ptr = new_ptr;
 
         // Decode derivation fields
         let (origin_block_number, new_ptr) = Self::unpack_uint48(data, ptr)?;
@@ -317,53 +336,96 @@ impl ShastaEventData {
                 isForcedInclusion: is_forced_inclusion,
                 blobSlice: BlobSlice {
                     blobHashes: blob_hashes,
-                    offset,
-                    timestamp: blob_timestamp,
+                    offset: Uint::from(offset),
+                    timestamp: Uint::from(blob_timestamp),
                 },
             });
         }
 
-        let (core_state_hash, new_ptr) = Self::unpack_hash(data, ptr)?;
-        ptr = new_ptr;
-        let (derivation_hash, new_ptr) = Self::unpack_hash(data, ptr)?;
-        ptr = new_ptr;
-
-        // Decode core state
-        let (next_proposal_id, new_ptr) = Self::unpack_uint48(data, ptr)?;
-        ptr = new_ptr;
-        let (last_proposal_block_id, new_ptr) = Self::unpack_uint48(data, ptr)?;
-        ptr = new_ptr;
-        let (last_finalized_proposal_id, new_ptr) = Self::unpack_uint48(data, ptr)?;
-        ptr = new_ptr;
-        let (last_checkpoint_timestamp, new_ptr) = Self::unpack_uint48(data, ptr)?;
-        ptr = new_ptr;
-        let (last_finalized_transition_hash, new_ptr) = Self::unpack_hash(data, ptr)?;
-        ptr = new_ptr;
-        let (bond_instructions_hash, _new_ptr) = Self::unpack_hash(data, ptr)?;
+        let (derivation_hash, _new_ptr) = Self::unpack_hash(data, ptr)?;
 
         Ok(Self {
             proposal: Proposal {
-                id: proposal_id,
-                timestamp,
-                endOfSubmissionWindowTimestamp: end_of_submission_window_timestamp,
+                id: Uint::from(proposal_id),
+                timestamp: Uint::from(timestamp),
+                endOfSubmissionWindowTimestamp: Uint::from(end_of_submission_window_timestamp),
                 proposer,
-                coreStateHash: core_state_hash,
+                parentProposalHash: parent_proposal_hash,
                 derivationHash: derivation_hash,
             },
             derivation: Derivation {
-                originBlockNumber: origin_block_number,
+                originBlockNumber: Uint::from(origin_block_number),
                 originBlockHash: origin_block_hash,
                 basefeeSharingPctg: basefee_sharing_pctg,
                 sources,
             },
-            core_state: CoreState {
-                nextProposalId: next_proposal_id,
-                lastProposalBlockId: last_proposal_block_id,
-                lastFinalizedProposalId: last_finalized_proposal_id,
-                lastCheckpointTimestamp: last_checkpoint_timestamp,
-                lastFinalizedTransitionHash: last_finalized_transition_hash,
-                bondInstructionsHash: bond_instructions_hash,
-            },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShastaEventData;
+    use alloy_primitives::hex;
+
+    #[test]
+    fn test_decode_known_hex() {
+        // This is a real example: decode the provided hex-encoded payload and check fields.
+        let data = hex::decode("0000000009143c44cdddb6a900fa2b585dd299e03d12fa4293bc0000693e56cc000000000000d1374b45317e657e07505c83fc4702e8f6e043ff3e7beb2eaa0974783a4222ae0000000038aeb5f96a8745b06f7a00e5741f503d6d45c0d5ec1377960abe86e45299d6410cdf4b000100000101b1a43b3e87672be8a5102ac0d99dc4215491d8a07a7fa402d34d7f1ac9696d0000000000693e56cc36cf931b08528aa49160c33ecda1505b2c292a4947c416d9dc26646ebe9c0d35").unwrap();
+
+        // Decode using manual decoding function
+        let result = ShastaEventData::decode_event_data(&data);
+
+        assert!(
+            result.is_ok(),
+            "Failed to manually decode Shasta event data: {:?}",
+            result.err()
+        );
+
+        let event_data = result.unwrap();
+
+        // Spot-check some expected field invariants:
+
+        // Proposal
+        println!("proposal.id: {}", event_data.proposal.id);
+        println!("proposal.proposer: {:?}", event_data.proposal.proposer);
+        println!("proposal.timestamp: {}", event_data.proposal.timestamp);
+        println!(
+            "proposal.parentProposalHash: 0x{}",
+            hex::encode(event_data.proposal.parentProposalHash)
+        );
+        println!(
+            "proposal.derivationHash: 0x{}",
+            hex::encode(event_data.proposal.derivationHash)
+        );
+
+        // Derivation
+        println!(
+            "derivation.originBlockNumber: {}",
+            event_data.derivation.originBlockNumber
+        );
+        println!(
+            "derivation.originBlockHash: 0x{}",
+            hex::encode(event_data.derivation.originBlockHash)
+        );
+        println!(
+            "derivation.basefeeSharingPctg: {}",
+            event_data.derivation.basefeeSharingPctg
+        );
+        println!(
+            "derivation.sources.length: {}",
+            event_data.derivation.sources.len()
+        );
+
+        // Derivation Source
+        let s = &event_data.derivation.sources[0];
+        println!("isForcedInclusion: {}", s.isForcedInclusion);
+        println!("blobHashes.length: {}", s.blobSlice.blobHashes.len());
+        println!(
+            "blobHashes[0]: 0x{}",
+            hex::encode(s.blobSlice.blobHashes[0])
+        );
+        println!("offset: {}", s.blobSlice.offset);
+        println!("timestamp: {}", s.blobSlice.timestamp);
     }
 }

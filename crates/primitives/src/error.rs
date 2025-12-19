@@ -3,10 +3,9 @@
 use crate::proof::ProverError;
 use reth_stateless::validation::StatelessValidationError;
 use std::io;
-use utoipa::ToSchema;
 
 /// Main error type for Raiko operations.
-#[derive(Debug, thiserror::Error, ToSchema)]
+#[derive(Debug, thiserror::Error)]
 pub enum RaikoError {
     /// For invalid proof type generation request.
     #[error("Unknown proof type: {0}")]
@@ -22,7 +21,6 @@ pub enum RaikoError {
 
     /// For requesting a proof of a type that is not supported.
     #[error("Feature not supported: {0}")]
-    #[schema(value_type = Value)]
     FeatureNotSupportedError(String),
 
     /// For invalid type conversion.
@@ -48,7 +46,6 @@ pub enum RaikoError {
 
     /// For errors produced by the guest provers.
     #[error("There was an error with a guest prover: {0}")]
-    #[schema(value_type = Value)]
     Guest(#[from] ProverError),
 
     /// For I/O errors with path context.

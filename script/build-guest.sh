@@ -71,6 +71,12 @@ build_risc0() {
 
     cd "$RISC0_GUEST_DIR"
 
+    # Keep guest build artifacts and lockfiles isolated from the workspace.
+    export CARGO_TARGET_DIR="$RISC0_GUEST_DIR/target"
+    local lockfile_dir="$ROOT_DIR/target/cargo-lockfiles/guest-risc0"
+    local lockfile_path="$lockfile_dir/Cargo.lock"
+    mkdir -p "$lockfile_dir"
+
     # RISC0-specific environment and flags
     export CARGO_TARGET_RISCV32IM_RISC0_ZKVM_ELF_RUSTFLAGS="-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\""
     export CC="/opt/riscv/bin/riscv32-unknown-elf-gcc"
@@ -88,14 +94,15 @@ build_risc0() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("risc0-batch" "risc0-shasta-aggregation")
+    local bins=("risc0-proposal" "risc0-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa")
     fi
 
     for bin in "${bins[@]}"; do
         log_info "Building $bin..."
-        cargo $TOOLCHAIN_RISC0 build \
+        cargo $TOOLCHAIN_RISC0 -Z unstable-options build \
+            --lockfile-path "$lockfile_path" \
             --target riscv32im-risc0-zkvm-elf \
             --bin "$bin" \
             $profile_flag \
@@ -133,6 +140,12 @@ build_sp1() {
 
     cd "$SP1_GUEST_DIR"
 
+    # Keep guest build artifacts and lockfiles isolated from the workspace.
+    export CARGO_TARGET_DIR="$SP1_GUEST_DIR/target"
+    local lockfile_dir="$ROOT_DIR/target/cargo-lockfiles/guest-sp1"
+    local lockfile_path="$lockfile_dir/Cargo.lock"
+    mkdir -p "$lockfile_dir"
+
     # SP1-specific environment and flags
     export CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS="-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort"
     export CC="/opt/riscv/bin/riscv32-unknown-elf-gcc"
@@ -149,14 +162,15 @@ build_sp1() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("sp1-batch" "sp1-shasta-aggregation")
+    local bins=("sp1-proposal" "sp1-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa" "bn254_add" "bn254_mul")
     fi
 
     for bin in "${bins[@]}"; do
         log_info "Building $bin..."
-        cargo $TOOLCHAIN_SP1 build \
+        cargo $TOOLCHAIN_SP1 -Z unstable-options build \
+            --lockfile-path "$lockfile_path" \
             --target riscv32im-succinct-zkvm-elf \
             --bin "$bin" \
             $profile_flag \

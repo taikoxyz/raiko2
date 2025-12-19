@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 description = "Taiko Shasta protocol types and codecs for Raiko V2"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Alloy types
 alloy-primitives.workspace = true

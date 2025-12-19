@@ -1,27 +1,27 @@
 //! Aggregates Shasta proposal proofs on RISC0
 #![no_main]
-harness::entrypoint!(main);
+risc0_zkvm::guest::entry!(main);
 
-use risc0_zkvm::{guest::env, serde};
-
-use raiko_lib::{
-    input::ShastaRisc0AggregationGuestInput,
-    protocol_instance::shasta_aggregation_output,
+use alloy_primitives::B256;
+use raiko2_primitives::{
+    guest::aggregate_shasta_zk_with_verifier, instance::words_to_bytes_le,
+    ShastaZkAggregationGuestInput,
 };
+use risc0_zkvm::guest::env;
 
 pub fn main() {
-    let input = env::read::<ShastaRisc0AggregationGuestInput>();
+    // Read aggregation input prepared by the host
+    let input: ShastaZkAggregationGuestInput = env::read();
 
-    for block_input in input.block_inputs.iter() {
-        env::verify(input.image_id, &serde::to_vec(block_input).unwrap()).unwrap();
-    }
+    let image_id_bytes = words_to_bytes_le(&input.image_id);
+    let image_id_b256 = B256::from(image_id_bytes);
 
-    let aggregation_hash = shasta_aggregation_output(
-        &input.block_inputs,
-        input.chain_id,
-        input.verifier_address,
-        input.prover_address,
-    );
+    let agg_public_input_hash =
+        aggregate_shasta_zk_with_verifier(&input, image_id_b256, |_i, block_input| {
+            env::verify(image_id_bytes, block_input.as_slice()).expect("proof verification failed");
+            Ok(())
+        })
+        .expect("aggregation failed");
 
-    env::commit_slice(aggregation_hash.as_slice());
+    env::commit_slice(agg_public_input_hash.as_slice());
 }

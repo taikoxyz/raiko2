@@ -8,6 +8,9 @@ members = [
     "crates/engine",
     "crates/prover",
     "crates/protocol",
+    "crates/queue",
+    "crates/guest-sp1",
+    "crates/guest-risc0",
     "bin/raiko2",
     "bin/rpc-proxy",
 ]
@@ -16,6 +19,14 @@ members = [
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+redundant_pub_crate = "warn"
+missing_const_for_fn = "warn"
 
 # Always optimize for performance
 [profile.dev]
@@ -34,6 +45,7 @@ raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
+raiko2-queue = { path = "./crates/queue" }
 
 # zkVM
 risc0-zkvm = "3.0.4"
@@ -54,16 +66,18 @@ reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3"
 reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }
 
 # Alloy
 alloy-rlp = { version = "0.3.4", default-features = false }
-alloy-primitives = { version = "1.0", default-features = false }
-alloy-sol-types = { version = "1.0", default-features = false }
+alloy-primitives = { version = "1.5.0", default-features = false }
+alloy-sol-types = { version = "1.5.0", default-features = false }
 alloy-trie = { version = "0.9", default-features = false }
 alloy-consensus = { version = "1.0", default-features = false, features = [
     "serde",
@@ -82,11 +96,10 @@ alloy-transport-http = { version = "1.0", default-features = false, features = [
 
 # Async, server, http
 axum = { version = "0.8.7", features = ["macros"] }
-tower-http = { version = "0.5.2", features = ["full"] }
+tower-http = { version = "0.6.8", features = ["full"] }
 tower = { version = "0.5.2", features = ["full"] }
-utoipa = { version = "4.2.0", features = ["axum_extras"] }
 tokio = { version = "^1.23", features = ["full"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12.26", features = ["json"] }
 async-trait = "0.1"
 futures = "0.3"
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -108,13 +121,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0.17"
 
 # rpc-proxy dependencies
 actix-web = "4"
-alloy = { version = "1", features = ["full", "serde"] }
-alloy-chains = { version = "0.2", features = ["serde"] }
+alloy = { version = "1.1.3", features = ["full", "serde"] }
+alloy-chains = { version = "0.2.23", features = ["serde"] }
 blst = "0.3"
 itertools = "0.14"
-revm = { version = "31", default-features = false }
+revm = { version = "33.1.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.0" }

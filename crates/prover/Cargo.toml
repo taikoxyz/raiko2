@@ -3,9 +3,13 @@ name = "raiko2-prover"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # Workspace dependencies
 raiko2-primitives.workspace = true
+raiko2-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

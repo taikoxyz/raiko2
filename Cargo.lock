@@ -9004,6 +9004,7 @@ dependencies = [
  "alloy-trie 0.9.1",
  "reth-chainspec",
  "reth-consensus",
+ "reth-consensus-common",
  "reth-errors",
  "reth-ethereum-consensus",
  "reth-ethereum-primitives",

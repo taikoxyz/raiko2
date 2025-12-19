@@ -10,6 +10,7 @@ use alloy_consensus::{BlockHeader, Header, TrieAccount};
 use alloy_primitives::{B256, map::AddressMap};
 use alloy_rlp::Decodable;
 use reth_consensus::{Consensus, HeaderValidator};
+use reth_consensus_common::validation::validate_block_pre_execution;
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_ethereum_primitives::Block;
 use reth_evm::{ConfigureEvm, execute::Executor};
@@ -158,11 +159,20 @@ fn validate_block_consensus(
     let parent_header = SealedHeader::seal_slow(parent_header.clone());
 
     let block_reader = Arc::new(WitnessTaikoBlockReader::from_headers(ancestor_headers));
-    let consensus = TaikoBeaconConsensus::new(chain_spec, block_reader);
+    let consensus_chain_spec = chain_spec.clone();
+    let consensus = TaikoBeaconConsensus::new(consensus_chain_spec, block_reader);
 
     consensus.validate_header(block.sealed_header())?;
 
     consensus.validate_header_against_parent(block.sealed_header(), &parent_header)?;
+
+    <TaikoBeaconConsensus as Consensus<Block>>::validate_body_against_header(
+        &consensus,
+        block.body(),
+        block.sealed_header(),
+    )?;
+
+    validate_block_pre_execution(block, chain_spec.as_ref())?;
 
     consensus.validate_block_pre_execution(block)?;
 
@@ -203,6 +213,7 @@ mod tests {
     use alethia_reth_node::{block::config::TaikoEvmConfig, chainspec::TAIKO_DEVNET};
     use alloy_consensus::{Header, proofs};
     use alloy_primitives::Bytes;
+    use reth_consensus::ConsensusError;
     use reth_ethereum_primitives::{Block, BlockBody};
     use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
 
@@ -256,5 +267,36 @@ mod tests {
             result,
             Err(StatelessValidationError::ConsensusValidationFailed(_))
         ));
+    }
+
+    #[test]
+    fn rejects_mismatched_transaction_root() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+
+        let parent_header = shanghai_header(0, 100, alloy_primitives::B256::ZERO);
+        let parent_hash = parent_header.hash_slow();
+
+        let mut header = shanghai_header(1, 200, parent_hash);
+        header.transactions_root = alloy_primitives::B256::ZERO;
+        header.base_fee_per_gas = Some(25_000_000);
+
+        let body = empty_shanghai_body();
+        let block = Block { header, body };
+
+        let witness = ExecutionWitness {
+            headers: vec![Bytes::from(alloy_rlp::encode(&parent_header))],
+            ..Default::default()
+        };
+
+        let callers = Default::default();
+        let result = validate_block(block, witness, callers, chain_spec, evm_config);
+
+        match result {
+            Err(StatelessValidationError::ConsensusValidationFailed(
+                ConsensusError::BodyTransactionRootDiff(_),
+            )) => {}
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 }

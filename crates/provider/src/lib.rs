@@ -1,4 +1,7 @@
 #![allow(async_fn_in_trait)]
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
 
 pub mod network;
 
@@ -40,7 +43,7 @@ mod tests {
     use alloy_primitives::U256;
 
     /// Mock provider for testing.
-    pub struct MockProvider {
+    pub(crate) struct MockProvider {
         pub blocks: Vec<Block>,
     }
 

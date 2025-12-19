@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 //! Raiko V2 - Taiko zkVM Prover Server
 //!
 //! This binary provides a REST API for generating zero-knowledge proofs

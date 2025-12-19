@@ -1,5 +1,6 @@
 //! SP1 guest program for single proposal proof.
 #![no_main]
+#![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
 use raiko2_primitives::{guest::prove_shasta_proposal, GuestInput};

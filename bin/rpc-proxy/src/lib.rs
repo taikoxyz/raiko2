@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod db;
-mod rpc;
-mod trie;
-mod witness;
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
+pub(crate) mod db;
+pub(crate) mod rpc;
+pub(crate) mod trie;
+pub(crate) mod witness;
 
 pub use witness::execution_witness;

@@ -101,7 +101,7 @@ impl<D> PreflightDb<D> {
     }
 
     /// Returns the referenced contracts
-    pub(crate) fn contracts(&self) -> &B256HashMap<Bytes> {
+    pub(crate) const fn contracts(&self) -> &B256HashMap<Bytes> {
         &self.contracts
     }
 }

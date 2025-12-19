@@ -24,7 +24,7 @@ struct Inner {
 }
 
 impl EngineQueue {
-    fn default_scheduler_config() -> SchedulerConfig {
+    const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::Exponential {
@@ -189,7 +189,7 @@ impl EngineQueue {
                     .prove(guest_input, &self.inner.config)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(proof))
+                Ok(EngineOutput::Proof(Box::new(proof)))
             }
             EngineTask::Aggregate {
                 batch_ids: _,
@@ -207,7 +207,7 @@ impl EngineQueue {
                     match view.state {
                         TaskState::Succeeded {
                             output: EngineOutput::Proof(proof),
-                        } => proofs.push(proof),
+                        } => proofs.push(*proof),
                         TaskState::Succeeded { .. } => {
                             return Err("dependency task did not produce Proof".to_string());
                         }
@@ -221,7 +221,7 @@ impl EngineQueue {
                     .aggregate(AggregationGuestInput { proofs }, &self.inner.config)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(proof))
+                Ok(EngineOutput::Proof(Box::new(proof)))
             }
         }
     }

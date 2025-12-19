@@ -54,10 +54,12 @@ mod tests {
 
     #[test]
     fn bind_addr_respects_config_host() {
-        let mut config = Config::default();
-        config.server = ServerConfig {
-            host: "127.0.0.1".to_string(),
-            port: 1234,
+        let config = Config {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 1234,
+            },
+            ..Default::default()
         };
 
         assert_eq!(bind_addr(&config), "127.0.0.1:1234");

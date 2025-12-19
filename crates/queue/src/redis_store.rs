@@ -87,7 +87,7 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-fn prio_str(prio: Priority) -> &'static str {
+const fn prio_str(prio: Priority) -> &'static str {
     match prio {
         Priority::High => "high",
         Priority::Medium => "medium",
@@ -104,7 +104,7 @@ fn parse_prio(s: &str) -> Option<Priority> {
     }
 }
 
-fn kind_str(kind: TaskKind) -> &'static str {
+const fn kind_str(kind: TaskKind) -> &'static str {
     match kind {
         TaskKind::Preflight => "preflight",
         TaskKind::BuildGuestInput => "build_guest_input",

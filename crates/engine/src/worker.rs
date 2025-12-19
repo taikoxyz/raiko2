@@ -153,29 +153,6 @@ fn spawn_maintenance_supervised<R: Runnable>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone)]
-    struct MockRunnable {
-        run_count: Arc<AtomicUsize>,
-        notify: Arc<Notify>,
-    }
-
-    #[async_trait::async_trait]
-    impl Runnable for MockRunnable {
-        async fn run_one(&self, _worker_id: &str) -> Result<bool, String> {
-            self.run_count.fetch_add(1, Ordering::SeqCst);
-            Ok(false) // No more work
-        }
-
-        async fn maintenance_tick(&self) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn notifier(&self) -> Arc<Notify> {
-            self.notify.clone()
-        }
-    }
 
     #[test]
     fn test_worker_config_default() {

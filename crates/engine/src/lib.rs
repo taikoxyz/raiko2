@@ -16,6 +16,10 @@
 //! `queue::EngineQueue` / `tasks::EngineTask`.
 //! TaikoEvmConfig integration pending alethia-reth-block dependency.
 
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_driver::Driver;
 use raiko2_primitives::{
@@ -39,7 +43,7 @@ pub struct Engine<P: Provider> {
 
 impl<P: Provider> Engine<P> {
     /// Create a new engine with the given provider.
-    pub fn new(driver: Driver, provider: P) -> Self {
+    pub const fn new(driver: Driver, provider: P) -> Self {
         Self { driver, provider }
     }
 

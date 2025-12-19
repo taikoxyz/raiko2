@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 //! Raiko V2 Prover SDKs
 //!
 //! This crate provides the prover implementations for generating zero-knowledge proofs
@@ -17,6 +21,8 @@
 //! // Create SP1 prover
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
+
+#![allow(missing_docs)]
 
 pub mod risc0;
 pub mod sp1;

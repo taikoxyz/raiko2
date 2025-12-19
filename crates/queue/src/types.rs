@@ -72,7 +72,7 @@ pub enum TaskState<O> {
 }
 
 impl<O> TaskState<O> {
-    pub fn pending(remaining: usize) -> Self {
+    pub const fn pending(remaining: usize) -> Self {
         TaskState::Pending {
             remaining_deps: remaining,
         }

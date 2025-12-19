@@ -1,5 +1,6 @@
 //! Aggregates Shasta proposal proofs on RISC0
 #![no_main]
+#![allow(missing_docs)]
 risc0_zkvm::guest::entry!(main);
 
 use alloy_primitives::B256;

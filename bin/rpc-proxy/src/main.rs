@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use alloy::{
     eips::BlockNumberOrTag,

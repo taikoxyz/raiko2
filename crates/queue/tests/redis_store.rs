@@ -1,4 +1,5 @@
 #![cfg(feature = "redis")]
+#![allow(missing_docs)]
 
 use std::process::Command;
 use std::time::Duration;

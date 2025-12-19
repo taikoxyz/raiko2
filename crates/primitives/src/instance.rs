@@ -208,7 +208,7 @@ impl ProtocolInstance {
 ///
 /// Checks that raw blob commitment matches input blob commitment,
 /// then verifies the blob version hash.
-pub fn verify_batch_mode_blob_usage(
+pub const fn verify_batch_mode_blob_usage(
     _guest_input: &GuestInput,
     blob_proof_type: BlobProofType,
 ) -> Result<()> {

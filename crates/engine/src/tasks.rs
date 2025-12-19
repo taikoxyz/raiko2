@@ -19,7 +19,7 @@ pub enum EngineTask {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineOutput {
     GuestInput(Box<raiko2_primitives::GuestInput>),
-    Proof(raiko2_primitives::Proof),
+    Proof(Box<raiko2_primitives::Proof>),
 }
 
 pub struct EngineJob {
@@ -83,11 +83,11 @@ mod tests {
         assert!(sched.next_ready("w").await.unwrap().is_none());
 
         sched
-            .complete(t1, Ok(EngineOutput::Proof(Default::default())))
+            .complete(t1, Ok(EngineOutput::Proof(Box::default())))
             .await
             .unwrap();
         sched
-            .complete(t2, Ok(EngineOutput::Proof(Default::default())))
+            .complete(t2, Ok(EngineOutput::Proof(Box::default())))
             .await
             .unwrap();
 

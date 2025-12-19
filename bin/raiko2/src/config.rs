@@ -166,23 +166,23 @@ fn default_queue_namespace() -> String {
     "raiko2:queue".to_string()
 }
 
-fn default_queue_maintenance_interval_ms() -> u64 {
+const fn default_queue_maintenance_interval_ms() -> u64 {
     200
 }
 
-fn default_queue_retry_max_attempts() -> u32 {
+const fn default_queue_retry_max_attempts() -> u32 {
     3
 }
 
-fn default_queue_retry_fixed_delay_ms() -> u64 {
+const fn default_queue_retry_fixed_delay_ms() -> u64 {
     1_000
 }
 
-fn default_queue_retry_base_delay_ms() -> u64 {
+const fn default_queue_retry_base_delay_ms() -> u64 {
     1_000
 }
 
-fn default_queue_retry_max_delay_ms() -> u64 {
+const fn default_queue_retry_max_delay_ms() -> u64 {
     30_000
 }
 
@@ -274,7 +274,7 @@ pub struct QueueConfig {
     pub retry: RetryConfig,
 }
 
-fn default_queue_workers() -> usize {
+const fn default_queue_workers() -> usize {
     1
 }
 

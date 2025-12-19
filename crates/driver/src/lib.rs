@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 //! Raiko2 Driver - block derivation and manifest creation.
 //!
 //! This module provides the `Driver` type that creates Taiko manifests
@@ -11,6 +15,8 @@
 //! let driver = Driver::new();
 //! let manifest = driver.taiko_manifest(&ctx, &blocks).await?;
 //! ```
+
+#![allow(missing_docs)]
 
 use raiko2_primitives::{ProofContext, RaikoResult, TaikoManifest, TaikoProverData};
 use raiko2_protocol::ShastaEventData;
@@ -27,7 +33,7 @@ pub struct Driver;
 
 impl Driver {
     /// Create a new driver.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 

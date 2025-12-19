@@ -9,7 +9,7 @@ use reth_stateless::ExecutionWitness;
 use crate::Provider;
 
 /// Convert RPC Account to TrieAccount for state trie operations.
-fn rpc_account_to_trie_account(account: Account) -> TrieAccount {
+const fn rpc_account_to_trie_account(account: Account) -> TrieAccount {
     TrieAccount {
         nonce: account.nonce,
         balance: account.balance,

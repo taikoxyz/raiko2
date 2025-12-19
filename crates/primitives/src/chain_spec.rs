@@ -69,7 +69,7 @@ pub enum ForkCondition {
 
 impl ForkCondition {
     /// Returns whether the condition has been met.
-    pub fn active(&self, block_no: BlockNumber, timestamp: u64) -> bool {
+    pub const fn active(&self, block_no: BlockNumber, timestamp: u64) -> bool {
         match self {
             ForkCondition::Block(block) => *block <= block_no,
             ForkCondition::Timestamp(ts) => *ts <= timestamp,
@@ -144,7 +144,7 @@ impl ChainSpec {
     }
 
     /// Returns the network chain ID.
-    pub fn chain_id(&self) -> ChainId {
+    pub const fn chain_id(&self) -> ChainId {
         self.chain_id
     }
 
@@ -163,7 +163,7 @@ impl ChainSpec {
     }
 
     /// Returns the Eip1559 constants
-    pub fn gas_constants(&self) -> &Eip1559Constants {
+    pub const fn gas_constants(&self) -> &Eip1559Constants {
         &self.eip_1559_constants
     }
 
@@ -212,7 +212,7 @@ impl ChainSpec {
         Err(anyhow!("fork l1 contract is not active"))
     }
 
-    pub fn is_taiko(&self) -> bool {
+    pub const fn is_taiko(&self) -> bool {
         self.is_taiko
     }
 

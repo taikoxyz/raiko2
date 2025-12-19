@@ -24,7 +24,7 @@ use risc0_ethereum_trie::{Nibbles, Trie, orphan};
 use std::collections::HashSet;
 use tracing::{debug, trace};
 
-pub(crate) async fn handle_removed_account<P, N>(
+pub async fn handle_removed_account<P, N>(
     provider: &P,
     block_hash: B256,
     address: Address,
@@ -46,7 +46,7 @@ where
     Ok(())
 }
 
-pub(crate) async fn handle_new_account<P, N>(
+pub async fn handle_new_account<P, N>(
     provider: &P,
     block_hash: B256,
     address: Address,
@@ -67,7 +67,7 @@ where
     Ok(())
 }
 
-pub(crate) async fn handle_modified_account<P, N>(
+pub async fn handle_modified_account<P, N>(
     provider: &P,
     block_hash: B256,
     address: Address,

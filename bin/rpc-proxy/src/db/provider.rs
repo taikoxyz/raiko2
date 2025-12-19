@@ -68,7 +68,7 @@ pub struct ProviderDb<N: Network, P: Provider<N>> {
 /// Additional configuration for a [Provider].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub(crate) struct ProviderConfig {
+pub struct ProviderConfig {
     /// Max number of storage keys to request in a single `eth_getProof` call.
     pub eip1186_proof_chunk_size: usize,
 }
@@ -97,12 +97,12 @@ impl<N: Network, P: Provider<N>> ProviderDb<N, P> {
     }
 
     /// Returns the [Provider].
-    pub(crate) fn provider(&self) -> &P {
+    pub(crate) const fn provider(&self) -> &P {
         &self.provider
     }
 
     /// Returns the block hash used for the queries.
-    pub(crate) fn block(&self) -> BlockHash {
+    pub(crate) const fn block(&self) -> BlockHash {
         self.block
     }
 

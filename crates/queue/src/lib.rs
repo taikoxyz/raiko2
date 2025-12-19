@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 #[cfg(feature = "redis")]
 mod redis_store;
 mod scheduler;

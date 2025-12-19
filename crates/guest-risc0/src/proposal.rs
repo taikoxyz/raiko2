@@ -1,5 +1,6 @@
 //! RISC0 guest program for single proposal proof.
 #![no_main]
+#![allow(missing_docs)]
 risc0_zkvm::guest::entry!(main);
 
 use raiko2_primitives::{guest::prove_shasta_proposal, GuestInput};

@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 //! Raiko2 Stateless Validation
 //!
 //! This crate provides stateless block validation using execution witnesses.

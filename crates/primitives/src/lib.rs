@@ -3,6 +3,10 @@
 //! This crate provides the foundational types used throughout the Raiko V2 system,
 //! including input/output types for guest programs, proof types, and error handling.
 
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 mod chain_spec;
 mod context;
 mod error;
@@ -11,7 +15,7 @@ mod input;
 pub mod instance;
 mod output;
 mod proof;
-mod proof_type;
+pub(crate) mod proof_type;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
 pub use context::{ProofContext, ProofRequest};

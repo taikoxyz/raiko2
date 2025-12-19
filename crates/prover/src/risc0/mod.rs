@@ -32,7 +32,7 @@ pub struct Risc0Config {
     pub verify: bool,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -81,7 +81,7 @@ pub struct Risc0Prover {
 
 impl Risc0Prover {
     /// Create a new RISC0 prover with the given configuration.
-    pub fn new(config: Risc0Config) -> Self {
+    pub const fn new(config: Risc0Config) -> Self {
         Self { config }
     }
 }

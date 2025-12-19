@@ -1,3 +1,7 @@
+#![allow(missing_docs)]
+#![allow(unreachable_pub)]
+#![allow(clippy::redundant_pub_crate)]
+
 //! Raiko V2 Protocol Types
 //!
 //! This crate provides Taiko Shasta protocol types and codecs.
@@ -22,6 +26,8 @@
 //! // Create a manifest for proof generation
 //! let manifest = TaikoManifest::default();
 //! ```
+
+#![allow(missing_docs)]
 
 mod libhash;
 mod manifest;

@@ -1,5 +1,6 @@
 //! Aggregates Shasta proposal proofs on SP1
 #![no_main]
+#![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
 use alloy_primitives::B256;

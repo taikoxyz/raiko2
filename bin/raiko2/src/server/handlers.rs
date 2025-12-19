@@ -79,7 +79,7 @@ pub enum ProofStatus {
     Cancelled,
 }
 
-fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus {
+const fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus {
     match state {
         TaskState::Pending { .. } | TaskState::Ready => ProofStatus::Pending,
         TaskState::Retrying { .. } => ProofStatus::Pending,

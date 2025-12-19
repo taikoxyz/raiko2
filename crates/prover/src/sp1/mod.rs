@@ -31,7 +31,7 @@ pub struct Sp1Config {
     pub verify: bool,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -119,7 +119,7 @@ pub struct Sp1Prover {
 
 impl Sp1Prover {
     /// Create a new SP1 prover with the given configuration.
-    pub fn new(config: Sp1Config) -> Self {
+    pub const fn new(config: Sp1Config) -> Self {
         Self { config }
     }
 }

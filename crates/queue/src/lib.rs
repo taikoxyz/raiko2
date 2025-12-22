@@ -12,4 +12,4 @@ mod types;
 pub use redis_store::RedisStore;
 pub use scheduler::{NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskLease, TaskView};
 pub use store::{MemoryStore, StoreResult, TaskStore, TaskStoreError};
-pub use types::{Priority, TaskId, TaskKind, TaskState};
+pub use types::{Priority, TaskId, TaskIdCodecError, TaskState, decode_task_id, encode_task_id};

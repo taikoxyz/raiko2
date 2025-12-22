@@ -42,7 +42,7 @@ COPY rust-toolchain rust-toolchain
 
 # Copy raiko2 crates
 COPY crates/primitives crates/primitives
-COPY crates/driver crates/driver
+COPY crates/pipeline crates/pipeline
 COPY crates/provider crates/provider
 COPY crates/stateless crates/stateless
 COPY crates/prover crates/prover

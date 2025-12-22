@@ -14,8 +14,8 @@ pub struct ProofRequest {
     pub l1_chain_id: u64,
     /// The L2 chain ID.
     pub l2_chain_id: u64,
-    /// The batch ID to prove.
-    pub batch_id: u64,
+    /// The proposal ID to prove.
+    pub proposal_id: u64,
     /// The proof type (risc0, sp1).
     pub proof_type: String,
     /// The blob proof type.
@@ -31,7 +31,7 @@ impl Default for ProofRequest {
         Self {
             l1_chain_id: 1,
             l2_chain_id: 167000,
-            batch_id: 0,
+            proposal_id: 0,
             proof_type: "risc0".to_string(),
             blob_proof_type: None,
             prover: None,
@@ -69,7 +69,7 @@ mod tests {
         let req = ProofRequest::default();
         assert_eq!(req.l1_chain_id, 1);
         assert_eq!(req.l2_chain_id, 167000);
-        assert_eq!(req.batch_id, 0);
+        assert_eq!(req.proposal_id, 0);
         assert_eq!(req.proof_type, "risc0");
         assert!(req.blob_proof_type.is_none());
         assert!(req.prover.is_none());
@@ -81,7 +81,7 @@ mod tests {
         let req = ProofRequest {
             l1_chain_id: 1,
             l2_chain_id: 167000,
-            batch_id: 123,
+            proposal_id: 123,
             proof_type: "sp1".to_string(),
             blob_proof_type: Some("kzg".to_string()),
             prover: Some("0x1234".to_string()),
@@ -91,7 +91,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: ProofRequest = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(req.batch_id, deserialized.batch_id);
+        assert_eq!(req.proposal_id, deserialized.proposal_id);
         assert_eq!(req.proof_type, deserialized.proof_type);
         assert_eq!(req.blob_proof_type, deserialized.blob_proof_type);
     }

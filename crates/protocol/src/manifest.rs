@@ -1,6 +1,6 @@
-//! Taiko manifest types for batch proofs.
+//! Taiko manifest types for proposal proofs.
 //!
-//! This module contains the manifest types used for Taiko batch proof generation.
+//! This module contains the manifest types used for Taiko proposal proof generation.
 //! These types describe the input data structure for zkVM guest programs.
 
 use alloy_consensus::Header;
@@ -35,7 +35,7 @@ impl FromStr for BlobProofType {
     }
 }
 
-/// Input data source for batch proof.
+/// Input data source for proposal proof.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InputDataSource {
     pub tx_data_from_calldata: Vec<u8>,
@@ -68,23 +68,23 @@ pub struct ManifestChainSpec {
     pub is_taiko: bool,
 }
 
-/// Taiko batch input manifest for guest programs.
+/// Taiko proposal input manifest for guest programs.
 ///
 /// This manifest describes all the data needed for a zkVM guest to
-/// verify a batch of Taiko L2 blocks.
+/// verify a proposal of Taiko L2 blocks.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TaikoManifest {
-    /// The batch ID being proven.
-    pub batch_id: u64,
-    /// The L1 header at which the batch was proposed.
+    /// The proposal ID being proven.
+    pub proposal_id: u64,
+    /// The L1 header at which the proposal was proposed.
     pub l1_header: Header,
-    /// The decoded batch proposal event data.
-    pub batch_proposed: ShastaEventData,
+    /// The decoded proposal event data.
+    pub proposal_event: ShastaEventData,
     /// Chain specification for the manifest.
     pub chain_spec: ManifestChainSpec,
     /// Prover-specific data.
     pub prover_data: TaikoProverData,
-    /// Data sources for the batch.
+    /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
 }
 
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn test_taiko_manifest_default() {
         let manifest = TaikoManifest::default();
-        assert_eq!(manifest.batch_id, 0);
+        assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
     }
 

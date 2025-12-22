@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/driver",
+    "crates/pipeline",
+    "crates/guests",
     "crates/primitives",
     "crates/stateless",
     "crates/provider",
@@ -9,11 +10,10 @@ members = [
     "crates/prover",
     "crates/protocol",
     "crates/queue",
-    "crates/guest-sp1",
-    "crates/guest-risc0",
     "bin/raiko2",
     "bin/rpc-proxy",
 ]
+exclude = ["guests/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -40,12 +40,13 @@ lto = true
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
 raiko2-prover = { path = "./crates/prover" }
-raiko2-driver = { path = "./crates/driver" }
+raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
 raiko2-queue = { path = "./crates/queue" }
+raiko2-guests = { path = "./crates/guests" }
 
 # zkVM
 risc0-zkvm = "3.0.4"

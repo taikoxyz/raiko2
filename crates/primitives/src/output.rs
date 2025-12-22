@@ -13,10 +13,10 @@ pub struct GuestOutput {
     pub hash: B256,
 }
 
-/// Guest batch output for multiple blocks.
+/// Guest proposal output for multiple blocks.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct GuestBatchOutput {
+pub struct GuestProposalOutput {
     pub blocks: Vec<Block>,
     pub hash: B256,
 }

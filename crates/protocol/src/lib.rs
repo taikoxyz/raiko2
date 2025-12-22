@@ -9,8 +9,8 @@
 //!
 //! - Decoding Shasta inbox events (Proposed, Proved)
 //! - Encoding/decoding derivation source manifests
-//! - Block manifest structures for batch proposals
-//! - Taiko batch manifest types for zkVM guest programs
+//! - Block manifest structures for proposals
+//! - Taiko proposal manifest types for zkVM guest programs
 //!
 //! ## Usage
 //!

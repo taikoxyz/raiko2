@@ -1,9 +1,9 @@
 //! Helpers for zkVM guest programs.
 
-use crate::{
+use raiko2_primitives::{
     GuestInput, ShastaZkAggregationGuestInput, StatelessInput,
     instance::{
-        ProtocolInstance, ShastaBatchMetadata, ShastaTransition,
+        ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output,
     },
@@ -21,7 +21,7 @@ pub struct TaikoRuntime {
 }
 
 impl TaikoRuntime {
-    fn from_chain_spec(chain_spec: &crate::ChainSpec) -> Result<Self> {
+    fn from_chain_spec(chain_spec: &raiko2_primitives::ChainSpec) -> Result<Self> {
         let chain_spec = chain_spec.to_taiko_chain_spec()?;
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
         Ok(Self {
@@ -118,16 +118,16 @@ where
         state_root: last_block.header.state_root,
     };
 
-    let batch_metadata = ShastaBatchMetadata {
+    let proposal_metadata = ShastaProposalMetadata {
         info_hash: B256::ZERO,
         proposer: proof_carry_data.transition_input.transition.proposer,
-        batch_id: guest_input.taiko.batch_id,
+        proposal_id: guest_input.taiko.proposal_id,
         proposed_at: proof_carry_data.transition_input.transition.timestamp,
     };
 
     let protocol_instance = ProtocolInstance {
         transition,
-        batch_metadata,
+        proposal_metadata,
         prover: proof_carry_data.transition_input.actual_prover,
         chain_id: proof_carry_data.chain_id,
         verifier_address: proof_carry_data.verifier,
@@ -188,9 +188,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chain_spec::Eip1559Constants;
-    use crate::instance::{ProtocolInstance, ShastaBatchMetadata, ShastaTransition};
-    use crate::{ChainSpec, StatelessInput, TaikoManifest};
+    use raiko2_primitives::chain_spec::Eip1559Constants;
+    use raiko2_primitives::instance::{ProtocolInstance, ShastaProposalMetadata, ShastaTransition};
+    use raiko2_primitives::{ChainSpec, StatelessInput, TaikoManifest};
     use alloy_primitives::{Address, B256};
     use raiko2_protocol::{TransitionInputData, hash_shasta_subproof_input};
     use reth_revm::primitives::hardfork::SpecId;
@@ -219,7 +219,7 @@ mod tests {
         let guest_input = GuestInput {
             witnesses: vec![input.clone()],
             taiko: TaikoManifest {
-                batch_id: 42,
+                proposal_id: 42,
                 ..Default::default()
             },
         };
@@ -251,16 +251,16 @@ mod tests {
             state_root: input.block.header.state_root,
         };
 
-        let batch_metadata = ShastaBatchMetadata {
+        let proposal_metadata = ShastaProposalMetadata {
             info_hash: B256::ZERO,
             proposer: proof_carry_data.transition_input.transition.proposer,
-            batch_id: guest_input.taiko.batch_id,
+            proposal_id: guest_input.taiko.proposal_id,
             proposed_at: proof_carry_data.transition_input.transition.timestamp,
         };
 
         let expected_instance = ProtocolInstance {
             transition,
-            batch_metadata,
+            proposal_metadata,
             prover: proof_carry_data.transition_input.actual_prover,
             chain_id: proof_carry_data.chain_id,
             verifier_address: proof_carry_data.verifier,
@@ -294,7 +294,7 @@ mod tests {
         let guest_input = GuestInput {
             witnesses: vec![first, second],
             taiko: TaikoManifest {
-                batch_id: 42,
+                proposal_id: 42,
                 ..Default::default()
             },
         };
@@ -330,7 +330,7 @@ mod tests {
         let guest_input = GuestInput {
             witnesses: vec![input],
             taiko: TaikoManifest {
-                batch_id: 1,
+                proposal_id: 1,
                 ..Default::default()
             },
         };

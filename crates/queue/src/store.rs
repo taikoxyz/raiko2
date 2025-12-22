@@ -1,7 +1,8 @@
-use crate::{Priority, TaskId, TaskKind, TaskState};
+use crate::{Priority, TaskId, TaskState};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
+use std::hash::Hash;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -57,80 +58,76 @@ impl Error for TaskStoreError {
 }
 
 #[async_trait]
-pub trait TaskStore<P, O>: Send + Sync
+pub trait TaskStore<P, O, Id>: Send + Sync
 where
     O: Clone,
+    Id: Send + Sync,
 {
     async fn insert_task(
         &self,
-        id: TaskId,
-        kind: TaskKind,
+        id: TaskId<Id>,
         payload: P,
         prio: Priority,
-        deps: Vec<TaskId>,
-    ) -> StoreResult<()>;
-    async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>>;
-    async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()>;
-    async fn get_view(
-        &self,
-        id: &TaskId,
-    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>>;
-    async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>>;
-    async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize>;
-    async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>>;
-    async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()>;
-    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>>;
+        deps: Vec<TaskId<Id>>,
+    ) -> StoreResult<bool>;
+    async fn get_state(&self, id: &TaskId<Id>) -> StoreResult<Option<TaskState<O, Id>>>;
+    async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()>;
+    async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
+    async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
+    async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
+    async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>>;
+    async fn push_ready(&self, prio: Priority, id: TaskId<Id>) -> StoreResult<()>;
+    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId<Id>>>;
     async fn take_ready(
         &self,
-        id: &TaskId,
+        id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>>;
+    ) -> StoreResult<Option<(P, Priority, u32)>>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
-            if let Some((payload, kind, priority, attempt)) = self.take_ready(&id, worker).await? {
-                return Ok(Some((id, payload, kind, priority, attempt)));
+            if let Some((payload, priority, attempt)) = self.take_ready(&id, worker).await? {
+                return Ok(Some((id, payload, priority, attempt)));
             }
         }
     }
-    async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()>;
-    async fn schedule(&self, id: TaskId, not_before_ms: u64) -> StoreResult<()>;
+    async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()>;
+    async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()>;
     async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
     async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
 }
 
-pub struct MemoryStore<P, O> {
-    inner: Mutex<Inner<P, O>>,
+pub struct MemoryStore<P, O, Id> {
+    inner: Mutex<Inner<P, O, Id>>,
     lease: Duration,
 }
 
-struct Inner<P, O> {
-    tasks: HashMap<TaskId, TaskRecord<P, O>>,
-    dependents: HashMap<TaskId, Vec<TaskId>>,
-    remaining: HashMap<TaskId, usize>,
-    ready_high: VecDeque<TaskId>,
-    ready_med: VecDeque<TaskId>,
-    ready_low: VecDeque<TaskId>,
-    scheduled: BTreeMap<u64, VecDeque<TaskId>>,
+struct Inner<P, O, Id> {
+    tasks: HashMap<TaskId<Id>, TaskRecord<P, O, Id>>,
+    dependents: HashMap<TaskId<Id>, Vec<TaskId<Id>>>,
+    remaining: HashMap<TaskId<Id>, usize>,
+    ready_high: VecDeque<TaskId<Id>>,
+    ready_med: VecDeque<TaskId<Id>>,
+    ready_low: VecDeque<TaskId<Id>>,
+    scheduled: BTreeMap<u64, VecDeque<TaskId<Id>>>,
 }
 
-struct TaskRecord<P, O> {
+struct TaskRecord<P, O, Id> {
     payload: Option<P>,
-    state: TaskState<O>,
+    state: TaskState<O, Id>,
     priority: Priority,
-    kind: TaskKind,
     attempt: u32,
     lease_until_ms: Option<u64>,
 }
 
-impl<P, O> MemoryStore<P, O> {
+impl<P, O, Id> MemoryStore<P, O, Id> {
     pub fn new() -> Self {
         Self::with_lease(Duration::from_secs(60))
     }
@@ -151,26 +148,33 @@ impl<P, O> MemoryStore<P, O> {
     }
 }
 
-impl<P, O> Default for MemoryStore<P, O> {
+impl<P, O, Id> Default for MemoryStore<P, O, Id> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for MemoryStore<P, O> {
+impl<P, O, Id> TaskStore<P, O, Id> for MemoryStore<P, O, Id>
+where
+    P: Clone + Send + 'static,
+    O: Clone + Send + 'static,
+    Id: Clone + Eq + Hash + Send + Sync + 'static,
+{
     async fn insert_task(
         &self,
-        id: TaskId,
-        kind: TaskKind,
+        id: TaskId<Id>,
         payload: P,
         prio: Priority,
-        deps: Vec<TaskId>,
-    ) -> StoreResult<()> {
+        deps: Vec<TaskId<Id>>,
+    ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
-        g.remaining.insert(id, deps.len());
+        if g.tasks.contains_key(&id) {
+            return Ok(false);
+        }
+        g.remaining.insert(id.clone(), deps.len());
         for dep in deps {
-            g.dependents.entry(dep).or_default().push(id);
+            g.dependents.entry(dep).or_default().push(id.clone());
         }
         let remaining = g.remaining.get(&id).copied().unwrap_or(0);
         g.tasks.insert(
@@ -179,21 +183,20 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
                 payload: Some(payload),
                 state: TaskState::pending(remaining),
                 priority: prio,
-                kind,
                 attempt: 0,
                 lease_until_ms: None,
             },
         );
 
-        Ok(())
+        Ok(true)
     }
 
-    async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>> {
+    async fn get_state(&self, id: &TaskId<Id>) -> StoreResult<Option<TaskState<O, Id>>> {
         let g = self.inner.lock().await;
         Ok(g.tasks.get(id).map(|r| &r.state).cloned())
     }
 
-    async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()> {
+    async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         if let Some(r) = g.tasks.get_mut(id) {
             r.state = state;
@@ -205,24 +208,21 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         Ok(())
     }
 
-    async fn get_view(
-        &self,
-        id: &TaskId,
-    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+    async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>> {
         let g = self.inner.lock().await;
         let record = g.tasks.get(id);
-        Ok(record.map(|r| (r.state.clone(), r.kind, r.priority)))
+        Ok(record.map(|r| (r.state.clone(), r.priority)))
     }
 
-    async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
+    async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>> {
         let g = self.inner.lock().await;
         Ok(g.dependents.get(dep).cloned().unwrap_or_default())
     }
 
-    async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize> {
+    async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize> {
         let mut g = self.inner.lock().await;
         let remaining = {
-            let entry = g.remaining.entry(*id).or_insert(0);
+            let entry = g.remaining.entry(id.clone()).or_insert(0);
             if *entry > 0 {
                 *entry -= 1;
             }
@@ -238,7 +238,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         Ok(remaining)
     }
 
-    async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>> {
+    async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>> {
         let mut g = self.inner.lock().await;
         let remaining = g.remaining.get(id).copied().unwrap_or(0);
         if remaining != 0 {
@@ -256,7 +256,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         }
     }
 
-    async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()> {
+    async fn push_ready(&self, prio: Priority, id: TaskId<Id>) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         match prio {
             Priority::High => g.ready_high.push_back(id),
@@ -267,7 +267,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         Ok(())
     }
 
-    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
+    async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId<Id>>> {
         let mut g = self.inner.lock().await;
         let id = match prio {
             Priority::High => g.ready_high.pop_front(),
@@ -279,9 +279,9 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
 
     async fn take_ready(
         &self,
-        id: &TaskId,
+        id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(P, Priority, u32)>> {
         let mut g = self.inner.lock().await;
         let Some(record) = g.tasks.get_mut(id) else {
             return Ok(None);
@@ -301,10 +301,10 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         };
         let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
-        Ok(Some((payload, record.kind, record.priority, attempt)))
+        Ok(Some((payload, record.priority, attempt)))
     }
 
-    async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
+    async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         if let Some(record) = g.tasks.get_mut(id) {
             record.payload = Some(payload);
@@ -313,7 +313,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         Ok(())
     }
 
-    async fn schedule(&self, id: TaskId, not_before_ms: u64) -> StoreResult<()> {
+    async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
         g.scheduled.entry(not_before_ms).or_default().push_back(id);
         Ok(())
@@ -375,7 +375,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         let mut g = self.inner.lock().await;
         let mut expired = Vec::new();
 
-        for (&id, record) in g.tasks.iter_mut() {
+        for (id, record) in g.tasks.iter_mut() {
             if expired.len() >= limit {
                 break;
             }
@@ -392,10 +392,10 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
 
             record.state = TaskState::Ready;
             record.lease_until_ms = None;
-            expired.push(id);
+            expired.push(id.clone());
         }
 
-        for id in expired.iter().copied() {
+        for id in expired.iter().cloned() {
             let Some(record) = g.tasks.get(&id) else {
                 continue;
             };
@@ -425,9 +425,9 @@ mod tests {
 
     #[tokio::test]
     async fn ready_push_pop_respects_priority() {
-        let store: MemoryStore<(), ()> = MemoryStore::new();
-        let a = TaskId::new();
-        let b = TaskId::new();
+        let store: MemoryStore<(), (), u64> = MemoryStore::new();
+        let a = TaskId::new(1);
+        let b = TaskId::new(2);
         store.push_ready(Priority::Low, a).await.unwrap();
         store.push_ready(Priority::High, b).await.unwrap();
         assert_eq!(store.pop_ready(Priority::High).await.unwrap(), Some(b));

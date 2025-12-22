@@ -3,7 +3,8 @@
 #![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
-use raiko2_primitives::{guest::prove_shasta_proposal, GuestInput};
+use raiko2_guest_common::prove_shasta_proposal;
+use raiko2_primitives::GuestInput;
 use raiko2_protocol::ProofCarryData;
 
 pub fn main() {

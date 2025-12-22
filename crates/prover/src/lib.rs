@@ -25,18 +25,31 @@
 pub mod risc0;
 pub mod sp1;
 
-use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
+use raiko2_pipeline::{PipelineSpec, ProverBackend};
+use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoResult};
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
-pub trait Prover: Send + Sync {
+pub trait Prover<S, B>: Send + Sync
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend,
+{
     /// Generate a proof for the given input.
-    async fn prove(&self, input: GuestInput, config: &ProverConfig) -> ProverResult<Proof>;
+    async fn prove(
+        &self,
+        input: GuestInput,
+        config: &ProverConfig,
+        spec: &S,
+        backend: &B,
+    ) -> RaikoResult<Proof>;
 
     /// Generate an aggregation proof.
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-    ) -> ProverResult<Proof>;
+        spec: &S,
+        backend: &B,
+    ) -> RaikoResult<Proof>;
 }

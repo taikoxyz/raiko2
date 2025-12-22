@@ -6,8 +6,9 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use raiko2_engine::EngineTaskKey;
 use raiko2_engine::tasks::EngineOutput;
-use raiko2_queue::{TaskId, TaskState};
+use raiko2_queue::{TaskState, decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -45,11 +46,11 @@ pub async fn get_info(State(state): State<AppState>) -> Json<InfoResponse> {
     })
 }
 
-/// Batch proof request.
+/// Proposal proof request.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // Fields will be used when full proof generation is implemented
-pub struct BatchProofRequest {
-    pub batch_id: u64,
+pub struct ProposalProofRequest {
+    pub proposal_id: u64,
     pub l1_inclusion_block: u64,
     #[serde(default)]
     pub prover_type: Option<String>,
@@ -79,7 +80,7 @@ pub enum ProofStatus {
     Cancelled,
 }
 
-const fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus {
+const fn status_from_task_state(state: &TaskState<EngineOutput, EngineTaskKey>) -> ProofStatus {
     match state {
         TaskState::Pending { .. } | TaskState::Ready => ProofStatus::Pending,
         TaskState::Retrying { .. } => ProofStatus::Pending,
@@ -90,27 +91,31 @@ const fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus 
     }
 }
 
-/// Request a batch proof.
-pub async fn request_batch_proof(
+/// Request a proposal proof.
+pub async fn request_proposal_proof(
     State(state): State<AppState>,
-    Json(req): Json<BatchProofRequest>,
+    Json(req): Json<ProposalProofRequest>,
 ) -> Result<Json<ProofResponse>, ApiError> {
     info!(
-        "Received batch proof request: batch_id={}, l1_block={}",
-        req.batch_id, req.l1_inclusion_block
+        "Received proposal proof request: proposal_id={}, l1_block={}",
+        req.proposal_id, req.l1_inclusion_block
     );
 
     let id = state
         .engine
-        .submit_batch_proof(req.batch_id)
+        .submit_proposal_proof(req.proposal_id)
         .await
         .map_err(|e| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("Failed to enqueue proof job: {e}"),
         })?;
+    let id = encode_task_id(&id).map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Failed to encode task id: {e}"),
+    })?;
 
     Ok(Json(ProofResponse {
-        id: id.to_string(),
+        id,
         status: ProofStatus::Pending,
     }))
 }
@@ -122,7 +127,7 @@ pub async fn get_proof_status(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Getting proof status for: {}", id);
 
-    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+    let task_id = decode_task_id::<EngineTaskKey>(&id).map_err(|e| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: format!("Invalid task id '{id}': {e}"),
     })?;
@@ -143,7 +148,7 @@ pub async fn get_proof_status(
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {
             output: EngineOutput::Proof(proof),
-        } => (proof.proof, None),
+        } => (proof.output.proof, None),
         TaskState::Failed { error, .. } => (None, Some(error)),
         TaskState::Retrying { error, .. } => (None, Some(error)),
         _ => (None, None),
@@ -175,15 +180,19 @@ pub async fn cancel_proof(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Cancelling proof: {}", id);
 
-    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+    let task_id = decode_task_id::<EngineTaskKey>(&id).map_err(|e| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    state.engine.cancel(task_id).await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        message: format!("Failed to cancel proof job: {e}"),
-    })?;
+    state
+        .engine
+        .cancel(task_id.clone())
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to cancel proof job: {e}"),
+        })?;
 
     let view = state
         .engine
@@ -201,7 +210,7 @@ pub async fn cancel_proof(
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {
             output: EngineOutput::Proof(proof),
-        } => (proof.proof, None),
+        } => (proof.output.proof, None),
         TaskState::Failed { error, .. } => (None, Some(error)),
         _ => (None, None),
     };

@@ -10,7 +10,6 @@
 mod chain_spec;
 mod context;
 mod error;
-pub mod guest;
 mod input;
 pub mod instance;
 mod output;
@@ -25,5 +24,5 @@ pub use input::{
     ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, StatelessInput, TaikoManifest,
     TaikoProverData,
 };
-pub use output::{AggregationGuestOutput, GuestBatchOutput, GuestOutput};
-pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig, ProverError, ProverResult};
+pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
+pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};

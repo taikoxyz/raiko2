@@ -1,29 +1,59 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use raiko2_primitives::{AggregationGuestInput, ProverConfig};
+use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
+use raiko2_primitives::{AggregationGuestInput, ProofContext};
 use raiko2_prover::Prover;
+use raiko2_provider::Provider;
 use raiko2_queue::{
-    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskKind,
-    TaskState, TaskStoreError, TaskView,
+    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskState,
+    TaskStoreError, TaskView,
 };
 
-use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
-use crate::tasks::{EngineOutput, EngineTask};
+use crate::tasks::{EngineOutput, EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
 
-#[derive(Clone)]
-pub struct EngineQueue {
-    inner: Arc<Inner>,
+pub struct Engine<S, B, P>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend,
+    P: Provider,
+{
+    inner: Arc<Inner<S, B, P>>,
 }
 
-struct Inner {
-    scheduler: Scheduler<EngineTask, EngineOutput>,
-    prover: Arc<dyn Prover>,
-    config: ProverConfig,
-    guest_input_builder: Arc<dyn GuestInputBuilder>,
+struct Inner<S, B, P>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend,
+    P: Provider,
+{
+    spec: S,
+    backend: B,
+    provider: P,
+    scheduler: Scheduler<EngineTask, EngineOutput, EngineTaskKey>,
+    prover: Arc<dyn Prover<S, B>>,
+    context: ProofContext,
 }
 
-impl EngineQueue {
+impl<S, B, P> Clone for Engine<S, B, P>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend,
+    P: Provider,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<S, B, P> Engine<S, B, P>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend,
+    P: Provider,
+{
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
@@ -35,91 +65,140 @@ impl EngineQueue {
         }
     }
 
-    pub fn new(prover: Arc<dyn Prover>) -> Self {
-        Self::with_store_and_builder(
+    pub fn new(
+        spec: S,
+        backend: B,
+        provider: P,
+        prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
+    ) -> Self {
+        Self::with_store_and_scheduler_config(
+            spec,
+            backend,
+            provider,
             prover,
+            context,
             MemoryStore::new(),
-            Arc::new(DefaultGuestInputBuilder),
-        )
-    }
-
-    pub fn with_store<S>(prover: Arc<dyn Prover>, store: S) -> Self
-    where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
-    {
-        Self::with_store_and_builder(prover, store, Arc::new(DefaultGuestInputBuilder))
-    }
-
-    pub fn with_store_and_builder<S>(
-        prover: Arc<dyn Prover>,
-        store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder>,
-    ) -> Self
-    where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
-    {
-        Self::with_store_and_builder_and_scheduler_config(
-            prover,
-            store,
-            guest_input_builder,
             Self::default_scheduler_config(),
         )
     }
 
-    pub fn with_store_and_builder_and_scheduler_config<S>(
-        prover: Arc<dyn Prover>,
-        store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder>,
+    pub fn with_store<Store>(
+        spec: S,
+        backend: B,
+        provider: P,
+        prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
+        store: Store,
+    ) -> Self
+    where
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
+    {
+        Self::with_store_and_scheduler_config(
+            spec,
+            backend,
+            provider,
+            prover,
+            context,
+            store,
+            Self::default_scheduler_config(),
+        )
+    }
+
+    pub fn with_store_and_scheduler_config<Store>(
+        spec: S,
+        backend: B,
+        provider: P,
+        prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
+        store: Store,
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
     {
         Self {
             inner: Arc::new(Inner {
+                spec,
+                backend,
+                provider,
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 prover,
-                config: ProverConfig::default(),
-                guest_input_builder,
+                context,
             }),
         }
     }
 
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
-        let input_task = self
+    fn context_for_proposal(&self, proposal_id: u64) -> ProofContext {
+        let mut ctx = self.inner.context.clone();
+        ctx.request.proposal_id = proposal_id;
+        ctx
+    }
+
+    const fn proposal_task_id(&self, proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Proposal { proposal_id, stage })
+    }
+
+    pub async fn submit_proposal_proof(
+        &self,
+        proposal_id: u64,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        let preflight_id = self.proposal_task_id(proposal_id, ProposalStage::Preflight);
+        let preflight_task = self
             .inner
             .scheduler
             .submit(
+                preflight_id,
                 NewTask {
-                    kind: TaskKind::BuildGuestInput,
                     priority: Priority::Low,
-                    payload: EngineTask::BuildGuestInput { batch_id },
+                    payload: EngineTask::Preflight { proposal_id },
                 },
                 vec![],
             )
             .await?;
 
+        let validation_id = self.proposal_task_id(proposal_id, ProposalStage::Validation);
+        let validation_task = self
+            .inner
+            .scheduler
+            .submit(
+                validation_id,
+                NewTask {
+                    priority: Priority::Low,
+                    payload: EngineTask::Validate {
+                        proposal_id,
+                        preflight_task: preflight_task.clone(),
+                    },
+                },
+                vec![preflight_task],
+            )
+            .await?;
+
+        let prove_id = self.proposal_task_id(proposal_id, ProposalStage::Prove);
         self.inner
             .scheduler
             .submit(
+                prove_id,
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveBatch {
-                        batch_id,
-                        input_task,
+                    payload: EngineTask::ProveProposal {
+                        proposal_id,
+                        input_task: validation_task.clone(),
                     },
                 },
-                vec![input_task],
+                vec![validation_task],
             )
             .await
     }
 
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<EngineOutput>>, TaskStoreError> {
+    pub async fn get(
+        &self,
+        id: EngineTaskId,
+    ) -> Result<Option<TaskView<EngineOutput, EngineTaskKey>>, TaskStoreError> {
         self.inner.scheduler.get(id).await
     }
 
-    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+    pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
         self.inner.scheduler.cancel(id).await
     }
 
@@ -133,7 +212,12 @@ impl EngineQueue {
         Ok(true)
     }
 
-    pub fn start_workers(&self, concurrency: usize) {
+    pub fn start_workers(&self, concurrency: usize)
+    where
+        S: 'static,
+        B: 'static,
+        P: 'static,
+    {
         self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
     }
 
@@ -141,7 +225,11 @@ impl EngineQueue {
         &self,
         concurrency: usize,
         maintenance_interval: Duration,
-    ) {
+    ) where
+        S: 'static,
+        B: 'static,
+        P: 'static,
+    {
         let notify = self.inner.scheduler.notifier();
         for i in 0..concurrency {
             spawn_worker_supervised(self.clone(), notify.clone(), format!("engine-{i}"));
@@ -152,14 +240,53 @@ impl EngineQueue {
 
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput, String> {
         match task {
-            EngineTask::BuildGuestInput { batch_id } => self
-                .inner
-                .guest_input_builder
-                .build_guest_input(batch_id)
-                .await
-                .map(|input| EngineOutput::GuestInput(Box::new(input))),
-            EngineTask::ProveBatch {
-                batch_id: _,
+            EngineTask::Preflight { proposal_id } => {
+                let ctx = self.context_for_proposal(proposal_id);
+                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                pipeline
+                    .preflight(&ctx, &self.inner.provider)
+                    .await
+                    .map(|input| EngineOutput::GuestInput(Box::new(input)))
+                    .map_err(|e| e.to_string())
+            }
+            EngineTask::Validate {
+                proposal_id,
+                preflight_task,
+            } => {
+                let input_view = self
+                    .inner
+                    .scheduler
+                    .get(preflight_task)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "missing preflight task".to_string())?;
+
+                let preflight_input = match input_view.state {
+                    TaskState::Succeeded {
+                        output: EngineOutput::GuestInput(input),
+                    } => match input.stage {
+                        PipelineStage::Preflight => input.output,
+                        _ => {
+                            return Err(
+                                "preflight task did not produce preflight output".to_string()
+                            );
+                        }
+                    },
+                    TaskState::Succeeded { .. } => {
+                        return Err("preflight task did not produce GuestInput".to_string());
+                    }
+                    _ => return Err("preflight task not completed".to_string()),
+                };
+
+                let ctx = self.context_for_proposal(proposal_id);
+                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                let validated = pipeline
+                    .validate(&ctx, preflight_input)
+                    .map_err(|e| e.to_string())?;
+                Ok(EngineOutput::GuestInput(Box::new(validated)))
+            }
+            EngineTask::ProveProposal {
+                proposal_id: _,
                 input_task,
             } => {
                 // NOTE: This relies on the store retaining task outputs until dependents
@@ -176,7 +303,14 @@ impl EngineQueue {
                 let guest_input = match input_view.state {
                     TaskState::Succeeded {
                         output: EngineOutput::GuestInput(input),
-                    } => *input,
+                    } => match input.stage {
+                        PipelineStage::Validation => input.output,
+                        _ => {
+                            return Err(
+                                "input task did not produce validated GuestInput".to_string()
+                            );
+                        }
+                    },
                     TaskState::Succeeded { .. } => {
                         return Err("input task did not produce GuestInput".to_string());
                     }
@@ -186,13 +320,21 @@ impl EngineQueue {
                 let proof = self
                     .inner
                     .prover
-                    .prove(guest_input, &self.inner.config)
+                    .prove(
+                        guest_input,
+                        &self.inner.context.config,
+                        &self.inner.spec,
+                        &self.inner.backend,
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(Box::new(proof)))
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    PipelineStage::Prove,
+                    proof,
+                ))))
             }
             EngineTask::Aggregate {
-                batch_ids: _,
+                proposal_ids: _,
                 proof_tasks,
             } => {
                 let mut proofs = Vec::with_capacity(proof_tasks.len());
@@ -207,7 +349,14 @@ impl EngineQueue {
                     match view.state {
                         TaskState::Succeeded {
                             output: EngineOutput::Proof(proof),
-                        } => proofs.push(*proof),
+                        } => match proof.stage {
+                            PipelineStage::Prove => proofs.push(proof.output),
+                            _ => {
+                                return Err(
+                                    "dependency task did not produce proposal proof".to_string()
+                                );
+                            }
+                        },
                         TaskState::Succeeded { .. } => {
                             return Err("dependency task did not produce Proof".to_string());
                         }
@@ -218,16 +367,32 @@ impl EngineQueue {
                 let proof = self
                     .inner
                     .prover
-                    .aggregate(AggregationGuestInput { proofs }, &self.inner.config)
+                    .aggregate(
+                        AggregationGuestInput { proofs },
+                        &self.inner.context.config,
+                        &self.inner.spec,
+                        &self.inner.backend,
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(Box::new(proof)))
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    PipelineStage::Aggregate,
+                    proof,
+                ))))
             }
         }
     }
 }
 
-fn spawn_worker_supervised(engine: EngineQueue, notify: Arc<tokio::sync::Notify>, worker: String) {
+fn spawn_worker_supervised<S, B, P>(
+    engine: Engine<S, B, P>,
+    notify: Arc<tokio::sync::Notify>,
+    worker: String,
+) where
+    S: PipelineSpec<B> + 'static,
+    B: ProverBackend + 'static,
+    P: Provider + 'static,
+{
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -265,7 +430,12 @@ fn spawn_worker_supervised(engine: EngineQueue, notify: Arc<tokio::sync::Notify>
     });
 }
 
-fn spawn_maintenance_supervised(engine: EngineQueue, maintenance_interval: Duration) {
+fn spawn_maintenance_supervised<S, B, P>(engine: Engine<S, B, P>, maintenance_interval: Duration)
+where
+    S: PipelineSpec<B> + 'static,
+    B: ProverBackend + 'static,
+    P: Provider + 'static,
+{
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -303,20 +473,32 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
+    use raiko2_pipeline::{
+        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
+    };
+    use raiko2_primitives::{
+        AggregationGuestInput, GuestInput, Proof, ProofContext, ProofRequest, ProverConfig,
+        RaikoError, RaikoResult,
+    };
     use raiko2_prover::Prover;
+    use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
-    use crate::input_builder::GuestInputBuilder;
-    use crate::queue::EngineQueue;
+    use crate::queue::Engine;
     use crate::tasks::EngineOutput;
 
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover for MockProver {
-        async fn prove(&self, input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-            assert_eq!(input.taiko.batch_id, 1);
+    impl Prover<TestSpec, TestBackend> for MockProver {
+        async fn prove(
+            &self,
+            input: GuestInput,
+            _config: &ProverConfig,
+            _spec: &TestSpec,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            assert_eq!(input.taiko.proposal_id, 1);
             Ok(Proof {
                 proof: Some("mock-proof".to_string()),
                 ..Default::default()
@@ -327,7 +509,9 @@ mod tests {
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-        ) -> ProverResult<Proof> {
+            _spec: &TestSpec,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
             Ok(Proof {
                 proof: Some("mock-agg-proof".to_string()),
                 ..Default::default()
@@ -338,45 +522,118 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover for FailingProver {
-        async fn prove(&self, _input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-            Err("boom".to_string().into())
+    impl Prover<TestSpec, TestBackend> for FailingProver {
+        async fn prove(
+            &self,
+            _input: GuestInput,
+            _config: &ProverConfig,
+            _spec: &TestSpec,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
+            Err(RaikoError::Guest("boom".to_string()))
         }
 
         async fn aggregate(
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-        ) -> ProverResult<Proof> {
+            _spec: &TestSpec,
+            _backend: &TestBackend,
+        ) -> RaikoResult<Proof> {
             Ok(Proof::default())
         }
     }
 
-    struct MockGuestInputBuilder;
+    struct TestBackend;
 
-    #[async_trait::async_trait]
-    impl GuestInputBuilder for MockGuestInputBuilder {
-        async fn build_guest_input(&self, batch_id: u64) -> Result<GuestInput, String> {
-            Ok(GuestInput {
-                taiko: raiko2_primitives::TaikoManifest {
-                    batch_id,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
+    impl ProverBackend for TestBackend {
+        fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+            Ok(&[])
         }
     }
 
+    struct TestSpec;
+    const NOOP_VALIDATION: NoopValidation = NoopValidation;
+    const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
+
+    #[async_trait::async_trait]
+    impl Preflight for TestSpec {
+        async fn preflight<P: Provider>(
+            &self,
+            ctx: &ProofContext,
+            _provider: &P,
+        ) -> RaikoResult<GuestInput> {
+            let mut input = GuestInput::default();
+            input.taiko.proposal_id = ctx.request.proposal_id;
+            Ok(input)
+        }
+    }
+
+    impl PipelineSpec<TestBackend> for TestSpec {
+        type Preflight = Self;
+        type Validation = NoopValidation;
+        type ManifestBuilder = NoopManifestBuilder;
+
+        fn preflight(&self) -> &Self::Preflight {
+            self
+        }
+
+        fn validation(&self) -> &Self::Validation {
+            &NOOP_VALIDATION
+        }
+
+        fn manifest_builder(&self) -> &Self::ManifestBuilder {
+            &NOOP_MANIFEST
+        }
+    }
+
+    struct MockProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn batch_blocks(
+            &self,
+            _blocks: &[u64],
+        ) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
+            Ok(vec![])
+        }
+
+        async fn batch_accounts(
+            &self,
+            _blocks: &[u64],
+            _accounts: &[Vec<alloy_primitives::Address>],
+        ) -> RaikoResult<Vec<alloy_primitives::map::AddressMap<alloy_trie::TrieAccount>>> {
+            Ok(vec![])
+        }
+
+        async fn batch_witnesses(
+            &self,
+            _blocks: &[u64],
+        ) -> RaikoResult<Vec<reth_stateless::ExecutionWitness>> {
+            Ok(vec![])
+        }
+    }
+
+    fn test_context() -> ProofContext {
+        ProofContext::new(ProofRequest::default(), ProverConfig::default())
+    }
+
     #[tokio::test]
-    async fn submit_batch_proof_runs_dependency_pipeline() {
-        let engine = EngineQueue::with_store_and_builder(
+    async fn submit_proposal_proof_runs_dependency_pipeline() {
+        let backend = TestBackend;
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec,
+            backend,
+            MockProvider,
             Arc::new(MockProver),
+            test_context(),
             raiko2_queue::MemoryStore::new(),
-            Arc::new(MockGuestInputBuilder),
+            Engine::default_scheduler_config(),
         );
 
-        let job_id = engine.submit_batch_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await.unwrap();
 
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(!engine.run_one("w1").await.unwrap());
@@ -386,7 +643,7 @@ mod tests {
             TaskState::Succeeded {
                 output: EngineOutput::Proof(proof),
             } => {
-                assert_eq!(proof.proof.as_deref(), Some("mock-proof"));
+                assert_eq!(proof.output.proof.as_deref(), Some("mock-proof"));
             }
             other => panic!("unexpected task state: {other:?}"),
         }
@@ -398,15 +655,20 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let engine = EngineQueue::with_store_and_builder_and_scheduler_config(
+        let backend = TestBackend;
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec,
+            backend,
+            MockProvider,
             Arc::new(FailingProver),
+            test_context(),
             raiko2_queue::MemoryStore::new(),
-            Arc::new(MockGuestInputBuilder),
             scheduler_config,
         );
 
-        let job_id = engine.submit_batch_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await.unwrap();
 
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
 

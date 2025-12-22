@@ -3,7 +3,8 @@
 #![allow(missing_docs)]
 risc0_zkvm::guest::entry!(main);
 
-use raiko2_primitives::{guest::prove_shasta_proposal, GuestInput};
+use raiko2_guest_common::prove_shasta_proposal;
+use raiko2_primitives::GuestInput;
 use raiko2_protocol::ProofCarryData;
 use risc0_zkvm::guest::env;
 

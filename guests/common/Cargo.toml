@@ -1,0 +1,15 @@
+[package]
+name = "raiko2-guest-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raiko2-primitives = { path = "../../crates/primitives" }
+raiko2-protocol = { path = "../../crates/protocol" }
+raiko2-stateless = { path = "../../crates/stateless" }
+alethia-reth-node = { git = "https://github.com/taikoxyz/alethia-reth" }
+alloy-primitives = { version = "1.5.0", default-features = false }
+anyhow = "1.0"
+
+[dev-dependencies]
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.9.3" }

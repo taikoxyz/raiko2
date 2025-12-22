@@ -1,33 +1,24 @@
-use std::{fmt, str::FromStr};
+use std::{error::Error, fmt};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TaskId(uuid::Uuid);
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TaskId<Id>(pub Id);
 
-impl TaskId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
+impl<Id> TaskId<Id> {
+    pub const fn new(id: Id) -> Self {
+        Self(id)
+    }
+
+    pub fn into_inner(self) -> Id {
+        self.0
     }
 }
 
-impl Default for TaskId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for TaskId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl FromStr for TaskId {
-    type Err = uuid::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(uuid::Uuid::parse_str(s)?))
+impl<Id> From<Id> for TaskId<Id> {
+    fn from(id: Id) -> Self {
+        Self(id)
     }
 }
 
@@ -38,16 +29,8 @@ pub enum Priority {
     Low,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskKind {
-    Preflight,
-    BuildGuestInput,
-    BatchProof,
-    Aggregation,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskState<O> {
+pub enum TaskState<O, Id> {
     Pending {
         remaining_deps: usize,
     },
@@ -66,17 +49,59 @@ pub enum TaskState<O> {
     },
     Failed {
         error: String,
-        caused_by_dep: Option<TaskId>,
+        caused_by_dep: Option<TaskId<Id>>,
     },
     Cancelled,
 }
 
-impl<O> TaskState<O> {
+impl<O, Id> TaskState<O, Id> {
     pub const fn pending(remaining: usize) -> Self {
         TaskState::Pending {
             remaining_deps: remaining,
         }
     }
+}
+
+#[derive(Debug)]
+pub struct TaskIdCodecError {
+    message: String,
+}
+
+impl TaskIdCodecError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for TaskIdCodecError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Error for TaskIdCodecError {}
+
+pub fn encode_task_id<Id>(id: &TaskId<Id>) -> Result<String, TaskIdCodecError>
+where
+    Id: Serialize,
+{
+    let bytes = bincode::serialize(&id.0)
+        .map_err(|e| TaskIdCodecError::new(format!("serialize task id: {e}")))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub fn decode_task_id<Id>(raw: &str) -> Result<TaskId<Id>, TaskIdCodecError>
+where
+    Id: for<'de> Deserialize<'de>,
+{
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .map_err(|e| TaskIdCodecError::new(format!("decode task id: {e}")))?;
+    let id = bincode::deserialize(&bytes)
+        .map_err(|e| TaskIdCodecError::new(format!("deserialize task id: {e}")))?;
+    Ok(TaskId(id))
 }
 
 #[cfg(test)]
@@ -85,8 +110,8 @@ mod tests {
 
     #[test]
     fn task_id_is_unique() {
-        let a = TaskId::new();
-        let b = TaskId::new();
+        let a = TaskId::new(1u64);
+        let b = TaskId::new(2u64);
         assert_ne!(a, b);
     }
 }

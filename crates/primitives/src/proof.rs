@@ -1,30 +1,9 @@
 //! Proof types for raiko2.
 
+use crate::RaikoResult;
 use alloy_primitives::{B256, ChainId};
 use raiko2_protocol::ProofCarryData;
 use serde::{Deserialize, Serialize};
-
-/// Prover error types.
-#[derive(thiserror::Error, Debug)]
-pub enum ProverError {
-    #[error("ProverError::GuestError `{0}`")]
-    GuestError(String),
-    #[error("ProverError::FileIo `{0}`")]
-    FileIo(#[from] std::io::Error),
-    #[error("ProverError::Param `{0}`")]
-    Param(#[from] serde_json::Error),
-    #[error("Store error `{0}`")]
-    StoreError(String),
-}
-
-impl From<String> for ProverError {
-    fn from(e: String) -> Self {
-        ProverError::GuestError(e)
-    }
-}
-
-/// Result type for prover operations.
-pub type ProverResult<T, E = ProverError> = core::result::Result<T, E>;
 
 /// Prover configuration (JSON value for flexibility).
 pub type ProverConfig = serde_json::Value;
@@ -66,12 +45,12 @@ impl std::fmt::Display for Proof {
 /// Trait for storing proof IDs.
 #[async_trait::async_trait]
 pub trait IdWrite: Send {
-    async fn store_id(&mut self, key: ProofKey, id: String) -> ProverResult<()>;
-    async fn remove_id(&mut self, key: ProofKey) -> ProverResult<()>;
+    async fn store_id(&mut self, key: ProofKey, id: String) -> RaikoResult<()>;
+    async fn remove_id(&mut self, key: ProofKey) -> RaikoResult<()>;
 }
 
 /// Trait for reading proof IDs.
 #[async_trait::async_trait]
 pub trait IdStore: IdWrite {
-    async fn read_id(&mut self, key: ProofKey) -> ProverResult<String>;
+    async fn read_id(&mut self, key: ProofKey) -> RaikoResult<String>;
 }

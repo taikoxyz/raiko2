@@ -4,9 +4,9 @@
 sp1_zkvm::entrypoint!(main);
 
 use alloy_primitives::B256;
+use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_primitives::{
-    guest::aggregate_shasta_zk_with_verifier, instance::words_to_bytes_be,
-    ShastaZkAggregationGuestInput,
+    instance::words_to_bytes_be, ShastaZkAggregationGuestInput,
 };
 use sha2::{Digest, Sha256};
 

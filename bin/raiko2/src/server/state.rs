@@ -5,11 +5,11 @@ use anyhow::Result;
 use raiko2_engine::tasks::EngineOutput;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey};
 use raiko2_pipeline::{
-    Risc0ShastaBackend, Sp1ShastaBackend,
+    NativeBackend, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
 use raiko2_primitives::{ProofContext, ProofRequest};
-use raiko2_prover::Prover;
+use raiko2_prover::{Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskStoreError, TaskView};
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub struct AppState {
 pub enum EngineHandle {
     Risc0(Engine<ShastaSpec, Risc0ShastaBackend, NetworkProvider>),
     Sp1(Engine<ShastaSpec, Sp1ShastaBackend, NetworkProvider>),
+    Native(Engine<ShastaSpec, NativeBackend, NetworkProvider>),
 }
 
 fn build_context(config: &Config, proof_type: &str) -> ProofContext {
@@ -58,6 +59,7 @@ impl EngineHandle {
         match self {
             EngineHandle::Risc0(engine) => engine.submit_proposal_proof(proposal_id).await,
             EngineHandle::Sp1(engine) => engine.submit_proposal_proof(proposal_id).await,
+            EngineHandle::Native(engine) => engine.submit_proposal_proof(proposal_id).await,
         }
     }
 
@@ -68,6 +70,7 @@ impl EngineHandle {
         match self {
             EngineHandle::Risc0(engine) => engine.get(id).await,
             EngineHandle::Sp1(engine) => engine.get(id).await,
+            EngineHandle::Native(engine) => engine.get(id).await,
         }
     }
 
@@ -75,6 +78,7 @@ impl EngineHandle {
         match self {
             EngineHandle::Risc0(engine) => engine.cancel(id).await,
             EngineHandle::Sp1(engine) => engine.cancel(id).await,
+            EngineHandle::Native(engine) => engine.cancel(id).await,
         }
     }
 
@@ -88,6 +92,9 @@ impl EngineHandle {
                 engine.start_workers_with_maintenance_interval(concurrency, maintenance_interval);
             }
             EngineHandle::Sp1(engine) => {
+                engine.start_workers_with_maintenance_interval(concurrency, maintenance_interval);
+            }
+            EngineHandle::Native(engine) => {
                 engine.start_workers_with_maintenance_interval(concurrency, maintenance_interval);
             }
         }
@@ -124,7 +131,7 @@ impl AppState {
                     execution_po2: 20,
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<ShastaSpec, Risc0ShastaBackend>> =
+                let prover: Arc<dyn Prover<Risc0ShastaBackend>> =
                     Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config));
                 let backend = RISC0_SHASTA_BACKEND;
                 let engine = match config.queue.backend {
@@ -190,7 +197,7 @@ impl AppState {
                     },
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<ShastaSpec, Sp1ShastaBackend>> =
+                let prover: Arc<dyn Prover<Sp1ShastaBackend>> =
                     Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config));
                 let backend = SP1_SHASTA_BACKEND;
                 let engine = match config.queue.backend {
@@ -241,6 +248,58 @@ impl AppState {
                     }
                 };
                 EngineHandle::Sp1(engine)
+            }
+            ProverType::Native => {
+                let prover: Arc<dyn Prover<NativeBackend>> = Arc::new(NativeProver::default());
+                let backend = NativeBackend::default();
+                let engine = match config.queue.backend {
+                    QueueBackend::Memory => {
+                        let provider = build_provider(&config)?;
+                        let context = build_context(&config, "native");
+                        Engine::with_store_and_scheduler_config(
+                            spec.clone(),
+                            backend,
+                            provider,
+                            prover,
+                            context,
+                            raiko2_queue::MemoryStore::new(),
+                            scheduler_config.clone(),
+                        )
+                    }
+                    QueueBackend::Redis => {
+                        #[cfg(feature = "redis-queue")]
+                        {
+                            let provider = build_provider(&config)?;
+                            let context = build_context(&config, "native");
+                            let url = config.queue.redis_url.clone().unwrap_or_default();
+                            let store = raiko2_queue::RedisStore::<
+                                EngineTask,
+                                EngineOutput,
+                                EngineTaskKey,
+                            >::connect(
+                                &url, &config.queue.namespace, Duration::from_secs(60)
+                            )
+                            .await?;
+                            Engine::with_store_and_scheduler_config(
+                                spec.clone(),
+                                backend,
+                                provider,
+                                prover,
+                                context,
+                                store,
+                                scheduler_config.clone(),
+                            )
+                        }
+
+                        #[cfg(not(feature = "redis-queue"))]
+                        {
+                            anyhow::bail!(
+                                "queue backend redis requires building raiko2 with `--features redis-queue`"
+                            );
+                        }
+                    }
+                };
+                EngineHandle::Native(engine)
             }
         };
 

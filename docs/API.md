@@ -43,7 +43,7 @@ GET /v1/info
 {
   "version": "0.1.0",
   "prover": "Risc0",
-  "supported_provers": ["risc0", "sp1"]
+  "supported_provers": ["risc0", "sp1", "native"]
 }
 ```
 
@@ -60,7 +60,7 @@ Content-Type: application/json
 | -------------------- | -------- | -------- | -------------------------------------------------- |
 | `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
 | `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
-| `prover_type`        | `string` | No       | Prover type: "risc0" or "sp1" (defaults to config) |
+| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", or "native" (defaults to config) |
 | `blob_proof_type`    | `string` | No       | Blob proof type: "kzg" or "proof_of_equivalence"   |
 | `prover`             | `string` | No       | Prover address (hex)                               |
 | `graffiti`           | `string` | No       | Custom graffiti string                             |

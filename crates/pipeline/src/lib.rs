@@ -5,7 +5,7 @@
 
 //! Raiko2 Pipeline - hardfork-specific manifest builders and pipeline specs.
 
-use raiko2_primitives::{GuestInput, ProofContext, RaikoResult, TaikoManifest};
+use raiko2_primitives::{GuestInput, ProofContext, RaikoError, RaikoResult, TaikoManifest};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,18 @@ pub trait PipelineSpec<B>: Send + Sync {
 /// Prover backend abstraction for selecting guest programs.
 pub trait ProverBackend: Send + Sync {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
+}
+
+/// Native backend placeholder (no ELF).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NativeBackend;
+
+impl ProverBackend for NativeBackend {
+    fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        Err(RaikoError::InvalidRequestConfig(
+            "native backend does not provide ELF".to_string(),
+        ))
+    }
 }
 
 /// RISC0 backend for Shasta guest programs.

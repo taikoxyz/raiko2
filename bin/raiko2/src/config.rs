@@ -104,6 +104,7 @@ pub enum ProverType {
     #[default]
     Risc0,
     Sp1,
+    Native,
 }
 
 impl std::str::FromStr for ProverType {
@@ -113,6 +114,7 @@ impl std::str::FromStr for ProverType {
         match s.to_lowercase().as_str() {
             "risc0" => Ok(ProverType::Risc0),
             "sp1" => Ok(ProverType::Sp1),
+            "native" => Ok(ProverType::Native),
             _ => Err(format!("Unknown prover type: {}", s)),
         }
     }
@@ -489,6 +491,8 @@ mod tests {
         assert_eq!("RISC0".parse::<ProverType>().unwrap(), ProverType::Risc0);
         assert_eq!("sp1".parse::<ProverType>().unwrap(), ProverType::Sp1);
         assert_eq!("SP1".parse::<ProverType>().unwrap(), ProverType::Sp1);
+        assert_eq!("native".parse::<ProverType>().unwrap(), ProverType::Native);
+        assert_eq!("NATIVE".parse::<ProverType>().unwrap(), ProverType::Native);
         assert!("invalid".parse::<ProverType>().is_err());
     }
 

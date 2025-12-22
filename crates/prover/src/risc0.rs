@@ -4,7 +4,7 @@
 //! zero-knowledge proofs of Taiko block execution.
 
 use alloy_primitives::B256;
-use raiko2_pipeline::{PipelineSpec, ProofStage, ProverBackend};
+use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{
     AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoError, RaikoResult,
     ShastaZkAggregationGuestInput,
@@ -85,16 +85,14 @@ impl Risc0Prover {
 }
 
 #[async_trait::async_trait]
-impl<S, B> crate::Prover<S, B> for Risc0Prover
+impl<B> crate::Prover<B> for Risc0Prover
 where
-    S: PipelineSpec<B>,
     B: ProverBackend,
 {
     async fn prove(
         &self,
         input: GuestInput,
         config: &ProverConfig,
-        _spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!("Starting RISC0 proposal proof generation...");
@@ -181,7 +179,6 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        _spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!(

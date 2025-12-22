@@ -22,17 +22,17 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
+pub mod native;
 pub mod risc0;
 pub mod sp1;
 
-use raiko2_pipeline::{PipelineSpec, ProverBackend};
+use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoResult};
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
-pub trait Prover<S, B>: Send + Sync
+pub trait Prover<B>: Send + Sync
 where
-    S: PipelineSpec<B>,
     B: ProverBackend,
 {
     /// Generate a proof for the given input.
@@ -40,7 +40,6 @@ where
         &self,
         input: GuestInput,
         config: &ProverConfig,
-        spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof>;
 
@@ -49,7 +48,6 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof>;
 }

@@ -42,7 +42,7 @@ pub async fn get_info(State(state): State<AppState>) -> Json<InfoResponse> {
     Json(InfoResponse {
         version: env!("CARGO_PKG_VERSION"),
         prover: format!("{:?}", state.config.prover.prover_type),
-        supported_provers: vec!["risc0", "sp1"],
+        supported_provers: vec!["risc0", "sp1", "native"],
     })
 }
 

@@ -8,6 +8,7 @@ Raiko V2 is the next-generation zkVM prover for Taiko, built on top of [alethia-
 - **alethia-reth Integration**: Uses Taiko's new reth fork for improved performance
 - **Shasta Protocol**: Native support for Taiko Shasta (Based Contestable Rollup)
 - **zkVM Provers**: Support for RISC0 and SP1 provers
+- **Native Prover**: Local execution with public-input output (no zk proof)
 
 ## Project Structure
 

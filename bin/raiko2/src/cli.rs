@@ -28,7 +28,7 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PORT", default_value = "8080")]
     pub port: u16,
 
-    /// Prover type (risc0, sp1)
+    /// Prover type (risc0, sp1, native)
     #[arg(long, env = "RAIKO2_PROVER", default_value = "risc0")]
     pub prover: String,
 

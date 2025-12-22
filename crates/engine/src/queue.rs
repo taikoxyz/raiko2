@@ -31,7 +31,7 @@ where
     backend: B,
     provider: P,
     scheduler: Scheduler<EngineTask, EngineOutput, EngineTaskKey>,
-    prover: Arc<dyn Prover<S, B>>,
+    prover: Arc<dyn Prover<B>>,
     context: ProofContext,
 }
 
@@ -69,7 +69,7 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<S, B>>,
+        prover: Arc<dyn Prover<B>>,
         context: ProofContext,
     ) -> Self {
         Self::with_store_and_scheduler_config(
@@ -87,7 +87,7 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<S, B>>,
+        prover: Arc<dyn Prover<B>>,
         context: ProofContext,
         store: Store,
     ) -> Self
@@ -109,7 +109,7 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<S, B>>,
+        prover: Arc<dyn Prover<B>>,
         context: ProofContext,
         store: Store,
         scheduler_config: SchedulerConfig,
@@ -320,12 +320,7 @@ where
                 let proof = self
                     .inner
                     .prover
-                    .prove(
-                        guest_input,
-                        &self.inner.context.config,
-                        &self.inner.spec,
-                        &self.inner.backend,
-                    )
+                    .prove(guest_input, &self.inner.context.config, &self.inner.backend)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
@@ -370,7 +365,6 @@ where
                     .aggregate(
                         AggregationGuestInput { proofs },
                         &self.inner.context.config,
-                        &self.inner.spec,
                         &self.inner.backend,
                     )
                     .await
@@ -490,12 +484,11 @@ mod tests {
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, TestBackend> for MockProver {
+    impl Prover<TestBackend> for MockProver {
         async fn prove(
             &self,
             input: GuestInput,
             _config: &ProverConfig,
-            _spec: &TestSpec,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             assert_eq!(input.taiko.proposal_id, 1);
@@ -509,7 +502,6 @@ mod tests {
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-            _spec: &TestSpec,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Ok(Proof {
@@ -522,12 +514,11 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, TestBackend> for FailingProver {
+    impl Prover<TestBackend> for FailingProver {
         async fn prove(
             &self,
             _input: GuestInput,
             _config: &ProverConfig,
-            _spec: &TestSpec,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Err(RaikoError::Guest("boom".to_string()))
@@ -537,7 +528,6 @@ mod tests {
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-            _spec: &TestSpec,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Ok(Proof::default())

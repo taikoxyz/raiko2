@@ -2,6 +2,7 @@
 
 use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
+use raiko2_driver::forks::shasta::ShastaSpec;
 use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
 use raiko2_engine::queue::EngineQueue;
 use raiko2_prover::Prover;
@@ -16,13 +17,13 @@ use raiko2_engine::tasks::{EngineOutput, EngineTask};
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub engine: EngineQueue,
+    pub engine: EngineQueue<ShastaSpec>,
 }
 
 impl AppState {
     /// Create new application state.
     pub async fn new(config: Config) -> Result<Self> {
-        let prover: Arc<dyn Prover> = match config.prover.prover_type {
+        let prover: Arc<dyn Prover<ShastaSpec>> = match config.prover.prover_type {
             ProverType::Risc0 => {
                 let risc0_config = raiko2_prover::risc0::Risc0Config {
                     bonsai: config.prover.risc0.bonsai,
@@ -51,12 +52,15 @@ impl AppState {
             }
         };
 
+        let spec = ShastaSpec::default();
+
         let proof_type = match config.prover.prover_type {
             ProverType::Risc0 => "risc0".to_string(),
             ProverType::Sp1 => "sp1".to_string(),
         };
-        let guest_input_builder: Arc<dyn GuestInputBuilder> = Arc::new(
+        let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec>> = Arc::new(
             NetworkGuestInputBuilder::new(
+                spec.clone(),
                 &config.rpc.l2_rpc,
                 config.rpc.l1_chain_id,
                 config.rpc.l2_chain_id,
@@ -85,6 +89,7 @@ impl AppState {
 
         let engine = match config.queue.backend {
             QueueBackend::Memory => EngineQueue::with_store_and_builder_and_scheduler_config(
+                spec.clone(),
                 prover,
                 raiko2_queue::MemoryStore::new(),
                 guest_input_builder.clone(),
@@ -101,6 +106,7 @@ impl AppState {
                     )
                     .await?;
                     EngineQueue::with_store_and_builder_and_scheduler_config(
+                        spec.clone(),
                         prover,
                         store,
                         guest_input_builder.clone(),

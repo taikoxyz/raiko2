@@ -1,32 +1,32 @@
-use async_trait::async_trait;
-use raiko2_driver::Driver;
+use raiko2_hardfork::HardforkSpec;
 use raiko2_primitives::{GuestInput, ProofContext, ProofRequest, ProverConfig, RaikoResult};
 use raiko2_provider::NetworkProvider;
 
-#[async_trait]
-pub trait GuestInputBuilder: Send + Sync {
+#[async_trait::async_trait]
+pub trait GuestInputBuilder<F: HardforkSpec>: Send + Sync {
     async fn build_guest_input(&self, batch_id: u64) -> Result<GuestInput, String>;
 }
 
 pub struct DefaultGuestInputBuilder;
 
-#[async_trait]
-impl GuestInputBuilder for DefaultGuestInputBuilder {
+#[async_trait::async_trait]
+impl<F: HardforkSpec> GuestInputBuilder<F> for DefaultGuestInputBuilder {
     async fn build_guest_input(&self, _batch_id: u64) -> Result<GuestInput, String> {
         Ok(GuestInput::default())
     }
 }
 
-pub struct NetworkGuestInputBuilder {
-    engine: crate::Engine<NetworkProvider>,
+pub struct NetworkGuestInputBuilder<F: HardforkSpec> {
+    engine: crate::Engine<NetworkProvider, F>,
     l1_chain_id: u64,
     l2_chain_id: u64,
     proof_type: String,
     config: ProverConfig,
 }
 
-impl NetworkGuestInputBuilder {
+impl<F: HardforkSpec> NetworkGuestInputBuilder<F> {
     pub fn new(
+        spec: F,
         rpc_url: &str,
         l1_chain_id: u64,
         l2_chain_id: u64,
@@ -35,7 +35,7 @@ impl NetworkGuestInputBuilder {
     ) -> RaikoResult<Self> {
         let provider = NetworkProvider::new(rpc_url)?;
         Ok(Self {
-            engine: crate::Engine::new(Driver::new(), provider),
+            engine: crate::Engine::new(spec, provider),
             l1_chain_id,
             l2_chain_id,
             proof_type,
@@ -44,8 +44,8 @@ impl NetworkGuestInputBuilder {
     }
 }
 
-#[async_trait]
-impl GuestInputBuilder for NetworkGuestInputBuilder {
+#[async_trait::async_trait]
+impl<F: HardforkSpec> GuestInputBuilder<F> for NetworkGuestInputBuilder<F> {
     async fn build_guest_input(&self, batch_id: u64) -> Result<GuestInput, String> {
         let ctx = ProofContext::new(
             ProofRequest {

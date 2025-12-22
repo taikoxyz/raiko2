@@ -10,6 +10,7 @@ workspace = true
 raiko2-driver.workspace = true
 raiko2-provider.workspace = true
 raiko2-primitives.workspace = true
+raiko2-hardfork.workspace = true
 raiko2-queue.workspace = true
 # raiko2-stateless.workspace = true # TODO: add validation back
 raiko2-prover.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "raiko2-guests"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

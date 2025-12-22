@@ -1,0 +1,15 @@
+[package]
+name = "raiko2-hardfork"
+version.workspace = true
+edition.workspace = true
+
+description = "Hardfork abstraction and traits for Raiko2 pipelines"
+
+[lints]
+workspace = true
+
+[dependencies]
+raiko2-primitives.workspace = true
+reth-ethereum-primitives.workspace = true
+async-trait.workspace = true
+raiko2-provider.workspace = true

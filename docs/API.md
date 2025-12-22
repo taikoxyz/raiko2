@@ -18,8 +18,6 @@ Currently no authentication is required. Production deployments should add authe
 
 ### Health Check
 
-Check if the server is running and healthy.
-
 ```http
 GET /health
 ```
@@ -29,18 +27,30 @@ GET /health
 ```json
 {
   "status": "ok",
+  "version": "0.1.0"
+}
+```
+
+### Server Info
+
+```http
+GET /v1/info
+```
+
+#### Response
+
+```json
+{
   "version": "0.1.0",
-  "prover": "risc0",
+  "prover": "Risc0",
   "supported_provers": ["risc0", "sp1"]
 }
 ```
 
 ### Request Batch Proof
 
-Request a proof for a batch of blocks.
-
 ```http
-POST /v2/proof/batch
+POST /v1/proof/batch
 Content-Type: application/json
 ```
 
@@ -49,7 +59,7 @@ Content-Type: application/json
 | Field                | Type     | Required | Description                                        |
 | -------------------- | -------- | -------- | -------------------------------------------------- |
 | `batch_id`           | `u64`    | Yes      | The batch ID to prove                              |
-| `l1_inclusion_block` | `u64`    | Yes      | The L1 block number where the batch was included   |
+| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the batch was included       |
 | `prover_type`        | `string` | No       | Prover type: "risc0" or "sp1" (defaults to config) |
 | `blob_proof_type`    | `string` | No       | Blob proof type: "kzg" or "proof_of_equivalence"   |
 | `prover`             | `string` | No       | Prover address (hex)                               |
@@ -70,7 +80,7 @@ Content-Type: application/json
 
 ```json
 {
-  "id": "proof-12345-50000-1733318400",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "pending"
 }
 ```
@@ -85,10 +95,8 @@ Content-Type: application/json
 
 ### Get Proof Status
 
-Query the status of a proof request.
-
 ```http
-GET /v2/proof/{proof_id}
+GET /v1/proof/{proof_id}
 ```
 
 #### Path Parameters
@@ -101,12 +109,10 @@ GET /v2/proof/{proof_id}
 
 ```json
 {
-  "id": "proof-12345-50000-1733318400",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
   "proof": "0x...",
-  "input": "0x...",
-  "created_at": "2025-12-04T15:00:00Z",
-  "completed_at": "2025-12-04T15:05:00Z"
+  "error": null
 }
 ```
 
@@ -120,21 +126,48 @@ GET /v2/proof/{proof_id}
 | `failed`    | Proof generation failed                         |
 | `cancelled` | Proof request was cancelled                     |
 
+### Cancel Proof
+
+```http
+POST /v1/proof/{proof_id}/cancel
+```
+
+#### Response
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "cancelled"
+}
+```
+
+Note: the status reflects the task state after the cancel attempt.
+
 ## Configuration
 
 ### Environment Variables
 
-| Variable             | Default   | Description                 |
-| -------------------- | --------- | --------------------------- |
-| `RAIKO2_HOST`        | `0.0.0.0` | Server bind address         |
-| `RAIKO2_PORT`        | `8080`    | Server port                 |
-| `RAIKO2_L1_RPC`      | -         | L1 RPC endpoint URL         |
-| `RAIKO2_L2_RPC`      | -         | L2 RPC endpoint URL         |
-| `RAIKO2_PROVER`      | `risc0`   | Default prover type         |
-| `RAIKO2_L1_CHAIN_ID` | `1`       | L1 chain ID                 |
-| `RAIKO2_L2_CHAIN_ID` | `167000`  | L2 chain ID (Taiko Mainnet) |
-| `RAIKO2_CONFIG`      | -         | Path to config file         |
-| `RUST_LOG`           | `info`    | Log level                   |
+| Variable                              | Default   | Description                                  |
+| ------------------------------------- | --------- | -------------------------------------------- |
+| `RAIKO2_HOST`                         | `0.0.0.0` | Server bind address                          |
+| `RAIKO2_PORT`                         | `8080`    | Server port                                  |
+| `RAIKO2_L1_RPC`                       | -         | L1 RPC endpoint URL                          |
+| `RAIKO2_L2_RPC`                       | -         | L2 RPC endpoint URL                          |
+| `RAIKO2_PROVER`                       | `risc0`   | Default prover type                          |
+| `RAIKO2_L1_CHAIN_ID`                  | `1`       | L1 chain ID                                  |
+| `RAIKO2_L2_CHAIN_ID`                  | `167000`  | L2 chain ID (Taiko Mainnet)                  |
+| `RAIKO2_CONFIG`                       | -         | Path to config file                          |
+| `RAIKO2_QUEUE_BACKEND`                | -         | Queue backend (memory, redis)                |
+| `RAIKO2_REDIS_URL`                    | -         | Redis URL (required for redis)               |
+| `RAIKO2_QUEUE_NAMESPACE`              | -         | Redis key namespace                          |
+| `RAIKO2_QUEUE_WORKERS`                | -         | Worker count                                 |
+| `RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS`| -         | Scheduler maintenance interval (ms)          |
+| `RAIKO2_QUEUE_RETRY_STRATEGY`         | -         | none, fixed, exponential                     |
+| `RAIKO2_QUEUE_RETRY_MAX_ATTEMPTS`     | -         | Max retry attempts                           |
+| `RAIKO2_QUEUE_RETRY_FIXED_DELAY_MS`   | -         | Fixed retry delay (ms)                       |
+| `RAIKO2_QUEUE_RETRY_BASE_DELAY_MS`    | -         | Exponential base delay (ms)                  |
+| `RAIKO2_QUEUE_RETRY_MAX_DELAY_MS`     | -         | Exponential max delay (ms)                   |
+| `RUST_LOG`                            | `info`    | Log level                                    |
 
 ### Config File (TOML)
 
@@ -146,18 +179,32 @@ port = 8080
 [rpc]
 l1_rpc = "https://ethereum-rpc.example.com"
 l2_rpc = "https://taiko-rpc.example.com"
+l1_chain_id = 1
+l2_chain_id = 167000
 
 [prover]
 prover_type = "risc0"
-# risc0-specific
-bonsai_api_key = "..."
-bonsai_api_url = "https://api.bonsai.xyz"
-# sp1-specific
-sp1_private_key = "..."
 
-[chain]
-l1_chain_id = 1
-l2_chain_id = 167000
+[prover.risc0]
+bonsai = true
+snark = true
+
+[prover.sp1]
+network = true
+plonk = true
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+
+[queue.retry]
+strategy = "exponential"
+max_attempts = 3
+fixed_delay_ms = 1000
+base_delay_ms = 1000
+max_delay_ms = 30000
 ```
 
 ## CLI Usage
@@ -188,23 +235,9 @@ All error responses follow this format:
 
 ```json
 {
-  "error": {
-    "code": "INVALID_BATCH_ID",
-    "message": "Batch ID 12345 not found on L1"
-  }
+  "error": "Batch ID 12345 not found on L1"
 }
 ```
-
-### Error Codes
-
-| Code               | HTTP Status | Description                        |
-| ------------------ | ----------- | ---------------------------------- |
-| `INVALID_REQUEST`  | 400         | Malformed request body             |
-| `INVALID_BATCH_ID` | 400         | Batch ID not found                 |
-| `INVALID_PROVER`   | 400         | Unsupported prover type            |
-| `PROOF_NOT_FOUND`  | 404         | Proof ID not found                 |
-| `PROVER_ERROR`     | 500         | Error during proof generation      |
-| `RPC_ERROR`        | 502         | Error communicating with L1/L2 RPC |
 
 ## Docker
 
@@ -228,13 +261,19 @@ docker run -d \
 # Health check
 curl http://localhost:8080/health
 
+# Server info
+curl http://localhost:8080/v1/info
+
 # Request proof
-curl -X POST http://localhost:8080/v2/proof/batch \
+curl -X POST http://localhost:8080/v1/proof/batch \
   -H "Content-Type: application/json" \
   -d '{"batch_id": 12345, "l1_inclusion_block": 50000}'
 
 # Get proof status
-curl http://localhost:8080/v2/proof/proof-12345-50000-1733318400
+curl http://localhost:8080/v1/proof/550e8400-e29b-41d4-a716-446655440000
+
+# Cancel proof
+curl -X POST http://localhost:8080/v1/proof/550e8400-e29b-41d4-a716-446655440000/cancel
 ```
 
 ### Python
@@ -244,7 +283,7 @@ import requests
 
 # Request proof
 response = requests.post(
-    "http://localhost:8080/v2/proof/batch",
+    "http://localhost:8080/v1/proof/batch",
     json={
         "batch_id": 12345,
         "l1_inclusion_block": 50000,
@@ -255,8 +294,7 @@ proof_id = response.json()["id"]
 
 # Poll for completion
 while True:
-    status = requests.get(f"http://localhost:8080/v2/proof/{proof_id}").json()
+    status = requests.get(f"http://localhost:8080/v1/proof/{proof_id}").json()
     if status["status"] in ["completed", "failed"]:
         break
-    time.sleep(10)
 ```

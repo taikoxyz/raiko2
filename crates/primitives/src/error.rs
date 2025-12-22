@@ -1,6 +1,5 @@
 //! Error types for raiko2.
 
-use crate::proof::ProverError;
 use reth_stateless::validation::StatelessValidationError;
 use std::io;
 
@@ -46,7 +45,11 @@ pub enum RaikoError {
 
     /// For errors produced by the guest provers.
     #[error("There was an error with a guest prover: {0}")]
-    Guest(#[from] ProverError),
+    Guest(String),
+
+    /// For proof storage errors.
+    #[error("Proof storage error: {0}")]
+    Store(String),
 
     /// For I/O errors with path context.
     #[error("I/O error on '{path}': {message}")]

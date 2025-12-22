@@ -1,4 +1,3 @@
-#![allow(async_fn_in_trait)]
 #![allow(missing_docs)]
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
@@ -25,7 +24,8 @@ pub use network::NetworkProvider;
 /// - [`batch_witnesses`]: Fetches execution witnesses for a batch of blocks.
 ///
 /// All methods return a [`RaikoResult`] wrapping the respective data type.
-pub trait Provider {
+#[async_trait::async_trait]
+pub trait Provider: Send + Sync {
     async fn batch_blocks(&self, blocks: &[u64]) -> RaikoResult<Vec<Block>>;
 
     async fn batch_accounts(
@@ -47,6 +47,7 @@ mod tests {
         pub blocks: Vec<Block>,
     }
 
+    #[async_trait::async_trait]
     impl Provider for MockProvider {
         async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Block>> {
             Ok(self

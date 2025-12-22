@@ -25,18 +25,21 @@
 pub mod risc0;
 pub mod sp1;
 
-use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
+use raiko2_hardfork::HardforkSpec;
+use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoResult};
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
-pub trait Prover: Send + Sync {
+pub trait Prover<F: HardforkSpec>: Send + Sync {
     /// Generate a proof for the given input.
-    async fn prove(&self, input: GuestInput, config: &ProverConfig) -> ProverResult<Proof>;
+    async fn prove(&self, input: GuestInput, config: &ProverConfig, spec: &F)
+    -> RaikoResult<Proof>;
 
     /// Generate an aggregation proof.
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-    ) -> ProverResult<Proof>;
+        spec: &F,
+    ) -> RaikoResult<Proof>;
 }

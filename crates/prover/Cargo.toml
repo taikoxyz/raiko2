@@ -10,6 +10,7 @@ workspace = true
 # Workspace dependencies
 raiko2-primitives.workspace = true
 raiko2-protocol.workspace = true
+raiko2-hardfork.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

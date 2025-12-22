@@ -9,14 +9,20 @@ workspace = true
 [dependencies]
 raiko2-primitives.workspace = true
 raiko2-protocol.workspace = true
+raiko2-hardfork.workspace = true
+raiko2-guests.workspace = true
+raiko2-stateless.workspace = true
+raiko2-provider.workspace = true
 
 reth-ethereum-primitives.workspace = true
+alethia-reth-node.workspace = true
 
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 
 anyhow.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

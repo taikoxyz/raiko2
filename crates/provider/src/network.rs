@@ -34,6 +34,7 @@ impl NetworkProvider {
     }
 }
 
+#[async_trait::async_trait]
 impl Provider for NetworkProvider {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
         const MAX_BATCH_SIZE: usize = 32;

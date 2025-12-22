@@ -26,13 +26,13 @@ VERBOSE="${VERBOSE:-0}"
 TOOLCHAIN_RISC0="+nightly-2024-12-20"
 TOOLCHAIN_SP1="+nightly-2024-12-20"
 
-# Guest directories (V2 locations)
-RISC0_GUEST_DIR="$ROOT_DIR/crates/guest-risc0"
-SP1_GUEST_DIR="$ROOT_DIR/crates/guest-sp1"
+# Guest directories (out-of-workspace)
+RISC0_GUEST_DIR="$ROOT_DIR/guests/risc0"
+SP1_GUEST_DIR="$ROOT_DIR/guests/sp1"
 
 # Output directories
-RISC0_OUTPUT_DIR="$ROOT_DIR/crates/prover/src/risc0/methods"
-SP1_OUTPUT_DIR="$ROOT_DIR/crates/prover/src/sp1/elf"
+RISC0_OUTPUT_DIR="$ROOT_DIR/crates/guests/elf"
+SP1_OUTPUT_DIR="$ROOT_DIR/crates/guests/elf"
 
 # Color output
 RED='\033[0;31m'
@@ -110,7 +110,7 @@ build_risc0() {
             ${VERBOSE:+"-v"}
     done
 
-    # Export ELFs to methods directory
+    # Export ELFs to guest artifacts directory
     mkdir -p "$RISC0_OUTPUT_DIR"
     local target_dir="$RISC0_GUEST_DIR/target/riscv32im-risc0-zkvm-elf/$PROFILE"
 
@@ -122,7 +122,6 @@ build_risc0() {
             cp "$elf" "$RISC0_OUTPUT_DIR/${elf_name}.elf"
             log_info "Exported $elf_name.elf"
 
-            # Generate methods.rs with image ID
             # Note: The actual image ID computation would require risc0-zkvm tooling
             # For now, we just copy the ELF and the driver will compute IDs at runtime
         fi

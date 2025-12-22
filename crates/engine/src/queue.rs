@@ -10,20 +10,29 @@ use raiko2_queue::{
 
 use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
 use crate::tasks::{EngineOutput, EngineTask};
+use raiko2_hardfork::HardforkSpec;
 
-#[derive(Clone)]
-pub struct EngineQueue {
-    inner: Arc<Inner>,
+pub struct EngineQueue<F: HardforkSpec> {
+    inner: Arc<Inner<F>>,
 }
 
-struct Inner {
+struct Inner<F: HardforkSpec> {
+    spec: F,
     scheduler: Scheduler<EngineTask, EngineOutput>,
-    prover: Arc<dyn Prover>,
+    prover: Arc<dyn Prover<F>>,
     config: ProverConfig,
-    guest_input_builder: Arc<dyn GuestInputBuilder>,
+    guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
 }
 
-impl EngineQueue {
+impl<F: HardforkSpec> Clone for EngineQueue<F> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<F: HardforkSpec> EngineQueue<F> {
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
@@ -35,30 +44,33 @@ impl EngineQueue {
         }
     }
 
-    pub fn new(prover: Arc<dyn Prover>) -> Self {
+    pub fn new(spec: F, prover: Arc<dyn Prover<F>>) -> Self {
         Self::with_store_and_builder(
+            spec,
             prover,
             MemoryStore::new(),
             Arc::new(DefaultGuestInputBuilder),
         )
     }
 
-    pub fn with_store<S>(prover: Arc<dyn Prover>, store: S) -> Self
+    pub fn with_store<S>(spec: F, prover: Arc<dyn Prover<F>>, store: S) -> Self
     where
         S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
-        Self::with_store_and_builder(prover, store, Arc::new(DefaultGuestInputBuilder))
+        Self::with_store_and_builder(spec, prover, store, Arc::new(DefaultGuestInputBuilder))
     }
 
     pub fn with_store_and_builder<S>(
-        prover: Arc<dyn Prover>,
+        spec: F,
+        prover: Arc<dyn Prover<F>>,
         store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder>,
+        guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
     ) -> Self
     where
         S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
         Self::with_store_and_builder_and_scheduler_config(
+            spec,
             prover,
             store,
             guest_input_builder,
@@ -67,9 +79,10 @@ impl EngineQueue {
     }
 
     pub fn with_store_and_builder_and_scheduler_config<S>(
-        prover: Arc<dyn Prover>,
+        spec: F,
+        prover: Arc<dyn Prover<F>>,
         store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder>,
+        guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
@@ -77,6 +90,7 @@ impl EngineQueue {
     {
         Self {
             inner: Arc::new(Inner {
+                spec,
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 prover,
                 config: ProverConfig::default(),
@@ -133,7 +147,10 @@ impl EngineQueue {
         Ok(true)
     }
 
-    pub fn start_workers(&self, concurrency: usize) {
+    pub fn start_workers(&self, concurrency: usize)
+    where
+        F: 'static,
+    {
         self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
     }
 
@@ -141,7 +158,9 @@ impl EngineQueue {
         &self,
         concurrency: usize,
         maintenance_interval: Duration,
-    ) {
+    ) where
+        F: 'static,
+    {
         let notify = self.inner.scheduler.notifier();
         for i in 0..concurrency {
             spawn_worker_supervised(self.clone(), notify.clone(), format!("engine-{i}"));
@@ -186,7 +205,7 @@ impl EngineQueue {
                 let proof = self
                     .inner
                     .prover
-                    .prove(guest_input, &self.inner.config)
+                    .prove(guest_input, &self.inner.config, &self.inner.spec)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::Proof(Box::new(proof)))
@@ -218,7 +237,11 @@ impl EngineQueue {
                 let proof = self
                     .inner
                     .prover
-                    .aggregate(AggregationGuestInput { proofs }, &self.inner.config)
+                    .aggregate(
+                        AggregationGuestInput { proofs },
+                        &self.inner.config,
+                        &self.inner.spec,
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::Proof(Box::new(proof)))
@@ -227,7 +250,11 @@ impl EngineQueue {
     }
 }
 
-fn spawn_worker_supervised(engine: EngineQueue, notify: Arc<tokio::sync::Notify>, worker: String) {
+fn spawn_worker_supervised<F: HardforkSpec + 'static>(
+    engine: EngineQueue<F>,
+    notify: Arc<tokio::sync::Notify>,
+    worker: String,
+) {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -265,7 +292,10 @@ fn spawn_worker_supervised(engine: EngineQueue, notify: Arc<tokio::sync::Notify>
     });
 }
 
-fn spawn_maintenance_supervised(engine: EngineQueue, maintenance_interval: Duration) {
+fn spawn_maintenance_supervised<F: HardforkSpec + 'static>(
+    engine: EngineQueue<F>,
+    maintenance_interval: Duration,
+) {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -303,7 +333,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, ProverResult};
+    use raiko2_hardfork::{
+        HardforkSpec, NoopManifestBuilder, NoopValidation, Preflight, ProofStage, ProverBackend,
+    };
+    use raiko2_primitives::{
+        AggregationGuestInput, GuestInput, Proof, ProofContext, ProverConfig, RaikoError,
+        RaikoResult,
+    };
     use raiko2_prover::Prover;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
@@ -314,8 +350,13 @@ mod tests {
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover for MockProver {
-        async fn prove(&self, input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
+    impl Prover<TestSpec> for MockProver {
+        async fn prove(
+            &self,
+            input: GuestInput,
+            _config: &ProverConfig,
+            _spec: &TestSpec,
+        ) -> RaikoResult<Proof> {
             assert_eq!(input.taiko.batch_id, 1);
             Ok(Proof {
                 proof: Some("mock-proof".to_string()),
@@ -327,7 +368,8 @@ mod tests {
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-        ) -> ProverResult<Proof> {
+            _spec: &TestSpec,
+        ) -> RaikoResult<Proof> {
             Ok(Proof {
                 proof: Some("mock-agg-proof".to_string()),
                 ..Default::default()
@@ -338,24 +380,67 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover for FailingProver {
-        async fn prove(&self, _input: GuestInput, _config: &ProverConfig) -> ProverResult<Proof> {
-            Err("boom".to_string().into())
+    impl Prover<TestSpec> for FailingProver {
+        async fn prove(
+            &self,
+            _input: GuestInput,
+            _config: &ProverConfig,
+            _spec: &TestSpec,
+        ) -> RaikoResult<Proof> {
+            Err(RaikoError::Guest("boom".to_string()))
         }
 
         async fn aggregate(
             &self,
             _input: AggregationGuestInput,
             _config: &ProverConfig,
-        ) -> ProverResult<Proof> {
+            _spec: &TestSpec,
+        ) -> RaikoResult<Proof> {
             Ok(Proof::default())
+        }
+    }
+
+    struct TestSpec;
+    const NOOP_VALIDATION: NoopValidation = NoopValidation;
+    const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
+
+    #[async_trait::async_trait]
+    impl Preflight for TestSpec {
+        async fn preflight<P: raiko2_provider::Provider>(
+            &self,
+            _ctx: &ProofContext,
+            _provider: &P,
+        ) -> RaikoResult<GuestInput> {
+            Ok(GuestInput::default())
+        }
+    }
+
+    impl HardforkSpec for TestSpec {
+        type Preflight = Self;
+        type Validation = NoopValidation;
+        type ManifestBuilder = NoopManifestBuilder;
+
+        fn preflight(&self) -> &Self::Preflight {
+            self
+        }
+
+        fn validation(&self) -> &Self::Validation {
+            &NOOP_VALIDATION
+        }
+
+        fn manifest_builder(&self) -> &Self::ManifestBuilder {
+            &NOOP_MANIFEST
+        }
+
+        fn elf(&self, _backend: ProverBackend, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+            Ok(&[])
         }
     }
 
     struct MockGuestInputBuilder;
 
     #[async_trait::async_trait]
-    impl GuestInputBuilder for MockGuestInputBuilder {
+    impl GuestInputBuilder<TestSpec> for MockGuestInputBuilder {
         async fn build_guest_input(&self, batch_id: u64) -> Result<GuestInput, String> {
             Ok(GuestInput {
                 taiko: raiko2_primitives::TaikoManifest {
@@ -369,7 +454,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_batch_proof_runs_dependency_pipeline() {
-        let engine = EngineQueue::with_store_and_builder(
+        let engine = EngineQueue::<TestSpec>::with_store_and_builder(
+            TestSpec,
             Arc::new(MockProver),
             raiko2_queue::MemoryStore::new(),
             Arc::new(MockGuestInputBuilder),
@@ -398,7 +484,8 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let engine = EngineQueue::with_store_and_builder_and_scheduler_config(
+        let engine = EngineQueue::<TestSpec>::with_store_and_builder_and_scheduler_config(
+            TestSpec,
             Arc::new(FailingProver),
             raiko2_queue::MemoryStore::new(),
             Arc::new(MockGuestInputBuilder),

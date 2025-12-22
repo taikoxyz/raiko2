@@ -1,6 +1,5 @@
 use crate::{
-    ManifestBuilder, PipelineSpec, Preflight, ProofStage, ProverBackend, Risc0Backend, Sp1Backend,
-    Validation,
+    ManifestBuilder, PipelineSpec, Preflight, ProverBackend, Risc0Backend, Sp1Backend, Validation,
 };
 use alethia_reth_node::block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
@@ -37,6 +36,16 @@ impl ShastaSpec {
     pub const fn new(manifest_builder: ShastaManifestBuilder) -> Self {
         Self { manifest_builder }
     }
+}
+
+/// Build a RISC0 backend preloaded with Shasta ELFs.
+pub const fn risc0_backend() -> Risc0Backend {
+    Risc0Backend::new(risc0::shasta::PROPOSAL_ELF, risc0::shasta::AGGREGATION_ELF)
+}
+
+/// Build an SP1 backend preloaded with Shasta ELFs.
+pub const fn sp1_backend() -> Sp1Backend {
+    Sp1Backend::new(sp1::shasta::PROPOSAL_ELF, sp1::shasta::AGGREGATION_ELF)
 }
 
 #[async_trait::async_trait]
@@ -191,7 +200,7 @@ impl Validation for ShastaSpec {
 
 impl<B> PipelineSpec<B> for ShastaSpec
 where
-    B: ProverBackend<ShastaSpec>,
+    B: ProverBackend,
 {
     type Preflight = Self;
     type Validation = Self;
@@ -210,20 +219,4 @@ where
     }
 }
 
-impl ProverBackend<ShastaSpec> for Risc0Backend {
-    fn elf(&self, _spec: &ShastaSpec, stage: ProofStage) -> RaikoResult<&'static [u8]> {
-        match stage {
-            ProofStage::Proposal => Ok(risc0::shasta::PROPOSAL_ELF),
-            ProofStage::Aggregation => Ok(risc0::shasta::AGGREGATION_ELF),
-        }
-    }
-}
-
-impl ProverBackend<ShastaSpec> for Sp1Backend {
-    fn elf(&self, _spec: &ShastaSpec, stage: ProofStage) -> RaikoResult<&'static [u8]> {
-        match stage {
-            ProofStage::Proposal => Ok(sp1::shasta::PROPOSAL_ELF),
-            ProofStage::Aggregation => Ok(sp1::shasta::AGGREGATION_ELF),
-        }
-    }
-}
+// ELF selection is handled by the backend instance.

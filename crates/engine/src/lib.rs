@@ -36,7 +36,7 @@ pub struct Engine<P, S, B>
 where
     P: Provider,
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     spec: S,
     provider: P,
@@ -47,7 +47,7 @@ impl<P, S, B> Engine<P, S, B>
 where
     P: Provider,
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     /// Create a new engine with the given provider.
     pub const fn new(spec: S, provider: P, backend: B) -> Self {
@@ -124,8 +124,7 @@ mod tests {
         use alloy_primitives::{Address, map::AddressMap};
         use alloy_trie::TrieAccount;
         use raiko2_pipeline::{
-            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage,
-            ProverBackend, Risc0Backend,
+            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, Risc0Backend,
         };
         use raiko2_primitives::RaikoResult;
         use reth_ethereum_primitives::Block;
@@ -164,12 +163,6 @@ mod tests {
             }
         }
 
-        impl ProverBackend<TestSpec> for Risc0Backend {
-            fn elf(&self, _spec: &TestSpec, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
-                Ok(&[])
-            }
-        }
-
         // Create a mock provider
         struct MockProvider;
 
@@ -192,7 +185,7 @@ mod tests {
         }
 
         let provider = MockProvider;
-        let backend = Risc0Backend;
+        let backend = Risc0Backend::new(&[], &[]);
         let engine = Engine::new(TestSpec, provider, backend);
 
         let empty_input = GuestInput::default();

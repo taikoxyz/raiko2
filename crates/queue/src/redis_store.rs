@@ -107,7 +107,7 @@ fn parse_prio(s: &str) -> Option<Priority> {
 const fn kind_str(kind: TaskKind) -> &'static str {
     match kind {
         TaskKind::Preflight => "preflight",
-        TaskKind::BuildGuestInput => "build_guest_input",
+        TaskKind::Validation => "validation",
         TaskKind::BatchProof => "batch_proof",
         TaskKind::Aggregation => "aggregation",
     }
@@ -116,7 +116,7 @@ const fn kind_str(kind: TaskKind) -> &'static str {
 fn parse_kind(s: &str) -> Option<TaskKind> {
     match s {
         "preflight" => Some(TaskKind::Preflight),
-        "build_guest_input" => Some(TaskKind::BuildGuestInput),
+        "validation" | "build_guest_input" => Some(TaskKind::Validation),
         "batch_proof" => Some(TaskKind::BatchProof),
         "aggregation" => Some(TaskKind::Aggregation),
         _ => None,

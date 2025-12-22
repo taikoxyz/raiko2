@@ -8,7 +8,7 @@ use raiko2_provider::Provider;
 pub struct Pipeline<'a, S, B>
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     spec: &'a S,
     backend: &'a B,
@@ -17,7 +17,7 @@ where
 impl<'a, S, B> Pipeline<'a, S, B>
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     /// Create a new pipeline using the provided pipeline spec.
     pub const fn new(spec: &'a S, backend: &'a B) -> Self {
@@ -114,8 +114,8 @@ mod tests {
         }
     }
 
-    impl ProverBackend<EmptySpec> for TestBackend {
-        fn elf(&self, _spec: &EmptySpec, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    impl ProverBackend for TestBackend {
+        fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
             Ok(&[])
         }
     }

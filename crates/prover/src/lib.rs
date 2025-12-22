@@ -33,11 +33,16 @@ use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, 
 pub trait Prover<S, B>: Send + Sync
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     /// Generate a proof for the given input.
-    async fn prove(&self, input: GuestInput, config: &ProverConfig, spec: &S)
-    -> RaikoResult<Proof>;
+    async fn prove(
+        &self,
+        input: GuestInput,
+        config: &ProverConfig,
+        spec: &S,
+        backend: &B,
+    ) -> RaikoResult<Proof>;
 
     /// Generate an aggregation proof.
     async fn aggregate(
@@ -45,5 +50,6 @@ where
         input: AggregationGuestInput,
         config: &ProverConfig,
         spec: &S,
+        backend: &B,
     ) -> RaikoResult<Proof>;
 }

@@ -106,14 +106,56 @@ pub trait PipelineSpec<B>: Send + Sync {
 }
 
 /// Prover backend abstraction for selecting guest programs.
-pub trait ProverBackend<S>: Send + Sync {
-    fn elf(&self, spec: &S, stage: ProofStage) -> RaikoResult<&'static [u8]>;
+pub trait ProverBackend: Send + Sync {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
 }
 
 /// RISC0 backend marker type.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Risc0Backend;
+#[derive(Debug, Clone, Copy)]
+pub struct Risc0Backend {
+    proposal_elf: &'static [u8],
+    aggregation_elf: &'static [u8],
+}
 
 /// SP1 backend marker type.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Sp1Backend;
+impl Risc0Backend {
+    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+        Self {
+            proposal_elf,
+            aggregation_elf,
+        }
+    }
+}
+
+impl ProverBackend for Risc0Backend {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        Ok(match stage {
+            ProofStage::Proposal => self.proposal_elf,
+            ProofStage::Aggregation => self.aggregation_elf,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Sp1Backend {
+    proposal_elf: &'static [u8],
+    aggregation_elf: &'static [u8],
+}
+
+impl Sp1Backend {
+    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+        Self {
+            proposal_elf,
+            aggregation_elf,
+        }
+    }
+}
+
+impl ProverBackend for Sp1Backend {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        Ok(match stage {
+            ProofStage::Proposal => self.proposal_elf,
+            ProofStage::Aggregation => self.aggregation_elf,
+        })
+    }
+}

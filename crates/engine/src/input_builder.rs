@@ -6,7 +6,7 @@ use raiko2_provider::NetworkProvider;
 pub trait GuestInputBuilder<S, B>: Send + Sync
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     async fn preflight(&self, batch_id: u64) -> Result<PipelineStageResult<GuestInput>, String>;
     async fn validate(
@@ -27,7 +27,7 @@ pub struct DefaultGuestInputBuilder;
 impl<S, B> GuestInputBuilder<S, B> for DefaultGuestInputBuilder
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     async fn preflight(&self, _batch_id: u64) -> Result<PipelineStageResult<GuestInput>, String> {
         Ok(PipelineStageResult::new(
@@ -51,7 +51,7 @@ where
 pub struct NetworkGuestInputBuilder<S, B>
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     engine: crate::Engine<NetworkProvider, S, B>,
     l1_chain_id: u64,
@@ -63,7 +63,7 @@ where
 impl<S, B> NetworkGuestInputBuilder<S, B>
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     pub fn new(
         spec: S,
@@ -104,7 +104,7 @@ where
 impl<S, B> GuestInputBuilder<S, B> for NetworkGuestInputBuilder<S, B>
 where
     S: PipelineSpec<B>,
-    B: ProverBackend<S>,
+    B: ProverBackend,
 {
     async fn preflight(&self, batch_id: u64) -> Result<PipelineStageResult<GuestInput>, String> {
         let ctx = self.build_context(batch_id);

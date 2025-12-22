@@ -41,7 +41,7 @@ pub enum Priority {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskKind {
     Preflight,
-    BuildGuestInput,
+    Validation,
     BatchProof,
     Aggregation,
 }

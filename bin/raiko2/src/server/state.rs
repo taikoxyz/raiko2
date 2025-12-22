@@ -5,7 +5,8 @@ use anyhow::Result;
 use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
 use raiko2_engine::queue::EngineQueue;
 use raiko2_engine::tasks::EngineOutput;
-use raiko2_pipeline::{Risc0Backend, Sp1Backend, forks::shasta::ShastaSpec};
+use raiko2_pipeline::forks::shasta::{ShastaSpec, risc0_backend, sp1_backend};
+use raiko2_pipeline::{Risc0Backend, Sp1Backend};
 use raiko2_prover::Prover;
 use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskId, TaskStoreError, TaskView};
 use std::sync::Arc;
@@ -97,7 +98,7 @@ impl AppState {
                 };
                 let prover: Arc<dyn Prover<ShastaSpec, Risc0Backend>> =
                     Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config));
-                let backend = Risc0Backend;
+                let backend = risc0_backend();
                 let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Risc0Backend>> =
                     Arc::new(
                         NetworkGuestInputBuilder::new(
@@ -115,6 +116,7 @@ impl AppState {
                     QueueBackend::Memory => {
                         EngineQueue::with_store_and_builder_and_scheduler_config(
                             spec.clone(),
+                            backend,
                             prover,
                             raiko2_queue::MemoryStore::new(),
                             guest_input_builder,
@@ -134,6 +136,7 @@ impl AppState {
                                 .await?;
                             EngineQueue::with_store_and_builder_and_scheduler_config(
                                 spec.clone(),
+                                backend,
                                 prover,
                                 store,
                                 guest_input_builder,
@@ -167,7 +170,7 @@ impl AppState {
                 };
                 let prover: Arc<dyn Prover<ShastaSpec, Sp1Backend>> =
                     Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config));
-                let backend = Sp1Backend;
+                let backend = sp1_backend();
                 let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Sp1Backend>> =
                     Arc::new(
                         NetworkGuestInputBuilder::new(
@@ -185,6 +188,7 @@ impl AppState {
                     QueueBackend::Memory => {
                         EngineQueue::with_store_and_builder_and_scheduler_config(
                             spec.clone(),
+                            backend,
                             prover,
                             raiko2_queue::MemoryStore::new(),
                             guest_input_builder,
@@ -204,6 +208,7 @@ impl AppState {
                                 .await?;
                             EngineQueue::with_store_and_builder_and_scheduler_config(
                                 spec.clone(),
+                                backend,
                                 prover,
                                 store,
                                 guest_input_builder,

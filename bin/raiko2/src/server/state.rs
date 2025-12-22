@@ -5,8 +5,10 @@ use anyhow::Result;
 use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
 use raiko2_engine::queue::EngineQueue;
 use raiko2_engine::tasks::EngineOutput;
-use raiko2_pipeline::forks::shasta::{ShastaSpec, risc0_backend, sp1_backend};
-use raiko2_pipeline::{Risc0Backend, Sp1Backend};
+use raiko2_pipeline::{
+    Risc0ShastaBackend, Sp1ShastaBackend,
+    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+};
 use raiko2_prover::Prover;
 use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskId, TaskStoreError, TaskView};
 use std::sync::Arc;
@@ -24,8 +26,8 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub enum EngineHandle {
-    Risc0(EngineQueue<ShastaSpec, Risc0Backend>),
-    Sp1(EngineQueue<ShastaSpec, Sp1Backend>),
+    Risc0(EngineQueue<ShastaSpec, Risc0ShastaBackend>),
+    Sp1(EngineQueue<ShastaSpec, Sp1ShastaBackend>),
 }
 
 impl EngineHandle {
@@ -96,22 +98,23 @@ impl AppState {
                     execution_po2: 20,
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<ShastaSpec, Risc0Backend>> =
+                let prover: Arc<dyn Prover<ShastaSpec, Risc0ShastaBackend>> =
                     Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config));
-                let backend = risc0_backend();
-                let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Risc0Backend>> =
-                    Arc::new(
-                        NetworkGuestInputBuilder::new(
-                            spec.clone(),
-                            backend,
-                            &config.rpc.l2_rpc,
-                            config.rpc.l1_chain_id,
-                            config.rpc.l2_chain_id,
-                            "risc0".to_string(),
-                            raiko2_primitives::ProverConfig::default(),
-                        )
-                        .map_err(|e| anyhow::anyhow!(e))?,
-                    );
+                let backend = RISC0_SHASTA_BACKEND;
+                let guest_input_builder: Arc<
+                    dyn GuestInputBuilder<ShastaSpec, Risc0ShastaBackend>,
+                > = Arc::new(
+                    NetworkGuestInputBuilder::new(
+                        spec.clone(),
+                        backend,
+                        &config.rpc.l2_rpc,
+                        config.rpc.l1_chain_id,
+                        config.rpc.l2_chain_id,
+                        "risc0".to_string(),
+                        raiko2_primitives::ProverConfig::default(),
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))?,
+                );
                 let engine = match config.queue.backend {
                     QueueBackend::Memory => {
                         EngineQueue::with_store_and_builder_and_scheduler_config(
@@ -168,10 +171,10 @@ impl AppState {
                     },
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<ShastaSpec, Sp1Backend>> =
+                let prover: Arc<dyn Prover<ShastaSpec, Sp1ShastaBackend>> =
                     Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config));
-                let backend = sp1_backend();
-                let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Sp1Backend>> =
+                let backend = SP1_SHASTA_BACKEND;
+                let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Sp1ShastaBackend>> =
                     Arc::new(
                         NetworkGuestInputBuilder::new(
                             spec.clone(),

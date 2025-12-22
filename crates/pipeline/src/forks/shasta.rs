@@ -1,5 +1,6 @@
 use crate::{
-    ManifestBuilder, PipelineSpec, Preflight, ProverBackend, Risc0Backend, Sp1Backend, Validation,
+    ManifestBuilder, PipelineSpec, Preflight, ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
+    Validation,
 };
 use alethia_reth_node::block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
@@ -38,15 +39,13 @@ impl ShastaSpec {
     }
 }
 
-/// Build a RISC0 backend preloaded with Shasta ELFs.
-pub const fn risc0_backend() -> Risc0Backend {
-    Risc0Backend::new(risc0::shasta::PROPOSAL_ELF, risc0::shasta::AGGREGATION_ELF)
-}
+/// RISC0 backend preloaded with Shasta ELFs.
+pub const RISC0_SHASTA_BACKEND: Risc0ShastaBackend =
+    Risc0ShastaBackend::new(risc0::shasta::PROPOSAL_ELF, risc0::shasta::AGGREGATION_ELF);
 
-/// Build an SP1 backend preloaded with Shasta ELFs.
-pub const fn sp1_backend() -> Sp1Backend {
-    Sp1Backend::new(sp1::shasta::PROPOSAL_ELF, sp1::shasta::AGGREGATION_ELF)
-}
+/// SP1 backend preloaded with Shasta ELFs.
+pub const SP1_SHASTA_BACKEND: Sp1ShastaBackend =
+    Sp1ShastaBackend::new(sp1::shasta::PROPOSAL_ELF, sp1::shasta::AGGREGATION_ELF);
 
 #[async_trait::async_trait]
 impl ManifestBuilder for ShastaManifestBuilder {
@@ -220,3 +219,29 @@ where
 }
 
 // ELF selection is handled by the backend instance.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shasta_backends_return_expected_elves() {
+        let risc0_proposal = RISC0_SHASTA_BACKEND
+            .elf(ProofStage::Proposal)
+            .expect("risc0 proposal elf");
+        let risc0_agg = RISC0_SHASTA_BACKEND
+            .elf(ProofStage::Aggregation)
+            .expect("risc0 aggregation elf");
+        assert_eq!(risc0_proposal, risc0::shasta::PROPOSAL_ELF);
+        assert_eq!(risc0_agg, risc0::shasta::AGGREGATION_ELF);
+
+        let sp1_proposal = SP1_SHASTA_BACKEND
+            .elf(ProofStage::Proposal)
+            .expect("sp1 proposal elf");
+        let sp1_agg = SP1_SHASTA_BACKEND
+            .elf(ProofStage::Aggregation)
+            .expect("sp1 aggregation elf");
+        assert_eq!(sp1_proposal, sp1::shasta::PROPOSAL_ELF);
+        assert_eq!(sp1_agg, sp1::shasta::AGGREGATION_ELF);
+    }
+}

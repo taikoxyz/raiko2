@@ -123,8 +123,9 @@ mod tests {
     fn test_generate_output_empty_input() {
         use alloy_primitives::{Address, map::AddressMap};
         use alloy_trie::TrieAccount;
+        use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
         use raiko2_pipeline::{
-            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, Risc0Backend,
+            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, B,
         };
         use raiko2_primitives::RaikoResult;
         use reth_ethereum_primitives::Block;
@@ -145,7 +146,7 @@ mod tests {
             }
         }
 
-        impl PipelineSpec<Risc0Backend> for TestSpec {
+        impl PipelineSpec<B> for TestSpec {
             type Preflight = Self;
             type Validation = NoopValidation;
             type ManifestBuilder = NoopManifestBuilder;
@@ -185,7 +186,7 @@ mod tests {
         }
 
         let provider = MockProvider;
-        let backend = Risc0Backend::new(&[], &[]);
+        let backend = RISC0_SHASTA_BACKEND;
         let engine = Engine::new(TestSpec, provider, backend);
 
         let empty_input = GuestInput::default();

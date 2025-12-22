@@ -110,15 +110,14 @@ pub trait ProverBackend: Send + Sync {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
 }
 
-/// RISC0 backend marker type.
+/// RISC0 backend for Shasta guest programs.
 #[derive(Debug, Clone, Copy)]
-pub struct Risc0Backend {
+pub struct Risc0ShastaBackend {
     proposal_elf: &'static [u8],
     aggregation_elf: &'static [u8],
 }
 
-/// SP1 backend marker type.
-impl Risc0Backend {
+impl Risc0ShastaBackend {
     pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             proposal_elf,
@@ -127,7 +126,7 @@ impl Risc0Backend {
     }
 }
 
-impl ProverBackend for Risc0Backend {
+impl ProverBackend for Risc0ShastaBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
         Ok(match stage {
             ProofStage::Proposal => self.proposal_elf,
@@ -136,13 +135,14 @@ impl ProverBackend for Risc0Backend {
     }
 }
 
+/// SP1 backend for Shasta guest programs.
 #[derive(Debug, Clone, Copy)]
-pub struct Sp1Backend {
+pub struct Sp1ShastaBackend {
     proposal_elf: &'static [u8],
     aggregation_elf: &'static [u8],
 }
 
-impl Sp1Backend {
+impl Sp1ShastaBackend {
     pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             proposal_elf,
@@ -151,7 +151,7 @@ impl Sp1Backend {
     }
 }
 
-impl ProverBackend for Sp1Backend {
+impl ProverBackend for Sp1ShastaBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
         Ok(match stage {
             ProofStage::Proposal => self.proposal_elf,

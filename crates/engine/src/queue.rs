@@ -451,9 +451,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
     use raiko2_pipeline::{
         NoopManifestBuilder, NoopValidation, PipelineSpec, PipelineStage, PipelineStageResult,
-        Preflight, Risc0Backend,
+        Preflight, B,
     };
     use raiko2_primitives::{
         AggregationGuestInput, GuestInput, Proof, ProofContext, ProverConfig, RaikoError,
@@ -469,13 +470,13 @@ mod tests {
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, Risc0Backend> for MockProver {
+    impl Prover<TestSpec, B> for MockProver {
         async fn prove(
             &self,
             input: GuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &Risc0Backend,
+            _backend: &B,
         ) -> RaikoResult<Proof> {
             assert_eq!(input.taiko.batch_id, 1);
             Ok(Proof {
@@ -489,7 +490,7 @@ mod tests {
             _input: AggregationGuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &Risc0Backend,
+            _backend: &B,
         ) -> RaikoResult<Proof> {
             Ok(Proof {
                 proof: Some("mock-agg-proof".to_string()),
@@ -501,13 +502,13 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, Risc0Backend> for FailingProver {
+    impl Prover<TestSpec, B> for FailingProver {
         async fn prove(
             &self,
             _input: GuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &Risc0Backend,
+            _backend: &B,
         ) -> RaikoResult<Proof> {
             Err(RaikoError::Guest("boom".to_string()))
         }
@@ -517,7 +518,7 @@ mod tests {
             _input: AggregationGuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &Risc0Backend,
+            _backend: &B,
         ) -> RaikoResult<Proof> {
             Ok(Proof::default())
         }
@@ -538,7 +539,7 @@ mod tests {
         }
     }
 
-    impl PipelineSpec<Risc0Backend> for TestSpec {
+    impl PipelineSpec<B> for TestSpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;
@@ -559,7 +560,7 @@ mod tests {
     struct MockGuestInputBuilder;
 
     #[async_trait::async_trait]
-    impl GuestInputBuilder<TestSpec, Risc0Backend> for MockGuestInputBuilder {
+    impl GuestInputBuilder<TestSpec, B> for MockGuestInputBuilder {
         async fn preflight(
             &self,
             batch_id: u64,
@@ -585,8 +586,8 @@ mod tests {
 
     #[tokio::test]
     async fn submit_batch_proof_runs_dependency_pipeline() {
-        let backend = Risc0Backend::new(&[], &[]);
-        let engine = EngineQueue::<TestSpec, Risc0Backend>::with_store_and_builder(
+        let backend = RISC0_SHASTA_BACKEND;
+        let engine = EngineQueue::<TestSpec, B>::with_store_and_builder(
             TestSpec,
             backend,
             Arc::new(MockProver),
@@ -618,9 +619,9 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let backend = Risc0Backend::new(&[], &[]);
+        let backend = RISC0_SHASTA_BACKEND;
         let engine =
-            EngineQueue::<TestSpec, Risc0Backend>::with_store_and_builder_and_scheduler_config(
+            EngineQueue::<TestSpec, B>::with_store_and_builder_and_scheduler_config(
                 TestSpec,
                 backend,
                 Arc::new(FailingProver),

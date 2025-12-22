@@ -1,4 +1,4 @@
-use crate::{Priority, TaskId, TaskKind, TaskState};
+use crate::{Priority, TaskId, TaskState};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -64,17 +64,13 @@ where
     async fn insert_task(
         &self,
         id: TaskId,
-        kind: TaskKind,
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
     ) -> StoreResult<()>;
     async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>>;
     async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()>;
-    async fn get_view(
-        &self,
-        id: &TaskId,
-    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>>;
+    async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>>;
     async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize>;
     async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>>;
@@ -84,19 +80,19 @@ where
         &self,
         id: &TaskId,
         worker: &str,
-    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>>;
+    ) -> StoreResult<Option<(P, Priority, u32)>>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(TaskId, P, Priority, u32)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
-            if let Some((payload, kind, priority, attempt)) = self.take_ready(&id, worker).await? {
-                return Ok(Some((id, payload, kind, priority, attempt)));
+            if let Some((payload, priority, attempt)) = self.take_ready(&id, worker).await? {
+                return Ok(Some((id, payload, priority, attempt)));
             }
         }
     }
@@ -125,7 +121,6 @@ struct TaskRecord<P, O> {
     payload: Option<P>,
     state: TaskState<O>,
     priority: Priority,
-    kind: TaskKind,
     attempt: u32,
     lease_until_ms: Option<u64>,
 }
@@ -162,7 +157,6 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
     async fn insert_task(
         &self,
         id: TaskId,
-        kind: TaskKind,
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
@@ -179,7 +173,6 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
                 payload: Some(payload),
                 state: TaskState::pending(remaining),
                 priority: prio,
-                kind,
                 attempt: 0,
                 lease_until_ms: None,
             },
@@ -205,13 +198,10 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         Ok(())
     }
 
-    async fn get_view(
-        &self,
-        id: &TaskId,
-    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+    async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, Priority)>> {
         let g = self.inner.lock().await;
         let record = g.tasks.get(id);
-        Ok(record.map(|r| (r.state.clone(), r.kind, r.priority)))
+        Ok(record.map(|r| (r.state.clone(), r.priority)))
     }
 
     async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
@@ -281,7 +271,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         &self,
         id: &TaskId,
         worker: &str,
-    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(P, Priority, u32)>> {
         let mut g = self.inner.lock().await;
         let Some(record) = g.tasks.get_mut(id) else {
             return Ok(None);
@@ -301,7 +291,7 @@ impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O> for M
         };
         let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
-        Ok(Some((payload, record.kind, record.priority, attempt)))
+        Ok(Some((payload, record.priority, attempt)))
     }
 
     async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {

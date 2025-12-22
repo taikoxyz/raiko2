@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use raiko2_pipeline::{PipelineStage, PipelineStageResult};
     use raiko2_primitives::Proof;
-    use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler, TaskKind};
+    use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
 
     #[tokio::test]
     async fn aggregation_depends_on_batches() {
@@ -45,7 +45,6 @@ mod tests {
         let a1 = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id: 1,
@@ -59,7 +58,6 @@ mod tests {
         let a2 = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id: 2,
@@ -73,7 +71,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {
                         batch_ids: vec![1, 2],

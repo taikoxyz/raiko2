@@ -6,8 +6,8 @@ use raiko2_primitives::{AggregationGuestInput, ProofContext};
 use raiko2_prover::Prover;
 use raiko2_provider::Provider;
 use raiko2_queue::{
-    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskKind,
-    TaskState, TaskStoreError, TaskView,
+    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskState,
+    TaskStoreError, TaskView,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -141,7 +141,6 @@ where
             .scheduler
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Low,
                     payload: EngineTask::Preflight { batch_id },
                 },
@@ -154,7 +153,6 @@ where
             .scheduler
             .submit(
                 NewTask {
-                    kind: TaskKind::Validation,
                     priority: Priority::Low,
                     payload: EngineTask::Validate {
                         batch_id,
@@ -169,7 +167,6 @@ where
             .scheduler
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id,

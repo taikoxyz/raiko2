@@ -38,14 +38,6 @@ pub enum Priority {
     Low,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskKind {
-    Preflight,
-    Validation,
-    BatchProof,
-    Aggregation,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState<O> {
     Pending {

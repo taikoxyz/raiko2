@@ -1,4 +1,4 @@
-use crate::{Priority, TaskId, TaskKind, TaskState, TaskStore, TaskStoreError};
+use crate::{Priority, TaskId, TaskState, TaskStore, TaskStoreError};
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,7 +69,6 @@ impl RetryPolicy {
 
 #[derive(Clone)]
 pub struct NewTask<P> {
-    pub kind: TaskKind,
     pub priority: Priority,
     pub payload: P,
 }
@@ -77,7 +76,6 @@ pub struct NewTask<P> {
 pub struct TaskLease<P> {
     pub id: TaskId,
     pub payload: P,
-    pub kind: TaskKind,
     pub priority: Priority,
     pub attempt: u32,
     pub worker: String,
@@ -87,7 +85,6 @@ pub struct TaskLease<P> {
 pub struct TaskView<O> {
     pub id: TaskId,
     pub state: TaskState<O>,
-    pub kind: TaskKind,
     pub priority: Priority,
 }
 
@@ -162,7 +159,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         };
 
         self.store
-            .insert_task(id, task.kind, task.payload, task.priority, deps)
+            .insert_task(id, task.payload, task.priority, deps)
             .await?;
         if let Some(priority) = self.store.try_mark_ready(&id).await? {
             self.store.push_ready(priority, id).await?;
@@ -174,13 +171,12 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
 
     pub async fn next_ready(&self, worker: &str) -> Result<Option<TaskLease<P>>, TaskStoreError> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
-            if let Some((id, payload, kind, priority, attempt)) =
+            if let Some((id, payload, priority, attempt)) =
                 self.store.pop_ready_and_take(prio, worker).await?
             {
                 return Ok(Some(TaskLease {
                     id,
                     payload,
-                    kind,
                     priority,
                     attempt,
                     worker: worker.to_string(),
@@ -199,7 +195,6 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         let TaskLease {
             id,
             payload,
-            kind: _,
             priority,
             attempt,
             worker,
@@ -319,13 +314,12 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
     }
 
     pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<O>>, TaskStoreError> {
-        let Some((state, kind, priority)) = self.store.get_view(&id).await? else {
+        let Some((state, priority)) = self.store.get_view(&id).await? else {
             return Ok(None);
         };
         Ok(Some(TaskView {
             id,
             state,
-            kind,
             priority,
         }))
     }
@@ -423,7 +417,6 @@ mod tests {
         payload: Option<P>,
         state: TaskState<O>,
         priority: Priority,
-        kind: TaskKind,
         attempt: u32,
     }
 
@@ -449,7 +442,6 @@ mod tests {
         async fn insert_task(
             &self,
             id: TaskId,
-            kind: TaskKind,
             payload: P,
             prio: Priority,
             deps: Vec<TaskId>,
@@ -466,7 +458,6 @@ mod tests {
                     payload: Some(payload),
                     state: TaskState::pending(remaining),
                     priority: prio,
-                    kind,
                     attempt: 0,
                 },
             );
@@ -486,15 +477,12 @@ mod tests {
             Ok(())
         }
 
-        async fn get_view(
-            &self,
-            id: &TaskId,
-        ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+        async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, Priority)>> {
             let guard = self.inner.lock().await;
             let Some(record) = guard.tasks.get(id) else {
                 return Ok(None);
             };
-            Ok(Some((record.state.clone(), record.kind, record.priority)))
+            Ok(Some((record.state.clone(), record.priority)))
         }
 
         async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
@@ -565,7 +553,7 @@ mod tests {
             &self,
             id: &TaskId,
             worker: &str,
-        ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+        ) -> StoreResult<Option<(P, Priority, u32)>> {
             let mut guard = self.inner.lock().await;
             let Some(record) = guard.tasks.get_mut(id) else {
                 return Ok(None);
@@ -583,12 +571,7 @@ mod tests {
                 worker: worker.to_string(),
                 attempt,
             };
-            Ok(Some((
-                payload.clone(),
-                record.kind,
-                record.priority,
-                attempt,
-            )))
+            Ok(Some((payload.clone(), record.priority, attempt)))
         }
 
         async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
@@ -619,12 +602,11 @@ mod tests {
         async fn insert_task(
             &self,
             id: TaskId,
-            kind: TaskKind,
             payload: P,
             prio: Priority,
             deps: Vec<TaskId>,
         ) -> crate::StoreResult<()> {
-            self.inner.insert_task(id, kind, payload, prio, deps).await
+            self.inner.insert_task(id, payload, prio, deps).await
         }
 
         async fn get_state(&self, id: &TaskId) -> crate::StoreResult<Option<TaskState<O>>> {
@@ -638,7 +620,7 @@ mod tests {
         async fn get_view(
             &self,
             id: &TaskId,
-        ) -> crate::StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+        ) -> crate::StoreResult<Option<(TaskState<O>, Priority)>> {
             self.inner.get_view(id).await
         }
 
@@ -666,7 +648,7 @@ mod tests {
             &self,
             _id: &TaskId,
             _worker: &str,
-        ) -> crate::StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+        ) -> crate::StoreResult<Option<(P, Priority, u32)>> {
             Ok(None)
         }
 
@@ -674,7 +656,7 @@ mod tests {
             &self,
             prio: Priority,
             worker: &str,
-        ) -> crate::StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
+        ) -> crate::StoreResult<Option<(TaskId, P, Priority, u32)>> {
             self.inner.pop_ready_and_take(prio, worker).await
         }
 
@@ -706,7 +688,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Low,
                     payload: "a",
                 },
@@ -717,7 +698,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: "b",
                 },
@@ -741,7 +721,6 @@ mod tests {
         let _ = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -761,7 +740,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -772,7 +750,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: "b",
                 },
@@ -796,7 +773,6 @@ mod tests {
         let _a1 = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "a1",
                 },
@@ -807,7 +783,6 @@ mod tests {
         let _a2 = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "a2",
                 },
@@ -819,7 +794,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: "b",
                 },
@@ -848,7 +822,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -859,7 +832,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: "b",
                 },
@@ -886,7 +858,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Low,
                     payload: "a",
                 },
@@ -897,7 +868,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "b",
                 },
@@ -908,7 +878,6 @@ mod tests {
         let c = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Aggregation,
                     priority: Priority::High,
                     payload: "c",
                 },
@@ -941,7 +910,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Low,
                     payload: "a",
                 },
@@ -952,7 +920,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "b",
                 },
@@ -975,7 +942,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -1003,7 +969,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -1032,7 +997,6 @@ mod tests {
         let id = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -1063,7 +1027,6 @@ mod tests {
         let id = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -1114,7 +1077,6 @@ mod tests {
         let a = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::Preflight,
                     priority: Priority::Medium,
                     payload: "a",
                 },
@@ -1125,7 +1087,6 @@ mod tests {
         let b = sched
             .submit(
                 NewTask {
-                    kind: TaskKind::BatchProof,
                     priority: Priority::High,
                     payload: "b",
                 },

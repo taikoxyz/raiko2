@@ -4,7 +4,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use raiko2_queue::{NewTask, Priority, RedisStore, Scheduler, TaskKind, TaskState};
+use raiko2_queue::{NewTask, Priority, RedisStore, Scheduler, TaskState};
 use testcontainers::{
     GenericImage,
     core::{IntoContainerPort, WaitFor},
@@ -43,7 +43,6 @@ async fn redis_store_persists_task_state_across_scheduler_restart() {
     let id = sched
         .submit(
             NewTask {
-                kind: TaskKind::Preflight,
                 priority: Priority::Medium,
                 payload: "hello".to_string(),
             },
@@ -88,7 +87,6 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
     let a1 = sched
         .submit(
             NewTask {
-                kind: TaskKind::BatchProof,
                 priority: Priority::Medium,
                 payload: "a1".to_string(),
             },
@@ -99,7 +97,6 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
     let a2 = sched
         .submit(
             NewTask {
-                kind: TaskKind::BatchProof,
                 priority: Priority::Medium,
                 payload: "a2".to_string(),
             },
@@ -110,7 +107,6 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
     let b = sched
         .submit(
             NewTask {
-                kind: TaskKind::Aggregation,
                 priority: Priority::High,
                 payload: "b".to_string(),
             },
@@ -155,7 +151,6 @@ async fn redis_store_requeues_task_after_lease_expires() {
     let id = sched
         .submit(
             NewTask {
-                kind: TaskKind::Preflight,
                 priority: Priority::Medium,
                 payload: "hello".to_string(),
             },

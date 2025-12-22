@@ -1,11 +1,10 @@
-use crate::{Priority, StoreResult, TaskId, TaskKind, TaskState, TaskStore, TaskStoreError};
+use crate::{Priority, StoreResult, TaskId, TaskState, TaskStore, TaskStoreError};
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{marker::PhantomData, time::Duration};
 use tokio::sync::Mutex;
 
-const FIELD_KIND: &str = "kind";
 const FIELD_PRIORITY: &str = "priority";
 const FIELD_STATE: &str = "state";
 const FIELD_REMAINING: &str = "remaining_deps";
@@ -104,25 +103,6 @@ fn parse_prio(s: &str) -> Option<Priority> {
     }
 }
 
-const fn kind_str(kind: TaskKind) -> &'static str {
-    match kind {
-        TaskKind::Preflight => "preflight",
-        TaskKind::Validation => "validation",
-        TaskKind::BatchProof => "batch_proof",
-        TaskKind::Aggregation => "aggregation",
-    }
-}
-
-fn parse_kind(s: &str) -> Option<TaskKind> {
-    match s {
-        "preflight" => Some(TaskKind::Preflight),
-        "validation" | "build_guest_input" => Some(TaskKind::Validation),
-        "batch_proof" => Some(TaskKind::BatchProof),
-        "aggregation" => Some(TaskKind::Aggregation),
-        _ => None,
-    }
-}
-
 #[async_trait]
 impl<P, O> TaskStore<P, O> for RedisStore<P, O>
 where
@@ -132,7 +112,6 @@ where
     async fn insert_task(
         &self,
         id: TaskId,
-        kind: TaskKind,
         payload: P,
         prio: Priority,
         deps: Vec<TaskId>,
@@ -144,8 +123,6 @@ where
         let mut conn = self.conn.lock().await;
         let _: () = redis::cmd("HSET")
             .arg(&task_key)
-            .arg(FIELD_KIND)
-            .arg(kind_str(kind))
             .arg(FIELD_PRIORITY)
             .arg(prio_str(prio))
             .arg(FIELD_STATE)
@@ -413,22 +390,9 @@ where
         Ok(())
     }
 
-    async fn get_view(
-        &self,
-        id: &TaskId,
-    ) -> StoreResult<Option<(TaskState<O>, TaskKind, Priority)>> {
+    async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, Priority)>> {
         let task_key = self.task_key(id);
         let mut conn = self.conn.lock().await;
-
-        let kind: Option<String> = conn
-            .hget(&task_key, FIELD_KIND)
-            .await
-            .map_err(TaskStoreError::backend)?;
-        let Some(kind) = kind else {
-            return Ok(None);
-        };
-        let kind = parse_kind(kind.as_str())
-            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
 
         let prio: Option<String> = conn
             .hget(&task_key, FIELD_PRIORITY)
@@ -444,7 +408,7 @@ where
         let Some(state) = self.get_state(id).await? else {
             return Ok(None);
         };
-        Ok(Some((state, kind, priority)))
+        Ok(Some((state, priority)))
     }
 
     async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
@@ -536,7 +500,7 @@ return redis.call('HGET', KEYS[1], ARGV[5])
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId, P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(TaskId, P, Priority, u32)>> {
         let ready_key = self.ready_key(prio);
         let running_key = self.running_key();
 
@@ -558,16 +522,15 @@ while true do
     redis.call('ZADD', KEYS[2], ARGV[8], id)
 
     local payload = redis.call('HGET', task_key, ARGV[10])
-    local kind = redis.call('HGET', task_key, ARGV[11])
-    local priority = redis.call('HGET', task_key, ARGV[12])
-    return {id, payload, kind, priority, attempt}
+    local priority = redis.call('HGET', task_key, ARGV[11])
+    return {id, payload, priority, attempt}
   end
 end
 "#,
         );
 
         let mut conn = self.conn.lock().await;
-        let result: Option<(String, Vec<u8>, String, String, i64)> = script
+        let result: Option<(String, Vec<u8>, String, i64)> = script
             .key(ready_key)
             .key(running_key)
             .arg(self.task_key_prefix())
@@ -580,13 +543,12 @@ end
             .arg(lease_until_ms as i64)
             .arg(FIELD_ATTEMPT)
             .arg(FIELD_PAYLOAD)
-            .arg(FIELD_KIND)
             .arg(FIELD_PRIORITY)
             .invoke_async(&mut *conn)
             .await
             .map_err(TaskStoreError::backend)?;
 
-        let Some((id, payload_bytes, kind, prio, attempt)) = result else {
+        let Some((id, payload_bytes, prio, attempt)) = result else {
             return Ok(None);
         };
         let id: TaskId = id
@@ -594,18 +556,16 @@ end
             .map_err(|e| TaskStoreError::corrupt_msg(format!("invalid task id: {e}")))?;
         let payload: P = bincode::deserialize(&payload_bytes)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
-        let kind = parse_kind(kind.as_str())
-            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
         let prio = parse_prio(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
-        Ok(Some((id, payload, kind, prio, attempt.max(0) as u32)))
+        Ok(Some((id, payload, prio, attempt.max(0) as u32)))
     }
 
     async fn take_ready(
         &self,
         id: &TaskId,
         worker: &str,
-    ) -> StoreResult<Option<(P, TaskKind, Priority, u32)>> {
+    ) -> StoreResult<Option<(P, Priority, u32)>> {
         let task_key = self.task_key(id);
         let running_key = self.running_key();
 
@@ -618,19 +578,18 @@ if state ~= ARGV[2] then
   return nil
 end
 
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[3], ARGV[4], ARGV[5], ARGV[10], ARGV[11])
-local attempt = redis.call('HINCRBY', KEYS[1], ARGV[9], 1)
-redis.call('ZADD', KEYS[2], ARGV[11], ARGV[12])
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[3], ARGV[4], ARGV[5], ARGV[9], ARGV[10])
+local attempt = redis.call('HINCRBY', KEYS[1], ARGV[8], 1)
+redis.call('ZADD', KEYS[2], ARGV[10], ARGV[11])
 
 local payload = redis.call('HGET', KEYS[1], ARGV[6])
-local kind = redis.call('HGET', KEYS[1], ARGV[7])
-local priority = redis.call('HGET', KEYS[1], ARGV[8])
-return {payload, kind, priority, attempt}
+local priority = redis.call('HGET', KEYS[1], ARGV[7])
+return {payload, priority, attempt}
 "#,
         );
 
         let mut conn = self.conn.lock().await;
-        let result: Option<(Vec<u8>, String, String, i64)> = script
+        let result: Option<(Vec<u8>, String, i64)> = script
             .key(task_key)
             .key(running_key)
             .arg(FIELD_STATE)
@@ -639,7 +598,6 @@ return {payload, kind, priority, attempt}
             .arg(FIELD_WORKER)
             .arg(worker)
             .arg(FIELD_PAYLOAD)
-            .arg(FIELD_KIND)
             .arg(FIELD_PRIORITY)
             .arg(FIELD_ATTEMPT)
             .arg(FIELD_LEASE_UNTIL_MS)
@@ -649,16 +607,14 @@ return {payload, kind, priority, attempt}
             .await
             .map_err(TaskStoreError::backend)?;
 
-        let Some((payload_bytes, kind, prio, attempt)) = result else {
+        let Some((payload_bytes, prio, attempt)) = result else {
             return Ok(None);
         };
         let payload: P = bincode::deserialize(&payload_bytes)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
-        let kind = parse_kind(kind.as_str())
-            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown kind: {kind}")))?;
         let prio = parse_prio(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
-        Ok(Some((payload, kind, prio, attempt.max(0) as u32)))
+        Ok(Some((payload, prio, attempt.max(0) as u32)))
     }
 
     async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {

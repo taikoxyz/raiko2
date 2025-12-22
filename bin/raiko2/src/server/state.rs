@@ -2,14 +2,15 @@
 
 use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
-use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
-use raiko2_engine::queue::EngineQueue;
+use raiko2_engine::Engine;
 use raiko2_engine::tasks::EngineOutput;
 use raiko2_pipeline::{
     Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
+use raiko2_primitives::{ProofContext, ProofRequest};
 use raiko2_prover::Prover;
+use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskId, TaskStoreError, TaskView};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +27,27 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub enum EngineHandle {
-    Risc0(EngineQueue<ShastaSpec, Risc0ShastaBackend>),
-    Sp1(EngineQueue<ShastaSpec, Sp1ShastaBackend>),
+    Risc0(Engine<ShastaSpec, Risc0ShastaBackend, NetworkProvider>),
+    Sp1(Engine<ShastaSpec, Sp1ShastaBackend, NetworkProvider>),
+}
+
+fn build_context(config: &Config, proof_type: &str) -> ProofContext {
+    ProofContext::new(
+        ProofRequest {
+            l1_chain_id: config.rpc.l1_chain_id,
+            l2_chain_id: config.rpc.l2_chain_id,
+            batch_id: 0,
+            proof_type: proof_type.to_string(),
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+        },
+        raiko2_primitives::ProverConfig::default(),
+    )
+}
+
+fn build_provider(config: &Config) -> Result<NetworkProvider> {
+    NetworkProvider::new(&config.rpc.l2_rpc).map_err(|e| anyhow::anyhow!(e))
 }
 
 impl EngineHandle {
@@ -101,34 +121,25 @@ impl AppState {
                 let prover: Arc<dyn Prover<ShastaSpec, Risc0ShastaBackend>> =
                     Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config));
                 let backend = RISC0_SHASTA_BACKEND;
-                let guest_input_builder: Arc<
-                    dyn GuestInputBuilder<ShastaSpec, Risc0ShastaBackend>,
-                > = Arc::new(
-                    NetworkGuestInputBuilder::new(
-                        spec.clone(),
-                        backend,
-                        &config.rpc.l2_rpc,
-                        config.rpc.l1_chain_id,
-                        config.rpc.l2_chain_id,
-                        "risc0".to_string(),
-                        raiko2_primitives::ProverConfig::default(),
-                    )
-                    .map_err(|e| anyhow::anyhow!(e))?,
-                );
                 let engine = match config.queue.backend {
                     QueueBackend::Memory => {
-                        EngineQueue::with_store_and_builder_and_scheduler_config(
+                        let provider = build_provider(&config)?;
+                        let context = build_context(&config, "risc0");
+                        Engine::with_store_and_scheduler_config(
                             spec.clone(),
                             backend,
+                            provider,
                             prover,
+                            context,
                             raiko2_queue::MemoryStore::new(),
-                            guest_input_builder,
                             scheduler_config.clone(),
                         )
                     }
                     QueueBackend::Redis => {
                         #[cfg(feature = "redis-queue")]
                         {
+                            let provider = build_provider(&config)?;
+                            let context = build_context(&config, "risc0");
                             let url = config.queue.redis_url.clone().unwrap_or_default();
                             let store =
                                 raiko2_queue::RedisStore::<EngineTask, EngineOutput>::connect(
@@ -137,12 +148,13 @@ impl AppState {
                                     Duration::from_secs(60),
                                 )
                                 .await?;
-                            EngineQueue::with_store_and_builder_and_scheduler_config(
+                            Engine::with_store_and_scheduler_config(
                                 spec.clone(),
                                 backend,
+                                provider,
                                 prover,
+                                context,
                                 store,
-                                guest_input_builder,
                                 scheduler_config.clone(),
                             )
                         }
@@ -174,33 +186,25 @@ impl AppState {
                 let prover: Arc<dyn Prover<ShastaSpec, Sp1ShastaBackend>> =
                     Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config));
                 let backend = SP1_SHASTA_BACKEND;
-                let guest_input_builder: Arc<dyn GuestInputBuilder<ShastaSpec, Sp1ShastaBackend>> =
-                    Arc::new(
-                        NetworkGuestInputBuilder::new(
-                            spec.clone(),
-                            backend,
-                            &config.rpc.l2_rpc,
-                            config.rpc.l1_chain_id,
-                            config.rpc.l2_chain_id,
-                            "sp1".to_string(),
-                            raiko2_primitives::ProverConfig::default(),
-                        )
-                        .map_err(|e| anyhow::anyhow!(e))?,
-                    );
                 let engine = match config.queue.backend {
                     QueueBackend::Memory => {
-                        EngineQueue::with_store_and_builder_and_scheduler_config(
+                        let provider = build_provider(&config)?;
+                        let context = build_context(&config, "sp1");
+                        Engine::with_store_and_scheduler_config(
                             spec.clone(),
                             backend,
+                            provider,
                             prover,
+                            context,
                             raiko2_queue::MemoryStore::new(),
-                            guest_input_builder,
                             scheduler_config.clone(),
                         )
                     }
                     QueueBackend::Redis => {
                         #[cfg(feature = "redis-queue")]
                         {
+                            let provider = build_provider(&config)?;
+                            let context = build_context(&config, "sp1");
                             let url = config.queue.redis_url.clone().unwrap_or_default();
                             let store =
                                 raiko2_queue::RedisStore::<EngineTask, EngineOutput>::connect(
@@ -209,12 +213,13 @@ impl AppState {
                                     Duration::from_secs(60),
                                 )
                                 .await?;
-                            EngineQueue::with_store_and_builder_and_scheduler_config(
+                            Engine::with_store_and_scheduler_config(
                                 spec.clone(),
                                 backend,
+                                provider,
                                 prover,
+                                context,
                                 store,
-                                guest_input_builder,
                                 scheduler_config.clone(),
                             )
                         }

@@ -1,42 +1,45 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use raiko2_primitives::{AggregationGuestInput, ProverConfig};
+use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
+use raiko2_primitives::{AggregationGuestInput, ProofContext};
 use raiko2_prover::Prover;
+use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskKind,
     TaskState, TaskStoreError, TaskView,
 };
 
-use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
 use crate::tasks::{EngineOutput, EngineTask};
-use raiko2_pipeline::{PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 
-pub struct EngineQueue<S, B>
+pub struct Engine<S, B, P>
 where
     S: PipelineSpec<B>,
     B: ProverBackend,
+    P: Provider,
 {
-    inner: Arc<Inner<S, B>>,
+    inner: Arc<Inner<S, B, P>>,
 }
 
-struct Inner<S, B>
+struct Inner<S, B, P>
 where
     S: PipelineSpec<B>,
     B: ProverBackend,
+    P: Provider,
 {
     spec: S,
     backend: B,
+    provider: P,
     scheduler: Scheduler<EngineTask, EngineOutput>,
     prover: Arc<dyn Prover<S, B>>,
-    config: ProverConfig,
-    guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
+    context: ProofContext,
 }
 
-impl<S, B> Clone for EngineQueue<S, B>
+impl<S, B, P> Clone for Engine<S, B, P>
 where
     S: PipelineSpec<B>,
     B: ProverBackend,
+    P: Provider,
 {
     fn clone(&self) -> Self {
         Self {
@@ -45,10 +48,11 @@ where
     }
 }
 
-impl<S, B> EngineQueue<S, B>
+impl<S, B, P> Engine<S, B, P>
 where
     S: PipelineSpec<B>,
     B: ProverBackend,
+    P: Provider,
 {
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
@@ -61,60 +65,53 @@ where
         }
     }
 
-    pub fn new(spec: S, backend: B, prover: Arc<dyn Prover<S, B>>) -> Self {
-        Self::with_store_and_builder(
+    pub fn new(
+        spec: S,
+        backend: B,
+        provider: P,
+        prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
+    ) -> Self {
+        Self::with_store_and_scheduler_config(
             spec,
             backend,
+            provider,
             prover,
+            context,
             MemoryStore::new(),
-            Arc::new(DefaultGuestInputBuilder),
+            Self::default_scheduler_config(),
         )
     }
 
     pub fn with_store<Store>(
         spec: S,
         backend: B,
+        provider: P,
         prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
         store: Store,
     ) -> Self
     where
         Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
-        Self::with_store_and_builder(
+        Self::with_store_and_scheduler_config(
             spec,
             backend,
+            provider,
             prover,
+            context,
             store,
-            Arc::new(DefaultGuestInputBuilder),
-        )
-    }
-
-    pub fn with_store_and_builder<Store>(
-        spec: S,
-        backend: B,
-        prover: Arc<dyn Prover<S, B>>,
-        store: Store,
-        guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
-    ) -> Self
-    where
-        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
-    {
-        Self::with_store_and_builder_and_scheduler_config(
-            spec,
-            backend,
-            prover,
-            store,
-            guest_input_builder,
             Self::default_scheduler_config(),
         )
     }
 
-    pub fn with_store_and_builder_and_scheduler_config<Store>(
+    pub fn with_store_and_scheduler_config<Store>(
         spec: S,
         backend: B,
+        provider: P,
         prover: Arc<dyn Prover<S, B>>,
+        context: ProofContext,
         store: Store,
-        guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
@@ -124,12 +121,18 @@ where
             inner: Arc::new(Inner {
                 spec,
                 backend,
+                provider,
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 prover,
-                config: ProverConfig::default(),
-                guest_input_builder,
+                context,
             }),
         }
+    }
+
+    fn context_for_batch(&self, batch_id: u64) -> ProofContext {
+        let mut ctx = self.inner.context.clone();
+        ctx.request.batch_id = batch_id;
+        ctx
     }
 
     pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
@@ -200,6 +203,7 @@ where
     where
         S: 'static,
         B: 'static,
+        P: 'static,
     {
         self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
     }
@@ -211,6 +215,7 @@ where
     ) where
         S: 'static,
         B: 'static,
+        P: 'static,
     {
         let notify = self.inner.scheduler.notifier();
         for i in 0..concurrency {
@@ -222,12 +227,15 @@ where
 
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput, String> {
         match task {
-            EngineTask::Preflight { batch_id } => self
-                .inner
-                .guest_input_builder
-                .preflight(batch_id)
-                .await
-                .map(|input| EngineOutput::GuestInput(Box::new(input))),
+            EngineTask::Preflight { batch_id } => {
+                let ctx = self.context_for_batch(batch_id);
+                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                pipeline
+                    .preflight(&ctx, &self.inner.provider)
+                    .await
+                    .map(|input| EngineOutput::GuestInput(Box::new(input)))
+                    .map_err(|e| e.to_string())
+            }
             EngineTask::Validate {
                 batch_id,
                 preflight_task,
@@ -257,11 +265,10 @@ where
                     _ => return Err("preflight task not completed".to_string()),
                 };
 
-                let validated = self
-                    .inner
-                    .guest_input_builder
-                    .validate(batch_id, preflight_input)
-                    .await
+                let ctx = self.context_for_batch(batch_id);
+                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                let validated = pipeline
+                    .validate(&ctx, preflight_input)
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::GuestInput(Box::new(validated)))
             }
@@ -302,7 +309,7 @@ where
                     .prover
                     .prove(
                         guest_input,
-                        &self.inner.config,
+                        &self.inner.context.config,
                         &self.inner.spec,
                         &self.inner.backend,
                     )
@@ -349,7 +356,7 @@ where
                     .prover
                     .aggregate(
                         AggregationGuestInput { proofs },
-                        &self.inner.config,
+                        &self.inner.context.config,
                         &self.inner.spec,
                         &self.inner.backend,
                     )
@@ -364,13 +371,14 @@ where
     }
 }
 
-fn spawn_worker_supervised<S, B>(
-    engine: EngineQueue<S, B>,
+fn spawn_worker_supervised<S, B, P>(
+    engine: Engine<S, B, P>,
     notify: Arc<tokio::sync::Notify>,
     worker: String,
 ) where
     S: PipelineSpec<B> + 'static,
     B: ProverBackend + 'static,
+    P: Provider + 'static,
 {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
@@ -409,10 +417,11 @@ fn spawn_worker_supervised<S, B>(
     });
 }
 
-fn spawn_maintenance_supervised<S, B>(engine: EngineQueue<S, B>, maintenance_interval: Duration)
+fn spawn_maintenance_supervised<S, B, P>(engine: Engine<S, B, P>, maintenance_interval: Duration)
 where
     S: PipelineSpec<B> + 'static,
     B: ProverBackend + 'static,
+    P: Provider + 'static,
 {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
@@ -451,32 +460,30 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
     use raiko2_pipeline::{
-        NoopManifestBuilder, NoopValidation, PipelineSpec, PipelineStage, PipelineStageResult,
-        Preflight, B,
+        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
     };
     use raiko2_primitives::{
-        AggregationGuestInput, GuestInput, Proof, ProofContext, ProverConfig, RaikoError,
-        RaikoResult,
+        AggregationGuestInput, GuestInput, Proof, ProofContext, ProofRequest, ProverConfig,
+        RaikoError, RaikoResult,
     };
     use raiko2_prover::Prover;
+    use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
-    use crate::input_builder::GuestInputBuilder;
-    use crate::queue::EngineQueue;
+    use crate::queue::Engine;
     use crate::tasks::EngineOutput;
 
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, B> for MockProver {
+    impl Prover<TestSpec, TestBackend> for MockProver {
         async fn prove(
             &self,
             input: GuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &B,
+            _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             assert_eq!(input.taiko.batch_id, 1);
             Ok(Proof {
@@ -490,7 +497,7 @@ mod tests {
             _input: AggregationGuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &B,
+            _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Ok(Proof {
                 proof: Some("mock-agg-proof".to_string()),
@@ -502,13 +509,13 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec, B> for FailingProver {
+    impl Prover<TestSpec, TestBackend> for FailingProver {
         async fn prove(
             &self,
             _input: GuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &B,
+            _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Err(RaikoError::Guest("boom".to_string()))
         }
@@ -518,9 +525,17 @@ mod tests {
             _input: AggregationGuestInput,
             _config: &ProverConfig,
             _spec: &TestSpec,
-            _backend: &B,
+            _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
             Ok(Proof::default())
+        }
+    }
+
+    struct TestBackend;
+
+    impl ProverBackend for TestBackend {
+        fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+            Ok(&[])
         }
     }
 
@@ -530,16 +545,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Preflight for TestSpec {
-        async fn preflight<P: raiko2_provider::Provider>(
+        async fn preflight<P: Provider>(
             &self,
-            _ctx: &ProofContext,
+            ctx: &ProofContext,
             _provider: &P,
         ) -> RaikoResult<GuestInput> {
-            Ok(GuestInput::default())
+            let mut input = GuestInput::default();
+            input.taiko.batch_id = ctx.request.batch_id;
+            Ok(input)
         }
     }
 
-    impl PipelineSpec<B> for TestSpec {
+    impl PipelineSpec<TestBackend> for TestSpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;
@@ -557,42 +574,48 @@ mod tests {
         }
     }
 
-    struct MockGuestInputBuilder;
+    struct MockProvider;
 
     #[async_trait::async_trait]
-    impl GuestInputBuilder<TestSpec, B> for MockGuestInputBuilder {
-        async fn preflight(
+    impl Provider for MockProvider {
+        async fn batch_blocks(
             &self,
-            batch_id: u64,
-        ) -> Result<PipelineStageResult<GuestInput>, String> {
-            let input = GuestInput {
-                taiko: raiko2_primitives::TaikoManifest {
-                    batch_id,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            Ok(PipelineStageResult::new(PipelineStage::Preflight, input))
+            _blocks: &[u64],
+        ) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
+            Ok(vec![])
         }
 
-        async fn validate(
+        async fn batch_accounts(
             &self,
-            _batch_id: u64,
-            input: GuestInput,
-        ) -> Result<PipelineStageResult<GuestInput>, String> {
-            Ok(PipelineStageResult::new(PipelineStage::Validation, input))
+            _blocks: &[u64],
+            _accounts: &[Vec<alloy_primitives::Address>],
+        ) -> RaikoResult<Vec<alloy_primitives::map::AddressMap<alloy_trie::TrieAccount>>> {
+            Ok(vec![])
         }
+
+        async fn batch_witnesses(
+            &self,
+            _blocks: &[u64],
+        ) -> RaikoResult<Vec<reth_stateless::ExecutionWitness>> {
+            Ok(vec![])
+        }
+    }
+
+    fn test_context() -> ProofContext {
+        ProofContext::new(ProofRequest::default(), ProverConfig::default())
     }
 
     #[tokio::test]
     async fn submit_batch_proof_runs_dependency_pipeline() {
-        let backend = RISC0_SHASTA_BACKEND;
-        let engine = EngineQueue::<TestSpec, B>::with_store_and_builder(
+        let backend = TestBackend;
+        let engine = Engine::with_store_and_scheduler_config(
             TestSpec,
             backend,
+            MockProvider,
             Arc::new(MockProver),
+            test_context(),
             raiko2_queue::MemoryStore::new(),
-            Arc::new(MockGuestInputBuilder),
+            Engine::default_scheduler_config(),
         );
 
         let job_id = engine.submit_batch_proof(1).await.unwrap();
@@ -619,16 +642,16 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let backend = RISC0_SHASTA_BACKEND;
-        let engine =
-            EngineQueue::<TestSpec, B>::with_store_and_builder_and_scheduler_config(
-                TestSpec,
-                backend,
-                Arc::new(FailingProver),
-                raiko2_queue::MemoryStore::new(),
-                Arc::new(MockGuestInputBuilder),
-                scheduler_config,
-            );
+        let backend = TestBackend;
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec,
+            backend,
+            MockProvider,
+            Arc::new(FailingProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            scheduler_config,
+        );
 
         let job_id = engine.submit_batch_proof(1).await.unwrap();
 

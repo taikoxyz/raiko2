@@ -1,4 +1,4 @@
-//! Worker management for the EngineQueue.
+//! Worker management for the Engine.
 //!
 //! This module provides supervised worker spawning and maintenance task management.
 //! Workers are automatically restarted on failure with backoff.

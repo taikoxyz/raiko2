@@ -64,9 +64,8 @@ Architecture diagram:
 ```mermaid
 flowchart LR
   C["Client / SDK"] --> A["raiko2 HTTP API"]
-  A --> Q["EngineQueue"]
-  Q -->|BuildGuestInput| E["Engine"]
-  E --> PL["Pipeline"]
+  A --> Q["Engine"]
+  Q --> PL["Pipeline"]
   PL --> PF["Preflight"]
   PL --> VA["Validation"]
   VA --> GI["GuestInput"]
@@ -93,15 +92,17 @@ Request sequence:
 sequenceDiagram
   participant C as Client
   participant API as HTTP API
-  participant Q as EngineQueue
+  participant Q as Engine
   participant W as Worker
   participant P as Provider
   participant Z as Prover
 
   C->>API: POST /v1/proof/batch
   API->>Q: submit_batch_proof
-  Q->>W: BuildGuestInput task
+  Q->>W: Preflight task
   W->>P: fetch blocks/witnesses/accounts
+  W->>Q: store Preflight output
+  Q->>W: Validation task
   W->>Q: store GuestInput
   Q->>W: Prove task
   W->>Z: prove(GuestInput)

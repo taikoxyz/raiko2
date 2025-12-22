@@ -1,17 +1,16 @@
 //! Helpers for zkVM guest programs.
 
-use raiko2_primitives::{
-    GuestInput, ShastaZkAggregationGuestInput, StatelessInput,
-    instance::{
-        ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_output,
-    },
-};
 use alethia_reth_node::{block::config::TaikoEvmConfig, chainspec::spec::TaikoChainSpec};
 use alloy_primitives::B256;
-use anyhow::{Context, Result, ensure};
-use raiko2_protocol::{ProofCarryData, hash_shasta_subproof_input};
+use anyhow::{ensure, Context, Result};
+use raiko2_primitives::{
+    instance::{
+        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
+        shasta_zk_aggregation_output, ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
+    },
+    GuestInput, ShastaZkAggregationGuestInput, StatelessInput,
+};
+use raiko2_protocol::{hash_shasta_subproof_input, ProofCarryData};
 use raiko2_stateless::validate_block;
 use std::sync::Arc;
 
@@ -188,11 +187,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Address, B256};
     use raiko2_primitives::chain_spec::Eip1559Constants;
     use raiko2_primitives::instance::{ProtocolInstance, ShastaProposalMetadata, ShastaTransition};
     use raiko2_primitives::{ChainSpec, StatelessInput, TaikoManifest};
-    use alloy_primitives::{Address, B256};
-    use raiko2_protocol::{TransitionInputData, hash_shasta_subproof_input};
+    use raiko2_protocol::{hash_shasta_subproof_input, TransitionInputData};
     use reth_revm::primitives::hardfork::SpecId;
 
     fn taiko_mainnet_chain_spec() -> ChainSpec {
@@ -347,10 +346,9 @@ mod tests {
         )
         .expect_err("expected chain_id mismatch to fail");
 
-        assert!(
-            err.to_string()
-                .contains("proof_carry_data.chain_id mismatch")
-        );
+        assert!(err
+            .to_string()
+            .contains("proof_carry_data.chain_id mismatch"));
     }
 
     #[test]
@@ -378,14 +376,12 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            prove_shasta_proposal_with_validator(
-                &guest_input,
-                &proof_carry_data,
-                |_stateless_input, _runtime| Ok(B256::ZERO),
-            )
-            .is_err()
-        );
+        assert!(prove_shasta_proposal_with_validator(
+            &guest_input,
+            &proof_carry_data,
+            |_stateless_input, _runtime| Ok(B256::ZERO),
+        )
+        .is_err());
     }
 
     #[test]

@@ -5,9 +5,7 @@ risc0_zkvm::guest::entry!(main);
 
 use alloy_primitives::B256;
 use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
-use raiko2_primitives::{
-    instance::words_to_bytes_le, ShastaZkAggregationGuestInput,
-};
+use raiko2_primitives::{instance::words_to_bytes_le, ShastaZkAggregationGuestInput};
 use risc0_zkvm::guest::env;
 
 pub fn main() {

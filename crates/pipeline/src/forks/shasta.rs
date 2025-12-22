@@ -1,6 +1,5 @@
 use crate::{
-    ManifestBuilder, PipelineSpec, Preflight, ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
-    Validation,
+    ManifestBuilder, PipelineSpec, Preflight, Risc0ShastaBackend, Sp1ShastaBackend, Validation,
 };
 use alethia_reth_node::block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
@@ -197,10 +196,7 @@ impl Validation for ShastaSpec {
     }
 }
 
-impl<B> PipelineSpec<B> for ShastaSpec
-where
-    B: ProverBackend,
-{
+impl PipelineSpec for ShastaSpec {
     type Preflight = Self;
     type Validation = Self;
     type ManifestBuilder = ShastaManifestBuilder;
@@ -223,7 +219,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ProofStage;
+    use crate::{ProofStage, ProverBackend};
 
     #[test]
     fn shasta_backends_return_expected_elves() {

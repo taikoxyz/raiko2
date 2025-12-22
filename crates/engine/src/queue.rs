@@ -14,7 +14,7 @@ use crate::tasks::{EngineOutput, EngineTask, EngineTaskId, EngineTaskKey, Propos
 
 pub struct Engine<S, B, P>
 where
-    S: PipelineSpec<B>,
+    S: PipelineSpec,
     B: ProverBackend,
     P: Provider,
 {
@@ -23,7 +23,7 @@ where
 
 struct Inner<S, B, P>
 where
-    S: PipelineSpec<B>,
+    S: PipelineSpec,
     B: ProverBackend,
     P: Provider,
 {
@@ -37,7 +37,7 @@ where
 
 impl<S, B, P> Clone for Engine<S, B, P>
 where
-    S: PipelineSpec<B>,
+    S: PipelineSpec,
     B: ProverBackend,
     P: Provider,
 {
@@ -50,7 +50,7 @@ where
 
 impl<S, B, P> Engine<S, B, P>
 where
-    S: PipelineSpec<B>,
+    S: PipelineSpec,
     B: ProverBackend,
     P: Provider,
 {
@@ -242,7 +242,7 @@ where
         match task {
             EngineTask::Preflight { proposal_id } => {
                 let ctx = self.context_for_proposal(proposal_id);
-                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                let pipeline = Pipeline::new(&self.inner.spec);
                 pipeline
                     .preflight(&ctx, &self.inner.provider)
                     .await
@@ -279,7 +279,7 @@ where
                 };
 
                 let ctx = self.context_for_proposal(proposal_id);
-                let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
+                let pipeline = Pipeline::new(&self.inner.spec);
                 let validated = pipeline
                     .validate(&ctx, preflight_input)
                     .map_err(|e| e.to_string())?;
@@ -383,7 +383,7 @@ fn spawn_worker_supervised<S, B, P>(
     notify: Arc<tokio::sync::Notify>,
     worker: String,
 ) where
-    S: PipelineSpec<B> + 'static,
+    S: PipelineSpec + 'static,
     B: ProverBackend + 'static,
     P: Provider + 'static,
 {
@@ -426,7 +426,7 @@ fn spawn_worker_supervised<S, B, P>(
 
 fn spawn_maintenance_supervised<S, B, P>(engine: Engine<S, B, P>, maintenance_interval: Duration)
 where
-    S: PipelineSpec<B> + 'static,
+    S: PipelineSpec + 'static,
     B: ProverBackend + 'static,
     P: Provider + 'static,
 {
@@ -559,7 +559,7 @@ mod tests {
         }
     }
 
-    impl PipelineSpec<TestBackend> for TestSpec {
+    impl PipelineSpec for TestSpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;

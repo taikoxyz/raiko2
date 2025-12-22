@@ -1,27 +1,22 @@
-use crate::{
-    PipelineSpec, PipelineStage, PipelineStageResult, Preflight, ProverBackend, Validation,
-};
+use crate::{PipelineSpec, PipelineStage, PipelineStageResult, Preflight, Validation};
 use raiko2_primitives::{GuestInput, ProofContext, RaikoResult};
 use raiko2_provider::Provider;
 
 /// Pipeline-agnostic builder for guest inputs.
-pub struct Pipeline<'a, S, B>
+pub struct Pipeline<'a, S>
 where
-    S: PipelineSpec<B>,
-    B: ProverBackend,
+    S: PipelineSpec,
 {
     spec: &'a S,
-    backend: &'a B,
 }
 
-impl<'a, S, B> Pipeline<'a, S, B>
+impl<'a, S> Pipeline<'a, S>
 where
-    S: PipelineSpec<B>,
-    B: ProverBackend,
+    S: PipelineSpec,
 {
     /// Create a new pipeline using the provided pipeline spec.
-    pub const fn new(spec: &'a S, backend: &'a B) -> Self {
-        Self { spec, backend }
+    pub const fn new(spec: &'a S) -> Self {
+        Self { spec }
     }
 
     /// Run the preflight stage.
@@ -65,23 +60,15 @@ where
         let preflight = self.preflight(ctx, provider).await?;
         self.validate(ctx, preflight.output)
     }
-
-    /// Access the prover backend used by this pipeline.
-    pub const fn backend(&self) -> &B {
-        self.backend
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
-    };
+    use crate::{NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight};
     use raiko2_primitives::{ProofRequest, ProverConfig};
 
     struct EmptySpec;
-    struct TestBackend;
     const NOOP_VALIDATION: NoopValidation = NoopValidation;
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
@@ -96,7 +83,7 @@ mod tests {
         }
     }
 
-    impl PipelineSpec<TestBackend> for EmptySpec {
+    impl PipelineSpec for EmptySpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;
@@ -111,12 +98,6 @@ mod tests {
 
         fn manifest_builder(&self) -> &Self::ManifestBuilder {
             &NOOP_MANIFEST
-        }
-    }
-
-    impl ProverBackend for TestBackend {
-        fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
-            Ok(&[])
         }
     }
 
@@ -150,8 +131,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_empty_input() {
         let spec = EmptySpec;
-        let backend = TestBackend;
-        let pipeline = Pipeline::new(&spec, &backend);
+        let pipeline = Pipeline::new(&spec);
         let ctx = ProofContext::new(ProofRequest::default(), ProverConfig::default());
         let input = pipeline
             .build_guest_input(&ctx, &EmptyProvider)

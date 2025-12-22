@@ -95,7 +95,7 @@ impl ManifestBuilder for NoopManifestBuilder {
 }
 
 /// Pipeline-specific behavior for building inputs.
-pub trait PipelineSpec<B>: Send + Sync {
+pub trait PipelineSpec: Send + Sync {
     type Preflight: Preflight;
     type Validation: Validation;
     type ManifestBuilder: ManifestBuilder;

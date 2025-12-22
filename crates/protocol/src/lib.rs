@@ -27,8 +27,6 @@
 //! let manifest = TaikoManifest::default();
 //! ```
 
-#![allow(missing_docs)]
-
 mod libhash;
 mod manifest;
 mod shasta;

@@ -22,8 +22,6 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
-#![allow(missing_docs)]
-
 pub mod risc0;
 pub mod sp1;
 

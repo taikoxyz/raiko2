@@ -4,7 +4,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use raiko2_queue::{NewTask, Priority, RedisStore, Scheduler, TaskState};
+use raiko2_queue::{NewTask, Priority, RedisStore, Scheduler, TaskId, TaskState};
 use testcontainers::{
     GenericImage,
     core::{IntoContainerPort, WaitFor},
@@ -33,15 +33,23 @@ async fn redis_store_persists_task_state_across_scheduler_restart() {
         .unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
     let url = format!("redis://127.0.0.1:{port}/");
-    let namespace = format!("test-{}", uuid::Uuid::new_v4());
+    let namespace = format!(
+        "test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    let store = RedisStore::<String, String>::connect(&url, &namespace, Duration::from_secs(30))
-        .await
-        .unwrap();
-    let sched: Scheduler<String, String> = Scheduler::new(store);
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await
+            .unwrap();
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let id = sched
         .submit(
+            TaskId::new(1),
             NewTask {
                 priority: Priority::Medium,
                 payload: "hello".to_string(),
@@ -53,10 +61,11 @@ async fn redis_store_persists_task_state_across_scheduler_restart() {
 
     drop(sched);
 
-    let store2 = RedisStore::<String, String>::connect(&url, &namespace, Duration::from_secs(30))
-        .await
-        .unwrap();
-    let sched2: Scheduler<String, String> = Scheduler::new(store2);
+    let store2 =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await
+            .unwrap();
+    let sched2: Scheduler<String, String, u64> = Scheduler::new(store2);
 
     let view = sched2.get(id).await.unwrap().unwrap();
     assert!(matches!(view.state, TaskState::Ready));
@@ -77,15 +86,23 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
         .unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
     let url = format!("redis://127.0.0.1:{port}/");
-    let namespace = format!("test-fanin-{}", uuid::Uuid::new_v4());
+    let namespace = format!(
+        "test-fanin-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    let store = RedisStore::<String, String>::connect(&url, &namespace, Duration::from_secs(30))
-        .await
-        .unwrap();
-    let sched: Scheduler<String, String> = Scheduler::new(store);
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await
+            .unwrap();
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let a1 = sched
         .submit(
+            TaskId::new(1),
             NewTask {
                 priority: Priority::Medium,
                 payload: "a1".to_string(),
@@ -96,6 +113,7 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
         .unwrap();
     let a2 = sched
         .submit(
+            TaskId::new(2),
             NewTask {
                 priority: Priority::Medium,
                 payload: "a2".to_string(),
@@ -106,6 +124,7 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
         .unwrap();
     let b = sched
         .submit(
+            TaskId::new(3),
             NewTask {
                 priority: Priority::High,
                 payload: "b".to_string(),
@@ -141,15 +160,23 @@ async fn redis_store_requeues_task_after_lease_expires() {
         .unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
     let url = format!("redis://127.0.0.1:{port}/");
-    let namespace = format!("test-lease-{}", uuid::Uuid::new_v4());
+    let namespace = format!(
+        "test-lease-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    let store = RedisStore::<String, String>::connect(&url, &namespace, Duration::from_millis(50))
-        .await
-        .unwrap();
-    let sched: Scheduler<String, String> = Scheduler::new(store);
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_millis(50))
+            .await
+            .unwrap();
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let id = sched
         .submit(
+            TaskId::new(1),
             NewTask {
                 priority: Priority::Medium,
                 payload: "hello".to_string(),

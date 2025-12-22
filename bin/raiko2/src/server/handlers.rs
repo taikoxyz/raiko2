@@ -6,8 +6,9 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use raiko2_engine::EngineTaskKey;
 use raiko2_engine::tasks::EngineOutput;
-use raiko2_queue::{TaskId, TaskState};
+use raiko2_queue::{TaskState, decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -79,7 +80,7 @@ pub enum ProofStatus {
     Cancelled,
 }
 
-const fn status_from_task_state(state: &TaskState<EngineOutput>) -> ProofStatus {
+const fn status_from_task_state(state: &TaskState<EngineOutput, EngineTaskKey>) -> ProofStatus {
     match state {
         TaskState::Pending { .. } | TaskState::Ready => ProofStatus::Pending,
         TaskState::Retrying { .. } => ProofStatus::Pending,
@@ -108,9 +109,13 @@ pub async fn request_batch_proof(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("Failed to enqueue proof job: {e}"),
         })?;
+    let id = encode_task_id(&id).map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Failed to encode task id: {e}"),
+    })?;
 
     Ok(Json(ProofResponse {
-        id: id.to_string(),
+        id,
         status: ProofStatus::Pending,
     }))
 }
@@ -122,7 +127,7 @@ pub async fn get_proof_status(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Getting proof status for: {}", id);
 
-    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+    let task_id = decode_task_id::<EngineTaskKey>(&id).map_err(|e| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: format!("Invalid task id '{id}': {e}"),
     })?;
@@ -175,15 +180,19 @@ pub async fn cancel_proof(
 ) -> Result<Json<ProofStatusResponse>, ApiError> {
     info!("Cancelling proof: {}", id);
 
-    let task_id = id.parse::<TaskId>().map_err(|e| ApiError {
+    let task_id = decode_task_id::<EngineTaskKey>(&id).map_err(|e| ApiError {
         status: StatusCode::BAD_REQUEST,
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    state.engine.cancel(task_id).await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        message: format!("Failed to cancel proof job: {e}"),
-    })?;
+    state
+        .engine
+        .cancel(task_id.clone())
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("Failed to cancel proof job: {e}"),
+        })?;
 
     let view = state
         .engine

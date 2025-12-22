@@ -73,8 +73,8 @@ pub struct NewTask<P> {
     pub payload: P,
 }
 
-pub struct TaskLease<P> {
-    pub id: TaskId,
+pub struct TaskLease<P, Id> {
+    pub id: TaskId<Id>,
     pub payload: P,
     pub priority: Priority,
     pub attempt: u32,
@@ -82,14 +82,14 @@ pub struct TaskLease<P> {
 }
 
 #[derive(Clone)]
-pub struct TaskView<O> {
-    pub id: TaskId,
-    pub state: TaskState<O>,
+pub struct TaskView<O, Id> {
+    pub id: TaskId<Id>,
+    pub state: TaskState<O, Id>,
     pub priority: Priority,
 }
 
-pub struct Scheduler<P, O: Clone> {
-    store: Arc<dyn TaskStore<P, O>>,
+pub struct Scheduler<P, O: Clone, Id> {
+    store: Arc<dyn TaskStore<P, O, Id>>,
     notify: Arc<Notify>,
     config: SchedulerConfig,
     _phantom: core::marker::PhantomData<fn(P, O)>,
@@ -107,26 +107,32 @@ pub struct Scheduler<P, O: Clone> {
 /// loop until it returns `0`, or make this value configurable.
 const MAINTENANCE_TICK_LIMIT: usize = 128;
 
-impl<P, O: Clone> Scheduler<P, O> {
+impl<P, O: Clone, Id> Scheduler<P, O, Id>
+where
+    Id: Send + Sync,
+{
     pub fn new<S>(store: S) -> Self
     where
-        S: TaskStore<P, O> + 'static,
+        S: TaskStore<P, O, Id> + 'static,
     {
         Self::with_config(store, SchedulerConfig::default())
     }
 
     pub fn with_config<S>(store: S, config: SchedulerConfig) -> Self
     where
-        S: TaskStore<P, O> + 'static,
+        S: TaskStore<P, O, Id> + 'static,
     {
         Self::from_arc_with_config(Arc::new(store), config)
     }
 
-    pub fn from_arc(store: Arc<dyn TaskStore<P, O>>) -> Self {
+    pub fn from_arc(store: Arc<dyn TaskStore<P, O, Id>>) -> Self {
         Self::from_arc_with_config(store, SchedulerConfig::default())
     }
 
-    pub fn from_arc_with_config(store: Arc<dyn TaskStore<P, O>>, config: SchedulerConfig) -> Self {
+    pub fn from_arc_with_config(
+        store: Arc<dyn TaskStore<P, O, Id>>,
+        config: SchedulerConfig,
+    ) -> Self {
         Self {
             store,
             notify: Arc::new(Notify::new()),
@@ -140,14 +146,18 @@ impl<P, O: Clone> Scheduler<P, O> {
     }
 }
 
-impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
+impl<P, O, Id> Scheduler<P, O, Id>
+where
+    P: Send + 'static,
+    O: Clone + Send + 'static,
+    Id: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+{
     pub async fn submit(
         &self,
+        id: TaskId<Id>,
         task: NewTask<P>,
-        deps: Vec<TaskId>,
-    ) -> Result<TaskId, TaskStoreError> {
-        let id = TaskId::new();
-
+        deps: Vec<TaskId<Id>>,
+    ) -> Result<TaskId<Id>, TaskStoreError> {
         // Normalize dependency list to avoid backend-specific behavior.
         //
         // Some stores may de-duplicate dependents (e.g. Redis sets) while still
@@ -155,21 +165,27 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         // duplicated deps, that mismatch can strand the task in `Pending`.
         let deps = {
             let mut seen = HashSet::with_capacity(deps.len());
-            deps.into_iter().filter(|dep| seen.insert(*dep)).collect()
+            deps.into_iter()
+                .filter(|dep| seen.insert(dep.clone()))
+                .collect()
         };
 
-        self.store
-            .insert_task(id, task.payload, task.priority, deps)
+        let inserted = self
+            .store
+            .insert_task(id.clone(), task.payload, task.priority, deps)
             .await?;
-        if let Some(priority) = self.store.try_mark_ready(&id).await? {
-            self.store.push_ready(priority, id).await?;
+        if inserted && let Some(priority) = self.store.try_mark_ready(&id).await? {
+            self.store.push_ready(priority, id.clone()).await?;
             self.notify.notify_one();
         }
 
         Ok(id)
     }
 
-    pub async fn next_ready(&self, worker: &str) -> Result<Option<TaskLease<P>>, TaskStoreError> {
+    pub async fn next_ready(
+        &self,
+        worker: &str,
+    ) -> Result<Option<TaskLease<P, Id>>, TaskStoreError> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
             if let Some((id, payload, priority, attempt)) =
                 self.store.pop_ready_and_take(prio, worker).await?
@@ -189,7 +205,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
 
     pub async fn complete(
         &self,
-        lease: TaskLease<P>,
+        lease: TaskLease<P, Id>,
         result: Result<O, String>,
     ) -> Result<(), TaskStoreError> {
         let TaskLease {
@@ -291,7 +307,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         Ok(())
     }
 
-    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+    pub async fn cancel(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
         let Some(current) = self.store.get_state(&id).await? else {
             self.notify.notify_one();
             return Ok(());
@@ -313,7 +329,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         Ok(())
     }
 
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<O>>, TaskStoreError> {
+    pub async fn get(&self, id: TaskId<Id>) -> Result<Option<TaskView<O, Id>>, TaskStoreError> {
         let Some((state, priority)) = self.store.get_view(&id).await? else {
             return Ok(None);
         };
@@ -344,12 +360,12 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
         Ok(moved)
     }
 
-    async fn fail_dependents(&self, root: TaskId, error: String) -> Result<(), TaskStoreError> {
-        let mut queue: VecDeque<TaskId> = self.store.dependents_of(&root).await?.into();
+    async fn fail_dependents(&self, root: TaskId<Id>, error: String) -> Result<(), TaskStoreError> {
+        let mut queue: VecDeque<TaskId<Id>> = self.store.dependents_of(&root).await?.into();
         let mut visited = HashSet::new();
 
         while let Some(id) = queue.pop_front() {
-            if !visited.insert(id) {
+            if !visited.insert(id.clone()) {
                 continue;
             }
 
@@ -363,7 +379,7 @@ impl<P: Send + 'static, O: Clone + Send + 'static> Scheduler<P, O> {
                         &id,
                         TaskState::Failed {
                             error: error.clone(),
-                            caused_by_dep: Some(root),
+                            caused_by_dep: Some(root.clone()),
                         },
                     )
                     .await?;
@@ -396,8 +412,15 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Mutex;
 
+    type TestId = u64;
+    type TestTaskId = TaskId<TestId>;
+
+    fn test_id(value: u64) -> TestTaskId {
+        TaskId::new(value)
+    }
+
     struct BuggyTakeStore<P, O> {
-        inner: MemoryStore<P, O>,
+        inner: MemoryStore<P, O, TestId>,
     }
 
     struct UniqueDependentsStore<P, O> {
@@ -405,17 +428,17 @@ mod tests {
     }
 
     struct UniqueDependentsInner<P, O> {
-        tasks: HashMap<TaskId, UniqueTaskRecord<P, O>>,
-        dependents: HashMap<TaskId, HashSet<TaskId>>,
-        remaining: HashMap<TaskId, usize>,
-        ready_high: VecDeque<TaskId>,
-        ready_medium: VecDeque<TaskId>,
-        ready_low: VecDeque<TaskId>,
+        tasks: HashMap<TestTaskId, UniqueTaskRecord<P, O>>,
+        dependents: HashMap<TestTaskId, HashSet<TestTaskId>>,
+        remaining: HashMap<TestTaskId, usize>,
+        ready_high: VecDeque<TestTaskId>,
+        ready_medium: VecDeque<TestTaskId>,
+        ready_low: VecDeque<TestTaskId>,
     }
 
     struct UniqueTaskRecord<P, O> {
         payload: Option<P>,
-        state: TaskState<O>,
+        state: TaskState<O, TestId>,
         priority: Priority,
         attempt: u32,
     }
@@ -436,20 +459,23 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O>
+    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O, TestId>
         for UniqueDependentsStore<P, O>
     {
         async fn insert_task(
             &self,
-            id: TaskId,
+            id: TestTaskId,
             payload: P,
             prio: Priority,
-            deps: Vec<TaskId>,
-        ) -> StoreResult<()> {
+            deps: Vec<TestTaskId>,
+        ) -> StoreResult<bool> {
             let mut guard = self.inner.lock().await;
-            guard.remaining.insert(id, deps.len());
+            if guard.tasks.contains_key(&id) {
+                return Ok(false);
+            }
+            guard.remaining.insert(id.clone(), deps.len());
             for dep in deps {
-                guard.dependents.entry(dep).or_default().insert(id);
+                guard.dependents.entry(dep).or_default().insert(id.clone());
             }
             let remaining = guard.remaining.get(&id).copied().unwrap_or(0);
             guard.tasks.insert(
@@ -461,15 +487,15 @@ mod tests {
                     attempt: 0,
                 },
             );
-            Ok(())
+            Ok(true)
         }
 
-        async fn get_state(&self, id: &TaskId) -> StoreResult<Option<TaskState<O>>> {
+        async fn get_state(&self, id: &TestTaskId) -> StoreResult<Option<TaskState<O, TestId>>> {
             let guard = self.inner.lock().await;
             Ok(guard.tasks.get(id).map(|record| record.state.clone()))
         }
 
-        async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> StoreResult<()> {
+        async fn set_state(&self, id: &TestTaskId, state: TaskState<O, TestId>) -> StoreResult<()> {
             let mut guard = self.inner.lock().await;
             if let Some(record) = guard.tasks.get_mut(id) {
                 record.state = state;
@@ -477,7 +503,10 @@ mod tests {
             Ok(())
         }
 
-        async fn get_view(&self, id: &TaskId) -> StoreResult<Option<(TaskState<O>, Priority)>> {
+        async fn get_view(
+            &self,
+            id: &TestTaskId,
+        ) -> StoreResult<Option<(TaskState<O, TestId>, Priority)>> {
             let guard = self.inner.lock().await;
             let Some(record) = guard.tasks.get(id) else {
                 return Ok(None);
@@ -485,18 +514,18 @@ mod tests {
             Ok(Some((record.state.clone(), record.priority)))
         }
 
-        async fn dependents_of(&self, dep: &TaskId) -> StoreResult<Vec<TaskId>> {
+        async fn dependents_of(&self, dep: &TestTaskId) -> StoreResult<Vec<TestTaskId>> {
             let guard = self.inner.lock().await;
             Ok(guard
                 .dependents
                 .get(dep)
-                .map(|set| set.iter().copied().collect())
+                .map(|set| set.iter().cloned().collect())
                 .unwrap_or_default())
         }
 
-        async fn dec_remaining_deps(&self, id: &TaskId) -> StoreResult<usize> {
+        async fn dec_remaining_deps(&self, id: &TestTaskId) -> StoreResult<usize> {
             let mut guard = self.inner.lock().await;
-            let entry = guard.remaining.entry(*id).or_insert(0);
+            let entry = guard.remaining.entry(id.clone()).or_insert(0);
             if *entry > 0 {
                 *entry -= 1;
             }
@@ -511,7 +540,7 @@ mod tests {
             Ok(remaining)
         }
 
-        async fn try_mark_ready(&self, id: &TaskId) -> StoreResult<Option<Priority>> {
+        async fn try_mark_ready(&self, id: &TestTaskId) -> StoreResult<Option<Priority>> {
             let mut guard = self.inner.lock().await;
             let remaining = guard.remaining.get(id).copied().unwrap_or(0);
             if remaining != 0 {
@@ -529,7 +558,7 @@ mod tests {
             }
         }
 
-        async fn push_ready(&self, prio: Priority, id: TaskId) -> StoreResult<()> {
+        async fn push_ready(&self, prio: Priority, id: TestTaskId) -> StoreResult<()> {
             let mut guard = self.inner.lock().await;
             match prio {
                 Priority::High => guard.ready_high.push_back(id),
@@ -539,7 +568,7 @@ mod tests {
             Ok(())
         }
 
-        async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId>> {
+        async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TestTaskId>> {
             let mut guard = self.inner.lock().await;
             let id = match prio {
                 Priority::High => guard.ready_high.pop_front(),
@@ -551,7 +580,7 @@ mod tests {
 
         async fn take_ready(
             &self,
-            id: &TaskId,
+            id: &TestTaskId,
             worker: &str,
         ) -> StoreResult<Option<(P, Priority, u32)>> {
             let mut guard = self.inner.lock().await;
@@ -574,7 +603,7 @@ mod tests {
             Ok(Some((payload.clone(), record.priority, attempt)))
         }
 
-        async fn put_payload(&self, id: &TaskId, payload: P) -> StoreResult<()> {
+        async fn put_payload(&self, id: &TestTaskId, payload: P) -> StoreResult<()> {
             let mut guard = self.inner.lock().await;
             if let Some(record) = guard.tasks.get_mut(id) {
                 record.payload = Some(payload);
@@ -582,7 +611,7 @@ mod tests {
             Ok(())
         }
 
-        async fn schedule(&self, _id: TaskId, _not_before_ms: u64) -> StoreResult<()> {
+        async fn schedule(&self, _id: TestTaskId, _not_before_ms: u64) -> StoreResult<()> {
             Ok(())
         }
 
@@ -596,57 +625,64 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O>
+    impl<P: Clone + Send + 'static, O: Clone + Send + 'static> TaskStore<P, O, TestId>
         for BuggyTakeStore<P, O>
     {
         async fn insert_task(
             &self,
-            id: TaskId,
+            id: TestTaskId,
             payload: P,
             prio: Priority,
-            deps: Vec<TaskId>,
-        ) -> crate::StoreResult<()> {
+            deps: Vec<TestTaskId>,
+        ) -> crate::StoreResult<bool> {
             self.inner.insert_task(id, payload, prio, deps).await
         }
 
-        async fn get_state(&self, id: &TaskId) -> crate::StoreResult<Option<TaskState<O>>> {
+        async fn get_state(
+            &self,
+            id: &TestTaskId,
+        ) -> crate::StoreResult<Option<TaskState<O, TestId>>> {
             self.inner.get_state(id).await
         }
 
-        async fn set_state(&self, id: &TaskId, state: TaskState<O>) -> crate::StoreResult<()> {
+        async fn set_state(
+            &self,
+            id: &TestTaskId,
+            state: TaskState<O, TestId>,
+        ) -> crate::StoreResult<()> {
             self.inner.set_state(id, state).await
         }
 
         async fn get_view(
             &self,
-            id: &TaskId,
-        ) -> crate::StoreResult<Option<(TaskState<O>, Priority)>> {
+            id: &TestTaskId,
+        ) -> crate::StoreResult<Option<(TaskState<O, TestId>, Priority)>> {
             self.inner.get_view(id).await
         }
 
-        async fn dependents_of(&self, dep: &TaskId) -> crate::StoreResult<Vec<TaskId>> {
+        async fn dependents_of(&self, dep: &TestTaskId) -> crate::StoreResult<Vec<TestTaskId>> {
             self.inner.dependents_of(dep).await
         }
 
-        async fn dec_remaining_deps(&self, id: &TaskId) -> crate::StoreResult<usize> {
+        async fn dec_remaining_deps(&self, id: &TestTaskId) -> crate::StoreResult<usize> {
             self.inner.dec_remaining_deps(id).await
         }
 
-        async fn try_mark_ready(&self, id: &TaskId) -> crate::StoreResult<Option<Priority>> {
+        async fn try_mark_ready(&self, id: &TestTaskId) -> crate::StoreResult<Option<Priority>> {
             self.inner.try_mark_ready(id).await
         }
 
-        async fn push_ready(&self, prio: Priority, id: TaskId) -> crate::StoreResult<()> {
+        async fn push_ready(&self, prio: Priority, id: TestTaskId) -> crate::StoreResult<()> {
             self.inner.push_ready(prio, id).await
         }
 
-        async fn pop_ready(&self, prio: Priority) -> crate::StoreResult<Option<TaskId>> {
+        async fn pop_ready(&self, prio: Priority) -> crate::StoreResult<Option<TestTaskId>> {
             self.inner.pop_ready(prio).await
         }
 
         async fn take_ready(
             &self,
-            _id: &TaskId,
+            _id: &TestTaskId,
             _worker: &str,
         ) -> crate::StoreResult<Option<(P, Priority, u32)>> {
             Ok(None)
@@ -656,15 +692,15 @@ mod tests {
             &self,
             prio: Priority,
             worker: &str,
-        ) -> crate::StoreResult<Option<(TaskId, P, Priority, u32)>> {
+        ) -> crate::StoreResult<Option<(TestTaskId, P, Priority, u32)>> {
             self.inner.pop_ready_and_take(prio, worker).await
         }
 
-        async fn put_payload(&self, id: &TaskId, payload: P) -> crate::StoreResult<()> {
+        async fn put_payload(&self, id: &TestTaskId, payload: P) -> crate::StoreResult<()> {
             self.inner.put_payload(id, payload).await
         }
 
-        async fn schedule(&self, id: TaskId, not_before_ms: u64) -> crate::StoreResult<()> {
+        async fn schedule(&self, id: TestTaskId, not_before_ms: u64) -> crate::StoreResult<()> {
             self.inner.schedule(id, not_before_ms).await
         }
 
@@ -683,10 +719,11 @@ mod tests {
 
     #[tokio::test]
     async fn next_ready_picks_high_before_low() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Low,
                     payload: "a",
@@ -697,6 +734,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",
@@ -714,12 +752,13 @@ mod tests {
 
     #[tokio::test]
     async fn next_ready_uses_atomic_store_take_when_available() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(BuggyTakeStore {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(BuggyTakeStore {
             inner: MemoryStore::new(),
         });
 
         let _ = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -734,11 +773,12 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_dependencies_do_not_block_dependents() {
-        let sched: Scheduler<&'static str, &'static str> =
+        let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(UniqueDependentsStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -749,6 +789,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",
@@ -768,10 +809,12 @@ mod tests {
 
     #[tokio::test]
     async fn dependent_enters_ready_after_all_deps_complete() {
-        let sched: Scheduler<&'static str, &'static str> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
 
         let _a1 = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a1",
@@ -782,6 +825,7 @@ mod tests {
             .unwrap();
         let _a2 = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a2",
@@ -793,6 +837,7 @@ mod tests {
 
         let b = sched
             .submit(
+                test_id(3),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",
@@ -817,10 +862,11 @@ mod tests {
 
     #[tokio::test]
     async fn failure_propagates_to_dependents() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -831,6 +877,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",
@@ -853,10 +900,11 @@ mod tests {
 
     #[tokio::test]
     async fn failure_propagates_transitively() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Low,
                     payload: "a",
@@ -867,6 +915,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "b",
@@ -877,6 +926,7 @@ mod tests {
             .unwrap();
         let c = sched
             .submit(
+                test_id(3),
                 NewTask {
                     priority: Priority::High,
                     payload: "c",
@@ -905,10 +955,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_propagates_to_dependents() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Low,
                     payload: "a",
@@ -919,6 +970,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "b",
@@ -937,10 +989,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_is_terminal_even_if_worker_completes_late() {
-        let sched: Scheduler<&'static str, &'static str> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -964,10 +1018,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_after_success_is_noop() {
-        let sched: Scheduler<&'static str, &'static str> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -992,10 +1048,11 @@ mod tests {
     #[tokio::test]
     async fn memory_store_requeues_task_after_lease_expires() {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
-        let sched: Scheduler<&'static str, ()> = Scheduler::new(store);
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(store);
 
         let id = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -1022,10 +1079,11 @@ mod tests {
     #[tokio::test]
     async fn stale_completion_is_ignored_after_task_is_reacquired() {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
-        let sched: Scheduler<&'static str, &'static str> = Scheduler::new(store);
+        let sched: Scheduler<&'static str, &'static str, TestId> = Scheduler::new(store);
 
         let id = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -1063,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_defers_dependent_failure_until_exhausted() {
-        let sched: Scheduler<&'static str, ()> = Scheduler::with_config(
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
             MemoryStore::new(),
             SchedulerConfig {
                 lease_duration: Duration::from_secs(60),
@@ -1076,6 +1134,7 @@ mod tests {
 
         let a = sched
             .submit(
+                test_id(1),
                 NewTask {
                     priority: Priority::Medium,
                     payload: "a",
@@ -1086,6 +1145,7 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                test_id(2),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",

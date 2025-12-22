@@ -6,11 +6,11 @@ use raiko2_primitives::{AggregationGuestInput, ProofContext};
 use raiko2_prover::Prover;
 use raiko2_provider::Provider;
 use raiko2_queue::{
-    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskState,
+    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskState,
     TaskStoreError, TaskView,
 };
 
-use crate::tasks::{EngineOutput, EngineTask};
+use crate::tasks::{BatchStage, EngineOutput, EngineTask, EngineTaskId, EngineTaskKey};
 
 pub struct Engine<S, B, P>
 where
@@ -30,7 +30,7 @@ where
     spec: S,
     backend: B,
     provider: P,
-    scheduler: Scheduler<EngineTask, EngineOutput>,
+    scheduler: Scheduler<EngineTask, EngineOutput, EngineTaskKey>,
     prover: Arc<dyn Prover<S, B>>,
     context: ProofContext,
 }
@@ -92,7 +92,7 @@ where
         store: Store,
     ) -> Self
     where
-        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
     {
         Self::with_store_and_scheduler_config(
             spec,
@@ -115,7 +115,7 @@ where
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
-        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
     {
         Self {
             inner: Arc::new(Inner {
@@ -135,11 +135,17 @@ where
         ctx
     }
 
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
+    const fn batch_task_id(&self, batch_id: u64, stage: BatchStage) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Batch { batch_id, stage })
+    }
+
+    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<EngineTaskId, TaskStoreError> {
+        let preflight_id = self.batch_task_id(batch_id, BatchStage::Preflight);
         let preflight_task = self
             .inner
             .scheduler
             .submit(
+                preflight_id,
                 NewTask {
                     priority: Priority::Low,
                     payload: EngineTask::Preflight { batch_id },
@@ -148,29 +154,33 @@ where
             )
             .await?;
 
+        let validation_id = self.batch_task_id(batch_id, BatchStage::Validation);
         let validation_task = self
             .inner
             .scheduler
             .submit(
+                validation_id,
                 NewTask {
                     priority: Priority::Low,
                     payload: EngineTask::Validate {
                         batch_id,
-                        preflight_task,
+                        preflight_task: preflight_task.clone(),
                     },
                 },
                 vec![preflight_task],
             )
             .await?;
 
+        let prove_id = self.batch_task_id(batch_id, BatchStage::Prove);
         self.inner
             .scheduler
             .submit(
+                prove_id,
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id,
-                        input_task: validation_task,
+                        input_task: validation_task.clone(),
                     },
                 },
                 vec![validation_task],
@@ -178,11 +188,14 @@ where
             .await
     }
 
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<EngineOutput>>, TaskStoreError> {
+    pub async fn get(
+        &self,
+        id: EngineTaskId,
+    ) -> Result<Option<TaskView<EngineOutput, EngineTaskKey>>, TaskStoreError> {
         self.inner.scheduler.get(id).await
     }
 
-    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+    pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
         self.inner.scheduler.cancel(id).await
     }
 

@@ -18,3 +18,4 @@ pub mod tasks;
 pub mod worker;
 
 pub use queue::Engine;
+pub use tasks::{BatchStage, EngineTaskId, EngineTaskKey};

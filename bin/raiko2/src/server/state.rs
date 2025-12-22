@@ -2,8 +2,8 @@
 
 use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
-use raiko2_engine::Engine;
 use raiko2_engine::tasks::EngineOutput;
+use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey};
 use raiko2_pipeline::{
     Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
@@ -11,7 +11,7 @@ use raiko2_pipeline::{
 use raiko2_primitives::{ProofContext, ProofRequest};
 use raiko2_prover::Prover;
 use raiko2_provider::NetworkProvider;
-use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskId, TaskStoreError, TaskView};
+use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskStoreError, TaskView};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,21 +51,24 @@ fn build_provider(config: &Config) -> Result<NetworkProvider> {
 }
 
 impl EngineHandle {
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
+    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<EngineTaskId, TaskStoreError> {
         match self {
             EngineHandle::Risc0(engine) => engine.submit_batch_proof(batch_id).await,
             EngineHandle::Sp1(engine) => engine.submit_batch_proof(batch_id).await,
         }
     }
 
-    pub async fn get(&self, id: TaskId) -> Result<Option<TaskView<EngineOutput>>, TaskStoreError> {
+    pub async fn get(
+        &self,
+        id: EngineTaskId,
+    ) -> Result<Option<TaskView<EngineOutput, EngineTaskKey>>, TaskStoreError> {
         match self {
             EngineHandle::Risc0(engine) => engine.get(id).await,
             EngineHandle::Sp1(engine) => engine.get(id).await,
         }
     }
 
-    pub async fn cancel(&self, id: TaskId) -> Result<(), TaskStoreError> {
+    pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
         match self {
             EngineHandle::Risc0(engine) => engine.cancel(id).await,
             EngineHandle::Sp1(engine) => engine.cancel(id).await,
@@ -141,13 +144,14 @@ impl AppState {
                             let provider = build_provider(&config)?;
                             let context = build_context(&config, "risc0");
                             let url = config.queue.redis_url.clone().unwrap_or_default();
-                            let store =
-                                raiko2_queue::RedisStore::<EngineTask, EngineOutput>::connect(
-                                    &url,
-                                    &config.queue.namespace,
-                                    Duration::from_secs(60),
-                                )
-                                .await?;
+                            let store = raiko2_queue::RedisStore::<
+                                EngineTask,
+                                EngineOutput,
+                                EngineTaskKey,
+                            >::connect(
+                                &url, &config.queue.namespace, Duration::from_secs(60)
+                            )
+                            .await?;
                             Engine::with_store_and_scheduler_config(
                                 spec.clone(),
                                 backend,
@@ -206,13 +210,14 @@ impl AppState {
                             let provider = build_provider(&config)?;
                             let context = build_context(&config, "sp1");
                             let url = config.queue.redis_url.clone().unwrap_or_default();
-                            let store =
-                                raiko2_queue::RedisStore::<EngineTask, EngineOutput>::connect(
-                                    &url,
-                                    &config.queue.namespace,
-                                    Duration::from_secs(60),
-                                )
-                                .await?;
+                            let store = raiko2_queue::RedisStore::<
+                                EngineTask,
+                                EngineOutput,
+                                EngineTaskKey,
+                            >::connect(
+                                &url, &config.queue.namespace, Duration::from_secs(60)
+                            )
+                            .await?;
                             Engine::with_store_and_scheduler_config(
                                 spec.clone(),
                                 backend,

@@ -2,6 +2,21 @@ use raiko2_pipeline::PipelineStageResult;
 use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchStage {
+    Preflight,
+    Validation,
+    Prove,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EngineTaskKey {
+    Batch { batch_id: u64, stage: BatchStage },
+    Aggregate { batch_ids: Vec<u64> },
+}
+
+pub type EngineTaskId = TaskId<EngineTaskKey>;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineTask {
     Preflight {
@@ -9,15 +24,15 @@ pub enum EngineTask {
     },
     Validate {
         batch_id: u64,
-        preflight_task: TaskId,
+        preflight_task: EngineTaskId,
     },
     ProveBatch {
         batch_id: u64,
-        input_task: TaskId,
+        input_task: EngineTaskId,
     },
     Aggregate {
         batch_ids: Vec<u64>,
-        proof_tasks: Vec<TaskId>,
+        proof_tasks: Vec<EngineTaskId>,
     },
 }
 
@@ -28,7 +43,7 @@ pub enum EngineOutput {
 }
 
 pub struct EngineJob {
-    pub id: TaskId,
+    pub id: EngineTaskId,
 }
 
 #[cfg(test)]
@@ -38,17 +53,23 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
 
+    fn batch_task_id(batch_id: u64, stage: BatchStage) -> EngineTaskId {
+        TaskId::new(EngineTaskKey::Batch { batch_id, stage })
+    }
+
     #[tokio::test]
     async fn aggregation_depends_on_batches() {
-        let sched: Scheduler<EngineTask, EngineOutput> = Scheduler::new(MemoryStore::new());
+        let sched: Scheduler<EngineTask, EngineOutput, EngineTaskKey> =
+            Scheduler::new(MemoryStore::new());
 
         let a1 = sched
             .submit(
+                batch_task_id(1, BatchStage::Prove),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id: 1,
-                        input_task: TaskId::new(),
+                        input_task: batch_task_id(1, BatchStage::Validation),
                     },
                 },
                 vec![],
@@ -57,11 +78,12 @@ mod tests {
             .unwrap();
         let a2 = sched
             .submit(
+                batch_task_id(2, BatchStage::Prove),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id: 2,
-                        input_task: TaskId::new(),
+                        input_task: batch_task_id(2, BatchStage::Validation),
                     },
                 },
                 vec![],
@@ -70,6 +92,9 @@ mod tests {
             .unwrap();
         let b = sched
             .submit(
+                TaskId::new(EngineTaskKey::Aggregate {
+                    batch_ids: vec![1, 2],
+                }),
                 NewTask {
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {

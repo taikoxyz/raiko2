@@ -143,7 +143,7 @@ pub async fn get_proof_status(
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {
             output: EngineOutput::Proof(proof),
-        } => (proof.proof, None),
+        } => (proof.output.proof, None),
         TaskState::Failed { error, .. } => (None, Some(error)),
         TaskState::Retrying { error, .. } => (None, Some(error)),
         _ => (None, None),
@@ -201,7 +201,7 @@ pub async fn cancel_proof(
     let (proof, error) = match view.state.clone() {
         TaskState::Succeeded {
             output: EngineOutput::Proof(proof),
-        } => (proof.proof, None),
+        } => (proof.output.proof, None),
         TaskState::Failed { error, .. } => (None, Some(error)),
         _ => (None, None),
     };

@@ -1,4 +1,7 @@
-use crate::{ManifestBuilder, PipelineSpec, Preflight, ProofStage, ProverBackend, Validation};
+use crate::{
+    ManifestBuilder, PipelineSpec, Preflight, ProofStage, ProverBackend, Risc0Backend, Sp1Backend,
+    Validation,
+};
 use alethia_reth_node::block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_guests::{risc0, sp1};
@@ -123,7 +126,7 @@ impl Preflight for ShastaSpec {
                 ..Default::default()
             });
 
-        let manifest = self.manifest_builder().taiko_manifest(ctx, &blocks).await?;
+        let manifest = self.manifest_builder.taiko_manifest(ctx, &blocks).await?;
 
         let witnesses = blocks
             .into_iter()
@@ -186,7 +189,10 @@ impl Validation for ShastaSpec {
     }
 }
 
-impl PipelineSpec for ShastaSpec {
+impl<B> PipelineSpec<B> for ShastaSpec
+where
+    B: ProverBackend<ShastaSpec>,
+{
     type Preflight = Self;
     type Validation = Self;
     type ManifestBuilder = ShastaManifestBuilder;
@@ -202,13 +208,22 @@ impl PipelineSpec for ShastaSpec {
     fn manifest_builder(&self) -> &Self::ManifestBuilder {
         &self.manifest_builder
     }
+}
 
-    fn elf(&self, backend: ProverBackend, stage: ProofStage) -> RaikoResult<&'static [u8]> {
-        match (backend, stage) {
-            (ProverBackend::Risc0, ProofStage::Proposal) => Ok(risc0::shasta::PROPOSAL_ELF),
-            (ProverBackend::Risc0, ProofStage::Aggregation) => Ok(risc0::shasta::AGGREGATION_ELF),
-            (ProverBackend::Sp1, ProofStage::Proposal) => Ok(sp1::shasta::PROPOSAL_ELF),
-            (ProverBackend::Sp1, ProofStage::Aggregation) => Ok(sp1::shasta::AGGREGATION_ELF),
+impl ProverBackend<ShastaSpec> for Risc0Backend {
+    fn elf(&self, _spec: &ShastaSpec, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        match stage {
+            ProofStage::Proposal => Ok(risc0::shasta::PROPOSAL_ELF),
+            ProofStage::Aggregation => Ok(risc0::shasta::AGGREGATION_ELF),
+        }
+    }
+}
+
+impl ProverBackend<ShastaSpec> for Sp1Backend {
+    fn elf(&self, _spec: &ShastaSpec, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        match stage {
+            ProofStage::Proposal => Ok(sp1::shasta::PROPOSAL_ELF),
+            ProofStage::Aggregation => Ok(sp1::shasta::AGGREGATION_ELF),
         }
     }
 }

@@ -20,7 +20,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
-use raiko2_pipeline::{Pipeline, PipelineSpec};
+use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use tracing::info;
@@ -32,28 +32,73 @@ pub mod worker;
 
 /// The main proving engine.
 #[derive(Debug)]
-pub struct Engine<P: Provider, F: PipelineSpec> {
-    spec: F,
+pub struct Engine<P, S, B>
+where
+    P: Provider,
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
+    spec: S,
     provider: P,
+    backend: B,
 }
 
-impl<P: Provider, F: PipelineSpec> Engine<P, F> {
+impl<P, S, B> Engine<P, S, B>
+where
+    P: Provider,
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
     /// Create a new engine with the given provider.
-    pub const fn new(spec: F, provider: P) -> Self {
-        Self { spec, provider }
+    pub const fn new(spec: S, provider: P, backend: B) -> Self {
+        Self {
+            spec,
+            provider,
+            backend,
+        }
     }
 
     /// Access the hardfork specification.
-    pub const fn spec(&self) -> &F {
+    pub const fn spec(&self) -> &S {
         &self.spec
+    }
+
+    /// Access the prover backend configuration.
+    pub const fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    /// Access the provider used by this engine.
+    pub const fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    /// Run preflight via the pipeline.
+    pub async fn preflight(
+        &self,
+        ctx: &ProofContext,
+    ) -> RaikoResult<PipelineStageResult<GuestInput>> {
+        let pipeline = Pipeline::new(&self.spec, &self.backend);
+        pipeline.preflight(ctx, &self.provider).await
+    }
+
+    /// Run validation via the pipeline.
+    pub fn validate(
+        &self,
+        ctx: &ProofContext,
+        input: GuestInput,
+    ) -> RaikoResult<PipelineStageResult<GuestInput>> {
+        let pipeline = Pipeline::new(&self.spec, &self.backend);
+        pipeline.validate(ctx, input)
     }
 
     /// Create guest input from the proof context.
     pub async fn create_input(&self, ctx: &ProofContext) -> RaikoResult<GuestInput> {
         info!("Creating input for batch {}", ctx.request.batch_id);
 
-        let pipeline = Pipeline::new(&self.spec);
-        pipeline.build_guest_input(ctx, &self.provider).await
+        let pipeline = Pipeline::new(&self.spec, &self.backend);
+        let input = pipeline.build_guest_input(ctx, &self.provider).await?;
+        Ok(input.output)
     }
 
     /// Generate output from the input (for verification).
@@ -79,7 +124,8 @@ mod tests {
         use alloy_primitives::{Address, map::AddressMap};
         use alloy_trie::TrieAccount;
         use raiko2_pipeline::{
-            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
+            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage,
+            ProverBackend, Risc0Backend,
         };
         use raiko2_primitives::RaikoResult;
         use reth_ethereum_primitives::Block;
@@ -100,7 +146,7 @@ mod tests {
             }
         }
 
-        impl PipelineSpec for TestSpec {
+        impl PipelineSpec<Risc0Backend> for TestSpec {
             type Preflight = Self;
             type Validation = NoopValidation;
             type ManifestBuilder = NoopManifestBuilder;
@@ -116,12 +162,10 @@ mod tests {
             fn manifest_builder(&self) -> &Self::ManifestBuilder {
                 &NOOP_MANIFEST
             }
+        }
 
-            fn elf(
-                &self,
-                _backend: ProverBackend,
-                _stage: ProofStage,
-            ) -> RaikoResult<&'static [u8]> {
+        impl ProverBackend<TestSpec> for Risc0Backend {
+            fn elf(&self, _spec: &TestSpec, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
                 Ok(&[])
             }
         }
@@ -148,7 +192,8 @@ mod tests {
         }
 
         let provider = MockProvider;
-        let engine = Engine::new(TestSpec, provider);
+        let backend = Risc0Backend;
+        let engine = Engine::new(TestSpec, provider, backend);
 
         let empty_input = GuestInput::default();
         let result = engine.generate_output(&empty_input);

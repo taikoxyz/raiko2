@@ -10,21 +10,33 @@ use raiko2_queue::{
 
 use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
 use crate::tasks::{EngineOutput, EngineTask};
-use raiko2_pipeline::PipelineSpec;
+use raiko2_pipeline::{PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 
-pub struct EngineQueue<F: PipelineSpec> {
-    inner: Arc<Inner<F>>,
+pub struct EngineQueue<S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
+    inner: Arc<Inner<S, B>>,
 }
 
-struct Inner<F: PipelineSpec> {
-    spec: F,
+struct Inner<S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
+    spec: S,
     scheduler: Scheduler<EngineTask, EngineOutput>,
-    prover: Arc<dyn Prover<F>>,
+    prover: Arc<dyn Prover<S, B>>,
     config: ProverConfig,
-    guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
+    guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
 }
 
-impl<F: PipelineSpec> Clone for EngineQueue<F> {
+impl<S, B> Clone for EngineQueue<S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -32,7 +44,11 @@ impl<F: PipelineSpec> Clone for EngineQueue<F> {
     }
 }
 
-impl<F: PipelineSpec> EngineQueue<F> {
+impl<S, B> EngineQueue<S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
@@ -44,7 +60,7 @@ impl<F: PipelineSpec> EngineQueue<F> {
         }
     }
 
-    pub fn new(spec: F, prover: Arc<dyn Prover<F>>) -> Self {
+    pub fn new(spec: S, prover: Arc<dyn Prover<S, B>>) -> Self {
         Self::with_store_and_builder(
             spec,
             prover,
@@ -53,21 +69,21 @@ impl<F: PipelineSpec> EngineQueue<F> {
         )
     }
 
-    pub fn with_store<S>(spec: F, prover: Arc<dyn Prover<F>>, store: S) -> Self
+    pub fn with_store<Store>(spec: S, prover: Arc<dyn Prover<S, B>>, store: Store) -> Self
     where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
         Self::with_store_and_builder(spec, prover, store, Arc::new(DefaultGuestInputBuilder))
     }
 
-    pub fn with_store_and_builder<S>(
-        spec: F,
-        prover: Arc<dyn Prover<F>>,
-        store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
+    pub fn with_store_and_builder<Store>(
+        spec: S,
+        prover: Arc<dyn Prover<S, B>>,
+        store: Store,
+        guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
     ) -> Self
     where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
         Self::with_store_and_builder_and_scheduler_config(
             spec,
@@ -78,15 +94,15 @@ impl<F: PipelineSpec> EngineQueue<F> {
         )
     }
 
-    pub fn with_store_and_builder_and_scheduler_config<S>(
-        spec: F,
-        prover: Arc<dyn Prover<F>>,
-        store: S,
-        guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
+    pub fn with_store_and_builder_and_scheduler_config<Store>(
+        spec: S,
+        prover: Arc<dyn Prover<S, B>>,
+        store: Store,
+        guest_input_builder: Arc<dyn GuestInputBuilder<S, B>>,
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
-        S: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput> + 'static,
     {
         Self {
             inner: Arc::new(Inner {
@@ -100,16 +116,32 @@ impl<F: PipelineSpec> EngineQueue<F> {
     }
 
     pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<TaskId, TaskStoreError> {
-        let input_task = self
+        let preflight_task = self
+            .inner
+            .scheduler
+            .submit(
+                NewTask {
+                    kind: TaskKind::Preflight,
+                    priority: Priority::Low,
+                    payload: EngineTask::Preflight { batch_id },
+                },
+                vec![],
+            )
+            .await?;
+
+        let validation_task = self
             .inner
             .scheduler
             .submit(
                 NewTask {
                     kind: TaskKind::BuildGuestInput,
                     priority: Priority::Low,
-                    payload: EngineTask::BuildGuestInput { batch_id },
+                    payload: EngineTask::Validate {
+                        batch_id,
+                        preflight_task,
+                    },
                 },
-                vec![],
+                vec![preflight_task],
             )
             .await?;
 
@@ -121,10 +153,10 @@ impl<F: PipelineSpec> EngineQueue<F> {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveBatch {
                         batch_id,
-                        input_task,
+                        input_task: validation_task,
                     },
                 },
-                vec![input_task],
+                vec![validation_task],
             )
             .await
     }
@@ -149,7 +181,8 @@ impl<F: PipelineSpec> EngineQueue<F> {
 
     pub fn start_workers(&self, concurrency: usize)
     where
-        F: 'static,
+        S: 'static,
+        B: 'static,
     {
         self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
     }
@@ -159,7 +192,8 @@ impl<F: PipelineSpec> EngineQueue<F> {
         concurrency: usize,
         maintenance_interval: Duration,
     ) where
-        F: 'static,
+        S: 'static,
+        B: 'static,
     {
         let notify = self.inner.scheduler.notifier();
         for i in 0..concurrency {
@@ -171,12 +205,49 @@ impl<F: PipelineSpec> EngineQueue<F> {
 
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput, String> {
         match task {
-            EngineTask::BuildGuestInput { batch_id } => self
+            EngineTask::Preflight { batch_id } => self
                 .inner
                 .guest_input_builder
-                .build_guest_input(batch_id)
+                .preflight(batch_id)
                 .await
                 .map(|input| EngineOutput::GuestInput(Box::new(input))),
+            EngineTask::Validate {
+                batch_id,
+                preflight_task,
+            } => {
+                let input_view = self
+                    .inner
+                    .scheduler
+                    .get(preflight_task)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "missing preflight task".to_string())?;
+
+                let preflight_input = match input_view.state {
+                    TaskState::Succeeded {
+                        output: EngineOutput::GuestInput(input),
+                    } => match input.stage {
+                        PipelineStage::Preflight => input.output,
+                        _ => {
+                            return Err(
+                                "preflight task did not produce preflight output".to_string()
+                            );
+                        }
+                    },
+                    TaskState::Succeeded { .. } => {
+                        return Err("preflight task did not produce GuestInput".to_string());
+                    }
+                    _ => return Err("preflight task not completed".to_string()),
+                };
+
+                let validated = self
+                    .inner
+                    .guest_input_builder
+                    .validate(batch_id, preflight_input)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(EngineOutput::GuestInput(Box::new(validated)))
+            }
             EngineTask::ProveBatch {
                 batch_id: _,
                 input_task,
@@ -195,7 +266,14 @@ impl<F: PipelineSpec> EngineQueue<F> {
                 let guest_input = match input_view.state {
                     TaskState::Succeeded {
                         output: EngineOutput::GuestInput(input),
-                    } => *input,
+                    } => match input.stage {
+                        PipelineStage::Validation => input.output,
+                        _ => {
+                            return Err(
+                                "input task did not produce validated GuestInput".to_string()
+                            );
+                        }
+                    },
                     TaskState::Succeeded { .. } => {
                         return Err("input task did not produce GuestInput".to_string());
                     }
@@ -208,7 +286,10 @@ impl<F: PipelineSpec> EngineQueue<F> {
                     .prove(guest_input, &self.inner.config, &self.inner.spec)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(Box::new(proof)))
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    PipelineStage::Prove,
+                    proof,
+                ))))
             }
             EngineTask::Aggregate {
                 batch_ids: _,
@@ -226,7 +307,14 @@ impl<F: PipelineSpec> EngineQueue<F> {
                     match view.state {
                         TaskState::Succeeded {
                             output: EngineOutput::Proof(proof),
-                        } => proofs.push(*proof),
+                        } => match proof.stage {
+                            PipelineStage::Prove => proofs.push(proof.output),
+                            _ => {
+                                return Err(
+                                    "dependency task did not produce batch proof".to_string()
+                                );
+                            }
+                        },
                         TaskState::Succeeded { .. } => {
                             return Err("dependency task did not produce Proof".to_string());
                         }
@@ -244,17 +332,23 @@ impl<F: PipelineSpec> EngineQueue<F> {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(Box::new(proof)))
+                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+                    PipelineStage::Aggregate,
+                    proof,
+                ))))
             }
         }
     }
 }
 
-fn spawn_worker_supervised<F: PipelineSpec + 'static>(
-    engine: EngineQueue<F>,
+fn spawn_worker_supervised<S, B>(
+    engine: EngineQueue<S, B>,
     notify: Arc<tokio::sync::Notify>,
     worker: String,
-) {
+) where
+    S: PipelineSpec<B> + 'static,
+    B: ProverBackend<S> + 'static,
+{
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -292,10 +386,11 @@ fn spawn_worker_supervised<F: PipelineSpec + 'static>(
     });
 }
 
-fn spawn_maintenance_supervised<F: PipelineSpec + 'static>(
-    engine: EngineQueue<F>,
-    maintenance_interval: Duration,
-) {
+fn spawn_maintenance_supervised<S, B>(engine: EngineQueue<S, B>, maintenance_interval: Duration)
+where
+    S: PipelineSpec<B> + 'static,
+    B: ProverBackend<S> + 'static,
+{
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
         loop {
@@ -334,7 +429,8 @@ mod tests {
     use std::time::Duration;
 
     use raiko2_pipeline::{
-        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
+        NoopManifestBuilder, NoopValidation, PipelineSpec, PipelineStage, PipelineStageResult,
+        Preflight, ProverBackend, Risc0Backend,
     };
     use raiko2_primitives::{
         AggregationGuestInput, GuestInput, Proof, ProofContext, ProverConfig, RaikoError,
@@ -350,7 +446,7 @@ mod tests {
     struct MockProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec> for MockProver {
+    impl Prover<TestSpec, Risc0Backend> for MockProver {
         async fn prove(
             &self,
             input: GuestInput,
@@ -380,7 +476,7 @@ mod tests {
     struct FailingProver;
 
     #[async_trait::async_trait]
-    impl Prover<TestSpec> for FailingProver {
+    impl Prover<TestSpec, Risc0Backend> for FailingProver {
         async fn prove(
             &self,
             _input: GuestInput,
@@ -415,7 +511,7 @@ mod tests {
         }
     }
 
-    impl PipelineSpec for TestSpec {
+    impl PipelineSpec<Risc0Backend> for TestSpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;
@@ -431,8 +527,14 @@ mod tests {
         fn manifest_builder(&self) -> &Self::ManifestBuilder {
             &NOOP_MANIFEST
         }
+    }
 
-        fn elf(&self, _backend: ProverBackend, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    impl ProverBackend<TestSpec> for Risc0Backend {
+        fn elf(
+            &self,
+            _spec: &TestSpec,
+            _stage: raiko2_pipeline::ProofStage,
+        ) -> RaikoResult<&'static [u8]> {
             Ok(&[])
         }
     }
@@ -440,21 +542,33 @@ mod tests {
     struct MockGuestInputBuilder;
 
     #[async_trait::async_trait]
-    impl GuestInputBuilder<TestSpec> for MockGuestInputBuilder {
-        async fn build_guest_input(&self, batch_id: u64) -> Result<GuestInput, String> {
-            Ok(GuestInput {
+    impl GuestInputBuilder<TestSpec, Risc0Backend> for MockGuestInputBuilder {
+        async fn preflight(
+            &self,
+            batch_id: u64,
+        ) -> Result<PipelineStageResult<GuestInput>, String> {
+            let input = GuestInput {
                 taiko: raiko2_primitives::TaikoManifest {
                     batch_id,
                     ..Default::default()
                 },
                 ..Default::default()
-            })
+            };
+            Ok(PipelineStageResult::new(PipelineStage::Preflight, input))
+        }
+
+        async fn validate(
+            &self,
+            _batch_id: u64,
+            input: GuestInput,
+        ) -> Result<PipelineStageResult<GuestInput>, String> {
+            Ok(PipelineStageResult::new(PipelineStage::Validation, input))
         }
     }
 
     #[tokio::test]
     async fn submit_batch_proof_runs_dependency_pipeline() {
-        let engine = EngineQueue::<TestSpec>::with_store_and_builder(
+        let engine = EngineQueue::<TestSpec, Risc0Backend>::with_store_and_builder(
             TestSpec,
             Arc::new(MockProver),
             raiko2_queue::MemoryStore::new(),
@@ -465,6 +579,7 @@ mod tests {
 
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(!engine.run_one("w1").await.unwrap());
 
         let view = engine.get(job_id).await.unwrap().unwrap();
@@ -472,7 +587,7 @@ mod tests {
             TaskState::Succeeded {
                 output: EngineOutput::Proof(proof),
             } => {
-                assert_eq!(proof.proof.as_deref(), Some("mock-proof"));
+                assert_eq!(proof.output.proof.as_deref(), Some("mock-proof"));
             }
             other => panic!("unexpected task state: {other:?}"),
         }
@@ -484,16 +599,18 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let engine = EngineQueue::<TestSpec>::with_store_and_builder_and_scheduler_config(
-            TestSpec,
-            Arc::new(FailingProver),
-            raiko2_queue::MemoryStore::new(),
-            Arc::new(MockGuestInputBuilder),
-            scheduler_config,
-        );
+        let engine =
+            EngineQueue::<TestSpec, Risc0Backend>::with_store_and_builder_and_scheduler_config(
+                TestSpec,
+                Arc::new(FailingProver),
+                raiko2_queue::MemoryStore::new(),
+                Arc::new(MockGuestInputBuilder),
+                scheduler_config,
+            );
 
         let job_id = engine.submit_batch_proof(1).await.unwrap();
 
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
 

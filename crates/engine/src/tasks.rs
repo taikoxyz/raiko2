@@ -1,10 +1,15 @@
+use raiko2_pipeline::PipelineStageResult;
 use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineTask {
-    BuildGuestInput {
+    Preflight {
         batch_id: u64,
+    },
+    Validate {
+        batch_id: u64,
+        preflight_task: TaskId,
     },
     ProveBatch {
         batch_id: u64,
@@ -18,8 +23,8 @@ pub enum EngineTask {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineOutput {
-    GuestInput(Box<raiko2_primitives::GuestInput>),
-    Proof(Box<raiko2_primitives::Proof>),
+    GuestInput(Box<PipelineStageResult<raiko2_primitives::GuestInput>>),
+    Proof(Box<PipelineStageResult<raiko2_primitives::Proof>>),
 }
 
 pub struct EngineJob {
@@ -29,6 +34,8 @@ pub struct EngineJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raiko2_pipeline::{PipelineStage, PipelineStageResult};
+    use raiko2_primitives::Proof;
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler, TaskKind};
 
     #[tokio::test]
@@ -82,12 +89,13 @@ mod tests {
         let t2 = sched.next_ready("w").await.unwrap().unwrap();
         assert!(sched.next_ready("w").await.unwrap().is_none());
 
+        let proof = PipelineStageResult::new(PipelineStage::Prove, Proof::default());
         sched
-            .complete(t1, Ok(EngineOutput::Proof(Box::default())))
+            .complete(t1, Ok(EngineOutput::Proof(Box::new(proof.clone()))))
             .await
             .unwrap();
         sched
-            .complete(t2, Ok(EngineOutput::Proof(Box::default())))
+            .complete(t2, Ok(EngineOutput::Proof(Box::new(proof))))
             .await
             .unwrap();
 

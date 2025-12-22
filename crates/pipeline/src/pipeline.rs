@@ -1,16 +1,54 @@
-use crate::{PipelineSpec, Preflight, Validation};
+use crate::{
+    PipelineSpec, PipelineStage, PipelineStageResult, Preflight, ProverBackend, Validation,
+};
 use raiko2_primitives::{GuestInput, ProofContext, RaikoResult};
 use raiko2_provider::Provider;
 
 /// Pipeline-agnostic builder for guest inputs.
-pub struct Pipeline<'a, F: PipelineSpec> {
-    spec: &'a F,
+pub struct Pipeline<'a, S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
+    spec: &'a S,
+    backend: &'a B,
 }
 
-impl<'a, F: PipelineSpec> Pipeline<'a, F> {
+impl<'a, S, B> Pipeline<'a, S, B>
+where
+    S: PipelineSpec<B>,
+    B: ProverBackend<S>,
+{
     /// Create a new pipeline using the provided pipeline spec.
-    pub const fn new(spec: &'a F) -> Self {
-        Self { spec }
+    pub const fn new(spec: &'a S, backend: &'a B) -> Self {
+        Self { spec, backend }
+    }
+
+    /// Run the preflight stage.
+    pub async fn preflight<P>(
+        &self,
+        ctx: &ProofContext,
+        provider: &P,
+    ) -> RaikoResult<PipelineStageResult<GuestInput>>
+    where
+        P: Provider,
+        S::Preflight: Preflight,
+    {
+        let input = self.spec.preflight().preflight(ctx, provider).await?;
+        Ok(PipelineStageResult::new(PipelineStage::Preflight, input))
+    }
+
+    /// Run the validation stage.
+    pub fn validate(
+        &self,
+        ctx: &ProofContext,
+        input: GuestInput,
+    ) -> RaikoResult<PipelineStageResult<GuestInput>>
+    where
+        S::Validation: Validation,
+    {
+        self.spec.validation().validate(ctx, &input)?;
+        Ok(PipelineStageResult::new(PipelineStage::Validation, input))
     }
 
     /// Build a guest input by running the unified pipeline steps.
@@ -18,15 +56,19 @@ impl<'a, F: PipelineSpec> Pipeline<'a, F> {
         &self,
         ctx: &ProofContext,
         provider: &P,
-    ) -> RaikoResult<GuestInput>
+    ) -> RaikoResult<PipelineStageResult<GuestInput>>
     where
         P: Provider,
-        F::Preflight: Preflight,
-        F::Validation: Validation,
+        S::Preflight: Preflight,
+        S::Validation: Validation,
     {
-        let input = self.spec.preflight().preflight(ctx, provider).await?;
-        self.spec.validation().validate(ctx, &input)?;
-        Ok(input)
+        let preflight = self.preflight(ctx, provider).await?;
+        self.validate(ctx, preflight.output)
+    }
+
+    /// Access the prover backend used by this pipeline.
+    pub const fn backend(&self) -> &B {
+        self.backend
     }
 }
 
@@ -39,6 +81,7 @@ mod tests {
     use raiko2_primitives::{ProofRequest, ProverConfig};
 
     struct EmptySpec;
+    struct TestBackend;
     const NOOP_VALIDATION: NoopValidation = NoopValidation;
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
@@ -53,7 +96,7 @@ mod tests {
         }
     }
 
-    impl PipelineSpec for EmptySpec {
+    impl PipelineSpec<TestBackend> for EmptySpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;
@@ -69,8 +112,10 @@ mod tests {
         fn manifest_builder(&self) -> &Self::ManifestBuilder {
             &NOOP_MANIFEST
         }
+    }
 
-        fn elf(&self, _backend: ProverBackend, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    impl ProverBackend<EmptySpec> for TestBackend {
+        fn elf(&self, _spec: &EmptySpec, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
             Ok(&[])
         }
     }
@@ -104,14 +149,15 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_empty_input() {
         let spec = EmptySpec;
-        let pipeline = Pipeline::new(&spec);
+        let backend = TestBackend;
+        let pipeline = Pipeline::new(&spec, &backend);
         let ctx = ProofContext::new(ProofRequest::default(), ProverConfig::default());
         let input = pipeline
             .build_guest_input(&ctx, &EmptyProvider)
             .await
             .expect("pipeline should succeed");
 
-        assert!(input.witnesses.is_empty());
-        assert_eq!(input.taiko.batch_id, 0);
+        assert!(input.output.witnesses.is_empty());
+        assert_eq!(input.output.taiko.batch_id, 0);
     }
 }

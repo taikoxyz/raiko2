@@ -8,24 +8,40 @@
 use raiko2_primitives::{GuestInput, ProofContext, RaikoResult, TaikoManifest};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
+use serde::{Deserialize, Serialize};
 
 pub mod forks;
 mod pipeline;
 
 pub use pipeline::Pipeline;
 
-/// Prover backend selector for hardfork-specific programs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProverBackend {
-    Risc0,
-    Sp1,
-}
-
 /// Proof stage selector for hardfork-specific programs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofStage {
     Proposal,
     Aggregation,
+}
+
+/// Pipeline stage selector for tracking progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipelineStage {
+    Preflight,
+    Validation,
+    Prove,
+    Aggregate,
+}
+
+/// Pipeline stage output wrapper for status tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineStageResult<T> {
+    pub stage: PipelineStage,
+    pub output: T,
+}
+
+impl<T> PipelineStageResult<T> {
+    pub const fn new(stage: PipelineStage, output: T) -> Self {
+        Self { stage, output }
+    }
 }
 
 /// Build and validate a guest input for the hardfork.
@@ -79,7 +95,7 @@ impl ManifestBuilder for NoopManifestBuilder {
 }
 
 /// Pipeline-specific behavior for building inputs.
-pub trait PipelineSpec: Send + Sync {
+pub trait PipelineSpec<B>: Send + Sync {
     type Preflight: Preflight;
     type Validation: Validation;
     type ManifestBuilder: ManifestBuilder;
@@ -87,6 +103,17 @@ pub trait PipelineSpec: Send + Sync {
     fn preflight(&self) -> &Self::Preflight;
     fn validation(&self) -> &Self::Validation;
     fn manifest_builder(&self) -> &Self::ManifestBuilder;
-
-    fn elf(&self, backend: ProverBackend, stage: ProofStage) -> RaikoResult<&'static [u8]>;
 }
+
+/// Prover backend abstraction for selecting guest programs.
+pub trait ProverBackend<S>: Send + Sync {
+    fn elf(&self, spec: &S, stage: ProofStage) -> RaikoResult<&'static [u8]>;
+}
+
+/// RISC0 backend marker type.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Risc0Backend;
+
+/// SP1 backend marker type.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sp1Backend;

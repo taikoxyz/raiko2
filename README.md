@@ -55,8 +55,10 @@ flowchart LR
 
 Key abstractions:
 
-- `PipelineSpec`: binds `Preflight` + `Validation` + ELF selection for a fork.
-- `Engine`/`Pipeline`: hardfork-agnostic orchestration.
+- `PipelineSpec`: binds `Preflight` + `Validation` + `ManifestBuilder` for a fork.
+- `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
+- `Pipeline`: hardfork-agnostic preflight + validation flow.
+- `Engine`: schedules pipeline stages and prover work.
 - `Prover`: backend execution (RISC0 / SP1).
 
 Architecture diagram:
@@ -73,7 +75,7 @@ flowchart LR
   PR --> PO["Proof"]
   HF["PipelineSpec"] -.-> PF
   HF -.-> VA
-  HF -.-> PR
+  PB["ProverBackend"] -.-> PR
 ```
 
 Pipeline flow:
@@ -139,7 +141,9 @@ ELF outputs are copied into `crates/guests/elf` for use by the host.
 ./target/release/raiko2 --config config.toml
 
 # Or with environment variables
-RAIKO_RPC_URL=http://localhost:8545 ./target/release/raiko2
+RAIKO2_L1_RPC=http://localhost:8545 \
+RAIKO2_L2_RPC=http://localhost:9545 \
+./target/release/raiko2
 ```
 
 ## Documentation

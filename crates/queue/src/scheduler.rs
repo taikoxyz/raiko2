@@ -794,7 +794,7 @@ mod tests {
                     priority: Priority::High,
                     payload: "b",
                 },
-                vec![a, a],
+                vec![a.clone(), a.clone()],
             )
             .await
             .unwrap();
@@ -882,7 +882,7 @@ mod tests {
                     priority: Priority::High,
                     payload: "b",
                 },
-                vec![a],
+                vec![a.clone()],
             )
             .await
             .unwrap();
@@ -920,7 +920,7 @@ mod tests {
                     priority: Priority::Medium,
                     payload: "b",
                 },
-                vec![a],
+                vec![a.clone()],
             )
             .await
             .unwrap();
@@ -931,7 +931,7 @@ mod tests {
                     priority: Priority::High,
                     payload: "c",
                 },
-                vec![b],
+                vec![b.clone()],
             )
             .await
             .unwrap();
@@ -975,12 +975,12 @@ mod tests {
                     priority: Priority::Medium,
                     payload: "b",
                 },
-                vec![a],
+                vec![a.clone()],
             )
             .await
             .unwrap();
 
-        sched.cancel(a).await.unwrap();
+        sched.cancel(a.clone()).await.unwrap();
         assert!(matches!(
             sched.get(b).await.unwrap().unwrap().state,
             TaskState::Failed { .. }
@@ -1007,7 +1007,7 @@ mod tests {
         let lease = sched.next_ready("w").await.unwrap().unwrap();
         assert_eq!(lease.id, a);
 
-        sched.cancel(a).await.unwrap();
+        sched.cancel(a.clone()).await.unwrap();
         sched.complete(lease, Ok("late-ok")).await.unwrap();
 
         assert!(matches!(
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(lease.id, a);
 
         sched.complete(lease, Ok("ok")).await.unwrap();
-        sched.cancel(a).await.unwrap();
+        sched.cancel(a.clone()).await.unwrap();
 
         assert!(matches!(
             sched.get(a).await.unwrap().unwrap().state,
@@ -1150,7 +1150,7 @@ mod tests {
                     priority: Priority::High,
                     payload: "b",
                 },
-                vec![a],
+                vec![a.clone()],
             )
             .await
             .unwrap();

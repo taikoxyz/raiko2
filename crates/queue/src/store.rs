@@ -428,8 +428,8 @@ mod tests {
         let store: MemoryStore<(), (), u64> = MemoryStore::new();
         let a = TaskId::new(1);
         let b = TaskId::new(2);
-        store.push_ready(Priority::Low, a).await.unwrap();
-        store.push_ready(Priority::High, b).await.unwrap();
+        store.push_ready(Priority::Low, a.clone()).await.unwrap();
+        store.push_ready(Priority::High, b.clone()).await.unwrap();
         assert_eq!(store.pop_ready(Priority::High).await.unwrap(), Some(b));
         assert_eq!(store.pop_ready(Priority::Low).await.unwrap(), Some(a));
     }

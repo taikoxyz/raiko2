@@ -122,6 +122,7 @@ mod tests {
 
     struct EmptyProvider;
 
+    #[async_trait::async_trait]
     impl Provider for EmptyProvider {
         async fn batch_blocks(
             &self,

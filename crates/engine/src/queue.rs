@@ -628,7 +628,7 @@ mod tests {
             Arc::new(MockProver),
             test_context(),
             raiko2_queue::MemoryStore::new(),
-            Engine::default_scheduler_config(),
+            Engine::<TestSpec, TestBackend, MockProvider>::default_scheduler_config(),
         );
 
         let job_id = engine.submit_proposal_proof(1).await.unwrap();

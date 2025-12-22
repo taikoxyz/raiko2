@@ -104,7 +104,7 @@ mod tests {
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {
                         proposal_ids: vec![1, 2],
-                        proof_tasks: vec![a1, a2],
+                        proof_tasks: vec![a1.clone(), a2.clone()],
                     },
                 },
                 vec![a1, a2],

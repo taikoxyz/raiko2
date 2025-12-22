@@ -10,7 +10,7 @@ use raiko2_queue::{
     TaskStoreError, TaskView,
 };
 
-use crate::tasks::{BatchStage, EngineOutput, EngineTask, EngineTaskId, EngineTaskKey};
+use crate::tasks::{EngineOutput, EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
 
 pub struct Engine<S, B, P>
 where
@@ -129,18 +129,21 @@ where
         }
     }
 
-    fn context_for_batch(&self, batch_id: u64) -> ProofContext {
+    fn context_for_proposal(&self, proposal_id: u64) -> ProofContext {
         let mut ctx = self.inner.context.clone();
-        ctx.request.batch_id = batch_id;
+        ctx.request.proposal_id = proposal_id;
         ctx
     }
 
-    const fn batch_task_id(&self, batch_id: u64, stage: BatchStage) -> EngineTaskId {
-        EngineTaskId::new(EngineTaskKey::Batch { batch_id, stage })
+    const fn proposal_task_id(&self, proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Proposal { proposal_id, stage })
     }
 
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<EngineTaskId, TaskStoreError> {
-        let preflight_id = self.batch_task_id(batch_id, BatchStage::Preflight);
+    pub async fn submit_proposal_proof(
+        &self,
+        proposal_id: u64,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        let preflight_id = self.proposal_task_id(proposal_id, ProposalStage::Preflight);
         let preflight_task = self
             .inner
             .scheduler
@@ -148,13 +151,13 @@ where
                 preflight_id,
                 NewTask {
                     priority: Priority::Low,
-                    payload: EngineTask::Preflight { batch_id },
+                    payload: EngineTask::Preflight { proposal_id },
                 },
                 vec![],
             )
             .await?;
 
-        let validation_id = self.batch_task_id(batch_id, BatchStage::Validation);
+        let validation_id = self.proposal_task_id(proposal_id, ProposalStage::Validation);
         let validation_task = self
             .inner
             .scheduler
@@ -163,7 +166,7 @@ where
                 NewTask {
                     priority: Priority::Low,
                     payload: EngineTask::Validate {
-                        batch_id,
+                        proposal_id,
                         preflight_task: preflight_task.clone(),
                     },
                 },
@@ -171,15 +174,15 @@ where
             )
             .await?;
 
-        let prove_id = self.batch_task_id(batch_id, BatchStage::Prove);
+        let prove_id = self.proposal_task_id(proposal_id, ProposalStage::Prove);
         self.inner
             .scheduler
             .submit(
                 prove_id,
                 NewTask {
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveBatch {
-                        batch_id,
+                    payload: EngineTask::ProveProposal {
+                        proposal_id,
                         input_task: validation_task.clone(),
                     },
                 },
@@ -237,8 +240,8 @@ where
 
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput, String> {
         match task {
-            EngineTask::Preflight { batch_id } => {
-                let ctx = self.context_for_batch(batch_id);
+            EngineTask::Preflight { proposal_id } => {
+                let ctx = self.context_for_proposal(proposal_id);
                 let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
                 pipeline
                     .preflight(&ctx, &self.inner.provider)
@@ -247,7 +250,7 @@ where
                     .map_err(|e| e.to_string())
             }
             EngineTask::Validate {
-                batch_id,
+                proposal_id,
                 preflight_task,
             } => {
                 let input_view = self
@@ -275,15 +278,15 @@ where
                     _ => return Err("preflight task not completed".to_string()),
                 };
 
-                let ctx = self.context_for_batch(batch_id);
+                let ctx = self.context_for_proposal(proposal_id);
                 let pipeline = Pipeline::new(&self.inner.spec, &self.inner.backend);
                 let validated = pipeline
                     .validate(&ctx, preflight_input)
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::GuestInput(Box::new(validated)))
             }
-            EngineTask::ProveBatch {
-                batch_id: _,
+            EngineTask::ProveProposal {
+                proposal_id: _,
                 input_task,
             } => {
                 // NOTE: This relies on the store retaining task outputs until dependents
@@ -331,7 +334,7 @@ where
                 ))))
             }
             EngineTask::Aggregate {
-                batch_ids: _,
+                proposal_ids: _,
                 proof_tasks,
             } => {
                 let mut proofs = Vec::with_capacity(proof_tasks.len());
@@ -350,7 +353,7 @@ where
                             PipelineStage::Prove => proofs.push(proof.output),
                             _ => {
                                 return Err(
-                                    "dependency task did not produce batch proof".to_string()
+                                    "dependency task did not produce proposal proof".to_string()
                                 );
                             }
                         },
@@ -495,7 +498,7 @@ mod tests {
             _spec: &TestSpec,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
-            assert_eq!(input.taiko.batch_id, 1);
+            assert_eq!(input.taiko.proposal_id, 1);
             Ok(Proof {
                 proof: Some("mock-proof".to_string()),
                 ..Default::default()
@@ -561,7 +564,7 @@ mod tests {
             _provider: &P,
         ) -> RaikoResult<GuestInput> {
             let mut input = GuestInput::default();
-            input.taiko.batch_id = ctx.request.batch_id;
+            input.taiko.proposal_id = ctx.request.proposal_id;
             Ok(input)
         }
     }
@@ -616,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_batch_proof_runs_dependency_pipeline() {
+    async fn submit_proposal_proof_runs_dependency_pipeline() {
         let backend = TestBackend;
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec,
@@ -628,7 +631,7 @@ mod tests {
             Engine::default_scheduler_config(),
         );
 
-        let job_id = engine.submit_batch_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await.unwrap();
 
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
@@ -663,7 +666,7 @@ mod tests {
             scheduler_config,
         );
 
-        let job_id = engine.submit_batch_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await.unwrap();
 
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());

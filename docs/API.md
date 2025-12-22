@@ -47,10 +47,10 @@ GET /v1/info
 }
 ```
 
-### Request Batch Proof
+### Request Proposal Proof
 
 ```http
-POST /v1/proof/batch
+POST /v1/proof/proposal
 Content-Type: application/json
 ```
 
@@ -58,8 +58,8 @@ Content-Type: application/json
 
 | Field                | Type     | Required | Description                                        |
 | -------------------- | -------- | -------- | -------------------------------------------------- |
-| `batch_id`           | `u64`    | Yes      | The batch ID to prove                              |
-| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the batch was included       |
+| `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
+| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
 | `prover_type`        | `string` | No       | Prover type: "risc0" or "sp1" (defaults to config) |
 | `blob_proof_type`    | `string` | No       | Blob proof type: "kzg" or "proof_of_equivalence"   |
 | `prover`             | `string` | No       | Prover address (hex)                               |
@@ -69,7 +69,7 @@ Content-Type: application/json
 
 ```json
 {
-  "batch_id": 12345,
+  "proposal_id": 12345,
   "l1_inclusion_block": 50000,
   "prover_type": "risc0",
   "blob_proof_type": "kzg"
@@ -103,7 +103,7 @@ GET /v1/proof/{proof_id}
 
 | Parameter  | Type     | Description                                  |
 | ---------- | -------- | -------------------------------------------- |
-| `proof_id` | `string` | The proof ID returned from the batch request |
+| `proof_id` | `string` | The proof ID returned from the proposal request |
 
 #### Response
 
@@ -235,7 +235,7 @@ All error responses follow this format:
 
 ```json
 {
-  "error": "Batch ID 12345 not found on L1"
+  "error": "Proposal ID 12345 not found on L1"
 }
 ```
 
@@ -265,9 +265,9 @@ curl http://localhost:8080/health
 curl http://localhost:8080/v1/info
 
 # Request proof
-curl -X POST http://localhost:8080/v1/proof/batch \
+curl -X POST http://localhost:8080/v1/proof/proposal \
   -H "Content-Type: application/json" \
-  -d '{"batch_id": 12345, "l1_inclusion_block": 50000}'
+  -d '{"proposal_id": 12345, "l1_inclusion_block": 50000}'
 
 # Get proof status
 curl http://localhost:8080/v1/proof/550e8400-e29b-41d4-a716-446655440000
@@ -283,9 +283,9 @@ import requests
 
 # Request proof
 response = requests.post(
-    "http://localhost:8080/v1/proof/batch",
+    "http://localhost:8080/v1/proof/proposal",
     json={
-        "batch_id": 12345,
+        "proposal_id": 12345,
         "l1_inclusion_block": 50000,
         "prover_type": "risc0"
     }

@@ -110,7 +110,7 @@ impl From<Sp1Response> for Proof {
     }
 }
 
-/// SP1 Prover for Shasta batch proofs.
+/// SP1 Prover for Shasta proposal proofs.
 pub struct Sp1Prover {
     config: Sp1Config,
 }
@@ -135,7 +135,7 @@ where
         _spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        info!("Starting SP1 batch proof generation...");
+        info!("Starting SP1 proposal proof generation...");
 
         // Extract ProofCarryData from config if available
         let proof_carry_data: ProofCarryData = serde_json::from_value(
@@ -178,19 +178,19 @@ where
             .mode(proof_mode)
             .run()
             .map_err(|e| {
-                tracing::error!("Failed to generate SP1 batch proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 batch proof generation failed: {}", e))
+                tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
+                RaikoError::Guest(format!("SP1 proposal proof generation failed: {}", e))
             })?;
 
-        info!("SP1 batch proof generated successfully");
+        info!("SP1 proposal proof generated successfully");
 
         // Verify proof if configured
         if self.config.verify {
             client.verify(&proof, &vk).map_err(|e| {
-                tracing::error!("Failed to verify SP1 batch proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 batch proof verification failed: {}", e))
+                tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
+                RaikoError::Guest(format!("SP1 proposal proof verification failed: {}", e))
             })?;
-            info!("SP1 batch proof verified successfully");
+            info!("SP1 proposal proof verified successfully");
         }
 
         // Extract public values (instance_hash + subproof_input_hash = 64 bytes)
@@ -255,11 +255,11 @@ where
         let mut stdin = SP1Stdin::new();
         stdin.write(&aggregation_input);
 
-        // Get the batch prover's verifying key for proof verification
-        // The batch proofs were generated with the batch ELF
-        let batch_elf = backend.elf(ProofStage::Proposal)?;
+        // Get the proposal prover's verifying key for proof verification.
+        // The proposal proofs were generated with the proposal ELF.
+        let proposal_elf = backend.elf(ProofStage::Proposal)?;
         let client = ProverClient::from_env();
-        let (_, batch_vk) = client.setup(batch_elf);
+        let (_, proposal_vk) = client.setup(proposal_elf);
 
         // Add SP1 proofs for verification within the guest
         // Each proof from input.proofs should be an SP1 proof that can be verified
@@ -281,7 +281,7 @@ where
                 // Extract the SP1ReduceProof from the Compressed variant
                 match sp1_proof_with_pv.proof {
                     sp1_sdk::SP1Proof::Compressed(reduce_proof) => {
-                        stdin.write_proof(*reduce_proof, batch_vk.vk.clone());
+                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
                     }
                     _ => {
                         return Err(RaikoError::Guest(

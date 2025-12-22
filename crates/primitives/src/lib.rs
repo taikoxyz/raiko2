@@ -24,5 +24,5 @@ pub use input::{
     ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, StatelessInput, TaikoManifest,
     TaikoProverData,
 };
-pub use output::{AggregationGuestOutput, GuestBatchOutput, GuestOutput};
+pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};

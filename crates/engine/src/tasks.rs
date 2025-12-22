@@ -3,7 +3,7 @@ use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BatchStage {
+pub enum ProposalStage {
     Preflight,
     Validation,
     Prove,
@@ -11,8 +11,13 @@ pub enum BatchStage {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineTaskKey {
-    Batch { batch_id: u64, stage: BatchStage },
-    Aggregate { batch_ids: Vec<u64> },
+    Proposal {
+        proposal_id: u64,
+        stage: ProposalStage,
+    },
+    Aggregate {
+        proposal_ids: Vec<u64>,
+    },
 }
 
 pub type EngineTaskId = TaskId<EngineTaskKey>;
@@ -20,18 +25,18 @@ pub type EngineTaskId = TaskId<EngineTaskKey>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineTask {
     Preflight {
-        batch_id: u64,
+        proposal_id: u64,
     },
     Validate {
-        batch_id: u64,
+        proposal_id: u64,
         preflight_task: EngineTaskId,
     },
-    ProveBatch {
-        batch_id: u64,
+    ProveProposal {
+        proposal_id: u64,
         input_task: EngineTaskId,
     },
     Aggregate {
-        batch_ids: Vec<u64>,
+        proposal_ids: Vec<u64>,
         proof_tasks: Vec<EngineTaskId>,
     },
 }
@@ -53,23 +58,23 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
 
-    fn batch_task_id(batch_id: u64, stage: BatchStage) -> EngineTaskId {
-        TaskId::new(EngineTaskKey::Batch { batch_id, stage })
+    fn proposal_task_id(proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
+        TaskId::new(EngineTaskKey::Proposal { proposal_id, stage })
     }
 
     #[tokio::test]
-    async fn aggregation_depends_on_batches() {
+    async fn aggregation_depends_on_proposals() {
         let sched: Scheduler<EngineTask, EngineOutput, EngineTaskKey> =
             Scheduler::new(MemoryStore::new());
 
         let a1 = sched
             .submit(
-                batch_task_id(1, BatchStage::Prove),
+                proposal_task_id(1, ProposalStage::Prove),
                 NewTask {
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveBatch {
-                        batch_id: 1,
-                        input_task: batch_task_id(1, BatchStage::Validation),
+                    payload: EngineTask::ProveProposal {
+                        proposal_id: 1,
+                        input_task: proposal_task_id(1, ProposalStage::Validation),
                     },
                 },
                 vec![],
@@ -78,12 +83,12 @@ mod tests {
             .unwrap();
         let a2 = sched
             .submit(
-                batch_task_id(2, BatchStage::Prove),
+                proposal_task_id(2, ProposalStage::Prove),
                 NewTask {
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveBatch {
-                        batch_id: 2,
-                        input_task: batch_task_id(2, BatchStage::Validation),
+                    payload: EngineTask::ProveProposal {
+                        proposal_id: 2,
+                        input_task: proposal_task_id(2, ProposalStage::Validation),
                     },
                 },
                 vec![],
@@ -93,12 +98,12 @@ mod tests {
         let b = sched
             .submit(
                 TaskId::new(EngineTaskKey::Aggregate {
-                    batch_ids: vec![1, 2],
+                    proposal_ids: vec![1, 2],
                 }),
                 NewTask {
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {
-                        batch_ids: vec![1, 2],
+                        proposal_ids: vec![1, 2],
                         proof_tasks: vec![a1, a2],
                     },
                 },

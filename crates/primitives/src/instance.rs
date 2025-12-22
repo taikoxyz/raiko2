@@ -167,12 +167,12 @@ pub struct ShastaTransition {
     pub state_root: B256,
 }
 
-/// Batch metadata for Shasta.
+/// Proposal metadata for Shasta.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ShastaBatchMetadata {
+pub struct ShastaProposalMetadata {
     pub info_hash: B256,
     pub proposer: Address,
-    pub batch_id: u64,
+    pub proposal_id: u64,
     pub proposed_at: u64,
 }
 
@@ -180,7 +180,7 @@ pub struct ShastaBatchMetadata {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProtocolInstance {
     pub transition: ShastaTransition,
-    pub batch_metadata: ShastaBatchMetadata,
+    pub proposal_metadata: ShastaProposalMetadata,
     pub prover: Address,
     pub chain_id: u64,
     pub verifier_address: Address,
@@ -193,9 +193,9 @@ impl ProtocolInstance {
             self.transition.parent_hash,
             self.transition.block_hash,
             self.transition.state_root,
-            self.batch_metadata.info_hash,
-            self.batch_metadata.proposer,
-            self.batch_metadata.batch_id,
+            self.proposal_metadata.info_hash,
+            self.proposal_metadata.proposer,
+            self.proposal_metadata.proposal_id,
             self.prover,
             self.chain_id,
         )
@@ -204,19 +204,19 @@ impl ProtocolInstance {
     }
 }
 
-/// Verify blob usage in batch mode.
+/// Verify blob usage in proposal mode.
 ///
 /// Checks that raw blob commitment matches input blob commitment,
 /// then verifies the blob version hash.
-pub const fn verify_batch_mode_blob_usage(
+pub const fn verify_proposal_mode_blob_usage(
     _guest_input: &GuestInput,
     blob_proof_type: BlobProofType,
 ) -> Result<()> {
     match blob_proof_type {
         BlobProofType::KzgVersionedHash => {
             // ensure!(
-            //     batch_input.taiko.tx_data_from_blob.len()
-            //         == batch_input
+            //     proposal_input.taiko.tx_data_from_blob.len()
+            //         == proposal_input
             //             .taiko
             //             .blob_commitments
             //             .as_ref()
@@ -226,8 +226,8 @@ pub const fn verify_batch_mode_blob_usage(
         }
         BlobProofType::ProofOfEquivalence => {
             // ensure!(
-            //     batch_input.taiko.tx_data_from_blob.len()
-            //         == batch_input
+            //     proposal_input.taiko.tx_data_from_blob.len()
+            //         == proposal_input
             //             .taiko
             //             .blob_proofs
             //             .as_ref()
@@ -237,8 +237,8 @@ pub const fn verify_batch_mode_blob_usage(
         }
     }
 
-    // TODO: Implement full blob verification with KZG
-    // For now, just verify the counts match
+    // TODO: Implement full blob verification with KZG.
+    // For now, just verify the counts match.
 
     Ok(())
 }
@@ -257,9 +257,9 @@ pub fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B256 {
     keccak256(abi_encode_data)
 }
 
-/// Create a protocol instance from batch input and executed blocks.
+/// Create a protocol instance from proposal input and executed blocks.
 pub fn new_protocol_instance(
-    batch_input: &GuestInput,
+    proposal_input: &GuestInput,
     blocks: Vec<Block>,
     prover_data: &TaikoProverData,
     chain_id: u64,
@@ -276,23 +276,23 @@ pub fn new_protocol_instance(
         state_root: last_block.header.state_root,
     };
 
-    // Calculate batch metadata
-    let tx_list_hash = keccak256(&batch_input.taiko.data_sources[0].tx_data_from_calldata);
+    // Calculate proposal metadata
+    let tx_list_hash = keccak256(&proposal_input.taiko.data_sources[0].tx_data_from_calldata);
 
-    // TODO: Get blob hashes from batch_proposed
+    // TODO: Get blob hashes from proposal_event.
     let blob_hashes: Vec<B256> = vec![];
     let txs_hash = calculate_txs_hash(tx_list_hash, &blob_hashes);
 
-    let batch_metadata = ShastaBatchMetadata {
+    let proposal_metadata = ShastaProposalMetadata {
         info_hash: txs_hash, // Simplified for now
         proposer: Address::default(),
-        batch_id: batch_input.taiko.batch_id,
+        proposal_id: proposal_input.taiko.proposal_id,
         proposed_at: 0,
     };
 
     Ok(ProtocolInstance {
         transition,
-        batch_metadata,
+        proposal_metadata,
         prover: prover_data.actual_prover,
         chain_id,
         verifier_address,

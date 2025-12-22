@@ -55,12 +55,12 @@ impl ManifestBuilder for ShastaManifestBuilder {
         blocks: &[Block],
     ) -> RaikoResult<TaikoManifest> {
         info!(
-            "Creating Taiko manifest for batch {} with {} blocks",
-            ctx.request.batch_id,
+            "Creating Taiko manifest for proposal {} with {} blocks",
+            ctx.request.proposal_id,
             blocks.len()
         );
 
-        // TODO: Implement actual L1 batch proposal fetching using raiko2-protocol.
+        // TODO: Implement actual L1 proposal fetching using raiko2-protocol.
         let prover_address = ctx
             .request
             .prover
@@ -83,9 +83,9 @@ impl ManifestBuilder for ShastaManifestBuilder {
         };
 
         Ok(TaikoManifest {
-            batch_id: ctx.request.batch_id,
+            proposal_id: ctx.request.proposal_id,
             l1_header: alloy_consensus::Header::default(),
-            batch_proposed: ShastaEventData::default(),
+            proposal_event: ShastaEventData::default(),
             chain_spec: Default::default(),
             prover_data,
             data_sources: Vec::new(),
@@ -100,7 +100,7 @@ impl Preflight for ShastaSpec {
         ctx: &ProofContext,
         provider: &P,
     ) -> RaikoResult<GuestInput> {
-        let block_numbers = vec![ctx.request.batch_id];
+        let block_numbers = vec![ctx.request.proposal_id];
         let blocks = provider.batch_blocks(&block_numbers).await?;
         let witnesses = provider.batch_witnesses(&block_numbers).await?;
 

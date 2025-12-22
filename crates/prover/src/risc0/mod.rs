@@ -72,7 +72,7 @@ impl From<Risc0Response> for Proof {
     }
 }
 
-/// RISC0 Prover for Shasta batch proofs.
+/// RISC0 Prover for Shasta proposal proofs.
 pub struct Risc0Prover {
     config: Risc0Config,
 }
@@ -97,7 +97,7 @@ where
         _spec: &S,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        info!("Starting RISC0 batch proof generation...");
+        info!("Starting RISC0 proposal proof generation...");
 
         // Extract ProofCarryData from config if available
         let proof_carry_data: ProofCarryData = serde_json::from_value(
@@ -131,25 +131,25 @@ where
         let image_id = compute_image_id(elf)
             .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {}", e)))?;
 
-        info!("Starting RISC0 batch proof generation...");
+        info!("Starting RISC0 proposal proof generation...");
         let prove_info = default_prover()
             .prove_with_opts(env, elf, &opts)
             .map_err(|e| {
-                tracing::error!("Failed to generate RISC0 batch proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 batch proof generation failed: {}", e))
+                tracing::error!("Failed to generate RISC0 proposal proof: {:?}", e);
+                RaikoError::Guest(format!("RISC0 proposal proof generation failed: {}", e))
             })?;
 
         let receipt = prove_info.receipt;
 
-        info!("RISC0 batch proof generated successfully");
+        info!("RISC0 proposal proof generated successfully");
 
         // Verify proof if configured
         if self.config.verify {
             receipt.verify(image_id).map_err(|e| {
-                tracing::error!("Failed to verify RISC0 batch proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 batch proof verification failed: {}", e))
+                tracing::error!("Failed to verify RISC0 proposal proof: {:?}", e);
+                RaikoError::Guest(format!("RISC0 proposal proof verification failed: {}", e))
             })?;
-            info!("RISC0 batch proof verified successfully");
+            info!("RISC0 proposal proof verified successfully");
         }
 
         // Extract public values (instance_hash + subproof_input_hash = 64 bytes)
@@ -161,7 +161,7 @@ where
         };
 
         info!(
-            "Generated batch receipt journal: {:?}",
+            "Generated proposal receipt journal: {:?}",
             alloy_primitives::hex::encode_prefixed(journal_bytes.clone())
         );
 
@@ -211,9 +211,9 @@ where
             ));
         }
 
-        // Get batch image ID for proof verification
-        let batch_elf = backend.elf(ProofStage::Proposal)?;
-        let _batch_image_id = compute_image_id(batch_elf)
+        // Get proposal image ID for proof verification
+        let proposal_elf = backend.elf(ProofStage::Proposal)?;
+        let _proposal_image_id = compute_image_id(proposal_elf)
             .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {}", e)))?;
 
         // Build executor environment with assumptions (proofs to verify)

@@ -46,11 +46,11 @@ pub async fn get_info(State(state): State<AppState>) -> Json<InfoResponse> {
     })
 }
 
-/// Batch proof request.
+/// Proposal proof request.
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // Fields will be used when full proof generation is implemented
-pub struct BatchProofRequest {
-    pub batch_id: u64,
+pub struct ProposalProofRequest {
+    pub proposal_id: u64,
     pub l1_inclusion_block: u64,
     #[serde(default)]
     pub prover_type: Option<String>,
@@ -91,19 +91,19 @@ const fn status_from_task_state(state: &TaskState<EngineOutput, EngineTaskKey>) 
     }
 }
 
-/// Request a batch proof.
-pub async fn request_batch_proof(
+/// Request a proposal proof.
+pub async fn request_proposal_proof(
     State(state): State<AppState>,
-    Json(req): Json<BatchProofRequest>,
+    Json(req): Json<ProposalProofRequest>,
 ) -> Result<Json<ProofResponse>, ApiError> {
     info!(
-        "Received batch proof request: batch_id={}, l1_block={}",
-        req.batch_id, req.l1_inclusion_block
+        "Received proposal proof request: proposal_id={}, l1_block={}",
+        req.proposal_id, req.l1_inclusion_block
     );
 
     let id = state
         .engine
-        .submit_batch_proof(req.batch_id)
+        .submit_proposal_proof(req.proposal_id)
         .await
         .map_err(|e| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,

@@ -158,6 +158,6 @@ mod tests {
             .expect("pipeline should succeed");
 
         assert!(input.output.witnesses.is_empty());
-        assert_eq!(input.output.taiko.batch_id, 0);
+        assert_eq!(input.output.taiko.proposal_id, 0);
     }
 }

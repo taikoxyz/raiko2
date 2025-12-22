@@ -36,7 +36,7 @@ fn build_context(config: &Config, proof_type: &str) -> ProofContext {
         ProofRequest {
             l1_chain_id: config.rpc.l1_chain_id,
             l2_chain_id: config.rpc.l2_chain_id,
-            batch_id: 0,
+            proposal_id: 0,
             proof_type: proof_type.to_string(),
             blob_proof_type: None,
             prover: None,
@@ -51,10 +51,13 @@ fn build_provider(config: &Config) -> Result<NetworkProvider> {
 }
 
 impl EngineHandle {
-    pub async fn submit_batch_proof(&self, batch_id: u64) -> Result<EngineTaskId, TaskStoreError> {
+    pub async fn submit_proposal_proof(
+        &self,
+        proposal_id: u64,
+    ) -> Result<EngineTaskId, TaskStoreError> {
         match self {
-            EngineHandle::Risc0(engine) => engine.submit_batch_proof(batch_id).await,
-            EngineHandle::Sp1(engine) => engine.submit_batch_proof(batch_id).await,
+            EngineHandle::Risc0(engine) => engine.submit_proposal_proof(proposal_id).await,
+            EngineHandle::Sp1(engine) => engine.submit_proposal_proof(proposal_id).await,
         }
     }
 

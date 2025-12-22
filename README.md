@@ -97,8 +97,8 @@ sequenceDiagram
   participant P as Provider
   participant Z as Prover
 
-  C->>API: POST /v1/proof/batch
-  API->>Q: submit_batch_proof
+  C->>API: POST /v1/proof/proposal
+  API->>Q: submit_proposal_proof
   Q->>W: Preflight task
   W->>P: fetch blocks/witnesses/accounts
   W->>Q: store Preflight output

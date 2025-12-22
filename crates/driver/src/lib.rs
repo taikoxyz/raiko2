@@ -16,8 +16,6 @@
 //! let manifest = driver.taiko_manifest(&ctx, &blocks).await?;
 //! ```
 
-#![allow(missing_docs)]
-
 use raiko2_primitives::{ProofContext, RaikoResult, TaikoManifest, TaikoProverData};
 use raiko2_protocol::ShastaEventData;
 use reth_ethereum_primitives::Block;

@@ -18,7 +18,7 @@ path = "src/main.rs"
 # Raiko2 crates
 raiko2-primitives.workspace = true
 raiko2-engine.workspace = true
-raiko2-driver.workspace = true
+raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-prover.workspace = true
 raiko2-protocol.workspace = true

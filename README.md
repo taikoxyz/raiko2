@@ -4,7 +4,7 @@ Raiko V2 is the next-generation zkVM prover for Taiko, built on top of [alethia-
 
 ## Features
 
-- **Modular Architecture**: Clean separation between primitives, protocol, driver, provider, engine, and prover
+- **Modular Architecture**: Clean separation between primitives, protocol, pipeline, provider, engine, and prover
 - **alethia-reth Integration**: Uses Taiko's new reth fork for improved performance
 - **Shasta Protocol**: Native support for Taiko Shasta (Based Contestable Rollup)
 - **zkVM Provers**: Support for RISC0 and SP1 provers
@@ -17,7 +17,7 @@ raiko2/
 ├── crates/
 │   ├── primitives/     # Core types and traits
 │   ├── protocol/       # Shasta protocol implementation
-│   ├── driver/         # Block execution driver
+│   ├── pipeline/       # Pipeline spec + manifest builder
 │   ├── provider/       # Data provider interfaces
 │   ├── engine/         # Execution engine
 │   ├── stateless/      # Stateless validation
@@ -55,7 +55,7 @@ flowchart LR
 
 Key abstractions:
 
-- `HardforkSpec`: binds `Preflight` + `Validation` + ELF selection for a fork.
+- `PipelineSpec`: binds `Preflight` + `Validation` + ELF selection for a fork.
 - `Engine`/`Pipeline`: hardfork-agnostic orchestration.
 - `Prover`: backend execution (RISC0 / SP1).
 
@@ -72,7 +72,7 @@ flowchart LR
   VA --> GI["GuestInput"]
   Q -->|Prove| PR["Prover (RISC0/SP1)"]
   PR --> PO["Proof"]
-  HF["HardforkSpec"] -.-> PF
+  HF["PipelineSpec"] -.-> PF
   HF -.-> VA
   HF -.-> PR
 ```

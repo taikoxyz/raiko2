@@ -3,11 +3,16 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
-//! Hardfork abstractions for Raiko2 pipelines.
+//! Raiko2 Pipeline - hardfork-specific manifest builders and pipeline specs.
 
 use raiko2_primitives::{GuestInput, ProofContext, RaikoResult, TaikoManifest};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
+
+pub mod forks;
+mod pipeline;
+
+pub use pipeline::Pipeline;
 
 /// Prover backend selector for hardfork-specific programs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +78,8 @@ impl ManifestBuilder for NoopManifestBuilder {
     }
 }
 
-/// Hardfork-specific behavior for building inputs.
-pub trait HardforkSpec: Send + Sync {
+/// Pipeline-specific behavior for building inputs.
+pub trait PipelineSpec: Send + Sync {
     type Preflight: Preflight;
     type Validation: Validation;
     type ManifestBuilder: ManifestBuilder;

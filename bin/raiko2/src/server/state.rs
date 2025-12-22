@@ -2,9 +2,9 @@
 
 use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
-use raiko2_driver::forks::shasta::ShastaSpec;
 use raiko2_engine::input_builder::{GuestInputBuilder, NetworkGuestInputBuilder};
 use raiko2_engine::queue::EngineQueue;
+use raiko2_pipeline::forks::shasta::ShastaSpec;
 use raiko2_prover::Prover;
 use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::sync::Arc;

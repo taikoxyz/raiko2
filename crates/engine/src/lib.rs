@@ -20,14 +20,11 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
-use raiko2_hardfork::HardforkSpec;
+use raiko2_pipeline::{Pipeline, PipelineSpec};
 use raiko2_primitives::{GuestInput, GuestOutput, ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use tracing::info;
 
-mod pipeline;
-
-use pipeline::Pipeline;
 pub mod input_builder;
 pub mod queue;
 pub mod tasks;
@@ -35,12 +32,12 @@ pub mod worker;
 
 /// The main proving engine.
 #[derive(Debug)]
-pub struct Engine<P: Provider, F: HardforkSpec> {
+pub struct Engine<P: Provider, F: PipelineSpec> {
     spec: F,
     provider: P,
 }
 
-impl<P: Provider, F: HardforkSpec> Engine<P, F> {
+impl<P: Provider, F: PipelineSpec> Engine<P, F> {
     /// Create a new engine with the given provider.
     pub const fn new(spec: F, provider: P) -> Self {
         Self { spec, provider }
@@ -81,8 +78,8 @@ mod tests {
     fn test_generate_output_empty_input() {
         use alloy_primitives::{Address, map::AddressMap};
         use alloy_trie::TrieAccount;
-        use raiko2_hardfork::{
-            HardforkSpec, NoopManifestBuilder, NoopValidation, Preflight, ProofStage, ProverBackend,
+        use raiko2_pipeline::{
+            NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
         };
         use raiko2_primitives::RaikoResult;
         use reth_ethereum_primitives::Block;
@@ -103,7 +100,7 @@ mod tests {
             }
         }
 
-        impl HardforkSpec for TestSpec {
+        impl PipelineSpec for TestSpec {
             type Preflight = Self;
             type Validation = NoopValidation;
             type ManifestBuilder = NoopManifestBuilder;

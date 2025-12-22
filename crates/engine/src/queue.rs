@@ -10,13 +10,13 @@ use raiko2_queue::{
 
 use crate::input_builder::{DefaultGuestInputBuilder, GuestInputBuilder};
 use crate::tasks::{EngineOutput, EngineTask};
-use raiko2_hardfork::HardforkSpec;
+use raiko2_pipeline::PipelineSpec;
 
-pub struct EngineQueue<F: HardforkSpec> {
+pub struct EngineQueue<F: PipelineSpec> {
     inner: Arc<Inner<F>>,
 }
 
-struct Inner<F: HardforkSpec> {
+struct Inner<F: PipelineSpec> {
     spec: F,
     scheduler: Scheduler<EngineTask, EngineOutput>,
     prover: Arc<dyn Prover<F>>,
@@ -24,7 +24,7 @@ struct Inner<F: HardforkSpec> {
     guest_input_builder: Arc<dyn GuestInputBuilder<F>>,
 }
 
-impl<F: HardforkSpec> Clone for EngineQueue<F> {
+impl<F: PipelineSpec> Clone for EngineQueue<F> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -32,7 +32,7 @@ impl<F: HardforkSpec> Clone for EngineQueue<F> {
     }
 }
 
-impl<F: HardforkSpec> EngineQueue<F> {
+impl<F: PipelineSpec> EngineQueue<F> {
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
@@ -250,7 +250,7 @@ impl<F: HardforkSpec> EngineQueue<F> {
     }
 }
 
-fn spawn_worker_supervised<F: HardforkSpec + 'static>(
+fn spawn_worker_supervised<F: PipelineSpec + 'static>(
     engine: EngineQueue<F>,
     notify: Arc<tokio::sync::Notify>,
     worker: String,
@@ -292,7 +292,7 @@ fn spawn_worker_supervised<F: HardforkSpec + 'static>(
     });
 }
 
-fn spawn_maintenance_supervised<F: HardforkSpec + 'static>(
+fn spawn_maintenance_supervised<F: PipelineSpec + 'static>(
     engine: EngineQueue<F>,
     maintenance_interval: Duration,
 ) {
@@ -333,8 +333,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use raiko2_hardfork::{
-        HardforkSpec, NoopManifestBuilder, NoopValidation, Preflight, ProofStage, ProverBackend,
+    use raiko2_pipeline::{
+        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
     };
     use raiko2_primitives::{
         AggregationGuestInput, GuestInput, Proof, ProofContext, ProverConfig, RaikoError,
@@ -415,7 +415,7 @@ mod tests {
         }
     }
 
-    impl HardforkSpec for TestSpec {
+    impl PipelineSpec for TestSpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;

@@ -1,9 +1,7 @@
+use crate::{ManifestBuilder, PipelineSpec, Preflight, ProofStage, ProverBackend, Validation};
 use alethia_reth_node::block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_guests::{risc0, sp1};
-use raiko2_hardfork::{
-    HardforkSpec, ManifestBuilder, Preflight, ProofStage, ProverBackend, Validation,
-};
 use raiko2_primitives::{
     ChainSpec, GuestInput, ProofContext, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs, TaikoManifest, TaikoProverData,
@@ -188,7 +186,7 @@ impl Validation for ShastaSpec {
     }
 }
 
-impl HardforkSpec for ShastaSpec {
+impl PipelineSpec for ShastaSpec {
     type Preflight = Self;
     type Validation = Self;
     type ManifestBuilder = ShastaManifestBuilder;

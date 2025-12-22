@@ -8804,8 +8804,8 @@ dependencies = [
  "axum 0.8.7",
  "clap",
  "dotenvy",
- "raiko2-driver",
  "raiko2-engine",
+ "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-protocol",
  "raiko2-prover",
@@ -8824,26 +8824,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "raiko2-driver"
-version = "0.1.0"
-dependencies = [
- "alethia-reth-node",
- "alloy-consensus",
- "alloy-primitives",
- "anyhow",
- "async-trait",
- "raiko2-guests",
- "raiko2-hardfork",
- "raiko2-primitives",
- "raiko2-protocol",
- "raiko2-provider",
- "raiko2-stateless",
- "reth-ethereum-primitives",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "raiko2-engine"
 version = "0.1.0"
 dependencies = [
@@ -8852,8 +8832,7 @@ dependencies = [
  "alloy-trie 0.9.1",
  "anyhow",
  "async-trait",
- "raiko2-driver",
- "raiko2-hardfork",
+ "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-prover",
  "raiko2-provider",
@@ -8872,13 +8851,22 @@ name = "raiko2-guests"
 version = "0.1.0"
 
 [[package]]
-name = "raiko2-hardfork"
+name = "raiko2-pipeline"
 version = "0.1.0"
 dependencies = [
+ "alethia-reth-node",
+ "alloy-consensus",
+ "alloy-primitives",
+ "anyhow",
  "async-trait",
+ "raiko2-guests",
  "raiko2-primitives",
+ "raiko2-protocol",
  "raiko2-provider",
+ "raiko2-stateless",
  "reth-ethereum-primitives",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8935,7 +8923,7 @@ dependencies = [
  "base64 0.22.1",
  "bincode",
  "hex",
- "raiko2-hardfork",
+ "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-protocol",
  "reqwest",

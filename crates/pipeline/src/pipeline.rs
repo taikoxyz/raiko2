@@ -1,14 +1,14 @@
-use raiko2_hardfork::{HardforkSpec, Preflight, Validation};
+use crate::{PipelineSpec, Preflight, Validation};
 use raiko2_primitives::{GuestInput, ProofContext, RaikoResult};
 use raiko2_provider::Provider;
 
-/// Hardfork-agnostic pipeline for building guest inputs.
-pub(crate) struct Pipeline<'a, F: HardforkSpec> {
+/// Pipeline-agnostic builder for guest inputs.
+pub struct Pipeline<'a, F: PipelineSpec> {
     spec: &'a F,
 }
 
-impl<'a, F: HardforkSpec> Pipeline<'a, F> {
-    /// Create a new pipeline using the provided hardfork spec.
+impl<'a, F: PipelineSpec> Pipeline<'a, F> {
+    /// Create a new pipeline using the provided pipeline spec.
     pub const fn new(spec: &'a F) -> Self {
         Self { spec }
     }
@@ -33,8 +33,8 @@ impl<'a, F: HardforkSpec> Pipeline<'a, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raiko2_hardfork::{
-        HardforkSpec, NoopManifestBuilder, NoopValidation, Preflight, ProofStage, ProverBackend,
+    use crate::{
+        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
     };
     use raiko2_primitives::{ProofRequest, ProverConfig};
 
@@ -53,7 +53,7 @@ mod tests {
         }
     }
 
-    impl HardforkSpec for EmptySpec {
+    impl PipelineSpec for EmptySpec {
         type Preflight = Self;
         type Validation = NoopValidation;
         type ManifestBuilder = NoopManifestBuilder;

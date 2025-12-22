@@ -1,5 +1,5 @@
 [package]
-name = "raiko2-driver"
+name = "raiko2-pipeline"
 version.workspace = true
 edition.workspace = true
 
@@ -9,7 +9,6 @@ workspace = true
 [dependencies]
 raiko2-primitives.workspace = true
 raiko2-protocol.workspace = true
-raiko2-hardfork.workspace = true
 raiko2-guests.workspace = true
 raiko2-stateless.workspace = true
 raiko2-provider.workspace = true

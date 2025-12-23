@@ -21,19 +21,9 @@ raiko2-engine.workspace = true
 raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-prover.workspace = true
-raiko2-protocol.workspace = true
 raiko2-queue.workspace = true
 
-# Alethia reth
-alethia-reth-node.workspace = true
-alethia-reth-chainspec.workspace = true
-
-# Reth
-reth.workspace = true
-
-# Web framework
 axum.workspace = true
-tower.workspace = true
 tower-http.workspace = true
 
 # Async runtime
@@ -51,9 +41,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
-# Error handling
 anyhow.workspace = true
-thiserror.workspace = true
 
 # Utilities
 dotenvy = "0.15"

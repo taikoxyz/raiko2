@@ -8,9 +8,8 @@ workspace = true
 
 [dependencies]
 raiko2-protocol.workspace = true
-raiko2-stateless.workspace = true
 
-alethia-reth-chainspec-lite.workspace = true
+alethia-reth-chainspec-core.workspace = true
 
 reth-revm.workspace = true
 reth-chainspec.workspace = true
@@ -18,11 +17,9 @@ reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-stateless.workspace = true
 
-alloy-trie.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
-alloy-rlp.workspace = true
 
 serde.workspace = true
 serde_with.workspace = true

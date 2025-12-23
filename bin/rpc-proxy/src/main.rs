@@ -16,6 +16,11 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
+mod db;
+mod rpc;
+mod trie;
+mod witness;
+
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use alloy::{
     eips::BlockNumberOrTag,
@@ -33,7 +38,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, field, info, instrument};
 use tracing_actix_web::TracingLogger;
-use zeth_rpc_proxy::execution_witness;
+use witness::execution_witness;
 
 /// This struct holds the application state that we want to share across all handlers.
 struct AppState {

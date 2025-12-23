@@ -11,21 +11,15 @@ workspace = true
 # Alloy types
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
-alloy-rlp = { workspace = true, features = ["derive"] }
 alloy-sol-types.workspace = true
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
-
-# Compression
-flate2 = "1.0"
 
 # Logging
 tracing.workspace = true
 
 # Error handling
-thiserror.workspace = true
 anyhow.workspace = true
 
 [features]

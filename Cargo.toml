@@ -52,12 +52,10 @@ raiko2-guests = { path = "./crates/guests" }
 risc0-zkvm = "3.0.4"
 sp1-sdk = "5.2.3"
 
-# Alethia reth (from alethia-reth)
-alethia-reth-node = { git = "https://github.com/taikoxyz/alethia-reth" }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth" }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth" }
-alethia-reth-chainspec-lite = { path = "../../taikoxyz/alethia-reth/crates/chainspec-lite" }
-alethia-reth-block-lite = { path = "../../taikoxyz/alethia-reth/crates/block-lite" }
+# Alethia reth (PR #79 branch)
+alethia-reth-block-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-chainspec-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-consensus-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
 
 # Reth (v1.9.3 - same as alethia-reth uses)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.9.3" }

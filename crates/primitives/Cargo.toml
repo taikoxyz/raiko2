@@ -10,8 +10,7 @@ workspace = true
 raiko2-protocol.workspace = true
 raiko2-stateless.workspace = true
 
-alethia-reth-node.workspace = true
-alethia-reth-evm.workspace = true
+alethia-reth-chainspec-lite.workspace = true
 
 reth-revm.workspace = true
 reth-chainspec.workspace = true

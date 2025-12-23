@@ -22,9 +22,9 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROFILE="${PROFILE:-release}"
 VERBOSE="${VERBOSE:-0}"
 
-# Toolchain versions
-TOOLCHAIN_RISC0="+nightly-2024-12-20"
-TOOLCHAIN_SP1="+nightly-2024-12-20"
+# Toolchain versions (override with env vars if needed)
+TOOLCHAIN_RISC0="${TOOLCHAIN_RISC0:-+risc0}"
+TOOLCHAIN_SP1="${TOOLCHAIN_SP1:-+succinct}"
 
 # Guest directories (out-of-workspace)
 RISC0_GUEST_DIR="$ROOT_DIR/guests/risc0"
@@ -57,8 +57,16 @@ check_toolchain() {
     if rustup toolchain list | grep -q "$toolchain"; then
         log_info "Toolchain $toolchain is installed"
     else
-        log_info "Installing toolchain $toolchain..."
-        rustup install "$toolchain"
+        case "$toolchain" in
+            risc0|succinct)
+                log_error "Toolchain $toolchain is not installed. Install via the vendor toolchain manager (e.g., rzup for risc0 or the SP1 installer) and re-run."
+                exit 1
+                ;;
+            *)
+                log_info "Installing toolchain $toolchain..."
+                rustup install "$toolchain"
+                ;;
+        esac
     fi
 }
 
@@ -94,7 +102,7 @@ build_risc0() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("risc0-proposal" "risc0-shasta-aggregation")
+    local bins=("risc0-shasta-proposal" "risc0-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa")
     fi
@@ -146,7 +154,7 @@ build_sp1() {
     mkdir -p "$lockfile_dir"
 
     # SP1-specific environment and flags
-    export CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS="-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort"
+    export CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS='-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend="custom"'
     export CC="/opt/riscv/bin/riscv32-unknown-elf-gcc"
     export CFLAGS="-march=rv32im -mstrict-align -falign-functions=2"
 
@@ -161,7 +169,7 @@ build_sp1() {
     fi
 
     # Build Shasta-only binaries
-    local bins=("sp1-proposal" "sp1-shasta-aggregation")
+    local bins=("sp1-shasta-proposal" "sp1-shasta-aggregation")
     if [ "$bench_mode" = "true" ]; then
         bins+=("sha256" "ecdsa" "bn254_add" "bn254_mul")
     fi

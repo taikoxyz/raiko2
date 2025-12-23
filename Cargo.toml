@@ -54,9 +54,10 @@ sp1-sdk = "5.2.3"
 
 # Alethia reth (from alethia-reth)
 alethia-reth-node = { git = "https://github.com/taikoxyz/alethia-reth" }
-alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth" }
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth" }
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth" }
+alethia-reth-chainspec-lite = { path = "../../taikoxyz/alethia-reth/crates/chainspec-lite" }
+alethia-reth-block-lite = { path = "../../taikoxyz/alethia-reth/crates/block-lite" }
 
 # Reth (v1.9.3 - same as alethia-reth uses)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.9.3" }

@@ -8,10 +8,7 @@
 //! It validates blocks without requiring access to the full node state by
 //! using state proofs and witness data.
 
-mod sparse;
-mod trie;
 mod validation;
-mod witness_db;
 
 pub use validation::validate_block;
 

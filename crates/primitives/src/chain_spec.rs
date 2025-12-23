@@ -1,4 +1,5 @@
 use crate::proof_type::ProofType;
+use alethia_reth_chainspec_lite::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET, spec::TaikoChainSpec};
 use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
 use reth_revm::primitives::hardfork::SpecId;
@@ -226,9 +227,7 @@ impl ChainSpec {
     /// - `167013` (Taiko Hoodi)
     ///
     /// Returns an error for non-Taiko chains or unknown Taiko chain IDs.
-    pub fn to_taiko_chain_spec(
-        &self,
-    ) -> Result<Arc<alethia_reth_node::chainspec::spec::TaikoChainSpec>> {
+    pub fn to_taiko_chain_spec(&self) -> Result<Arc<TaikoChainSpec>> {
         if !self.is_taiko {
             bail!(
                 "chain spec is not a Taiko chain and cannot be converted (chain_id={})",
@@ -237,9 +236,9 @@ impl ChainSpec {
         }
 
         match self.chain_id {
-            167000 => Ok(alethia_reth_node::chainspec::TAIKO_MAINNET.clone()),
-            167001 => Ok(alethia_reth_node::chainspec::TAIKO_DEVNET.clone()),
-            167013 => Ok(alethia_reth_node::chainspec::TAIKO_HOODI.clone()),
+            167000 => Ok(TAIKO_MAINNET.clone()),
+            167001 => Ok(TAIKO_DEVNET.clone()),
+            167013 => Ok(TAIKO_HOODI.clone()),
             other => bail!(
                 "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
             ),
@@ -254,7 +253,7 @@ impl ChainSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alethia_reth_node::chainspec::{
+    use alethia_reth_chainspec_lite::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
     };
 
@@ -272,10 +271,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(
-            taiko.inner.genesis_header.hash_slow(),
-            TAIKO_MAINNET_GENESIS_HASH
-        );
+        assert_eq!(taiko.genesis_hash(), TAIKO_MAINNET_GENESIS_HASH);
     }
 
     #[test]
@@ -292,10 +288,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(
-            taiko.inner.genesis_header.hash_slow(),
-            TAIKO_DEVNET_GENESIS_HASH
-        );
+        assert_eq!(taiko.genesis_hash(), TAIKO_DEVNET_GENESIS_HASH);
     }
 
     #[test]
@@ -312,10 +305,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(
-            taiko.inner.genesis_header.hash_slow(),
-            TAIKO_HOODI_GENESIS_HASH
-        );
+        assert_eq!(taiko.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
     }
 
     #[test]

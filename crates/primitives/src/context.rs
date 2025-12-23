@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::proof::ProverConfig;
-use alethia_reth_node::chainspec::spec::TaikoChainSpec;
+use alethia_reth_chainspec_lite::spec::TaikoChainSpec;
 use reth_chainspec::ChainSpec as RethChainSpec;
 use serde::{Deserialize, Serialize};
 

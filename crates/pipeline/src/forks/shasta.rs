@@ -1,7 +1,7 @@
 use crate::{
     ManifestBuilder, PipelineSpec, Preflight, Risc0ShastaBackend, Sp1ShastaBackend, Validation,
 };
-use alethia_reth_node::block::config::TaikoEvmConfig;
+use alethia_reth_block_lite::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_guests::{risc0, sp1};
 use raiko2_primitives::{

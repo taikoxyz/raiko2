@@ -250,8 +250,8 @@ impl AppState {
                 EngineHandle::Sp1(engine)
             }
             ProverType::Native => {
-                let prover: Arc<dyn Prover<NativeBackend>> = Arc::new(NativeProver::default());
-                let backend = NativeBackend::default();
+                let prover: Arc<dyn Prover<NativeBackend>> = Arc::new(NativeProver);
+                let backend = NativeBackend;
                 let engine = match config.queue.backend {
                     QueueBackend::Memory => {
                         let provider = build_provider(&config)?;

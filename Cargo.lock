@@ -271,7 +271,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-block-core"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
 dependencies = [
  "alethia-reth-chainspec-core",
  "alethia-reth-evm",
@@ -295,7 +295,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-chainspec-core"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -316,7 +316,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-consensus-core"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
 dependencies = [
  "alethia-reth-chainspec-core",
  "alethia-reth-evm",
@@ -336,7 +336,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -2484,7 +2484,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2504,7 +2504,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "regex",
@@ -2522,7 +2522,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "regex",
@@ -5712,7 +5712,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5747,7 +5747,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -8410,7 +8410,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -8423,7 +8423,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -8492,7 +8492,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.31",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -8529,7 +8529,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.1",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -15408,7 +15408,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

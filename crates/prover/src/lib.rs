@@ -26,8 +26,14 @@ pub mod native;
 pub mod risc0;
 pub mod sp1;
 
+use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoResult};
+use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoResult};
+
+/// Encoding helper for guest inputs.
+pub trait GuestInputCodec<I>: Send + Sync {
+    fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
+}
 
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
@@ -35,13 +41,27 @@ pub trait Prover<B>: Send + Sync
 where
     B: ProverBackend,
 {
+    type GuestInput: Send + Sync + 'static;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes>;
+
     /// Generate a proof for the given input.
-    async fn prove(
+    async fn prove_encoded(
         &self,
-        input: GuestInput,
+        input: Bytes,
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof>;
+
+    async fn prove(
+        &self,
+        input: Self::GuestInput,
+        config: &ProverConfig,
+        backend: &B,
+    ) -> RaikoResult<Proof> {
+        let encoded = self.encode(&input, config)?;
+        self.prove_encoded(encoded, config, backend).await
+    }
 
     /// Generate an aggregation proof.
     async fn aggregate(

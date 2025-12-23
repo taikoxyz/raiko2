@@ -2,18 +2,20 @@
 
 use crate::config::{Config, ProverType, QueueBackend, RetryStrategy};
 use anyhow::Result;
-use raiko2_engine::tasks::EngineOutput;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey};
 use raiko2_pipeline::{
     NativeBackend, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
+use raiko2_primitives::GuestInput;
 use raiko2_primitives::{ProofContext, ProofRequest};
 use raiko2_prover::{Prover, native::NativeProver};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskStoreError, TaskView};
 use std::sync::Arc;
 use std::time::Duration;
+
+type EngineOutput = raiko2_engine::tasks::EngineOutput<GuestInput>;
 
 #[cfg(feature = "redis-queue")]
 use raiko2_engine::tasks::EngineTask;
@@ -131,7 +133,7 @@ impl AppState {
                     execution_po2: 20,
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<Risc0ShastaBackend>> =
+                let prover: Arc<dyn Prover<Risc0ShastaBackend, GuestInput = GuestInput>> =
                     Arc::new(raiko2_prover::risc0::Risc0Prover::new(risc0_config));
                 let backend = RISC0_SHASTA_BACKEND;
                 let engine = match config.queue.backend {
@@ -197,7 +199,7 @@ impl AppState {
                     },
                     verify: true,
                 };
-                let prover: Arc<dyn Prover<Sp1ShastaBackend>> =
+                let prover: Arc<dyn Prover<Sp1ShastaBackend, GuestInput = GuestInput>> =
                     Arc::new(raiko2_prover::sp1::Sp1Prover::new(sp1_config));
                 let backend = SP1_SHASTA_BACKEND;
                 let engine = match config.queue.backend {
@@ -250,7 +252,8 @@ impl AppState {
                 EngineHandle::Sp1(engine)
             }
             ProverType::Native => {
-                let prover: Arc<dyn Prover<NativeBackend>> = Arc::new(NativeProver);
+                let prover: Arc<dyn Prover<NativeBackend, GuestInput = GuestInput>> =
+                    Arc::new(NativeProver);
                 let backend = NativeBackend;
                 let engine = match config.queue.backend {
                     QueueBackend::Memory => {

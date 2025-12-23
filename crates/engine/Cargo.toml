@@ -31,3 +31,4 @@ tokio.workspace = true
 reth.workspace = true
 alloy-trie.workspace = true
 reth-stateless.workspace = true
+bincode.workspace = true

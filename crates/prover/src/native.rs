@@ -1,6 +1,6 @@
 //! Native prover implementation (no zk proof).
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{
     GuestInput, Proof, ProverConfig, RaikoError, RaikoResult, ShastaZkAggregationGuestInput,
@@ -12,21 +12,39 @@ use raiko2_primitives::{
 };
 use raiko2_protocol::ProofCarryData;
 
+use crate::GuestInputCodec;
+
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeProver;
+
+impl GuestInputCodec<GuestInput> for NativeProver {
+    fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+        Ok(Bytes::from(bytes))
+    }
+}
 
 #[async_trait::async_trait]
 impl<B> crate::Prover<B> for NativeProver
 where
     B: ProverBackend,
 {
-    async fn prove(
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+        GuestInputCodec::encode(self, input, config)
+    }
+
+    async fn prove_encoded(
         &self,
-        input: GuestInput,
+        input: Bytes,
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
+        let input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {}", e)))?;
         if input.witnesses.is_empty() {
             return Err(RaikoError::Guest(
                 "GuestInput must contain at least one witness".to_string(),

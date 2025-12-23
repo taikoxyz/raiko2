@@ -3,7 +3,7 @@
 //! This module provides the RISC0 prover implementation for generating
 //! zero-knowledge proofs of Taiko block execution.
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{
     AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoError, RaikoResult,
@@ -13,6 +13,8 @@ use raiko2_protocol::ProofCarryData;
 use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_prover};
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+use crate::GuestInputCodec;
 
 /// RISC0 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,17 +86,33 @@ impl Risc0Prover {
     }
 }
 
+impl GuestInputCodec<GuestInput> for Risc0Prover {
+    fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
 #[async_trait::async_trait]
 impl<B> crate::Prover<B> for Risc0Prover
 where
     B: ProverBackend,
 {
-    async fn prove(
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+        GuestInputCodec::encode(self, input, config)
+    }
+
+    async fn prove_encoded(
         &self,
-        input: GuestInput,
+        input: Bytes,
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
+        let input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {}", e)))?;
         info!("Starting RISC0 proposal proof generation...");
 
         // Extract ProofCarryData from config if available

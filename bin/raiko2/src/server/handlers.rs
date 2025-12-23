@@ -7,12 +7,14 @@ use axum::{
     response::IntoResponse,
 };
 use raiko2_engine::EngineTaskKey;
-use raiko2_engine::tasks::EngineOutput;
+use raiko2_primitives::GuestInput;
 use raiko2_queue::{TaskState, decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::state::AppState;
+
+type EngineOutput = raiko2_engine::tasks::EngineOutput<GuestInput>;
 
 /// Health check response.
 #[derive(Serialize)]

@@ -94,6 +94,8 @@ impl ManifestBuilder for ShastaManifestBuilder {
 
 #[async_trait::async_trait]
 impl Preflight for ShastaSpec {
+    type Input = GuestInput;
+
     async fn preflight<P: Provider>(
         &self,
         ctx: &ProofContext,
@@ -155,6 +157,8 @@ impl Preflight for ShastaSpec {
 }
 
 impl Validation for ShastaSpec {
+    type Input = GuestInput;
+
     fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
         let Some(first_input) = input.witnesses.first() else {
             return Err(RaikoError::Preflight(
@@ -197,6 +201,7 @@ impl Validation for ShastaSpec {
 }
 
 impl PipelineSpec for ShastaSpec {
+    type GuestInput = GuestInput;
     type Preflight = Self;
     type Validation = Self;
     type ManifestBuilder = ShastaManifestBuilder;

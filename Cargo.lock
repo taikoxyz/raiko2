@@ -8846,6 +8846,7 @@ dependencies = [
  "alloy-trie 0.9.1",
  "anyhow",
  "async-trait",
+ "bincode",
  "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-prover",

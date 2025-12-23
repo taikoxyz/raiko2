@@ -3,7 +3,7 @@
 //! This module provides the SP1 prover implementation for generating
 //! zero-knowledge proofs of Taiko block execution.
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{
     AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoError, RaikoResult,
@@ -15,6 +15,8 @@ use sp1_sdk::{
     HashableKey, ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
 };
 use tracing::info;
+
+use crate::GuestInputCodec;
 
 /// SP1 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,14 +124,28 @@ impl Sp1Prover {
     }
 }
 
+impl GuestInputCodec<GuestInput> for Sp1Prover {
+    fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
 #[async_trait::async_trait]
 impl<B> crate::Prover<B> for Sp1Prover
 where
     B: ProverBackend,
 {
-    async fn prove(
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+        GuestInputCodec::encode(self, input, config)
+    }
+
+    async fn prove_encoded(
         &self,
-        input: GuestInput,
+        input: Bytes,
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
@@ -150,10 +166,8 @@ where
         // 2. ProofCarryData via read()
         let mut stdin = SP1Stdin::new();
 
-        // Serialize GuestInput with bincode and write as bytes (for read_vec)
-        let input_bytes = bincode::serialize(&input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
-        stdin.write_slice(&input_bytes);
+        // GuestInput bytes for read_vec()
+        stdin.write_slice(input.as_ref());
 
         // Write ProofCarryData (for sp1_zkvm::io::read())
         stdin.write(&proof_carry_data);

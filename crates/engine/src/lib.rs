@@ -17,7 +17,7 @@ mod queue;
 pub mod tasks;
 pub mod worker;
 
-pub use tasks::{EngineTaskId, EngineTaskKey, ProposalStage};
+pub use tasks::{EncodedGuestInput, EngineTaskId, EngineTaskKey, ProposalStage};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,8 +52,8 @@ where
     spec: S,
     backend: B,
     provider: P,
-    scheduler: Scheduler<EngineTask, EngineOutput, EngineTaskKey>,
-    prover: Arc<dyn Prover<B>>,
+    scheduler: Scheduler<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>,
+    prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
     context: ProofContext,
 }
 
@@ -91,7 +91,7 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<B>>,
+        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
         context: ProofContext,
     ) -> Self {
         Self::with_store_and_scheduler_config(
@@ -109,12 +109,13 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<B>>,
+        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
         context: ProofContext,
         store: Store,
     ) -> Self
     where
-        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
+            + 'static,
     {
         Self::with_store_and_scheduler_config(
             spec,
@@ -131,13 +132,14 @@ where
         spec: S,
         backend: B,
         provider: P,
-        prover: Arc<dyn Prover<B>>,
+        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
         context: ProofContext,
         store: Store,
         scheduler_config: SchedulerConfig,
     ) -> Self
     where
-        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput, EngineTaskKey> + 'static,
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
+            + 'static,
     {
         Self {
             inner: Arc::new(Inner {
@@ -196,6 +198,23 @@ where
             )
             .await?;
 
+        let encode_id = self.proposal_task_id(proposal_id, ProposalStage::Encode);
+        let encode_task = self
+            .inner
+            .scheduler
+            .submit(
+                encode_id,
+                NewTask {
+                    priority: Priority::Low,
+                    payload: EngineTask::Encode {
+                        proposal_id,
+                        input_task: validation_task.clone(),
+                    },
+                },
+                vec![validation_task],
+            )
+            .await?;
+
         let prove_id = self.proposal_task_id(proposal_id, ProposalStage::Prove);
         self.inner
             .scheduler
@@ -205,10 +224,10 @@ where
                     priority: Priority::Medium,
                     payload: EngineTask::ProveProposal {
                         proposal_id,
-                        input_task: validation_task.clone(),
+                        input_task: encode_task.clone(),
                     },
                 },
-                vec![validation_task],
+                vec![encode_task],
             )
             .await
     }
@@ -216,7 +235,7 @@ where
     pub async fn get(
         &self,
         id: EngineTaskId,
-    ) -> Result<Option<TaskView<EngineOutput, EngineTaskKey>>, TaskStoreError> {
+    ) -> Result<Option<TaskView<EngineOutput<S::GuestInput>, EngineTaskKey>>, TaskStoreError> {
         self.inner.scheduler.get(id).await
     }
 
@@ -260,7 +279,7 @@ where
         spawn_maintenance_supervised(self.clone(), maintenance_interval);
     }
 
-    async fn execute(&self, task: EngineTask) -> Result<EngineOutput, String> {
+    async fn execute(&self, task: EngineTask) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
             EngineTask::Preflight { proposal_id } => {
                 let ctx = self.context_for_proposal(proposal_id);
@@ -307,13 +326,10 @@ where
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::GuestInput(Box::new(validated)))
             }
-            EngineTask::ProveProposal {
-                proposal_id: _,
+            EngineTask::Encode {
+                proposal_id,
                 input_task,
             } => {
-                // NOTE: This relies on the store retaining task outputs until dependents
-                // have finished. Current stores do not garbage-collect outputs; any future
-                // GC/TTL must ensure dependency outputs remain available.
                 let input_view = self
                     .inner
                     .scheduler
@@ -339,10 +355,51 @@ where
                     _ => return Err("input task not completed".to_string()),
                 };
 
+                let ctx = self.context_for_proposal(proposal_id);
+                let encoded = self
+                    .inner
+                    .prover
+                    .encode(&guest_input, &ctx.config)
+                    .map_err(|e| e.to_string())?;
+
+                Ok(EngineOutput::EncodedInput(Box::new(
+                    PipelineStageResult::new(PipelineStage::Encode, encoded),
+                )))
+            }
+            EngineTask::ProveProposal {
+                proposal_id: _,
+                input_task,
+            } => {
+                // NOTE: This relies on the store retaining task outputs until dependents
+                // have finished. Current stores do not garbage-collect outputs; any future
+                // GC/TTL must ensure dependency outputs remain available.
+                let input_view = self
+                    .inner
+                    .scheduler
+                    .get(input_task)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "missing input task".to_string())?;
+
+                let encoded = match input_view.state {
+                    TaskState::Succeeded {
+                        output: EngineOutput::EncodedInput(input),
+                    } => match input.stage {
+                        PipelineStage::Encode => input.output,
+                        _ => {
+                            return Err("input task did not produce encoded GuestInput".to_string());
+                        }
+                    },
+                    TaskState::Succeeded { .. } => {
+                        return Err("input task did not produce encoded input".to_string());
+                    }
+                    _ => return Err("input task not completed".to_string()),
+                };
+
                 let proof = self
                     .inner
                     .prover
-                    .prove(guest_input, &self.inner.context.config, &self.inner.backend)
+                    .prove_encoded(encoded, &self.inner.context.config, &self.inner.backend)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(

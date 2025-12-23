@@ -1,5 +1,5 @@
 use crate::{PipelineSpec, PipelineStage, PipelineStageResult, Preflight, Validation};
-use raiko2_primitives::{GuestInput, ProofContext, RaikoResult};
+use raiko2_primitives::{ProofContext, RaikoResult};
 use raiko2_provider::Provider;
 
 /// Pipeline-agnostic builder for guest inputs.
@@ -24,7 +24,7 @@ where
         &self,
         ctx: &ProofContext,
         provider: &P,
-    ) -> RaikoResult<PipelineStageResult<GuestInput>>
+    ) -> RaikoResult<PipelineStageResult<S::GuestInput>>
     where
         P: Provider,
         S::Preflight: Preflight,
@@ -37,8 +37,8 @@ where
     pub fn validate(
         &self,
         ctx: &ProofContext,
-        input: GuestInput,
-    ) -> RaikoResult<PipelineStageResult<GuestInput>>
+        input: S::GuestInput,
+    ) -> RaikoResult<PipelineStageResult<S::GuestInput>>
     where
         S::Validation: Validation,
     {
@@ -51,7 +51,7 @@ where
         &self,
         ctx: &ProofContext,
         provider: &P,
-    ) -> RaikoResult<PipelineStageResult<GuestInput>>
+    ) -> RaikoResult<PipelineStageResult<S::GuestInput>>
     where
         P: Provider,
         S::Preflight: Preflight,
@@ -66,14 +66,16 @@ where
 mod tests {
     use super::*;
     use crate::{NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight};
-    use raiko2_primitives::{ProofRequest, ProverConfig};
+    use raiko2_primitives::{GuestInput, ProofRequest, ProverConfig};
 
     struct EmptySpec;
-    const NOOP_VALIDATION: NoopValidation = NoopValidation;
+    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
     #[async_trait::async_trait]
     impl Preflight for EmptySpec {
+        type Input = GuestInput;
+
         async fn preflight<P: Provider>(
             &self,
             _ctx: &ProofContext,
@@ -84,8 +86,9 @@ mod tests {
     }
 
     impl PipelineSpec for EmptySpec {
+        type GuestInput = GuestInput;
         type Preflight = Self;
-        type Validation = NoopValidation;
+        type Validation = NoopValidation<GuestInput>;
         type ManifestBuilder = NoopManifestBuilder;
 
         fn preflight(&self) -> &Self::Preflight {

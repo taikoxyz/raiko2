@@ -97,6 +97,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use alloy_primitives::Bytes;
     use raiko2_pipeline::{
         NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
     };
@@ -104,7 +105,7 @@ mod tests {
         AggregationGuestInput, GuestInput, Proof, ProofContext, ProofRequest, ProverConfig,
         RaikoError, RaikoResult,
     };
-    use raiko2_prover::Prover;
+    use raiko2_prover::{GuestInputCodec, Prover};
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
@@ -113,14 +114,30 @@ mod tests {
 
     struct MockProver;
 
+    impl GuestInputCodec<GuestInput> for MockProver {
+        fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+            let bytes = bincode::serialize(input)
+                .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+            Ok(Bytes::from(bytes))
+        }
+    }
+
     #[async_trait::async_trait]
     impl Prover<TestBackend> for MockProver {
-        async fn prove(
+        type GuestInput = GuestInput;
+
+        fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+            GuestInputCodec::encode(self, input, config)
+        }
+
+        async fn prove_encoded(
             &self,
-            input: GuestInput,
+            input: Bytes,
             _config: &ProverConfig,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
+            let input: GuestInput = bincode::deserialize(input.as_ref())
+                .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {}", e)))?;
             assert_eq!(input.taiko.proposal_id, 1);
             Ok(Proof {
                 proof: Some("mock-proof".to_string()),
@@ -143,11 +160,25 @@ mod tests {
 
     struct FailingProver;
 
+    impl GuestInputCodec<GuestInput> for FailingProver {
+        fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+            let bytes = bincode::serialize(input)
+                .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+            Ok(Bytes::from(bytes))
+        }
+    }
+
     #[async_trait::async_trait]
     impl Prover<TestBackend> for FailingProver {
-        async fn prove(
+        type GuestInput = GuestInput;
+
+        fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+            GuestInputCodec::encode(self, input, config)
+        }
+
+        async fn prove_encoded(
             &self,
-            _input: GuestInput,
+            _input: Bytes,
             _config: &ProverConfig,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
@@ -173,11 +204,13 @@ mod tests {
     }
 
     struct TestSpec;
-    const NOOP_VALIDATION: NoopValidation = NoopValidation;
+    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
     #[async_trait::async_trait]
     impl Preflight for TestSpec {
+        type Input = GuestInput;
+
         async fn preflight<P: Provider>(
             &self,
             ctx: &ProofContext,
@@ -190,8 +223,9 @@ mod tests {
     }
 
     impl PipelineSpec for TestSpec {
+        type GuestInput = GuestInput;
         type Preflight = Self;
-        type Validation = NoopValidation;
+        type Validation = NoopValidation<GuestInput>;
         type ManifestBuilder = NoopManifestBuilder;
 
         fn preflight(&self) -> &Self::Preflight {
@@ -256,6 +290,7 @@ mod tests {
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(!engine.run_one("w1").await.unwrap());
 
         let view = engine.get(job_id).await.unwrap().unwrap();
@@ -288,6 +323,7 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(1).await.unwrap();
 
+        assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());
         assert!(engine.run_one("w1").await.unwrap());

@@ -1,4 +1,6 @@
+use alloy_primitives::Bytes;
 use raiko2_pipeline::PipelineStageResult;
+use raiko2_primitives::Proof;
 use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum ProposalStage {
     Preflight,
     Validation,
+    Encode,
     Prove,
 }
 
@@ -31,6 +34,10 @@ pub enum EngineTask {
         proposal_id: u64,
         preflight_task: EngineTaskId,
     },
+    Encode {
+        proposal_id: u64,
+        input_task: EngineTaskId,
+    },
     ProveProposal {
         proposal_id: u64,
         input_task: EngineTaskId,
@@ -41,10 +48,13 @@ pub enum EngineTask {
     },
 }
 
+pub type EncodedGuestInput = Bytes;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum EngineOutput {
-    GuestInput(Box<PipelineStageResult<raiko2_primitives::GuestInput>>),
-    Proof(Box<PipelineStageResult<raiko2_primitives::Proof>>),
+pub enum EngineOutput<I> {
+    GuestInput(Box<PipelineStageResult<I>>),
+    EncodedInput(Box<PipelineStageResult<EncodedGuestInput>>),
+    Proof(Box<PipelineStageResult<Proof>>),
 }
 
 pub struct EngineJob {
@@ -55,7 +65,7 @@ pub struct EngineJob {
 mod tests {
     use super::*;
     use raiko2_pipeline::{PipelineStage, PipelineStageResult};
-    use raiko2_primitives::Proof;
+    use raiko2_primitives::{GuestInput, Proof};
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
 
     fn proposal_task_id(proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
@@ -64,7 +74,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregation_depends_on_proposals() {
-        let sched: Scheduler<EngineTask, EngineOutput, EngineTaskKey> =
+        let sched: Scheduler<EngineTask, EngineOutput<GuestInput>, EngineTaskKey> =
             Scheduler::new(MemoryStore::new());
 
         let a1 = sched
@@ -74,7 +84,7 @@ mod tests {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveProposal {
                         proposal_id: 1,
-                        input_task: proposal_task_id(1, ProposalStage::Validation),
+                        input_task: proposal_task_id(1, ProposalStage::Encode),
                     },
                 },
                 vec![],
@@ -88,7 +98,7 @@ mod tests {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveProposal {
                         proposal_id: 2,
-                        input_task: proposal_task_id(2, ProposalStage::Validation),
+                        input_task: proposal_task_id(2, ProposalStage::Encode),
                     },
                 },
                 vec![],

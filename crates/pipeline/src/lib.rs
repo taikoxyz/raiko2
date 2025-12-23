@@ -5,7 +5,7 @@
 
 //! Raiko2 Pipeline - hardfork-specific manifest builders and pipeline specs.
 
-use raiko2_primitives::{GuestInput, ProofContext, RaikoError, RaikoResult, TaikoManifest};
+use raiko2_primitives::{ProofContext, RaikoError, RaikoResult, TaikoManifest};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub enum ProofStage {
 pub enum PipelineStage {
     Preflight,
     Validation,
+    Encode,
     Prove,
     Aggregate,
 }
@@ -47,11 +48,12 @@ impl<T> PipelineStageResult<T> {
 /// Build and validate a guest input for the hardfork.
 #[async_trait::async_trait]
 pub trait Preflight: Send + Sync {
+    type Input;
     async fn preflight<P: Provider>(
         &self,
         ctx: &ProofContext,
         provider: &P,
-    ) -> RaikoResult<GuestInput>;
+    ) -> RaikoResult<Self::Input>;
 }
 
 /// Build Taiko manifests for guest execution.
@@ -66,15 +68,18 @@ pub trait ManifestBuilder: Send + Sync {
 
 /// Validate a guest input for the hardfork.
 pub trait Validation: Send + Sync {
-    fn validate(&self, ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()>;
+    type Input;
+    fn validate(&self, ctx: &ProofContext, input: &Self::Input) -> RaikoResult<()>;
 }
 
 /// No-op validation for tests or fast paths.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct NoopValidation;
+pub struct NoopValidation<I>(std::marker::PhantomData<I>);
 
-impl Validation for NoopValidation {
-    fn validate(&self, _ctx: &ProofContext, _input: &GuestInput) -> RaikoResult<()> {
+impl<I: Send + Sync> Validation for NoopValidation<I> {
+    type Input = I;
+
+    fn validate(&self, _ctx: &ProofContext, _input: &Self::Input) -> RaikoResult<()> {
         Ok(())
     }
 }
@@ -96,8 +101,9 @@ impl ManifestBuilder for NoopManifestBuilder {
 
 /// Pipeline-specific behavior for building inputs.
 pub trait PipelineSpec: Send + Sync {
-    type Preflight: Preflight;
-    type Validation: Validation;
+    type GuestInput: Clone + Send + Sync + 'static;
+    type Preflight: Preflight<Input = Self::GuestInput>;
+    type Validation: Validation<Input = Self::GuestInput>;
     type ManifestBuilder: ManifestBuilder;
 
     fn preflight(&self) -> &Self::Preflight;

@@ -8683,7 +8683,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-client",
- "alloy-rpc-types",
+ "alloy-rpc-types-eth",
  "alloy-trie 0.9.1",
  "async-trait",
  "raiko2-primitives",

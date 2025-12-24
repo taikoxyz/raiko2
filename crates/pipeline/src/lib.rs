@@ -32,6 +32,24 @@ pub enum PipelineStage {
     Aggregate,
 }
 
+/// Pipeline identifier for routing requests to the right engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PipelineKey {
+    ShastaRisc0,
+    ShastaSp1,
+    ShastaNative,
+}
+
+impl PipelineKey {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PipelineKey::ShastaRisc0 => "shasta-risc0",
+            PipelineKey::ShastaSp1 => "shasta-sp1",
+            PipelineKey::ShastaNative => "shasta-native",
+        }
+    }
+}
+
 /// Pipeline stage output wrapper for status tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStageResult<T> {
@@ -105,7 +123,14 @@ pub trait PipelineSpec: Send + Sync {
     type Preflight: Preflight<Input = Self::GuestInput>;
     type Validation: Validation<Input = Self::GuestInput>;
     type ManifestBuilder: ManifestBuilder;
+    type Prover: Send + Sync;
+    type Backend: ProverBackend;
+    type Provider: Provider;
 
+    fn pipeline_key(&self) -> PipelineKey;
+    fn prover(&self) -> &Self::Prover;
+    fn backend(&self) -> &Self::Backend;
+    fn provider(&self) -> &Self::Provider;
     fn preflight(&self) -> &Self::Preflight;
     fn validation(&self) -> &Self::Validation;
     fn manifest_builder(&self) -> &Self::ManifestBuilder;

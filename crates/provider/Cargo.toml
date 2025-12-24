@@ -13,7 +13,7 @@ reth-stateless.workspace = true
 alloy-trie.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-client.workspace = true
-alloy-rpc-types.workspace = true
+alloy-rpc-types-eth.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 

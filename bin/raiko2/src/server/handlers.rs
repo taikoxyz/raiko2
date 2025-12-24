@@ -7,14 +7,13 @@ use axum::{
     response::IntoResponse,
 };
 use raiko2_engine::EngineTaskKey;
-use raiko2_primitives::GuestInput;
-use raiko2_queue::{TaskState, decode_task_id, encode_task_id};
+use raiko2_pipeline::PipelineKey;
+use raiko2_queue::{decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::state::AppState;
-
-type EngineOutput = raiko2_engine::tasks::EngineOutput<GuestInput>;
+use crate::config::ProverType;
+use super::state::{AppState, ProofStatus};
 
 /// Health check response.
 #[derive(Serialize)]
@@ -71,26 +70,20 @@ pub struct ProofResponse {
     pub status: ProofStatus,
 }
 
-/// Proof status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProofStatus {
-    Pending,
-    Proving,
-    Completed,
-    Failed,
-    Cancelled,
-}
+fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> Result<PipelineKey, ApiError> {
+    let prover_type = match req.prover_type.as_deref() {
+        Some(raw) => raw.parse::<ProverType>().map_err(|err| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: err,
+        })?,
+        None => state.config.prover.prover_type,
+    };
 
-const fn status_from_task_state(state: &TaskState<EngineOutput, EngineTaskKey>) -> ProofStatus {
-    match state {
-        TaskState::Pending { .. } | TaskState::Ready => ProofStatus::Pending,
-        TaskState::Retrying { .. } => ProofStatus::Pending,
-        TaskState::Running { .. } => ProofStatus::Proving,
-        TaskState::Succeeded { .. } => ProofStatus::Completed,
-        TaskState::Failed { .. } => ProofStatus::Failed,
-        TaskState::Cancelled => ProofStatus::Cancelled,
-    }
+    Ok(match prover_type {
+        ProverType::Risc0 => PipelineKey::ShastaRisc0,
+        ProverType::Sp1 => PipelineKey::ShastaSp1,
+        ProverType::Native => PipelineKey::ShastaNative,
+    })
 }
 
 /// Request a proposal proof.
@@ -103,8 +96,12 @@ pub async fn request_proposal_proof(
         req.proposal_id, req.l1_inclusion_block
     );
 
-    let id = state
-        .engine
+    let pipeline_key = pipeline_key_from_request(&state, &req)?;
+    let engine = state.pipelines.get(pipeline_key).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("Pipeline not available: {}", pipeline_key.as_str()),
+    })?;
+    let id = engine
         .submit_proposal_proof(req.proposal_id)
         .await
         .map_err(|e| ApiError {
@@ -134,9 +131,13 @@ pub async fn get_proof_status(
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    let view = state
-        .engine
-        .get(task_id)
+    let pipeline_key = task_id.0.pipeline_key();
+    let engine = state.pipelines.get(pipeline_key).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("Pipeline not available: {}", pipeline_key.as_str()),
+    })?;
+    let view = engine
+        .get_status(task_id)
         .await
         .map_err(|e| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -147,20 +148,11 @@ pub async fn get_proof_status(
             message: format!("Proof job not found: {id}"),
         })?;
 
-    let (proof, error) = match view.state.clone() {
-        TaskState::Succeeded {
-            output: EngineOutput::Proof(proof),
-        } => (proof.output.proof, None),
-        TaskState::Failed { error, .. } => (None, Some(error)),
-        TaskState::Retrying { error, .. } => (None, Some(error)),
-        _ => (None, None),
-    };
-
     Ok(Json(ProofStatusResponse {
         id,
-        status: status_from_task_state(&view.state),
-        proof,
-        error,
+        status: view.status,
+        proof: view.proof,
+        error: view.error,
     }))
 }
 
@@ -187,8 +179,12 @@ pub async fn cancel_proof(
         message: format!("Invalid task id '{id}': {e}"),
     })?;
 
-    state
-        .engine
+    let pipeline_key = task_id.0.pipeline_key();
+    let engine = state.pipelines.get(pipeline_key).ok_or(ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: format!("Pipeline not available: {}", pipeline_key.as_str()),
+    })?;
+    engine
         .cancel(task_id.clone())
         .await
         .map_err(|e| ApiError {
@@ -196,9 +192,8 @@ pub async fn cancel_proof(
             message: format!("Failed to cancel proof job: {e}"),
         })?;
 
-    let view = state
-        .engine
-        .get(task_id)
+    let view = engine
+        .get_status(task_id)
         .await
         .map_err(|e| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -209,19 +204,11 @@ pub async fn cancel_proof(
             message: format!("Proof job not found: {id}"),
         })?;
 
-    let (proof, error) = match view.state.clone() {
-        TaskState::Succeeded {
-            output: EngineOutput::Proof(proof),
-        } => (proof.output.proof, None),
-        TaskState::Failed { error, .. } => (None, Some(error)),
-        _ => (None, None),
-    };
-
     Ok(Json(ProofStatusResponse {
         id,
-        status: status_from_task_state(&view.state),
-        proof,
-        error,
+        status: view.status,
+        proof: view.proof,
+        error: view.error,
     }))
 }
 

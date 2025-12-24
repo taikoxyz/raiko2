@@ -31,34 +31,31 @@ use raiko2_queue::{
 
 use crate::tasks::{EngineOutput, EngineTask};
 
-pub struct Engine<S, B, P>
+pub struct Engine<S>
 where
     S: PipelineSpec,
-    B: ProverBackend,
-    P: Provider,
+    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput>,
+    S::Backend: ProverBackend,
+    S::Provider: Provider,
 {
-    inner: Arc<Inner<S, B, P>>,
+    inner: Arc<Inner<S>>,
 }
 
-struct Inner<S, B, P>
+struct Inner<S>
 where
     S: PipelineSpec,
-    B: ProverBackend,
-    P: Provider,
 {
     spec: S,
-    backend: B,
-    provider: P,
     scheduler: Scheduler<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>,
-    prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
     context: ProofContext,
 }
 
-impl<S, B, P> Clone for Engine<S, B, P>
+impl<S> Clone for Engine<S>
 where
     S: PipelineSpec,
-    B: ProverBackend,
-    P: Provider,
+    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput>,
+    S::Backend: ProverBackend,
+    S::Provider: Provider,
 {
     fn clone(&self) -> Self {
         Self {
@@ -67,11 +64,12 @@ where
     }
 }
 
-impl<S, B, P> Engine<S, B, P>
+impl<S> Engine<S>
 where
     S: PipelineSpec,
-    B: ProverBackend,
-    P: Provider,
+    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput>,
+    S::Backend: ProverBackend,
+    S::Provider: Provider,
 {
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
@@ -84,18 +82,9 @@ where
         }
     }
 
-    pub fn new(
-        spec: S,
-        backend: B,
-        provider: P,
-        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
-        context: ProofContext,
-    ) -> Self {
+    pub fn new(spec: S, context: ProofContext) -> Self {
         Self::with_store_and_scheduler_config(
             spec,
-            backend,
-            provider,
-            prover,
             context,
             MemoryStore::new(),
             Self::default_scheduler_config(),
@@ -104,9 +93,6 @@ where
 
     pub fn with_store<Store>(
         spec: S,
-        backend: B,
-        provider: P,
-        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
         context: ProofContext,
         store: Store,
     ) -> Self
@@ -116,9 +102,6 @@ where
     {
         Self::with_store_and_scheduler_config(
             spec,
-            backend,
-            provider,
-            prover,
             context,
             store,
             Self::default_scheduler_config(),
@@ -127,9 +110,6 @@ where
 
     pub fn with_store_and_scheduler_config<Store>(
         spec: S,
-        backend: B,
-        provider: P,
-        prover: Arc<dyn Prover<B, GuestInput = S::GuestInput>>,
         context: ProofContext,
         store: Store,
         scheduler_config: SchedulerConfig,
@@ -141,10 +121,7 @@ where
         Self {
             inner: Arc::new(Inner {
                 spec,
-                backend,
-                provider,
                 scheduler: Scheduler::with_config(store, scheduler_config),
-                prover,
                 context,
             }),
         }
@@ -156,8 +133,12 @@ where
         ctx
     }
 
-    const fn proposal_task_id(&self, proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
-        EngineTaskId::new(EngineTaskKey::Proposal { proposal_id, stage })
+    fn proposal_task_id(&self, proposal_id: u64, stage: ProposalStage) -> EngineTaskId {
+        EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: self.inner.spec.pipeline_key(),
+            proposal_id,
+            stage,
+        })
     }
 
     pub async fn submit_proposal_proof(
@@ -253,8 +234,9 @@ where
     pub fn start_workers(&self, concurrency: usize)
     where
         S: 'static,
-        B: 'static,
-        P: 'static,
+        S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
+        S::Backend: ProverBackend + 'static,
+        S::Provider: Provider + 'static,
     {
         self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
     }
@@ -265,8 +247,9 @@ where
         maintenance_interval: Duration,
     ) where
         S: 'static,
-        B: 'static,
-        P: 'static,
+        S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
+        S::Backend: ProverBackend + 'static,
+        S::Provider: Provider + 'static,
     {
         let notify = self.inner.scheduler.notifier();
         for i in 0..concurrency {
@@ -282,7 +265,7 @@ where
                 let ctx = self.context_for_proposal(proposal_id);
                 let pipeline = Pipeline::new(&self.inner.spec);
                 pipeline
-                    .preflight(&ctx, &self.inner.provider)
+                    .preflight(&ctx)
                     .await
                     .map(|input| EngineOutput::GuestInput(Box::new(input)))
                     .map_err(|e| e.to_string())
@@ -355,7 +338,8 @@ where
                 let ctx = self.context_for_proposal(proposal_id);
                 let encoded = self
                     .inner
-                    .prover
+                    .spec
+                    .prover()
                     .encode(&guest_input, &ctx.config)
                     .map_err(|e| e.to_string())?;
 
@@ -395,8 +379,13 @@ where
 
                 let proof = self
                     .inner
-                    .prover
-                    .prove_encoded(encoded, &self.inner.context.config, &self.inner.backend)
+                    .spec
+                    .prover()
+                    .prove_encoded(
+                        encoded,
+                        &self.inner.context.config,
+                        self.inner.spec.backend(),
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
@@ -437,11 +426,12 @@ where
 
                 let proof = self
                     .inner
-                    .prover
+                    .spec
+                    .prover()
                     .aggregate(
                         AggregationGuestInput { proofs },
                         &self.inner.context.config,
-                        &self.inner.backend,
+                        self.inner.spec.backend(),
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -454,14 +444,15 @@ where
     }
 }
 
-fn spawn_worker_supervised<S, B, P>(
-    engine: Engine<S, B, P>,
+fn spawn_worker_supervised<S>(
+    engine: Engine<S>,
     notify: Arc<tokio::sync::Notify>,
     worker: String,
 ) where
     S: PipelineSpec + 'static,
-    B: ProverBackend + 'static,
-    P: Provider + 'static,
+    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
+    S::Backend: ProverBackend + 'static,
+    S::Provider: Provider + 'static,
 {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
@@ -500,13 +491,14 @@ fn spawn_worker_supervised<S, B, P>(
     });
 }
 
-fn spawn_maintenance_supervised<S, B, P>(
-    engine: Engine<S, B, P>,
+fn spawn_maintenance_supervised<S>(
+    engine: Engine<S>,
     maintenance_interval: Duration,
 ) where
     S: PipelineSpec + 'static,
-    B: ProverBackend + 'static,
-    P: Provider + 'static,
+    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
+    S::Backend: ProverBackend + 'static,
+    S::Provider: Provider + 'static,
 {
     tokio::spawn(async move {
         let restart_backoff = Duration::from_secs(1);
@@ -542,12 +534,12 @@ fn spawn_maintenance_supervised<S, B, P>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use alloy_primitives::Bytes;
     use raiko2_pipeline::{
-        NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight, ProofStage, ProverBackend,
+        NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight, ProofStage,
+        ProverBackend,
     };
     use raiko2_primitives::{
         AggregationGuestInput, GuestInput, Proof, ProofContext, ProofRequest, ProverConfig,
@@ -651,12 +643,29 @@ mod tests {
         }
     }
 
-    struct TestSpec;
+    struct TestSpec<Pv> {
+        prover: Pv,
+        backend: TestBackend,
+        provider: MockProvider,
+    }
+
+    impl<Pv> TestSpec<Pv> {
+        fn new(prover: Pv) -> Self {
+            Self {
+                prover,
+                backend: TestBackend,
+                provider: MockProvider,
+            }
+        }
+    }
     const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
     #[async_trait::async_trait]
-    impl Preflight for TestSpec {
+    impl<Pv> Preflight for TestSpec<Pv>
+    where
+        Pv: Send + Sync,
+    {
         type Input = GuestInput;
 
         async fn preflight<P: Provider>(
@@ -670,11 +679,33 @@ mod tests {
         }
     }
 
-    impl PipelineSpec for TestSpec {
+    impl<Pv> PipelineSpec for TestSpec<Pv>
+    where
+        Pv: Send + Sync,
+    {
         type GuestInput = GuestInput;
         type Preflight = Self;
         type Validation = NoopValidation<GuestInput>;
         type ManifestBuilder = NoopManifestBuilder;
+        type Prover = Pv;
+        type Backend = TestBackend;
+        type Provider = MockProvider;
+
+        fn pipeline_key(&self) -> PipelineKey {
+            PipelineKey::ShastaNative
+        }
+
+        fn prover(&self) -> &Self::Prover {
+            &self.prover
+        }
+
+        fn backend(&self) -> &Self::Backend {
+            &self.backend
+        }
+
+        fn provider(&self) -> &Self::Provider {
+            &self.provider
+        }
 
         fn preflight(&self) -> &Self::Preflight {
             self
@@ -722,15 +753,11 @@ mod tests {
 
     #[tokio::test]
     async fn submit_proposal_proof_runs_dependency_pipeline() {
-        let backend = TestBackend;
         let engine = Engine::with_store_and_scheduler_config(
-            TestSpec,
-            backend,
-            MockProvider,
-            Arc::new(MockProver),
+            TestSpec::new(MockProver),
             test_context(),
             raiko2_queue::MemoryStore::new(),
-            Engine::<TestSpec, TestBackend, MockProvider>::default_scheduler_config(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
         let job_id = engine.submit_proposal_proof(1).await.unwrap();
@@ -758,12 +785,8 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
-        let backend = TestBackend;
         let engine = Engine::with_store_and_scheduler_config(
-            TestSpec,
-            backend,
-            MockProvider,
-            Arc::new(FailingProver),
+            TestSpec::new(FailingProver),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             scheduler_config,

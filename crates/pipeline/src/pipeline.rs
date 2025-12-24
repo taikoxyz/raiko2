@@ -1,7 +1,5 @@
 use crate::{PipelineSpec, PipelineStage, PipelineStageResult, Preflight, Validation};
 use raiko2_primitives::{ProofContext, RaikoResult};
-use raiko2_provider::Provider;
-
 /// Pipeline-agnostic builder for guest inputs.
 pub struct Pipeline<'a, S>
 where
@@ -20,16 +18,18 @@ where
     }
 
     /// Run the preflight stage.
-    pub async fn preflight<P>(
+    pub async fn preflight(
         &self,
         ctx: &ProofContext,
-        provider: &P,
     ) -> RaikoResult<PipelineStageResult<S::GuestInput>>
     where
-        P: Provider,
         S::Preflight: Preflight,
     {
-        let input = self.spec.preflight().preflight(ctx, provider).await?;
+        let input = self
+            .spec
+            .preflight()
+            .preflight(ctx, self.spec.provider())
+            .await?;
         Ok(PipelineStageResult::new(PipelineStage::Preflight, input))
     }
 
@@ -47,17 +47,15 @@ where
     }
 
     /// Build a guest input by running the unified pipeline steps.
-    pub async fn build_guest_input<P>(
+    pub async fn build_guest_input(
         &self,
         ctx: &ProofContext,
-        provider: &P,
     ) -> RaikoResult<PipelineStageResult<S::GuestInput>>
     where
-        P: Provider,
         S::Preflight: Preflight,
         S::Validation: Validation,
     {
-        let preflight = self.preflight(ctx, provider).await?;
+        let preflight = self.preflight(ctx).await?;
         self.validate(ctx, preflight.output)
     }
 }
@@ -65,10 +63,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NoopManifestBuilder, NoopValidation, PipelineSpec, Preflight};
+    use crate::{
+        NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
+    };
     use raiko2_primitives::{GuestInput, ProofRequest, ProverConfig};
 
-    struct EmptySpec;
+    struct EmptySpec {
+        prover: (),
+        backend: NativeBackend,
+        provider: EmptyProvider,
+    }
     const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
@@ -90,6 +94,25 @@ mod tests {
         type Preflight = Self;
         type Validation = NoopValidation<GuestInput>;
         type ManifestBuilder = NoopManifestBuilder;
+        type Prover = ();
+        type Backend = NativeBackend;
+        type Provider = EmptyProvider;
+
+        fn pipeline_key(&self) -> PipelineKey {
+            PipelineKey::ShastaNative
+        }
+
+        fn prover(&self) -> &Self::Prover {
+            &self.prover
+        }
+
+        fn backend(&self) -> &Self::Backend {
+            &self.backend
+        }
+
+        fn provider(&self) -> &Self::Provider {
+            &self.provider
+        }
 
         fn preflight(&self) -> &Self::Preflight {
             self
@@ -133,11 +156,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_empty_input() {
-        let spec = EmptySpec;
+        let spec = EmptySpec {
+            prover: (),
+            backend: NativeBackend,
+            provider: EmptyProvider,
+        };
         let pipeline = Pipeline::new(&spec);
         let ctx = ProofContext::new(ProofRequest::default(), ProverConfig::default());
         let input = pipeline
-            .build_guest_input(&ctx, &EmptyProvider)
+            .build_guest_input(&ctx)
             .await
             .expect("pipeline should succeed");
 

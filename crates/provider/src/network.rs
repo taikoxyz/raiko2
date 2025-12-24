@@ -1,6 +1,6 @@
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types::{Account, BlockNumberOrTag};
+use alloy_rpc_types_eth::{Account, BlockNumberOrTag};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{RaikoError, RaikoResult};
 use reth_ethereum_primitives::Block as RethBlock;

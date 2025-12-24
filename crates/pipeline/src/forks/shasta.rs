@@ -1,5 +1,6 @@
 use crate::{
-    ManifestBuilder, PipelineSpec, Preflight, Risc0ShastaBackend, Sp1ShastaBackend, Validation,
+    ManifestBuilder, PipelineKey, PipelineSpec, Preflight, ProverBackend, Risc0ShastaBackend,
+    Sp1ShastaBackend, Validation,
 };
 use alethia_reth_block_core::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
@@ -26,15 +27,42 @@ impl ShastaManifestBuilder {
 }
 
 /// Shasta hardfork specification.
-#[derive(Debug, Clone, Default)]
-pub struct ShastaSpec {
+#[derive(Debug)]
+pub struct ShastaSpec<Pr, Bk, Pv> {
+    prover: Pr,
+    backend: Bk,
+    provider: Pv,
     manifest_builder: ShastaManifestBuilder,
+    pipeline_key: PipelineKey,
 }
 
-impl ShastaSpec {
+impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
+    /// Create a Shasta spec with the default manifest builder.
+    pub fn new(pipeline_key: PipelineKey, prover: Pr, backend: Bk, provider: Pv) -> Self {
+        Self {
+            prover,
+            backend,
+            provider,
+            manifest_builder: ShastaManifestBuilder::default(),
+            pipeline_key,
+        }
+    }
+
     /// Create a Shasta spec using the provided manifest builder.
-    pub const fn new(manifest_builder: ShastaManifestBuilder) -> Self {
-        Self { manifest_builder }
+    pub fn with_manifest_builder(
+        manifest_builder: ShastaManifestBuilder,
+        pipeline_key: PipelineKey,
+        prover: Pr,
+        backend: Bk,
+        provider: Pv,
+    ) -> Self {
+        Self {
+            prover,
+            backend,
+            provider,
+            manifest_builder,
+            pipeline_key,
+        }
     }
 }
 
@@ -93,7 +121,12 @@ impl ManifestBuilder for ShastaManifestBuilder {
 }
 
 #[async_trait::async_trait]
-impl Preflight for ShastaSpec {
+impl<Pr, Bk, Pv> Preflight for ShastaSpec<Pr, Bk, Pv>
+where
+    Pr: Send + Sync,
+    Bk: ProverBackend,
+    Pv: Provider,
+{
     type Input = GuestInput;
 
     async fn preflight<P: Provider>(
@@ -156,7 +189,12 @@ impl Preflight for ShastaSpec {
     }
 }
 
-impl Validation for ShastaSpec {
+impl<Pr, Bk, Pv> Validation for ShastaSpec<Pr, Bk, Pv>
+where
+    Pr: Send + Sync,
+    Bk: ProverBackend,
+    Pv: Provider,
+{
     type Input = GuestInput;
 
     fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
@@ -200,11 +238,35 @@ impl Validation for ShastaSpec {
     }
 }
 
-impl PipelineSpec for ShastaSpec {
+impl<Pr, Bk, Pv> PipelineSpec for ShastaSpec<Pr, Bk, Pv>
+where
+    Pr: Send + Sync,
+    Bk: ProverBackend,
+    Pv: Provider,
+{
     type GuestInput = GuestInput;
     type Preflight = Self;
     type Validation = Self;
     type ManifestBuilder = ShastaManifestBuilder;
+    type Prover = Pr;
+    type Backend = Bk;
+    type Provider = Pv;
+
+    fn pipeline_key(&self) -> PipelineKey {
+        self.pipeline_key
+    }
+
+    fn prover(&self) -> &Self::Prover {
+        &self.prover
+    }
+
+    fn backend(&self) -> &Self::Backend {
+        &self.backend
+    }
+
+    fn provider(&self) -> &Self::Provider {
+        &self.provider
+    }
 
     fn preflight(&self) -> &Self::Preflight {
         self

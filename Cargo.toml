@@ -19,7 +19,7 @@ exclude = ["guests/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.90"
 
 [workspace.lints.rust]
 unreachable_pub = "warn"
@@ -135,3 +135,7 @@ blst = "0.3"
 itertools = "0.14"
 revm = { version = "33.1.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.0" }
+
+# kzg
+kzg = { package = "rust-kzg-zkcrypto", git = "https://github.com/grandinetech/rust-kzg.git", default-features = false }
+kzg_traits = { package = "kzg", git = "https://github.com/grandinetech/rust-kzg.git", default-features = false }

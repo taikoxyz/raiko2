@@ -29,3 +29,6 @@ tracing.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+
+kzg.workspace = true
+kzg_traits.workspace = true

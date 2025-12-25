@@ -1,5 +1,5 @@
+//! Redis-backed queue store integration tests.
 #![cfg(feature = "redis")]
-#![allow(missing_docs)]
 
 use std::process::Command;
 use std::time::Duration;

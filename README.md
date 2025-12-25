@@ -15,6 +15,7 @@ Raiko V2 is the next-generation zkVM prover for Taiko, built on top of [alethia-
 ```
 raiko2/
 ├── Cargo.toml          # Workspace root
+├── justfile            # Task entrypoints (build-guest, etc.)
 ├── crates/
 │   ├── primitives/     # Core types and traits
 │   ├── protocol/       # Shasta protocol implementation
@@ -28,20 +29,23 @@ raiko2/
 │   ├── raiko2/         # Main binary (HTTP server + CLI)
 │   └── rpc-proxy/      # RPC proxy service
 ├── docs/               # Documentation
+├── xtask/              # Automation (guest builds via cargo risczero/prove)
 ├── guests/             # Guest program sources (out-of-workspace)
 │   ├── common/         # Shared guest abstractions
 │   ├── risc0/          # RISC0 guest programs
 │   └── sp1/            # SP1 guest programs
-└── script/             # Build scripts
+└── script/             # Helper scripts (prove-block, update_imageid, etc.)
 ```
 
 ## Architecture
 
 Core flow:
 
-1. **Preflight** builds `GuestInput` from RPC/provider data.
+1. **Preflight** builds `GuestInput` (includes `TaikoManifest`) from RPC/provider data.
 2. **Validation** checks `GuestInput` (stateless validation for Shasta).
-3. **Prover** runs the zkVM using hardfork-selected ELF.
+3. **Encode** serializes `GuestInput` for the prover backend.
+4. **Prover** runs the zkVM using hardfork-selected ELF.
+5. **Aggregate** combines proposal proofs (aggregation stage).
 
 Dataflow diagram:
 
@@ -50,8 +54,10 @@ flowchart LR
   P["Provider"] --> PF["Preflight"]
   PF --> VA["Validation"]
   VA --> GI["GuestInput"]
-  GI --> PR["Prover"]
+  GI --> EN["Encode"]
+  EN --> PR["Prover"]
   PR --> PO["Proof"]
+  PO -.-> AG["Aggregate"]
 ```
 
 Key abstractions:
@@ -60,7 +66,7 @@ Key abstractions:
 - `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
 - `Pipeline`: hardfork-agnostic preflight + validation flow.
 - `Engine`: schedules pipeline stages and prover work.
-- `Prover`: backend execution (RISC0 / SP1).
+- `Prover`: encode/prove/aggregate execution (RISC0 / SP1).
 
 Architecture diagram:
 
@@ -68,14 +74,19 @@ Architecture diagram:
 flowchart LR
   C["Client / SDK"] --> A["raiko2 HTTP API"]
   A --> Q["Engine"]
-  Q --> PL["Pipeline"]
+  Q --> SCH["Queue/Scheduler"]
+  SCH --> W["Worker"]
+  W --> PL["Pipeline"]
   PL --> PF["Preflight"]
   PL --> VA["Validation"]
   VA --> GI["GuestInput"]
-  Q -->|Prove| PR["Prover (RISC0/SP1)"]
+  W --> EN["Encode"]
+  W --> PR["Prover (RISC0/SP1)"]
   PR --> PO["Proof"]
+  PO --> AG["Aggregation Proof"]
   HF["PipelineSpec"] -.-> PF
   HF -.-> VA
+  HF -.-> EN
   PB["ProverBackend"] -.-> PR
 ```
 
@@ -85,7 +96,8 @@ Pipeline flow:
 flowchart TD
   Start([Start]) --> Build[Preflight: build GuestInput]
   Build --> Validate[Validation: stateless checks]
-  Validate --> Prove[Prover: run zkVM]
+  Validate --> Encode[Encode: serialize GuestInput]
+  Encode --> Prove[Prover: run zkVM]
   Prove --> Done([Proof])
 ```
 
@@ -107,8 +119,10 @@ sequenceDiagram
   W->>Q: store Preflight output
   Q->>W: Validation task
   W->>Q: store GuestInput
+  Q->>W: Encode task
+  W->>Q: store EncodedInput
   Q->>W: Prove task
-  W->>Z: prove(GuestInput)
+  W->>Z: prove(EncodedInput)
   Z-->>W: Proof
   W->>Q: store Proof
   C->>API: GET /v1/proof/{id}
@@ -122,13 +136,24 @@ cd raiko2
 cargo build --release
 ```
 
+## Testing
+
+Always run:
+
+```bash
+cargo clippy --workspace -- -D warnings
+cargo nextest run --workspace
+```
+
 ## Building Guests
 
 Guest programs live in `guests/` as standalone crates (not part of the root workspace). Each guest
 crate carries its own `[patch.crates-io]` in `Cargo.toml` to keep RISC0 and SP1 dependencies isolated.
 `xtask` uses the official Docker images (no local toolchains required), and copies
 ELF outputs into `crates/guests/elf` for use by the host. `just` is the preferred
-wrapper, and `./script/build-guest.sh` forwards to `just`.
+wrapper.
+
+Prerequisites: `docker`, `just`, `cargo risczero` (via `rzup install`), and `cargo prove` (via `sp1up`).
 
 ```bash
 just build-guest all
@@ -138,6 +163,12 @@ just build-guest sp1
 # Override images/tags/platform if needed:
 RISC0_DOCKER_TAG=r0.1.88.0 SP1_DOCKER_TAG=v5.2.4 DOCKER_DEFAULT_PLATFORM=linux/amd64 \\
   just build-guest all
+```
+
+If you don't use `just`:
+
+```bash
+cargo run -p xtask -- build-guest all
 ```
 
 ## Running

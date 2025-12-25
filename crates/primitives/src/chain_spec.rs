@@ -273,7 +273,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(taiko.genesis_hash(), TAIKO_MAINNET_GENESIS_HASH);
+        assert_eq!(taiko.inner.genesis_hash(), TAIKO_MAINNET_GENESIS_HASH);
     }
 
     #[test]
@@ -290,7 +290,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(taiko.genesis_hash(), TAIKO_DEVNET_GENESIS_HASH);
+        assert_eq!(taiko.inner.genesis_hash(), TAIKO_DEVNET_GENESIS_HASH);
     }
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
             .to_taiko_chain_spec()
             .expect("failed to convert to TaikoChainSpec");
 
-        assert_eq!(taiko.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
+        assert_eq!(taiko.inner.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
     }
 
     #[test]

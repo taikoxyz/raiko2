@@ -7,7 +7,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
-mod chain_spec;
+pub mod chain_spec;
 mod context;
 mod error;
 mod input;

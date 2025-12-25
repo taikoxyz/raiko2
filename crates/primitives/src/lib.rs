@@ -15,7 +15,7 @@ pub mod instance;
 mod output;
 mod proof;
 pub(crate) mod proof_type;
-mod blob_utils;
+pub mod blob_utils;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
 pub use context::{ProofContext, ProofRequest};

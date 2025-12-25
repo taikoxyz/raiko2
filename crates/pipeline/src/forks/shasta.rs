@@ -2,7 +2,7 @@ use crate::{
     ManifestBuilder, PipelineKey, PipelineSpec, Preflight, ProverBackend, Risc0ShastaBackend,
     Sp1ShastaBackend, Validation,
 };
-use alethia_reth_block_core::config::TaikoEvmConfig;
+use alethia_reth_block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_guests::{risc0, sp1};
 use raiko2_primitives::{
@@ -38,18 +38,18 @@ pub struct ShastaSpec<Pr, Bk, Pv> {
 
 impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
     /// Create a Shasta spec with the default manifest builder.
-    pub fn new(pipeline_key: PipelineKey, prover: Pr, backend: Bk, provider: Pv) -> Self {
+    pub const fn new(pipeline_key: PipelineKey, prover: Pr, backend: Bk, provider: Pv) -> Self {
         Self {
             prover,
             backend,
             provider,
-            manifest_builder: ShastaManifestBuilder::default(),
+            manifest_builder: ShastaManifestBuilder::new(),
             pipeline_key,
         }
     }
 
     /// Create a Shasta spec using the provided manifest builder.
-    pub fn with_manifest_builder(
+    pub const fn with_manifest_builder(
         manifest_builder: ShastaManifestBuilder,
         pipeline_key: PipelineKey,
         prover: Pr,

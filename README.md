@@ -126,13 +126,18 @@ cargo build --release
 
 Guest programs live in `guests/` as standalone crates (not part of the root workspace). Each guest
 crate carries its own `[patch.crates-io]` in `Cargo.toml` to keep RISC0 and SP1 dependencies isolated.
-ELF outputs are copied into `crates/guests/elf` for use by the host.
+`xtask` uses the official Docker images (no local toolchains required), and copies
+ELF outputs into `crates/guests/elf` for use by the host. `just` is the preferred
+wrapper, and `./script/build-guest.sh` forwards to `just`.
 
 ```bash
-./script/build-guest.sh all
+just build-guest all
 # or individually:
-./script/build-guest.sh risc0
-./script/build-guest.sh sp1
+just build-guest risc0
+just build-guest sp1
+# Override images/tags/platform if needed:
+RISC0_DOCKER_TAG=r0.1.88.0 SP1_DOCKER_TAG=v5.2.4 DOCKER_DEFAULT_PLATFORM=linux/amd64 \\
+  just build-guest all
 ```
 
 ## Running

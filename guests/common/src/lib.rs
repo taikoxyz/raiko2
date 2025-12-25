@@ -1,7 +1,7 @@
 //! Helpers for zkVM guest programs.
 
-use alethia_reth_block_core::config::TaikoEvmConfig;
-use alethia_reth_chainspec_core::spec::TaikoChainSpec;
+use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy_primitives::B256;
 use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{

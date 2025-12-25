@@ -27,6 +27,6 @@ reth-errors.workspace = true
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.1" }
 
 # Alethia reth
-alethia-reth-block-core.workspace = true
-alethia-reth-chainspec-core.workspace = true
-alethia-reth-consensus-core.workspace = true
+alethia-reth-chainspec.workspace = true
+alethia-reth-block.workspace = true
+alethia-reth-consensus.workspace = true

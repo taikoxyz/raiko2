@@ -269,11 +269,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "alethia-reth-block-core"
+name = "alethia-reth-block"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#28e3acf63af1d5bffb1c458d848692eae7796fc9"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alethia-reth-evm",
  "alloy-consensus",
  "alloy-eips",
@@ -288,14 +288,16 @@ dependencies = [
  "reth-evm-ethereum",
  "reth-execution-types",
  "reth-primitives",
+ "reth-primitives-traits",
  "reth-revm",
+ "reth-storage-errors",
  "revm-database-interface",
 ]
 
 [[package]]
-name = "alethia-reth-chainspec-core"
+name = "alethia-reth-chainspec"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#28e3acf63af1d5bffb1c458d848692eae7796fc9"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -314,12 +316,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "alethia-reth-consensus-core"
+name = "alethia-reth-consensus"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#28e3acf63af1d5bffb1c458d848692eae7796fc9"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alethia-reth-evm",
+ "alethia-reth-primitives",
  "alloy-consensus",
  "alloy-hardforks",
  "alloy-primitives",
@@ -327,6 +330,7 @@ dependencies = [
  "reth-chainspec",
  "reth-consensus",
  "reth-consensus-common",
+ "reth-ethereum",
  "reth-ethereum-consensus",
  "reth-execution-types",
  "reth-primitives",
@@ -336,13 +340,37 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#103d0e2966ab6c9aadb1e11ae05fc96101fddc25"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#28e3acf63af1d5bffb1c458d848692eae7796fc9"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
  "reth-evm",
  "reth-revm",
  "revm-database-interface",
+ "tracing",
+]
+
+[[package]]
+name = "alethia-reth-primitives"
+version = "0.6.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#28e3acf63af1d5bffb1c458d848692eae7796fc9"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "alloy-serde",
+ "reth-chainspec",
+ "reth-engine-local",
+ "reth-ethereum",
+ "reth-ethereum-engine-primitives",
+ "reth-node-api",
+ "reth-payload-primitives",
+ "reth-primitives",
+ "reth-primitives-traits",
+ "serde",
+ "serde_with",
+ "sha2",
  "tracing",
 ]
 
@@ -2484,7 +2512,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2504,7 +2532,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -2522,7 +2550,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -3152,7 +3180,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.111",
  "tempfile",
- "toml",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -5712,7 +5740,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5747,7 +5775,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -8410,7 +8438,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -8423,7 +8451,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.111",
@@ -8492,7 +8520,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.31",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -8529,7 +8557,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.1",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -8572,7 +8600,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "toml",
+ "toml 0.8.23",
  "tower-http",
  "tracing",
  "tracing-subscriber 0.3.22",
@@ -8607,7 +8635,7 @@ version = "0.1.0"
 name = "raiko2-pipeline"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-block-core",
+ "alethia-reth-block",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-trie 0.9.1",
@@ -8628,7 +8656,7 @@ dependencies = [
 name = "raiko2-primitives"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-sol-types",
@@ -8710,9 +8738,9 @@ dependencies = [
 name = "raiko2-stateless"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-block-core",
- "alethia-reth-chainspec-core",
- "alethia-reth-consensus-core",
+ "alethia-reth-block",
+ "alethia-reth-chainspec",
+ "alethia-reth-consensus",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
@@ -9290,7 +9318,7 @@ dependencies = [
  "tar",
  "tokio",
  "tokio-stream",
- "toml",
+ "toml 0.8.23",
  "tracing",
  "zstd",
 ]
@@ -9362,7 +9390,7 @@ dependencies = [
  "reth-prune-types",
  "reth-stages-types",
  "serde",
- "toml",
+ "toml 0.8.23",
  "url",
 ]
 
@@ -10583,7 +10611,7 @@ dependencies = [
  "shellexpand",
  "strum 0.27.2",
  "thiserror 2.0.17",
- "toml",
+ "toml 0.8.23",
  "tracing",
  "url",
  "vergen",
@@ -12705,7 +12733,7 @@ dependencies = [
  "strum 0.27.2",
  "tempfile",
  "thiserror 2.0.17",
- "toml",
+ "toml 0.8.23",
  "yaml-rust2",
 ]
 
@@ -13043,6 +13071,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -14435,9 +14472,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
+version = "0.9.10+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0825052159284a1a8b4d6c0c86cbc801f2da5afd2b225fa548c72f2e74002f48"
+dependencies = [
+ "indexmap 2.12.1",
+ "serde_core",
+ "serde_spanned 1.0.4",
+ "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 0.7.14",
 ]
 
 [[package]]
@@ -14451,9 +14503,9 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "0.7.3"
+version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2cdb639ebbc97961c51720f858597f7f24c4fc295327923af55b74c3c724533"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
 dependencies = [
  "serde_core",
 ]
@@ -14477,7 +14529,7 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap 2.12.1",
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
  "winnow 0.7.14",
@@ -14490,16 +14542,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6485ef6d0d9b5d0ec17244ff7eb05310113c3f316f2d14200d4de56b3cb98f8d"
 dependencies = [
  "indexmap 2.12.1",
- "toml_datetime 0.7.3",
+ "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "winnow 0.7.14",
 ]
 
 [[package]]
 name = "toml_parser"
-version = "1.0.4"
+version = "1.0.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0cbe268d35bdb4bb5a56a2de88d0ad0eb70af5384a99d648cd4b3d04039800e"
+checksum = "a3198b4b0a8e11f09dd03e133c0280504d0801269e9afa46362ffde1cbeebf44"
 dependencies = [
  "winnow 0.7.14",
 ]
@@ -14509,6 +14561,12 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toml_writer"
+version = "1.0.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
 
 [[package]]
 name = "tonic"
@@ -15408,7 +15466,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -16091,6 +16149,16 @@ name = "xsum"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0637d3a5566a82fa5214bae89087bc8c9fb94cd8e8a3c07feb691bb8d9c632db"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "toml 0.9.10+spec-1.1.0",
+]
 
 [[package]]
 name = "xxhash-rust"

@@ -1,6 +1,6 @@
 use crate::proof_type::ProofType;
-pub use alethia_reth_chainspec_core::spec::TaikoChainSpec;
-use alethia_reth_chainspec_core::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
+pub use alethia_reth_chainspec::spec::TaikoChainSpec;
+use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
 use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
 use reth_revm::primitives::hardfork::SpecId;
@@ -254,9 +254,10 @@ impl ChainSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alethia_reth_chainspec_core::{
+    use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
     };
+    use reth_chainspec::EthChainSpec;
 
     #[test]
     fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() {

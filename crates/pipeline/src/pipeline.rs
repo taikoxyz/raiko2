@@ -67,13 +67,14 @@ mod tests {
         NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
     };
     use raiko2_primitives::{GuestInput, ProofRequest, ProverConfig};
+    use raiko2_provider::Provider;
 
     struct EmptySpec {
         prover: (),
         backend: NativeBackend,
         provider: EmptyProvider,
     }
-    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
+    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
     #[async_trait::async_trait]

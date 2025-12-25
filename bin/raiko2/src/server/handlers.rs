@@ -12,8 +12,8 @@ use raiko2_queue::{decode_task_id, encode_task_id};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::config::ProverType;
 use super::state::{AppState, ProofStatus};
+use crate::config::ProverType;
 
 /// Health check response.
 #[derive(Serialize)]
@@ -70,7 +70,10 @@ pub struct ProofResponse {
     pub status: ProofStatus,
 }
 
-fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> Result<PipelineKey, ApiError> {
+fn pipeline_key_from_request(
+    state: &AppState,
+    req: &ProposalProofRequest,
+) -> Result<PipelineKey, ApiError> {
     let prover_type = match req.prover_type.as_deref() {
         Some(raw) => raw.parse::<ProverType>().map_err(|err| ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -184,13 +187,10 @@ pub async fn cancel_proof(
         status: StatusCode::NOT_FOUND,
         message: format!("Pipeline not available: {}", pipeline_key.as_str()),
     })?;
-    engine
-        .cancel(task_id.clone())
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("Failed to cancel proof job: {e}"),
-        })?;
+    engine.cancel(task_id.clone()).await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("Failed to cancel proof job: {e}"),
+    })?;
 
     let view = engine
         .get_status(task_id)

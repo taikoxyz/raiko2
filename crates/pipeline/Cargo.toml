@@ -14,7 +14,7 @@ raiko2-stateless.workspace = true
 raiko2-provider.workspace = true
 
 reth-ethereum-primitives.workspace = true
-alethia-reth-block-core.workspace = true
+alethia-reth-block.workspace = true
 
 alloy-consensus.workspace = true
 

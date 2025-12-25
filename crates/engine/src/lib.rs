@@ -91,11 +91,7 @@ where
         )
     }
 
-    pub fn with_store<Store>(
-        spec: S,
-        context: ProofContext,
-        store: Store,
-    ) -> Self
+    pub fn with_store<Store>(spec: S, context: ProofContext, store: Store) -> Self
     where
         Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
             + 'static,
@@ -444,11 +440,8 @@ where
     }
 }
 
-fn spawn_worker_supervised<S>(
-    engine: Engine<S>,
-    notify: Arc<tokio::sync::Notify>,
-    worker: String,
-) where
+fn spawn_worker_supervised<S>(engine: Engine<S>, notify: Arc<tokio::sync::Notify>, worker: String)
+where
     S: PipelineSpec + 'static,
     S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
     S::Backend: ProverBackend + 'static,
@@ -491,10 +484,8 @@ fn spawn_worker_supervised<S>(
     });
 }
 
-fn spawn_maintenance_supervised<S>(
-    engine: Engine<S>,
-    maintenance_interval: Duration,
-) where
+fn spawn_maintenance_supervised<S>(engine: Engine<S>, maintenance_interval: Duration)
+where
     S: PipelineSpec + 'static,
     S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
     S::Backend: ProverBackend + 'static,
@@ -549,16 +540,14 @@ mod tests {
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
-    use crate::tasks::EngineOutput;
     use crate::Engine;
+    use crate::tasks::EngineOutput;
 
     struct MockProver;
 
     impl GuestInputCodec<GuestInput> for MockProver {
         fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-            let bytes = bincode::serialize(input)
-                .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
-            Ok(Bytes::from(bytes))
+            Ok(Bytes::from(input.taiko.proposal_id.to_le_bytes().to_vec()))
         }
     }
 
@@ -576,9 +565,14 @@ mod tests {
             _config: &ProverConfig,
             _backend: &TestBackend,
         ) -> RaikoResult<Proof> {
-            let input: GuestInput = bincode::deserialize(input.as_ref())
-                .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {}", e)))?;
-            assert_eq!(input.taiko.proposal_id, 1);
+            let raw = input.as_ref();
+            if raw.len() != 8 {
+                return Err(RaikoError::Guest("Encoded input missing proposal id".to_string()));
+            }
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(raw);
+            let proposal_id = u64::from_le_bytes(buf);
+            assert_eq!(proposal_id, 1);
             Ok(Proof {
                 proof: Some("mock-proof".to_string()),
                 ..Default::default()
@@ -602,9 +596,7 @@ mod tests {
 
     impl GuestInputCodec<GuestInput> for FailingProver {
         fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-            let bytes = bincode::serialize(input)
-                .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
-            Ok(Bytes::from(bytes))
+            Ok(Bytes::from(input.taiko.proposal_id.to_le_bytes().to_vec()))
         }
     }
 
@@ -658,7 +650,7 @@ mod tests {
             }
         }
     }
-    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation(std::marker::PhantomData);
+    const NOOP_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
     const NOOP_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
     #[async_trait::async_trait]

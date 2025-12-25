@@ -15,11 +15,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "alethia-reth-block-core"
+name = "alethia-reth-block"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#f7cad576b677b165acb1610ea278dd3b6f0b67f1"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alethia-reth-evm",
  "alloy-consensus",
  "alloy-eips",
@@ -34,14 +34,16 @@ dependencies = [
  "reth-evm-ethereum",
  "reth-execution-types",
  "reth-primitives",
+ "reth-primitives-traits",
  "reth-revm",
+ "reth-storage-errors",
  "revm-database-interface",
 ]
 
 [[package]]
-name = "alethia-reth-chainspec-core"
+name = "alethia-reth-chainspec"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#f7cad576b677b165acb1610ea278dd3b6f0b67f1"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -60,11 +62,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "alethia-reth-consensus-core"
+name = "alethia-reth-consensus"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#f7cad576b677b165acb1610ea278dd3b6f0b67f1"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alethia-reth-evm",
  "alloy-consensus",
  "alloy-hardforks",
@@ -73,6 +75,7 @@ dependencies = [
  "reth-chainspec",
  "reth-consensus",
  "reth-consensus-common",
+ "reth-ethereum",
  "reth-ethereum-consensus",
  "reth-execution-types",
  "reth-primitives",
@@ -82,7 +85,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "0.6.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#a790fe547b6d8793509e4139a518ffd74dcef919"
+source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fsupport_zkvm#f7cad576b677b165acb1610ea278dd3b6f0b67f1"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -2804,8 +2807,8 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 name = "raiko2-guest-common"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-block-core",
- "alethia-reth-chainspec-core",
+ "alethia-reth-block",
+ "alethia-reth-chainspec",
  "alloy-primitives",
  "anyhow",
  "raiko2-primitives",
@@ -2829,7 +2832,7 @@ dependencies = [
 name = "raiko2-primitives"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-chainspec-core",
+ "alethia-reth-chainspec",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-sol-types",
@@ -2865,9 +2868,9 @@ dependencies = [
 name = "raiko2-stateless"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-block-core",
- "alethia-reth-chainspec-core",
- "alethia-reth-consensus-core",
+ "alethia-reth-block",
+ "alethia-reth-chainspec",
+ "alethia-reth-consensus",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",

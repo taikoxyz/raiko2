@@ -4,7 +4,7 @@ use crate::config::{Config, QueueBackend, RetryStrategy};
 use anyhow::Result;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey};
 use raiko2_pipeline::{
-    NativeBackend, PipelineKey, PipelineSpec, Risc0ShastaBackend, Sp1ShastaBackend,
+    NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
 use raiko2_primitives::{ProofContext, ProofRequest};
@@ -55,7 +55,6 @@ pub trait EngineHandle: Send + Sync {
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>>;
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
-    fn start_workers_with_maintenance_interval(&self, concurrency: usize, interval: Duration);
 }
 
 fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineStatusView {
@@ -126,10 +125,6 @@ where
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
     }
-
-    fn start_workers_with_maintenance_interval(&self, concurrency: usize, interval: Duration) {
-        self.start_workers_with_maintenance_interval(concurrency, interval);
-    }
 }
 
 /// Pipeline factory for resolving engines.
@@ -184,6 +179,7 @@ fn build_provider(config: &Config) -> Result<NetworkProvider> {
     NetworkProvider::new(&config.rpc.l2_rpc).map_err(|e| anyhow::anyhow!(e))
 }
 
+#[cfg(feature = "redis-queue")]
 fn queue_namespace(base: &str, key: PipelineKey) -> String {
     let base = base.trim_end_matches('/');
     format!("{}/{}", base, key.as_str())
@@ -240,11 +236,13 @@ impl AppState {
             QueueBackend::Redis => {
                 #[cfg(feature = "redis-queue")]
                 {
-                    type Risc0Output = EngineOutput<<Risc0Spec as PipelineSpec>::GuestInput>;
+                    type Risc0Output =
+                        EngineOutput<<Risc0Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                     let provider = build_provider(&config)?;
                     let context = build_context(&config, "risc0");
                     let url = config.queue.redis_url.clone().unwrap_or_default();
-                    let namespace = queue_namespace(&config.queue.namespace, PipelineKey::ShastaRisc0);
+                    let namespace =
+                        queue_namespace(&config.queue.namespace, PipelineKey::ShastaRisc0);
                     let store = raiko2_queue::RedisStore::<EngineTask, Risc0Output, EngineTaskKey>::connect(
                         &url,
                         &namespace,
@@ -309,17 +307,20 @@ impl AppState {
             QueueBackend::Redis => {
                 #[cfg(feature = "redis-queue")]
                 {
-                    type Sp1Output = EngineOutput<<Sp1Spec as PipelineSpec>::GuestInput>;
+                    type Sp1Output =
+                        EngineOutput<<Sp1Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                     let provider = build_provider(&config)?;
                     let context = build_context(&config, "sp1");
                     let url = config.queue.redis_url.clone().unwrap_or_default();
-                    let namespace = queue_namespace(&config.queue.namespace, PipelineKey::ShastaSp1);
-                    let store = raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
-                        &url,
-                        &namespace,
-                        Duration::from_secs(60),
-                    )
-                    .await?;
+                    let namespace =
+                        queue_namespace(&config.queue.namespace, PipelineKey::ShastaSp1);
+                    let store =
+                        raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
+                            &url,
+                            &namespace,
+                            Duration::from_secs(60),
+                        )
+                        .await?;
                     let spec = ShastaSpec::new(
                         PipelineKey::ShastaSp1,
                         Sp1Prover::new(sp1_config.clone()),
@@ -365,7 +366,8 @@ impl AppState {
             QueueBackend::Redis => {
                 #[cfg(feature = "redis-queue")]
                 {
-                    type NativeOutput = EngineOutput<<NativeSpec as PipelineSpec>::GuestInput>;
+                    type NativeOutput =
+                        EngineOutput<<NativeSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                     let provider = build_provider(&config)?;
                     let context = build_context(&config, "native");
                     let url = config.queue.redis_url.clone().unwrap_or_default();

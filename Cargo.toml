@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "xtask",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",
@@ -53,9 +54,9 @@ risc0-zkvm = "3.0.4"
 sp1-sdk = "5.2.3"
 
 # Alethia reth (PR #79 branch)
-alethia-reth-block-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
-alethia-reth-chainspec-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
-alethia-reth-consensus-core = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
 
 # Reth (v1.9.3 - same as alethia-reth uses)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.9.3" }
@@ -87,7 +88,9 @@ alloy-network = { version = "1.0", default-features = false, features = [
 ] }
 alloy-rpc-types = { version = "1.0", default-features = false }
 alloy-rpc-types-eth = { version = "1.1.3", default-features = false }
-alloy-rpc-client = { version = "1.0", default-features = false, features = ["reqwest"] }
+alloy-rpc-client = { version = "1.0", default-features = false, features = [
+    "reqwest",
+] }
 alloy-provider = { version = "1.0", default-features = false, features = [
     "reqwest",
 ] }

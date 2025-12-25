@@ -1,7 +1,7 @@
 use crate::{sparse::SparseState, trie::StatelessTrieExt, witness_db::WitnessDatabase};
-use alethia_reth_block_core::config::TaikoEvmConfig;
-use alethia_reth_chainspec_core::spec::TaikoChainSpec;
-use alethia_reth_consensus_core::validation::{
+use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_chainspec::spec::TaikoChainSpec;
+use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
 use alloy_consensus::{BlockHeader, Header, TrieAccount};
@@ -207,8 +207,8 @@ fn compute_ancestor_hashes(
 #[cfg(test)]
 mod tests {
     use super::validate_block;
-    use alethia_reth_block_core::config::TaikoEvmConfig;
-    use alethia_reth_chainspec_core::TAIKO_DEVNET;
+    use alethia_reth_block::config::TaikoEvmConfig;
+    use alethia_reth_chainspec::TAIKO_DEVNET;
     use alloy_consensus::{Header, proofs};
     use alloy_primitives::Bytes;
     use reth_consensus::ConsensusError;

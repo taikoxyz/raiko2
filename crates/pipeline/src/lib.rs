@@ -94,6 +94,12 @@ pub trait Validation: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopValidation<I>(std::marker::PhantomData<I>);
 
+impl<I> NoopValidation<I> {
+    pub const fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 impl<I: Send + Sync> Validation for NoopValidation<I> {
     type Input = I;
 

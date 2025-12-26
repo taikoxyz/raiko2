@@ -81,7 +81,32 @@ fn blob_to_proof_with_settings(
     Ok(result)
 }
 
-/// Compute KZG proof for a blob and its commitment using the static KZG settings.
+/// Compute a KZG proof for a blob and its corresponding commitment using the static KZG settings.
+///
+/// # Parameters
+///
+/// - `blob`: The raw blob data as a byte slice. In the context of [EIP-4844],
+///   this should be the encoded blob whose polynomial commitment is being proven.
+/// - `commitment`: The KZG commitment to the exact same blob, encoded as
+///   48-byte `KzgCommitmentBytes`. This should typically be produced by
+///   [`blob_to_commitment`] using the same `blob` input.
+///
+/// The `commitment` **must** correspond to the provided `blob`. Passing a
+/// commitment that was computed from different data will result in a proof
+/// that fails verification.
+///
+/// # Returns
+///
+/// Returns the KZG proof bytes (`KzgCommitmentBytes`) for the given `blob` and
+/// `commitment`. This proof can be used with EIP-4844-compatible verification
+/// routines (e.g. [`verify_blob_kzg_proof_with_settings`] or the underlying
+/// `verify_blob_kzg_proof_rust`) to prove that the blob data matches its
+/// published KZG commitment.
+///
+/// For more details on how blob commitments and proofs are used in the
+/// protocol, see [EIP-4844].
+///
+/// [EIP-4844]: https://eips.ethereum.org/EIPS/eip-4844
 pub fn blob_to_proof(
     blob: &[u8],
     commitment: &KzgCommitmentBytes,

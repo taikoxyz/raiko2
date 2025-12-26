@@ -239,7 +239,7 @@ mod test {
     }
 
     #[test]
-    fn blob_to_proof_and_verify_real_blob() {
+    fn blob_to_proof_computes_verifiable_proof_for_mainnet_blob() {
         use std::fs;
 
         // Read blob from file

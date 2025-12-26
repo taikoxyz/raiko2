@@ -3,7 +3,8 @@ use alloy_primitives::B256;
 use kzg::kzg_proofs::KZGSettings;
 use kzg_traits::G1;
 use kzg_traits::eip_4844::{
-    blob_to_kzg_commitment_rust, bytes_to_blob, hash, verify_blob_kzg_proof_rust,
+    blob_to_kzg_commitment_rust, bytes_to_blob, compute_blob_kzg_proof_rust, hash,
+    verify_blob_kzg_proof_rust,
 };
 use std::sync::OnceLock;
 
@@ -34,9 +35,15 @@ fn init_kzg_settings() -> Result<KZGSettings, String> {
         .map_err(|e| format!("bincode deserialize KZGSettings failed: {e}"))
 }
 
-pub type KzgGroup = [u8; 48];
 pub type KzgField = [u8; 32];
-pub type KzgCommitmentBytes = KzgGroup;
+pub type KzgCommitmentBytes = [u8; 48];
+
+fn g1_to_kzg_commitment_bytes(g1_point: &impl G1) -> KzgCommitmentBytes {
+    let bytes = g1_point.to_bytes();
+    let mut result = [0u8; 48];
+    result.copy_from_slice(&bytes);
+    result
+}
 
 fn blob_to_commitment_with_settings(
     blob: &[u8],
@@ -49,15 +56,62 @@ fn blob_to_commitment_with_settings(
         RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {}", e))
     })?;
 
-    let commitment_bytes = commitment.to_bytes();
-    let mut result = [0u8; 48];
-    result.copy_from_slice(&commitment_bytes);
-    Ok(result)
+    Ok(g1_to_kzg_commitment_bytes(&commitment))
 }
 
 /// Convert blob (Vec<u8>) to KZG commitment using the static KZG settings.
 pub fn blob_to_commitment(blob: &[u8]) -> RaikoResult<KzgCommitmentBytes> {
     blob_to_commitment_with_settings(blob, get_kzg_settings()?)
+}
+
+fn blob_to_proof_with_settings(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+    kzg_settings: &KZGSettings,
+) -> RaikoResult<KzgCommitmentBytes> {
+    let blob_fields = bytes_to_blob(blob)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
+
+    let kzg_commitment = G1::from_bytes(commitment)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {}", e)))?;
+
+    let proof = compute_blob_kzg_proof_rust(&blob_fields, &kzg_commitment, kzg_settings)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute proof: {}", e)))?;
+
+    Ok(g1_to_kzg_commitment_bytes(&proof))
+}
+
+/// Compute a KZG proof for a blob and its corresponding commitment using the static KZG settings.
+///
+/// # Parameters
+///
+/// - `blob`: The raw blob data as a byte slice. In the context of [EIP-4844],
+///   this should be the encoded blob whose polynomial commitment is being proven.
+/// - `commitment`: The KZG commitment to the exact same blob, encoded as
+///   48-byte `KzgCommitmentBytes`. This should typically be produced by
+///   [`blob_to_commitment`] using the same `blob` input.
+///
+/// The `commitment` **must** correspond to the provided `blob`. Passing a
+/// commitment that was computed from different data will result in a proof
+/// that fails verification.
+///
+/// # Returns
+///
+/// Returns the KZG proof bytes (`KzgCommitmentBytes`) for the given `blob` and
+/// `commitment`. This proof can be used with EIP-4844-compatible verification
+/// routines (e.g. [`verify_blob_kzg_proof_with_settings`] or the underlying
+/// `verify_blob_kzg_proof_rust`) to prove that the blob data matches its
+/// published KZG commitment.
+///
+/// For more details on how blob commitments and proofs are used in the
+/// protocol, see [EIP-4844].
+///
+/// [EIP-4844]: https://eips.ethereum.org/EIPS/eip-4844
+pub fn blob_to_proof(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+) -> RaikoResult<KzgCommitmentBytes> {
+    blob_to_proof_with_settings(blob, commitment, get_kzg_settings()?)
 }
 
 /// Convert KZG commitment to versioned hash (EIP-4844).
@@ -109,7 +163,8 @@ pub fn verify_blob_kzg_proof(
 #[cfg(test)]
 mod test {
     use super::*;
-    use kzg_traits::eip_4844::{BYTES_PER_BLOB, compute_blob_kzg_proof_rust};
+    use alloy_primitives::hex;
+    use kzg_traits::eip_4844::BYTES_PER_BLOB;
 
     #[test]
     fn blob_commitment_version_hash_and_proof_verify() {
@@ -206,5 +261,43 @@ mod test {
             &deserialized_settings,
         )
         .expect("verify with bincode-deserialized settings");
+    }
+
+    #[test]
+    fn blob_to_proof_computes_verifiable_proof_for_mainnet_blob() {
+        use std::fs;
+
+        // Read blob from file
+        let blob_file = concat!(env!("CARGO_MANIFEST_DIR"), "/blob_13326465_0.bin");
+        let blob_bytes = fs::read(blob_file).expect("Failed to read blob file");
+        println!("Read blob: {} bytes", blob_bytes.len());
+
+        // Given commitment from mainnet
+        let expected_commitment = "0xb8df58142f4397d25bf26f670fef31622428dbe4f22ad6e8c5386458ef28c698841904258320d98befd52b26edf1a26d";
+        let commitment_str = expected_commitment
+            .strip_prefix("0x")
+            .unwrap_or(expected_commitment);
+        let commitment_bytes: [u8; 48] = hex::decode(commitment_str)
+            .expect("Failed to decode commitment hex")
+            .try_into()
+            .expect("Commitment must be 48 bytes");
+
+        // Check that our computed commitment matches the expected commitment_hex above
+        let computed_commitment =
+            blob_to_commitment(&blob_bytes).expect("Failed to compute commitment");
+        assert_eq!(
+            computed_commitment, commitment_bytes,
+            "Calculated commitment does not match expected commitment!"
+        );
+
+        // Compute proof
+        let proof = blob_to_proof(&blob_bytes, &commitment_bytes).expect("Failed to compute proof");
+        println!("Computed proof: 0x{}", hex::encode(proof));
+
+        // Verify proof
+        verify_blob_kzg_proof(&blob_bytes, &commitment_bytes, &proof)
+            .expect("Failed to verify proof");
+
+        println!("✓ Proof verified successfully!");
     }
 }

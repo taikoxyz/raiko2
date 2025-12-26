@@ -30,8 +30,7 @@ hex.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 
-kzg.workspace = true
+kzg = { workspace = true, features = ["bincode"] }
 kzg_traits.workspace = true
 
-[dev-dependencies]
 bincode.workspace = true

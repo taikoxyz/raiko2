@@ -32,3 +32,6 @@ async-trait.workspace = true
 
 kzg.workspace = true
 kzg_traits.workspace = true
+
+[dev-dependencies]
+bincode.workspace = true

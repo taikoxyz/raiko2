@@ -7,6 +7,7 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
+pub mod blob;
 pub mod chain_spec;
 mod context;
 mod error;
@@ -15,7 +16,6 @@ pub mod instance;
 mod output;
 mod proof;
 pub(crate) mod proof_type;
-pub mod blob_utils;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
 pub use context::{ProofContext, ProofRequest};

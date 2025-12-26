@@ -5,7 +5,7 @@ use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy_primitives::B256;
 use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{
-    blob_utils::verify_proposal_mode_blob_usage,
+    blob::verify_proposal_mode_blob_usage,
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output, ProtocolInstance, ShastaProposalMetadata, ShastaTransition,

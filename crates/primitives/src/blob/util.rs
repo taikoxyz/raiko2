@@ -1,4 +1,4 @@
-use crate::{GuestInput, RaikoError, RaikoResult};
+use crate::{RaikoError, RaikoResult};
 use alloy_primitives::B256;
 use kzg::kzg_proofs::KZGSettings;
 use kzg_traits::G1;
@@ -6,8 +6,6 @@ use kzg_traits::eip_4844::{
     blob_to_kzg_commitment_rust, bytes_to_blob, hash, load_trusted_setup_rust,
     load_trusted_setup_string, verify_blob_kzg_proof_rust,
 };
-#[cfg(test)]
-use std::path::Path;
 use std::sync::OnceLock;
 
 pub const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
@@ -16,9 +14,14 @@ pub const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 /// This is initialized lazily on first access.
 static KZG_SETTINGS: OnceLock<Result<KZGSettings, String>> = OnceLock::new();
 
+/// Default embedded trusted setup in `RKZG` binary format.
+///
+/// This makes KZG settings initialization fast and deterministic (no filesystem IO), suitable for
+/// zk guest builds.
+static DEFAULT_RKZG_BYTES: &[u8] = include_bytes!("../../kzg_settings_raw.rkzg");
+
 /// Get or initialize the KZG settings.
-/// Loads the trusted setup from the default path on first call.
-fn get_kzg_settings() -> RaikoResult<&'static KZGSettings> {
+pub(crate) fn get_kzg_settings() -> RaikoResult<&'static KZGSettings> {
     match KZG_SETTINGS.get_or_init(init_kzg_settings) {
         Ok(settings) => Ok(settings),
         Err(e) => Err(RaikoError::InvalidBlobOption(format!(
@@ -27,19 +30,11 @@ fn get_kzg_settings() -> RaikoResult<&'static KZGSettings> {
     }
 }
 
-/// Default embedded trusted setup in `RKZG` binary format.
-///
-/// This makes KZG settings initialization fast and deterministic (no filesystem IO), suitable for
-/// zk guest builds.
-static DEFAULT_RKZG_BYTES: &[u8] = include_bytes!("../kzg_settings_raw.rkzg");
-
-/// Initialize KZG settings from the trusted setup file.
+/// Initialize KZG settings from the embedded trusted setup bytes.
 fn init_kzg_settings() -> Result<KZGSettings, String> {
     // NOTE: zk guests cannot read files. Keep this strictly embedded.
-    let bytes: &[u8] = DEFAULT_RKZG_BYTES;
     let (g1_monomial_bytes, g1_lagrange_bytes, g2_monomial_bytes) =
-        decode_trusted_setup_bytes(bytes)?;
-
+        decode_trusted_setup_bytes(DEFAULT_RKZG_BYTES)?;
     load_trusted_setup_rust(&g1_monomial_bytes, &g1_lagrange_bytes, &g2_monomial_bytes)
 }
 
@@ -144,18 +139,14 @@ fn blob_to_commitment_with_settings(
     blob: &[u8],
     kzg_settings: &KZGSettings,
 ) -> RaikoResult<KzgCommitmentBytes> {
-    // Convert blob bytes to blob format expected by kzg
     let blob_fields = bytes_to_blob(blob)
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
 
-    // Compute KZG commitment
     let commitment = blob_to_kzg_commitment_rust(&blob_fields, kzg_settings).map_err(|e| {
         RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {}", e))
     })?;
 
-    // Convert commitment to bytes (48 bytes)
     let commitment_bytes = commitment.to_bytes();
-
     let mut result = [0u8; 48];
     result.copy_from_slice(&commitment_bytes);
     Ok(result)
@@ -175,35 +166,28 @@ pub fn commitment_to_version_hash(commitment: &KzgCommitmentBytes) -> B256 {
     B256::from_slice(&out)
 }
 
-fn verify_blob_kzg_proof_with_settings(
+pub(crate) fn verify_blob_kzg_proof_with_settings(
     blob: &[u8],
     commitment: &KzgCommitmentBytes,
     proof: &KzgCommitmentBytes,
     kzg_settings: &KZGSettings,
 ) -> RaikoResult<()> {
-    // Convert blob bytes to blob format
     let blob_fields = bytes_to_blob(blob)
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
 
-    // Convert commitment bytes to G1 point
     let kzg_commitment = G1::from_bytes(commitment)
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {}", e)))?;
-
-    // Convert proof bytes to G1 point
     let kzg_proof = G1::from_bytes(proof)
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid proof: {}", e)))?;
 
-    // Verify the proof
     let is_valid =
         verify_blob_kzg_proof_rust(&blob_fields, &kzg_commitment, &kzg_proof, kzg_settings)
             .map_err(|e| RaikoError::InvalidBlobOption(format!("Verification error: {}", e)))?;
-
     if !is_valid {
         return Err(RaikoError::InvalidBlobOption(
             "KZG proof verification failed".to_string(),
         ));
     }
-
     Ok(())
 }
 
@@ -216,86 +200,14 @@ pub fn verify_blob_kzg_proof(
     verify_blob_kzg_proof_with_settings(blob, commitment, proof, get_kzg_settings()?)
 }
 
-/// Verify blob usage in proposal mode.
-///
-/// Checks that raw blob commitment matches input blob commitment,
-/// then verifies the blob version hash.
-/// Iterates through each data source and verifies each blob with its commitment and proof.
-///
-/// This function uses a static KZG settings loaded from the default trusted setup path.
-pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<()> {
-    // Get the static KZG settings
-    let kzg_settings = get_kzg_settings()?;
-
-    for data_source in &guest_input.taiko.data_sources {
-        // Skip if no blobs in this data source
-        if data_source.tx_data_from_blob.is_empty() {
-            continue;
-        }
-
-        let commitments = &data_source.blob_commitments;
-        let proofs = &data_source.blob_proofs;
-
-        if data_source.tx_data_from_blob.len() != commitments.len() {
-            return Err(RaikoError::InvalidBlobOption(format!(
-                "blob count ({}) does not match commitment count ({})",
-                data_source.tx_data_from_blob.len(),
-                commitments.len()
-            )));
-        }
-        if commitments.len() != proofs.len() {
-            return Err(RaikoError::InvalidBlobOption(format!(
-                "commitment count ({}) does not match proof count ({})",
-                commitments.len(),
-                proofs.len()
-            )));
-        }
-
-        // Iterate and verify each blob with its commitment and proof
-        for (idx, blob_data) in data_source.tx_data_from_blob.iter().enumerate() {
-            // Convert commitment Vec<u8> to [u8; 48]
-            if commitments[idx].len() != 48 {
-                return Err(RaikoError::InvalidBlobOption(format!(
-                    "Commitment at index {} has invalid length (expected 48 bytes, got {})",
-                    idx,
-                    commitments[idx].len()
-                )));
-            }
-            let mut commitment_array = [0u8; 48];
-            commitment_array.copy_from_slice(&commitments[idx]);
-
-            // Convert proof Vec<u8> to [u8; 48]
-            if proofs[idx].len() != 48 {
-                return Err(RaikoError::InvalidBlobOption(format!(
-                    "Proof at index {} has invalid length (expected 48 bytes, got {})",
-                    idx,
-                    proofs[idx].len()
-                )));
-            }
-            let mut proof_array = [0u8; 48];
-            proof_array.copy_from_slice(&proofs[idx]);
-
-            // Verify the blob KZG proof
-            verify_blob_kzg_proof_with_settings(
-                blob_data,
-                &commitment_array,
-                &proof_array,
-                kzg_settings,
-            )
-            .map_err(|e| {
-                RaikoError::InvalidBlobOption(format!(
-                    "Blob verification failed at index {}: {}",
-                    idx, e
-                ))
-            })?;
-        }
-    }
-
-    Ok(())
-}
+// Note: `get_kzg_settings` and `verify_blob_kzg_proof_with_settings` are `pub(crate)` so
+// `verification.rs` can call them without making them public API.
 
 #[cfg(test)]
 mod test {
+    use std::io::Read;
+    use std::path::Path;
+
     use super::*;
     use kzg::kzg_proofs::generate_trusted_setup;
     use kzg_traits::G2;
@@ -306,25 +218,19 @@ mod test {
 
     #[test]
     fn blob_commitment_version_hash_and_proof_verify() {
-        // Build a valid EIP-4844-sized blob (all zeros).
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
-
-        // Build KZGSettings in-memory (no filesystem dependency).
         let (g1_monomial, g1_lagrange, g2_monomial_full) =
             generate_trusted_setup(FIELD_ELEMENTS_PER_BLOB, [7u8; 32]);
-        // EIP-4844 trusted setup only requires 65 G2 points.
         let g2_monomial = &g2_monomial_full[..TRUSTED_SETUP_NUM_G2_POINTS];
 
         let mut g1_monomial_bytes = Vec::with_capacity(FIELD_ELEMENTS_PER_BLOB * 48);
         for p in &g1_monomial {
             g1_monomial_bytes.extend_from_slice(&p.to_bytes());
         }
-
         let mut g1_lagrange_bytes = Vec::with_capacity(FIELD_ELEMENTS_PER_BLOB * 48);
         for p in &g1_lagrange {
             g1_lagrange_bytes.extend_from_slice(&p.to_bytes());
         }
-
         let mut g2_monomial_bytes = Vec::with_capacity(TRUSTED_SETUP_NUM_G2_POINTS * 96);
         for p in g2_monomial {
             g2_monomial_bytes.extend_from_slice(&p.to_bytes());
@@ -334,11 +240,9 @@ mod test {
             load_trusted_setup_rust(&g1_monomial_bytes, &g1_lagrange_bytes, &g2_monomial_bytes)
                 .expect("load trusted setup into KZGSettings");
 
-        // Compute commitment (bytes) via our helper.
         let commitment_bytes =
             blob_to_commitment_with_settings(&blob_bytes, &kzg_settings).expect("commitment");
 
-        // Compute commitment (point) and proof via rust-kzg, and verify they match our bytes wrapper.
         let blob_fr = bytes_to_blob(&blob_bytes).expect("bytes_to_blob");
         let commitment_point =
             blob_to_kzg_commitment_rust(&blob_fr, &kzg_settings).expect("commitment point");
@@ -356,7 +260,6 @@ mod test {
         )
         .expect("verify proof");
 
-        // Versioned hash: sha256(commitment) with first byte set to 0x01.
         let version_hash = commitment_to_version_hash(&commitment_bytes);
         let mut expected = hash(&commitment_bytes);
         expected[0] = VERSIONED_HASH_VERSION_KZG;
@@ -373,12 +276,10 @@ mod test {
         for p in &g1_monomial {
             g1_monomial_bytes.extend_from_slice(&p.to_bytes());
         }
-
         let mut g1_lagrange_bytes = Vec::with_capacity(FIELD_ELEMENTS_PER_BLOB * 48);
         for p in &g1_lagrange {
             g1_lagrange_bytes.extend_from_slice(&p.to_bytes());
         }
-
         let mut g2_monomial_bytes = Vec::with_capacity(TRUSTED_SETUP_NUM_G2_POINTS * 96);
         for p in g2_monomial {
             g2_monomial_bytes.extend_from_slice(&p.to_bytes());
@@ -396,32 +297,20 @@ mod test {
 
     #[test]
     fn load_repo_rkzg_and_compute_commitment() {
-        // This file is expected to be generated offline (from `trusted_setup.txt`) and checked in.
-        // It uses the fast `RKZG` binary format defined in this module.
-        static RKZG_BYTES: &[u8] = include_bytes!("../kzg_settings_raw.rkzg");
+        static RKZG_BYTES: &[u8] = include_bytes!("../../kzg_settings_raw.rkzg");
 
         let (g1_m, g1_l, g2_m) = decode_trusted_setup_bytes(RKZG_BYTES).expect("decode rkzg");
         let kzg_settings: KZGSettings =
             load_trusted_setup_rust(&g1_m, &g1_l, &g2_m).expect("load KZGSettings");
 
-        // Compute commitment from a deterministic blob.
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
         let commitment =
             blob_to_commitment_with_settings(&blob_bytes, &kzg_settings).expect("commitment");
-
-        // Basic sanity: version hash should be stable and not all-zero.
         let version_hash = commitment_to_version_hash(&commitment);
         assert_ne!(version_hash, B256::ZERO);
     }
 
     /// Offline helper: convert an Ethereum `trusted_setup.txt` into an `RKZG` binary file.
-    ///
-    /// Usage:
-    /// - `RAIKO2_TRUSTED_SETUP_TXT=/path/to/trusted_setup.txt`
-    /// - `RAIKO2_TRUSTED_SETUP_BIN=/path/to/kzg_settings_raw.rkzg` (optional; default shown)
-    ///
-    /// Run:
-    /// `cargo test -p raiko2-primitives convert_eth_trusted_setup_txt_to_bin -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn convert_eth_trusted_setup_txt_to_bin() {
@@ -432,17 +321,12 @@ mod test {
 
         write_trusted_setup_bin_from_txt(&txt_path, &out_path).expect("convert and write rkzg");
 
-        // Sanity: ensure the produced file decodes and loads.
         let bytes = std::fs::read(&out_path).expect("read rkzg output");
         let (g1m, g1l, g2m) = decode_trusted_setup_bytes(&bytes).expect("decode rkzg output");
         let _settings: KZGSettings =
             load_trusted_setup_rust(&g1m, &g1l, &g2m).expect("load settings from rkzg output");
     }
 
-    /// Convert an EIP-4844 trusted setup **text** file (e.g. Ethereum `trusted_setup.txt`) into the
-    /// fast `RKZG` binary format used by `decode_trusted_setup_bytes`.
-    ///
-    /// This is intended as an offline build step: run once, then ship the `.rkzg` file.
     fn trusted_setup_txt_to_rkzg_bytes(txt_contents: &str) -> Result<Vec<u8>, String> {
         let (g1_monomial_bytes, g1_lagrange_bytes, g2_monomial_bytes) =
             load_trusted_setup_string(txt_contents)?;
@@ -466,5 +350,102 @@ mod test {
         std::fs::write(out_path, &bin)
             .map_err(|e| format!("write rkzg bin {:?}: {e}", out_path))?;
         Ok(())
+    }
+
+    pub fn load_trusted_setup_filename_rust(filepath: &str) -> Result<KZGSettings, String> {
+        let mut file =
+            std::fs::File::open(filepath).map_err(|_| "Unable to open file".to_string())?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|_| "Unable to read file".to_string())?;
+
+        let (g1_monomial_bytes, g1_lagrange_bytes, g2_monomial_bytes) =
+            load_trusted_setup_string(&contents)?;
+        load_trusted_setup_rust(&g1_monomial_bytes, &g1_lagrange_bytes, &g2_monomial_bytes)
+    }
+
+    #[test]
+    fn test_serialize_and_deserialize_kzg_settings() {
+        let trusted_setup_path = "./trusted_setup.txt";
+        println!(
+            "Loading trusted setup from: {} (this may take a while...)",
+            trusted_setup_path
+        );
+        let start = std::time::Instant::now();
+        let _ = load_trusted_setup_filename_rust(&trusted_setup_path)
+            .expect("Failed to load trusted setup");
+        let load_time = start.elapsed();
+        println!("✓ Loaded trusted setup in {:.2}s", load_time.as_secs_f64());
+    }
+
+    #[test]
+    fn bincode_deserialize_kzg_settings_bin() {
+        let binary_file = concat!(env!("CARGO_MANIFEST_DIR"), "/kzg_settings.bin");
+
+        let start = std::time::Instant::now();
+        let binary_data = std::fs::read(binary_file).expect("Failed to read kzg_settings.bin");
+        let deserialized_settings: KZGSettings = bincode::deserialize(&binary_data)
+            .expect("Failed to deserialize KZGSettings from binary");
+        println!(
+            "✓ bincode deserialized KZGSettings in {:.2}s ({} bytes)",
+            start.elapsed().as_secs_f64(),
+            binary_data.len()
+        );
+
+        let blob_bytes = vec![0u8; BYTES_PER_BLOB];
+        let _commitment =
+            blob_to_commitment_with_settings(&blob_bytes, &deserialized_settings).expect("commit");
+    }
+
+    #[test]
+    fn bincode_settings_matches_embedded_settings_commit_proof_verify() {
+        let binary_file = concat!(env!("CARGO_MANIFEST_DIR"), "/kzg_settings.bin");
+        let binary_data = std::fs::read(binary_file).expect("Failed to read kzg_settings.bin");
+        let deserialized_settings: KZGSettings = bincode::deserialize(&binary_data)
+            .expect("Failed to deserialize KZGSettings from binary");
+
+        let embedded_settings = get_kzg_settings().expect("load embedded settings");
+
+        let blob_bytes = vec![0u8; BYTES_PER_BLOB];
+        let blob_fr = bytes_to_blob(&blob_bytes).expect("bytes_to_blob");
+
+        let commitment_embedded =
+            blob_to_kzg_commitment_rust(&blob_fr, embedded_settings).expect("commit embedded");
+        let commitment_deser =
+            blob_to_kzg_commitment_rust(&blob_fr, &deserialized_settings).expect("commit deser");
+        assert_eq!(
+            commitment_embedded.to_bytes(),
+            commitment_deser.to_bytes(),
+            "commitment mismatch: embedded vs bincode-deserialized"
+        );
+
+        let proof_embedded =
+            compute_blob_kzg_proof_rust(&blob_fr, &commitment_embedded, embedded_settings)
+                .expect("proof embedded");
+        let proof_deser =
+            compute_blob_kzg_proof_rust(&blob_fr, &commitment_deser, &deserialized_settings)
+                .expect("proof deser");
+        assert_eq!(
+            proof_embedded.to_bytes(),
+            proof_deser.to_bytes(),
+            "proof mismatch: embedded vs bincode-deserialized"
+        );
+
+        let commitment_bytes = commitment_embedded.to_bytes();
+        let proof_bytes = proof_embedded.to_bytes();
+        verify_blob_kzg_proof_with_settings(
+            &blob_bytes,
+            &commitment_bytes,
+            &proof_bytes,
+            embedded_settings,
+        )
+        .expect("verify with embedded settings");
+        verify_blob_kzg_proof_with_settings(
+            &blob_bytes,
+            &commitment_bytes,
+            &proof_bytes,
+            &deserialized_settings,
+        )
+        .expect("verify with bincode-deserialized settings");
     }
 }

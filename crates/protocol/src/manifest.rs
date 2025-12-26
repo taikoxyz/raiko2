@@ -40,9 +40,8 @@ impl FromStr for BlobProofType {
 pub struct InputDataSource {
     pub tx_data_from_calldata: Vec<u8>,
     pub tx_data_from_blob: Vec<Vec<u8>>,
-    pub blob_commitments: Option<Vec<Vec<u8>>>,
-    pub blob_proofs: Option<Vec<Vec<u8>>>,
-    pub blob_proof_type: BlobProofType,
+    pub blob_commitments: Vec<Vec<u8>>,
+    pub blob_proofs: Vec<Vec<u8>>,
     pub is_forced_inclusion: bool,
 }
 
@@ -124,7 +123,9 @@ mod tests {
     fn test_input_data_source_default() {
         let source = InputDataSource::default();
         assert!(source.tx_data_from_calldata.is_empty());
+        assert!(source.tx_data_from_blob.is_empty());
+        assert!(source.blob_commitments.is_empty());
+        assert!(source.blob_proofs.is_empty());
         assert!(!source.is_forced_inclusion);
-        assert_eq!(source.blob_proof_type, BlobProofType::KzgVersionedHash);
     }
 }

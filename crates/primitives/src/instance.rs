@@ -204,45 +204,6 @@ impl ProtocolInstance {
     }
 }
 
-/// Verify blob usage in proposal mode.
-///
-/// Checks that raw blob commitment matches input blob commitment,
-/// then verifies the blob version hash.
-pub const fn verify_proposal_mode_blob_usage(
-    _guest_input: &GuestInput,
-    blob_proof_type: BlobProofType,
-) -> Result<()> {
-    match blob_proof_type {
-        BlobProofType::KzgVersionedHash => {
-            // ensure!(
-            //     proposal_input.taiko.tx_data_from_blob.len()
-            //         == proposal_input
-            //             .taiko
-            //             .blob_commitments
-            //             .as_ref()
-            //             .map_or(0, |c| c.len()),
-            //     "Each blob should have its own hash commit"
-            // );
-        }
-        BlobProofType::ProofOfEquivalence => {
-            // ensure!(
-            //     proposal_input.taiko.tx_data_from_blob.len()
-            //         == proposal_input
-            //             .taiko
-            //             .blob_proofs
-            //             .as_ref()
-            //             .map_or(0, |p| p.len()),
-            //     "Each blob should have its own proof"
-            // );
-        }
-    }
-
-    // TODO: Implement full blob verification with KZG.
-    // For now, just verify the counts match.
-
-    Ok(())
-}
-
 /// Calculate the txs hash for Shasta.
 pub fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B256 {
     debug!(

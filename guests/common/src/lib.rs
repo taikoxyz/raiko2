@@ -5,6 +5,7 @@ use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy_primitives::B256;
 use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{
+    blob::verify_proposal_mode_blob_usage,
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output, ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
@@ -35,6 +36,9 @@ pub fn prove_shasta_proposal(
     guest_input: &GuestInput,
     proof_carry_data: &ProofCarryData,
 ) -> Result<(B256, B256)> {
+    verify_proposal_mode_blob_usage(guest_input)
+        .context("proposal mode blob usage verification failed")?;
+
     prove_shasta_proposal_with_validator(
         guest_input,
         proof_carry_data,

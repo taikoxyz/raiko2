@@ -35,9 +35,15 @@ fn init_kzg_settings() -> Result<KZGSettings, String> {
         .map_err(|e| format!("bincode deserialize KZGSettings failed: {e}"))
 }
 
-pub type KzgGroup = [u8; 48];
 pub type KzgField = [u8; 32];
-pub type KzgCommitmentBytes = KzgGroup;
+pub type KzgCommitmentBytes = [u8; 48];
+
+fn g1_to_kzg_commitment_bytes(g1_point: &impl G1) -> KzgCommitmentBytes {
+    let bytes = g1_point.to_bytes();
+    let mut result = [0u8; 48];
+    result.copy_from_slice(&bytes);
+    result
+}
 
 fn blob_to_commitment_with_settings(
     blob: &[u8],
@@ -50,10 +56,7 @@ fn blob_to_commitment_with_settings(
         RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {}", e))
     })?;
 
-    let commitment_bytes = commitment.to_bytes();
-    let mut result = [0u8; 48];
-    result.copy_from_slice(&commitment_bytes);
-    Ok(result)
+    Ok(g1_to_kzg_commitment_bytes(&commitment))
 }
 
 /// Convert blob (Vec<u8>) to KZG commitment using the static KZG settings.
@@ -75,10 +78,7 @@ fn blob_to_proof_with_settings(
     let proof = compute_blob_kzg_proof_rust(&blob_fields, &kzg_commitment, kzg_settings)
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute proof: {}", e)))?;
 
-    let proof_bytes = proof.to_bytes();
-    let mut result = [0u8; 48];
-    result.copy_from_slice(&proof_bytes);
-    Ok(result)
+    Ok(g1_to_kzg_commitment_bytes(&proof))
 }
 
 /// Compute a KZG proof for a blob and its corresponding commitment using the static KZG settings.

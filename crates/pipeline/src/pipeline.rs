@@ -66,7 +66,8 @@ mod tests {
     use crate::{
         NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
     };
-    use raiko2_primitives::{GuestInput, ProofRequest, ProverConfig};
+    use raiko2_primitives::{ProofRequest, ProverConfig};
+    use raiko2_primitives_shasta::GuestInput;
     use raiko2_provider::Provider;
 
     struct EmptySpec {

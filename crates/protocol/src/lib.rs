@@ -2,40 +2,24 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
-//! Raiko V2 Protocol Types
+//! Raiko V2 protocol core types.
 //!
-//! This crate provides Taiko Shasta protocol types and codecs.
-//! These types are compatible with taiko-client-rs and used for:
-//!
-//! - Decoding Shasta inbox events (Proposed, Proved)
-//! - Encoding/decoding derivation source manifests
-//! - Block manifest structures for proposals
-//! - Taiko proposal manifest types for zkVM guest programs
+//! This crate provides protocol-agnostic types shared across hardforks.
+//! Hardfork-specific codecs and data live in fork-specific crates.
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use raiko2_protocol::{
-//!     ShastaEventData,
-//!     TaikoManifest, TaikoProverData, InputDataSource,
-//! };
+//! use raiko2_protocol::{TaikoManifest, TaikoProverData, InputDataSource};
 //!
-//! // Decode a proposed event
-//! let event_data = ShastaEventData::from_event_data(&bytes)?;
-//!
-//! // Create a manifest for proof generation
-//! let manifest = TaikoManifest::default();
+//! let manifest: TaikoManifest<(), ()> = TaikoManifest::default();
+//! let prover_data: TaikoProverData<()> = TaikoProverData::default();
+//! let _ = InputDataSource::default();
 //! ```
 
-mod libhash;
 mod manifest;
-mod shasta;
 
-// Re-export shasta types
-pub use libhash::*;
-pub use shasta::*;
-
-// Re-export manifest types
+// Re-export core manifest types
 pub use manifest::{
     BlobProofType, InputDataSource, ManifestChainSpec, TaikoManifest, TaikoProverData,
 };

@@ -533,9 +533,10 @@ mod tests {
         ProverBackend,
     };
     use raiko2_primitives::{
-        AggregationGuestInput, GuestInput, Proof, ProofContext, ProofRequest, ProverConfig,
-        RaikoError, RaikoResult,
+        AggregationGuestInput, Proof, ProofContext, ProofRequest, ProverConfig, RaikoError,
+        RaikoResult,
     };
+    use raiko2_primitives_shasta::GuestInput;
     use raiko2_prover::{GuestInputCodec, Prover};
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
@@ -567,7 +568,9 @@ mod tests {
         ) -> RaikoResult<Proof> {
             let raw = input.as_ref();
             if raw.len() != 8 {
-                return Err(RaikoError::Guest("Encoded input missing proposal id".to_string()));
+                return Err(RaikoError::Guest(
+                    "Encoded input missing proposal id".to_string(),
+                ));
             }
             let mut buf = [0u8; 8];
             buf.copy_from_slice(raw);

@@ -2,7 +2,6 @@
 
 use crate::RaikoResult;
 use alloy_primitives::{B256, ChainId};
-use raiko2_protocol::ProofCarryData;
 use serde::{Deserialize, Serialize};
 
 /// Prover configuration (JSON value for flexibility).
@@ -24,8 +23,8 @@ pub struct Proof {
     pub uuid: Option<String>,
     /// The kzg proof.
     pub kzg_proof: Option<String>,
-    /// the extra data of Proof
-    pub extra_data: Option<ProofCarryData>,
+    /// Extra, fork-specific metadata (serialized as JSON).
+    pub extra_data: Option<serde_json::Value>,
 }
 
 impl std::fmt::Display for Proof {

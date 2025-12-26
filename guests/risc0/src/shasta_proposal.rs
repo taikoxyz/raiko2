@@ -6,8 +6,8 @@ risc0_zkvm::guest::entry!(main);
 mod sys;
 
 use raiko2_guest_common::prove_shasta_proposal;
-use raiko2_primitives::GuestInput;
-use raiko2_protocol::ProofCarryData;
+use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_zkvm::guest::env;
 
 pub fn main() {

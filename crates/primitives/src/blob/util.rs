@@ -109,7 +109,7 @@ pub fn verify_blob_kzg_proof(
 #[cfg(test)]
 mod test {
     use super::*;
-    use kzg_traits::eip_4844::{compute_blob_kzg_proof_rust, BYTES_PER_BLOB};
+    use kzg_traits::eip_4844::{BYTES_PER_BLOB, compute_blob_kzg_proof_rust};
 
     #[test]
     fn blob_commitment_version_hash_and_proof_verify() {
@@ -144,8 +144,8 @@ mod test {
     fn bincode_deserialize_kzg_settings_bin() {
         static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
         let start = std::time::Instant::now();
-        let deserialized_settings: KZGSettings = bincode::deserialize(BIN)
-            .expect("Failed to deserialize KZGSettings from binary");
+        let deserialized_settings: KZGSettings =
+            bincode::deserialize(BIN).expect("Failed to deserialize KZGSettings from binary");
         println!(
             "✓ bincode deserialized KZGSettings in {:.2}s ({} bytes)",
             start.elapsed().as_secs_f64(),
@@ -160,8 +160,8 @@ mod test {
     #[test]
     fn bincode_settings_matches_embedded_settings_commit_proof_verify() {
         static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
-        let deserialized_settings: KZGSettings = bincode::deserialize(BIN)
-            .expect("Failed to deserialize KZGSettings from binary");
+        let deserialized_settings: KZGSettings =
+            bincode::deserialize(BIN).expect("Failed to deserialize KZGSettings from binary");
 
         let embedded_settings = get_kzg_settings().expect("load embedded settings");
 

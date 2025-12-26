@@ -27,3 +27,4 @@ alloy-trie.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-stateless.workspace = true
 bincode.workspace = true
+raiko2-primitives-shasta.workspace = true

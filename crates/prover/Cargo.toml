@@ -9,7 +9,8 @@ workspace = true
 [dependencies]
 # Workspace dependencies
 raiko2-primitives.workspace = true
-raiko2-protocol.workspace = true
+raiko2-primitives-shasta.workspace = true
+raiko2-protocol-shasta.workspace = true
 raiko2-pipeline.workspace = true
 serde.workspace = true
 serde_json.workspace = true

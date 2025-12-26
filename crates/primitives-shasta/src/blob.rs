@@ -1,14 +1,14 @@
-use crate::{GuestInput, RaikoError, RaikoResult};
+//! Shasta-specific blob verification helpers.
 
-use super::util::{KzgCommitmentBytes, get_kzg_settings, verify_blob_kzg_proof_with_settings};
+use raiko2_primitives::blob::util::{KzgCommitmentBytes, verify_blob_kzg_proof};
+use raiko2_primitives::{RaikoError, RaikoResult};
+
+use crate::GuestInput;
 
 /// Verify blob usage in proposal mode.
 ///
 /// Iterates through each data source and verifies each blob with its commitment and proof.
-/// This function uses a static KZG settings loaded from the embedded trusted setup bytes.
 pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<()> {
-    let kzg_settings = get_kzg_settings()?;
-
     for data_source in &guest_input.taiko.data_sources {
         if data_source.tx_data_from_blob.is_empty() {
             continue;
@@ -53,13 +53,7 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
             let mut proof_array: KzgCommitmentBytes = [0u8; 48];
             proof_array.copy_from_slice(&proofs[idx]);
 
-            verify_blob_kzg_proof_with_settings(
-                blob_data,
-                &commitment_array,
-                &proof_array,
-                kzg_settings,
-            )
-            .map_err(|e| {
+            verify_blob_kzg_proof(blob_data, &commitment_array, &proof_array).map_err(|e| {
                 RaikoError::InvalidBlobOption(format!(
                     "Blob verification failed at index {}: {}",
                     idx, e

@@ -118,6 +118,9 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     ensure_docker()?;
     ensure_cargo_risczero()?;
 
+    let risc0_docker_tag =
+        env::var("RISC0_DOCKER_CONTAINER_TAG").unwrap_or_else(|_| "r0.1.91.1".to_string());
+
     let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
     if profile != "release" {
         println!("[WARN] PROFILE={profile} is ignored by cargo risczero; building default profile");
@@ -149,14 +152,22 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
         env::var("RISC0_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_RISC0_RUSTFLAGS.to_string());
     cmd.env("CARGO_TARGET_RISCV32IM_RISC0_ZKVM_ELF_RUSTFLAGS", rustflags);
     cmd.env("RISC0_FEATURE_bigint2", "1");
+    cmd.env("RISC0_DOCKER_CONTAINER_TAG", &risc0_docker_tag);
+    println!("[INFO] RISC0 docker tag: {risc0_docker_tag}");
 
-    if let Ok(cc) = env::var("RISC0_GUEST_CC") && !cc.is_empty() {
+    if let Ok(cc) = env::var("RISC0_GUEST_CC")
+        && !cc.is_empty()
+    {
         cmd.env("CC", cc);
     }
-    if let Ok(cflags) = env::var("RISC0_GUEST_CFLAGS") && !cflags.is_empty() {
+    if let Ok(cflags) = env::var("RISC0_GUEST_CFLAGS")
+        && !cflags.is_empty()
+    {
         cmd.env("CFLAGS", cflags);
     }
-    if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM") && !platform.is_empty() {
+    if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
+        && !platform.is_empty()
+    {
         cmd.env("DOCKER_DEFAULT_PLATFORM", platform);
     }
     if env::var("MOCK").ok().as_deref() == Some("1") {
@@ -272,13 +283,19 @@ fn build_sp1(root: &Path, bench: bool) -> Result<()> {
             rustflags,
         );
 
-        if let Ok(cc) = env::var("SP1_GUEST_CC") && !cc.is_empty() {
+        if let Ok(cc) = env::var("SP1_GUEST_CC")
+            && !cc.is_empty()
+        {
             cmd.env("CC", cc);
         }
-        if let Ok(cflags) = env::var("SP1_GUEST_CFLAGS") && !cflags.is_empty() {
+        if let Ok(cflags) = env::var("SP1_GUEST_CFLAGS")
+            && !cflags.is_empty()
+        {
             cmd.env("CFLAGS", cflags);
         }
-        if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM") && !platform.is_empty() {
+        if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
+            && !platform.is_empty()
+        {
             cmd.env("DOCKER_DEFAULT_PLATFORM", platform);
         }
         if env::var("MOCK").ok().as_deref() == Some("1") {

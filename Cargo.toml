@@ -10,6 +10,8 @@ members = [
     "crates/engine",
     "crates/prover",
     "crates/protocol",
+    "crates/protocol-shasta",
+    "crates/primitives-shasta",
     "crates/queue",
     "bin/raiko2",
     "bin/rpc-proxy",
@@ -46,6 +48,8 @@ raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-stateless = { path = "./crates/stateless" }
 raiko2-protocol = { path = "./crates/protocol" }
+raiko2-protocol-shasta = { path = "./crates/protocol-shasta" }
+raiko2-primitives-shasta = { path = "./crates/primitives-shasta" }
 raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
 
@@ -54,9 +58,9 @@ risc0-zkvm = "3.0.4"
 sp1-sdk = "5.2.3"
 
 # Alethia reth (PR #79 branch)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 
 # Reth (v1.9.3 - same as alethia-reth uses)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.9.3" }

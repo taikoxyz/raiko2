@@ -6,10 +6,11 @@ use alethia_reth_block::config::TaikoEvmConfig;
 use alloy_consensus::transaction::SignerRecoverable;
 use raiko2_guests::{risc0, sp1};
 use raiko2_primitives::{
-    ChainSpec, GuestInput, ProofContext, RaikoError, RaikoResult, StatelessInput,
-    SupportedChainSpecs, TaikoManifest, TaikoProverData,
+    ChainSpec, ProofContext, RaikoError, RaikoResult, StatelessInput, SupportedChainSpecs,
 };
-use raiko2_protocol::ShastaEventData;
+use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::{TaikoManifest, TaikoProverData};
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block;
 use reth_ethereum_primitives::Block;
@@ -76,6 +77,8 @@ pub const SP1_SHASTA_BACKEND: Sp1ShastaBackend =
 
 #[async_trait::async_trait]
 impl ManifestBuilder for ShastaManifestBuilder {
+    type Manifest = TaikoManifest;
+
     async fn taiko_manifest(
         &self,
         ctx: &ProofContext,

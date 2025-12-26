@@ -7,7 +7,6 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-raiko2-protocol.workspace = true
 
 alethia-reth-chainspec.workspace = true
 
@@ -18,15 +17,12 @@ reth-ethereum-primitives.workspace = true
 reth-stateless.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
-alloy-sol-types.workspace = true
 
 serde.workspace = true
 serde_with.workspace = true
 serde_json.workspace = true
 
 anyhow.workspace = true
-tracing.workspace = true
-hex.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 

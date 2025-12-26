@@ -5,11 +5,9 @@
 
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
-use raiko2_primitives::{
-    AggregationGuestInput, GuestInput, Proof, ProverConfig, RaikoError, RaikoResult,
-    ShastaZkAggregationGuestInput,
-};
-use raiko2_protocol::ProofCarryData;
+use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_prover};
 use serde::{Deserialize, Serialize};
 use tracing::info;

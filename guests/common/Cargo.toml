@@ -5,10 +5,11 @@ edition = "2021"
 
 [dependencies]
 raiko2-primitives = { path = "../../crates/primitives" }
-raiko2-protocol = { path = "../../crates/protocol" }
+raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
+raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 raiko2-stateless = { path = "../../crates/stateless" }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/support_zkvm", default-features = false }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 alloy-primitives = { version = "1.5.0", default-features = false }
 anyhow = "1.0"
 

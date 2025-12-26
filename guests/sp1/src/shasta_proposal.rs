@@ -6,8 +6,8 @@ sp1_zkvm::entrypoint!(main);
 mod sys;
 
 use raiko2_guest_common::prove_shasta_proposal;
-use raiko2_primitives::GuestInput;
-use raiko2_protocol::ProofCarryData;
+use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 
 pub fn main() {
     // Read the guest input prepared by the host

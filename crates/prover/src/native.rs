@@ -2,15 +2,16 @@
 
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{
-    GuestInput, Proof, ProverConfig, RaikoError, RaikoResult, ShastaZkAggregationGuestInput,
+use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::{
+    GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
     instance::{
         ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         shasta_zk_aggregation_public_input_from_proof_carry_data_vec, words_to_bytes_be,
         words_to_bytes_le,
     },
 };
-use raiko2_protocol::ProofCarryData;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 
 use crate::GuestInputCodec;
 
@@ -83,9 +84,11 @@ where
             verifier_address: proof_carry_data.verifier,
         };
 
+        let extra_data = encode_proof_carry_data(&proof_carry_data)?;
+
         Ok(Proof {
             input: Some(instance.instance_hash()),
-            extra_data: Some(proof_carry_data),
+            extra_data: Some(extra_data),
             ..Default::default()
         })
     }

@@ -76,7 +76,8 @@ pub struct EngineJob {
 mod tests {
     use super::*;
     use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
-    use raiko2_primitives::{GuestInput, Proof};
+    use raiko2_primitives::Proof;
+    use raiko2_primitives_shasta::GuestInput;
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
 
     fn proposal_task_id(

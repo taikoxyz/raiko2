@@ -5,7 +5,7 @@
 
 //! Raiko2 Pipeline - hardfork-specific manifest builders and pipeline specs.
 
-use raiko2_primitives::{ProofContext, RaikoError, RaikoResult, TaikoManifest};
+use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -77,11 +77,12 @@ pub trait Preflight: Send + Sync {
 /// Build Taiko manifests for guest execution.
 #[async_trait::async_trait]
 pub trait ManifestBuilder: Send + Sync {
+    type Manifest: Send + Sync + 'static;
     async fn taiko_manifest(
         &self,
         ctx: &ProofContext,
         blocks: &[Block],
-    ) -> RaikoResult<TaikoManifest>;
+    ) -> RaikoResult<Self::Manifest>;
 }
 
 /// Validate a guest input for the hardfork.
@@ -114,12 +115,14 @@ pub struct NoopManifestBuilder;
 
 #[async_trait::async_trait]
 impl ManifestBuilder for NoopManifestBuilder {
+    type Manifest = ();
+
     async fn taiko_manifest(
         &self,
         _ctx: &ProofContext,
         _blocks: &[Block],
-    ) -> RaikoResult<TaikoManifest> {
-        Ok(TaikoManifest::default())
+    ) -> RaikoResult<Self::Manifest> {
+        Ok(())
     }
 }
 

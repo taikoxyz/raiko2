@@ -1,22 +1,24 @@
 [package]
-name = "raiko2-protocol"
+name = "raiko2-protocol-shasta"
 version.workspace = true
 edition.workspace = true
-description = "Taiko protocol core types for Raiko V2"
+description = "Taiko Shasta protocol types and codecs for Raiko V2"
 
 [lints]
 workspace = true
 
 [dependencies]
+raiko2-protocol.workspace = true
+
 # Alloy types
 alloy-primitives.workspace = true
-alloy-consensus.workspace = true
+alloy-sol-types.workspace = true
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
 
-# Error handling
-anyhow.workspace = true
+# Logging
+tracing.workspace = true
 
 [features]
 default = []

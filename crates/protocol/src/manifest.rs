@@ -9,8 +9,6 @@ use anyhow::{Error, anyhow};
 use core::str::FromStr;
 use serde::{Deserialize, Serialize};
 
-use crate::shasta::{Checkpoint, ShastaEventData};
-
 /// Blob proof type for Taiko.
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -47,12 +45,12 @@ pub struct InputDataSource {
 
 /// Taiko prover data.
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
-pub struct TaikoProverData {
+pub struct TaikoProverData<Cp = ()> {
     pub actual_prover: Address,
     pub designated_prover: Option<Address>,
     pub graffiti: B256,
     pub parent_transition_hash: Option<B256>,
-    pub checkpoint: Option<Checkpoint>,
+    pub checkpoint: Option<Cp>,
     pub last_anchor_block_number: Option<u64>,
 }
 
@@ -72,17 +70,17 @@ pub struct ManifestChainSpec {
 /// This manifest describes all the data needed for a zkVM guest to
 /// verify a proposal of Taiko L2 blocks.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct TaikoManifest {
+pub struct TaikoManifest<E = (), Cp = ()> {
     /// The proposal ID being proven.
     pub proposal_id: u64,
     /// The L1 header at which the proposal was proposed.
     pub l1_header: Header,
     /// The decoded proposal event data.
-    pub proposal_event: ShastaEventData,
+    pub proposal_event: E,
     /// Chain specification for the manifest.
     pub chain_spec: ManifestChainSpec,
     /// Prover-specific data.
-    pub prover_data: TaikoProverData,
+    pub prover_data: TaikoProverData<Cp>,
     /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
 }
@@ -106,14 +104,14 @@ mod tests {
 
     #[test]
     fn test_taiko_manifest_default() {
-        let manifest = TaikoManifest::default();
+        let manifest: TaikoManifest<(), ()> = TaikoManifest::default();
         assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
     }
 
     #[test]
     fn test_taiko_prover_data_default() {
-        let data = TaikoProverData::default();
+        let data: TaikoProverData<()> = TaikoProverData::default();
         assert_eq!(data.actual_prover, Address::ZERO);
         assert!(data.designated_prover.is_none());
         assert_eq!(data.graffiti, B256::ZERO);

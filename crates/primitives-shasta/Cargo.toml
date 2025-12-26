@@ -1,0 +1,24 @@
+[package]
+name = "raiko2-primitives-shasta"
+version.workspace = true
+edition.workspace = true
+
+description = "Taiko Shasta primitives for Raiko V2"
+
+[lints]
+workspace = true
+
+[dependencies]
+raiko2-primitives.workspace = true
+raiko2-protocol-shasta.workspace = true
+
+reth-ethereum-primitives.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+
+anyhow.workspace = true
+hex.workspace = true
+tracing.workspace = true

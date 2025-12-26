@@ -1,10 +1,8 @@
 // rust impl of taiko-mono/packages/protocol/contracts/layer1/shasta/libs/LibHashing.sol
 
-use crate::{
-    ProofCarryData, TransitionInputData,
-    shasta::{
-        BlobSlice, Checkpoint, Commitment, CoreState, Derivation, DerivationSource, Proposal,
-    },
+use crate::shasta::{
+    BlobSlice, Checkpoint, Commitment, CoreState, Derivation, DerivationSource, ProofCarryData,
+    Proposal, TransitionInputData,
 };
 use alloy_primitives::{Address, B256, U256, b256, keccak256};
 
@@ -94,10 +92,6 @@ const EMPTY_BYTES_HASH: B256 =
 
 pub const VERIFY_PROOF_B256: B256 =
     b256!("5645524946595f50524f4f460000000000000000000000000000000000000000");
-
-// NOTE: The following functions are commented out because they depend on ProofCarryData and
-// TransitionInputData types which are not defined in this crate yet.
-// Uncomment these once those types are available.
 
 /// Domain-separated hash for a Shasta sub-proof public input.
 ///

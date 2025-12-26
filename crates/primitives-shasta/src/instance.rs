@@ -4,14 +4,15 @@
 //! for the Shasta hardfork. Legacy fork support (Hekla, Ontake, Pacaya) has been
 //! removed in V2.
 
-use crate::{BlobProofType, GuestInput, TaikoProverData, input::ShastaRawAggregationGuestInput};
+use crate::{GuestInput, input::ShastaRawAggregationGuestInput};
 use alloy_primitives::{Address, B256, Uint, keccak256};
 use alloy_sol_types::SolValue;
 use anyhow::{Result, ensure};
-use raiko2_protocol::{
-    Commitment, ProofCarryData, Transition, hash_checkpoint, hash_commitment, hash_public_input,
-    hash_two_values,
+use raiko2_protocol_shasta::TaikoProverData;
+use raiko2_protocol_shasta::libhash::{
+    hash_checkpoint, hash_commitment, hash_public_input, hash_two_values,
 };
+use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -34,7 +35,8 @@ pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
     bytes
 }
 
-pub fn aggregation_output_combine(public_inputs: Vec<B256>) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn aggregation_output_combine(public_inputs: Vec<B256>) -> Vec<u8> {
     let mut output = Vec::with_capacity(public_inputs.len() * 32);
     for public_input in public_inputs.iter() {
         output.extend_from_slice(&public_input.0);
@@ -42,11 +44,13 @@ pub fn aggregation_output_combine(public_inputs: Vec<B256>) -> Vec<u8> {
     output
 }
 
-pub fn aggregation_output(program: B256, public_inputs: Vec<B256>) -> Vec<u8> {
+#[allow(dead_code)]
+pub(crate) fn aggregation_output(program: B256, public_inputs: Vec<B256>) -> Vec<u8> {
     aggregation_output_combine([vec![program], public_inputs].concat())
 }
 
-pub fn validate_shasta_aggregate_proof_carry_data(
+#[allow(dead_code)]
+pub(crate) fn validate_shasta_aggregate_proof_carry_data(
     aggregation_input: &ShastaRawAggregationGuestInput,
 ) -> bool {
     // The carry vector is meant to be a per-proof sidecar; treat mismatched sizes as invalid.
@@ -56,7 +60,9 @@ pub fn validate_shasta_aggregate_proof_carry_data(
     validate_shasta_proof_carry_data_vec(&aggregation_input.proof_carry_data_vec)
 }
 
-pub fn validate_shasta_proof_carry_data_vec(proof_carry_data_vec: &[ProofCarryData]) -> bool {
+pub(crate) fn validate_shasta_proof_carry_data_vec(
+    proof_carry_data_vec: &[ProofCarryData],
+) -> bool {
     if proof_carry_data_vec.is_empty() {
         return false;
     }
@@ -205,7 +211,8 @@ impl ProtocolInstance {
 }
 
 /// Calculate the txs hash for Shasta.
-pub fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B256 {
+#[allow(dead_code)]
+pub(crate) fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B256 {
     debug!(
         "calculate_txs_hash from tx_list_hash: {:?}, blob_hashes: {:?}",
         tx_list_hash, blob_hashes
@@ -219,7 +226,8 @@ pub fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B256 {
 }
 
 /// Create a protocol instance from proposal input and executed blocks.
-pub fn new_protocol_instance(
+#[allow(dead_code)]
+pub(crate) fn new_protocol_instance(
     proposal_input: &GuestInput,
     blocks: Vec<Block>,
     prover_data: &TaikoProverData,

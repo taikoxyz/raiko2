@@ -82,7 +82,10 @@ fn blob_to_proof_with_settings(
 }
 
 /// Compute KZG proof for a blob and its commitment using the static KZG settings.
-pub fn blob_to_proof(blob: &[u8], commitment: &KzgCommitmentBytes) -> RaikoResult<KzgCommitmentBytes> {
+pub fn blob_to_proof(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+) -> RaikoResult<KzgCommitmentBytes> {
     blob_to_proof_with_settings(blob, commitment, get_kzg_settings()?)
 }
 
@@ -135,6 +138,7 @@ pub fn verify_blob_kzg_proof(
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloy_primitives::hex;
     use kzg_traits::eip_4844::BYTES_PER_BLOB;
 
     #[test]
@@ -244,16 +248,25 @@ mod test {
         println!("Read blob: {} bytes", blob_bytes.len());
 
         // Given commitment from mainnet
-        let commitment_hex = "0xb8df58142f4397d25bf26f670fef31622428dbe4f22ad6e8c5386458ef28c698841904258320d98befd52b26edf1a26d";
-        let commitment_str = commitment_hex.strip_prefix("0x").unwrap_or(commitment_hex);
+        let expected_commitment = "0xb8df58142f4397d25bf26f670fef31622428dbe4f22ad6e8c5386458ef28c698841904258320d98befd52b26edf1a26d";
+        let commitment_str = expected_commitment
+            .strip_prefix("0x")
+            .unwrap_or(expected_commitment);
         let commitment_bytes: [u8; 48] = hex::decode(commitment_str)
             .expect("Failed to decode commitment hex")
             .try_into()
             .expect("Commitment must be 48 bytes");
 
+        // Check that our computed commitment matches the expected commitment_hex above
+        let computed_commitment =
+            blob_to_commitment(&blob_bytes).expect("Failed to compute commitment");
+        assert_eq!(
+            computed_commitment, commitment_bytes,
+            "Calculated commitment does not match expected commitment!"
+        );
+
         // Compute proof
-        let proof = blob_to_proof(&blob_bytes, &commitment_bytes)
-            .expect("Failed to compute proof");
+        let proof = blob_to_proof(&blob_bytes, &commitment_bytes).expect("Failed to compute proof");
         println!("Computed proof: 0x{}", hex::encode(proof));
 
         // Verify proof

@@ -1008,7 +1008,7 @@ dependencies = [
 [[package]]
 name = "bls12_381"
 version = "0.8.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
 dependencies = [
  "ff",
  "group",
@@ -2104,7 +2104,7 @@ dependencies = [
 [[package]]
 name = "kzg"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
 dependencies = [
  "arbitrary",
  "hashbrown 0.15.5",
@@ -3725,7 +3725,7 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 [[package]]
 name = "rust-kzg-zkcrypto"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
 dependencies = [
  "arbitrary",
  "bincode",
@@ -4874,10 +4874,6 @@ dependencies = [
 ]
 
 [[patch.unused]]
-name = "kzg-bench"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "bls12_381"
 version = "0.8.0"
 source = "git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-5.0.0#8774878d42311b956022007e9960043baad24a7f"
@@ -4906,3 +4902,7 @@ source = "git+https://github.com/sp1-patches/rust-secp256k1?tag=patch-0.29.1-sp1
 name = "substrate-bn"
 version = "0.6.0"
 source = "git+https://github.com/sp1-patches/bn?tag=patch-0.6.0-sp1-5.0.0#e0d67f219b2ad6a1887e3275b7ba09ada4b1afb6"
+
+[[patch.unused]]
+name = "kzg-bench"
+version = "0.1.0"

@@ -141,5 +141,5 @@ revm = { version = "33.1.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.0" }
 
 # kzg
-kzg = { package = "rust-kzg-zkcrypto", git = "https://github.com/smtmfft/rust-kzg.git", branch="raiko2-main", default-features = false, features=["rand"] }
+kzg = { package = "rust-kzg-zkcrypto", git = "https://github.com/smtmfft/rust-kzg.git", branch="raiko2-main", default-features = false }
 kzg_traits = { package = "kzg", git = "https://github.com/smtmfft/rust-kzg.git",  branch="raiko2-main", default-features = false }

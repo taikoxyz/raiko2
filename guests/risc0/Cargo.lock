@@ -1076,7 +1076,7 @@ dependencies = [
 [[package]]
 name = "bls12_381"
 version = "0.8.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "ff",
  "group",
@@ -2248,7 +2248,7 @@ dependencies = [
 [[package]]
 name = "kzg"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "arbitrary",
  "hashbrown 0.15.5",
@@ -2256,10 +2256,6 @@ dependencies = [
  "sha2",
  "siphasher",
 ]
-
-[[package]]
-name = "kzg-bench"
-version = "0.1.0"
 
 [[package]]
 name = "lazy_static"
@@ -4032,7 +4028,7 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 [[package]]
 name = "rust-kzg-zkcrypto"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "arbitrary",
  "bincode",
@@ -4041,9 +4037,7 @@ dependencies = [
  "ff",
  "hex",
  "kzg",
- "kzg-bench",
  "libc",
- "rand 0.8.5",
  "serde",
  "serde_bytes",
  "subtle",
@@ -5176,3 +5170,7 @@ source = "git+https://github.com/risc0/RustCrypto-hashes?tag=sha2-v0.10.8-riscze
 name = "substrate-bn"
 version = "0.6.0"
 source = "git+https://github.com/risc0/paritytech-bn?tag=v0.6.0-risczero.0#22108fe8c6ea1ebc1358fc4fd6854a6bf46e3509"
+
+[[patch.unused]]
+name = "kzg-bench"
+version = "0.1.0"

@@ -227,7 +227,7 @@ dependencies = [
  "ethereum_ssz_derive",
  "serde",
  "serde_with",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "thiserror",
 ]
 
@@ -1008,7 +1008,7 @@ dependencies = [
 [[package]]
 name = "bls12_381"
 version = "0.8.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "ff",
  "group",
@@ -2078,7 +2078,7 @@ dependencies = [
  "hex",
  "once_cell",
  "serdect",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "sp1-lib",
 ]
 
@@ -2104,18 +2104,14 @@ dependencies = [
 [[package]]
 name = "kzg"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "arbitrary",
  "hashbrown 0.15.5",
  "hex",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "siphasher",
 ]
-
-[[package]]
-name = "kzg-bench"
-version = "0.1.0"
 
 [[package]]
 name = "lazy_static"
@@ -2407,7 +2403,7 @@ dependencies = [
  "elliptic-curve",
  "hex",
  "primeorder",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "sp1-lib",
 ]
 
@@ -3729,7 +3725,7 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 [[package]]
 name = "rust-kzg-zkcrypto"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#852da9716e15814bf6d28eb96cebb0410b063108"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#2fafe10a48723c796958a1354f2218556701a10e"
 dependencies = [
  "arbitrary",
  "bincode",
@@ -3738,9 +3734,7 @@ dependencies = [
  "ff",
  "hex",
  "kzg",
- "kzg-bench",
  "libc",
- "rand 0.8.5",
  "serde",
  "serde_bytes",
  "subtle",
@@ -4118,7 +4112,7 @@ dependencies = [
  "p3-poseidon2",
  "p3-symmetric",
  "serde",
- "sha2 0.10.8",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4135,7 +4129,7 @@ dependencies = [
  "p3-baby-bear",
  "p3-field",
  "rand 0.8.5",
- "sha2 0.10.8",
+ "sha2 0.10.9",
  "sp1-lib",
  "sp1-primitives",
 ]
@@ -4878,6 +4872,10 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "kzg-bench"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "bls12_381"

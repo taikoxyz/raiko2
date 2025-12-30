@@ -227,7 +227,7 @@ dependencies = [
  "ethereum_ssz_derive",
  "serde",
  "serde_with",
- "sha2 0.10.9",
+ "sha2 0.10.8",
  "thiserror",
 ]
 
@@ -1008,7 +1008,7 @@ dependencies = [
 [[package]]
 name = "bls12_381"
 version = "0.8.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#8e4aa66bad0ced3725e6016ef3a4eb7264fcdb00"
 dependencies = [
  "ff",
  "group",
@@ -2043,9 +2043,9 @@ dependencies = [
 
 [[package]]
 name = "itoa"
-version = "1.0.16"
+version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ee5b5339afb4c41626dde77b7a611bd4f2c202b897852b4bcf5d03eddc61010"
+checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jobserver"
@@ -2078,7 +2078,7 @@ dependencies = [
  "hex",
  "once_cell",
  "serdect",
- "sha2 0.10.9",
+ "sha2 0.10.8",
  "sp1-lib",
 ]
 
@@ -2104,12 +2104,12 @@ dependencies = [
 [[package]]
 name = "kzg"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#8e4aa66bad0ced3725e6016ef3a4eb7264fcdb00"
 dependencies = [
  "arbitrary",
  "hashbrown 0.15.5",
  "hex",
- "sha2 0.10.9",
+ "sha2 0.10.8",
  "siphasher",
 ]
 
@@ -2403,7 +2403,7 @@ dependencies = [
  "elliptic-curve",
  "hex",
  "primeorder",
- "sha2 0.10.9",
+ "sha2 0.10.8",
  "sp1-lib",
 ]
 
@@ -2651,9 +2651,9 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "portable-atomic"
-version = "1.12.0"
+version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59e70c4aef1e55797c2e8fd94a4f2a973fc972cfde0e0b05f683667b0cd39dd"
+checksum = "f89776e4d69bb58bc6993e99ffa1d11f228b839984854c7daeb5d37f87cbe950"
 
 [[package]]
 name = "potential_utf"
@@ -2731,9 +2731,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.103"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
+checksum = "9695f8df41bb4f3d222c95a67532365f569318332d03d5f3f67f37b20e6ebdf0"
 dependencies = [
  "unicode-ident",
 ]
@@ -3690,9 +3690,9 @@ dependencies = [
 
 [[package]]
 name = "ruint"
-version = "1.17.0"
+version = "1.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68df0380e5c9d20ce49534f292a36a7514ae21350726efe1865bdb1fa91d278"
+checksum = "c141e807189ad38a07276942c6623032d3753c8859c146104ac2e4d68865945a"
 dependencies = [
  "alloy-rlp",
  "ark-ff 0.3.0",
@@ -3725,7 +3725,7 @@ checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 [[package]]
 name = "rust-kzg-zkcrypto"
 version = "0.1.0"
-source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#bf3f8a90b9d10d569f7719e9f29e730c22b1b1fc"
+source = "git+https://github.com/smtmfft/rust-kzg.git?branch=raiko2-main#8e4aa66bad0ced3725e6016ef3a4eb7264fcdb00"
 dependencies = [
  "arbitrary",
  "bincode",
@@ -3947,9 +3947,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.147"
+version = "1.0.148"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6af14725505314343e673e9ecb7cd7e8a36aa9791eb936235a3567cc31447ae4"
+checksum = "3084b546a1dd6289475996f182a22aba973866ea8e8b02c51d9f46b1336a22da"
 dependencies = [
  "indexmap 2.12.1",
  "itoa",
@@ -4112,7 +4112,7 @@ dependencies = [
  "p3-poseidon2",
  "p3-symmetric",
  "serde",
- "sha2 0.10.9",
+ "sha2 0.10.8",
 ]
 
 [[package]]
@@ -4129,7 +4129,7 @@ dependencies = [
  "p3-baby-bear",
  "p3-field",
  "rand 0.8.5",
- "sha2 0.10.9",
+ "sha2 0.10.8",
  "sp1-lib",
  "sp1-primitives",
 ]
@@ -4797,9 +4797,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize_derive"
-version = "1.4.2"
+version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce36e65b0d2999d2aafac989fb249189a141aee1f53c612c1f37d72631959f69"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4841,9 +4841,9 @@ dependencies = [
 
 [[package]]
 name = "zmij"
-version = "0.1.9"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0095ecd462946aa3927d9297b63ef82fb9a5316d7a37d134eeb36e58228615a"
+checksum = "e9747e91771f56fd7893e1164abd78febd14a670ceec257caad15e051de35f06"
 
 [[package]]
 name = "zstd"
@@ -4874,6 +4874,10 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "kzg-bench"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "bls12_381"
 version = "0.8.0"
 source = "git+https://github.com/sp1-patches/bls12_381?tag=patch-0.8.0-sp1-5.0.0#8774878d42311b956022007e9960043baad24a7f"
@@ -4902,7 +4906,3 @@ source = "git+https://github.com/sp1-patches/rust-secp256k1?tag=patch-0.29.1-sp1
 name = "substrate-bn"
 version = "0.6.0"
 source = "git+https://github.com/sp1-patches/bn?tag=patch-0.6.0-sp1-5.0.0#e0d67f219b2ad6a1887e3275b7ba09ada4b1afb6"
-
-[[patch.unused]]
-name = "kzg-bench"
-version = "0.1.0"

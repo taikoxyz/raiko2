@@ -7,15 +7,34 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-raiko2-primitives.workspace = true
-reth-ethereum-primitives.workspace = true
-reth-stateless.workspace = true
-alloy-trie.workspace = true
+alloy.workspace = true
+alloy-chains.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-trie.workspace = true
+anyhow.workspace = true
 async-trait.workspace = true
+futures.workspace = true
+itertools.workspace = true
+raiko2-primitives.workspace = true
+reth-chainspec.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-primitives-traits.workspace = true
+reth-stateless.workspace = true
 reqwest.workspace = true
+revm.workspace = true
+risc0-ethereum-trie = { workspace = true, features = ["orphan"] }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Alethia reth for Taiko chains
+alethia-reth-block.workspace = true
+alethia-reth-chainspec.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

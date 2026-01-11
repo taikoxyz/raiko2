@@ -8734,16 +8734,32 @@ dependencies = [
 name = "raiko2-provider"
 version = "0.1.0"
 dependencies = [
+ "alethia-reth-block",
+ "alethia-reth-chainspec",
+ "alloy",
+ "alloy-chains",
  "alloy-primitives",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
  "alloy-trie 0.9.2",
+ "anyhow",
  "async-trait",
+ "futures",
+ "itertools 0.14.0",
  "raiko2-primitives",
  "reqwest",
+ "reth-chainspec",
  "reth-ethereum-primitives",
+ "reth-evm",
+ "reth-evm-ethereum",
+ "reth-primitives-traits",
  "reth-stateless",
+ "revm 33.1.0",
+ "risc0-ethereum-trie 0.2.0 (git+https://github.com/risc0/risc0-ethereum.git?tag=v3.0.0)",
+ "serde",
+ "thiserror 2.0.17",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -16037,6 +16053,23 @@ name = "wit-bindgen"
 version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
+
+[[package]]
+name = "witness-check"
+version = "0.1.0"
+dependencies = [
+ "alethia-reth-block",
+ "alloy",
+ "alloy-primitives",
+ "anyhow",
+ "clap",
+ "raiko2-primitives",
+ "raiko2-provider",
+ "raiko2-stateless",
+ "reqwest",
+ "reth-ethereum-primitives",
+ "tokio",
+]
 
 [[package]]
 name = "write16"

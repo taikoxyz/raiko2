@@ -1,8 +1,8 @@
 use alloy::{
     eips::BlockNumberOrTag,
     providers::{DynProvider, Provider as AlloyProvider, ProviderBuilder},
-    rpc::client::RpcClient,
     rlp::decode_exact,
+    rpc::client::RpcClient,
 };
 use alloy_chains::NamedChain;
 use alloy_primitives::{Address, keccak256, map::AddressMap};
@@ -268,7 +268,8 @@ enum WitnessStrategy {
     LocalOnly,
 }
 
-fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessStrategy { match mode {
+fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessStrategy {
+    match mode {
         WitnessMode::ForceRemote => WitnessStrategy::RemoteOnly,
         WitnessMode::ForceLocal => WitnessStrategy::LocalOnly,
         WitnessMode::Auto => {
@@ -301,12 +302,7 @@ impl Provider for NetworkProvider {
                 .ok_or_else(|| RaikoError::RPC(format!("Block {} not found", block_number)))?;
 
             // Convert alloy BlockResponse to RethBlock
-            let reth_block: RethBlock = rpc_block.try_into().map_err(|e| {
-                RaikoError::RPC(format!(
-                    "Failed to convert block {} to RethBlock: {e:?}",
-                    block_number
-                ))
-            })?;
+            let reth_block: RethBlock = rpc_block.into();
 
             blocks.push(reth_block);
         }
@@ -335,7 +331,7 @@ impl Provider for NetworkProvider {
                 })?
                 .ok_or_else(|| RaikoError::RPC(format!("Block {block_number} not found")))?;
             let block_hash = block.header.hash_slow();
-            
+
             for address in addresses {
                 // Use eth_getProof to get account information (standard Ethereum RPC method)
                 let proof = self

@@ -80,17 +80,16 @@ impl<'de> Deserialize<'de> for ForkCondition {
     {
         // Handle both "TBD" (from JSON) and "Tbd" (Rust enum variant)
         let value: Value = Value::deserialize(deserializer)?;
-        
+
         match value {
             Value::Object(map) => {
                 if let Some(block) = map.get("Block") {
-                    let block_num = BlockNumber::deserialize(block)
-                        .map_err(serde::de::Error::custom)?;
+                    let block_num =
+                        BlockNumber::deserialize(block).map_err(serde::de::Error::custom)?;
                     return Ok(ForkCondition::Block(block_num));
                 }
                 if let Some(timestamp) = map.get("Timestamp") {
-                    let ts = u64::deserialize(timestamp)
-                        .map_err(serde::de::Error::custom)?;
+                    let ts = u64::deserialize(timestamp).map_err(serde::de::Error::custom)?;
                     return Ok(ForkCondition::Timestamp(ts));
                 }
                 Err(serde::de::Error::custom("Invalid ForkCondition object"))
@@ -99,7 +98,10 @@ impl<'de> Deserialize<'de> for ForkCondition {
                 // Handle "TBD" or "Tbd" string
                 match s.as_str() {
                     "TBD" | "Tbd" => Ok(ForkCondition::Tbd),
-                    _ => Err(serde::de::Error::custom(format!("Unknown ForkCondition variant: {}", s))),
+                    _ => Err(serde::de::Error::custom(format!(
+                        "Unknown ForkCondition variant: {}",
+                        s
+                    ))),
                 }
             }
             _ => Err(serde::de::Error::custom("Invalid ForkCondition format")),
@@ -144,7 +146,7 @@ impl Default for Eip1559Constants {
 /// - For Taiko forks, we use CANCUN as base and encode the fork name in a way that
 ///   allows us to distinguish them when needed
 /// - We maintain a separate mapping for Taiko fork lookups
-fn taiko_fork_to_spec_id(_fork_name: &str) -> SpecId {
+const fn taiko_fork_to_spec_id(_fork_name: &str) -> SpecId {
     // For now, we'll use CANCUN as placeholder for all Taiko forks.
     // The actual fork resolution happens in TaikoChainSpec.
     // We need to ensure different forks map to different values to avoid collisions.
@@ -174,26 +176,24 @@ where
 /// Custom deserializer for BTreeMap<SpecId, T> that handles Taiko-specific fork names.
 /// For Taiko forks, we need to preserve the original fork name to avoid collisions.
 /// We'll use a workaround: store them with string keys internally, then convert.
-fn deserialize_spec_id_map<'de, D, T>(
-    deserializer: D,
-) -> Result<BTreeMap<SpecId, T>, D::Error>
+fn deserialize_spec_id_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<SpecId, T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
     // First deserialize as a map with string keys
     let string_map: BTreeMap<String, T> = BTreeMap::deserialize(deserializer)?;
-    
+
     // For Taiko forks, we need to handle them specially to avoid collisions.
     // Since multiple Taiko forks would all map to CANCUN, we'll use a different approach:
     // We'll create a composite key or use a workaround.
     // Actually, for Taiko chains, the lookup is done via TaikoChainSpec anyway,
     // so we can use a placeholder. But we need to preserve the mapping.
-    
+
     // Let's use a simpler approach: for Taiko forks, we'll store them separately
     // and use CANCUN as the key. The actual resolution happens in TaikoChainSpec.
     let mut spec_id_map = BTreeMap::new();
-    
+
     for (key, value) in string_map {
         let spec_id = match key.as_str() {
             "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => {
@@ -204,10 +204,9 @@ where
                 // in the hard_forks map, which is actually fine since they're ordered.
                 SpecId::CANCUN
             }
-            _ => {
-                serde_json::from_str(&format!("\"{}\"", key))
-                    .map_err(|_| serde::de::Error::custom(format!("unknown SpecId variant: {}", key)))?
-            }
+            _ => serde_json::from_str(&format!("\"{}\"", key)).map_err(|_| {
+                serde::de::Error::custom(format!("unknown SpecId variant: {}", key))
+            })?,
         };
         // Note: This will overwrite if multiple Taiko forks exist, but that's OK
         // because for Taiko chains, we use TaikoChainSpec which handles forks properly.
@@ -232,34 +231,35 @@ pub struct ChainSpec {
     pub rpc: String,
     pub beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
-    pub verifier_address_forks: BTreeMap<SpecId, BTreeMap<ProofType, Option<Address>>>,
+    pub verifier_address_forks: VerifierAddressForks,
     pub genesis_time: u64,
     pub seconds_per_slot: u64,
     pub is_taiko: bool,
 }
 
+type VerifierAddressForks = BTreeMap<SpecId, BTreeMap<ProofType, Option<Address>>>;
+
 /// Custom deserializer for verifier_address_forks nested map structure.
 fn deserialize_verifier_address_forks<'de, D>(
     deserializer: D,
-) -> Result<BTreeMap<SpecId, BTreeMap<ProofType, Option<Address>>>, D::Error>
+) -> Result<VerifierAddressForks, D::Error>
 where
     D: Deserializer<'de>,
 {
     // First deserialize as a map with string keys, where inner map also has string keys
     let string_map: BTreeMap<String, BTreeMap<String, Option<Address>>> =
         BTreeMap::deserialize(deserializer)?;
-    
+
     // Convert string keys to SpecId and inner string keys to ProofType
-    let mut spec_id_map = BTreeMap::new();
+    let mut spec_id_map: VerifierAddressForks = BTreeMap::new();
     for (key, inner_map) in string_map {
         let spec_id = match key.as_str() {
             "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => SpecId::CANCUN,
-            _ => {
-                serde_json::from_str(&format!("\"{}\"", key))
-                    .map_err(|_| serde::de::Error::custom(format!("unknown SpecId variant: {}", key)))?
-            }
+            _ => serde_json::from_str(&format!("\"{}\"", key)).map_err(|_| {
+                serde::de::Error::custom(format!("unknown SpecId variant: {}", key))
+            })?,
         };
-        
+
         // Convert inner map: skip SGXGETH, convert other keys to ProofType
         let mut proof_type_map = BTreeMap::new();
         for (proof_key, address) in inner_map {
@@ -267,7 +267,7 @@ where
             if proof_key == "SGXGETH" {
                 continue;
             }
-            
+
             // Convert proof type string to ProofType enum
             let proof_type = match proof_key.as_str() {
                 "NATIVE" | "Native" => ProofType::Native,
@@ -275,12 +275,15 @@ where
                 "SGX" | "Sgx" => ProofType::Sgx,
                 "RISC0" | "Risc0" => ProofType::Risc0,
                 _ => {
-                    return Err(serde::de::Error::custom(format!("unknown ProofType variant: {}", proof_key)));
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown ProofType variant: {}",
+                        proof_key
+                    )));
                 }
             };
             proof_type_map.insert(proof_type, address);
         }
-        
+
         spec_id_map.insert(spec_id, proof_type_map);
     }
     Ok(spec_id_map)
@@ -306,12 +309,12 @@ impl<'de> Deserialize<'de> for ChainSpec {
             rpc: String,
             beacon_rpc: Option<String>,
             #[serde(deserialize_with = "deserialize_verifier_address_forks")]
-            verifier_address_forks: BTreeMap<SpecId, BTreeMap<ProofType, Option<Address>>>,
+            verifier_address_forks: VerifierAddressForks,
             genesis_time: u64,
             seconds_per_slot: u64,
             is_taiko: bool,
         }
-        
+
         let helper = ChainSpecHelper::deserialize(deserializer)?;
         Ok(ChainSpec {
             name: helper.name,

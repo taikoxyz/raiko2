@@ -255,6 +255,98 @@ where
         spawn_maintenance_supervised(self.clone(), maintenance_interval);
     }
 
+    async fn get_guest_input(
+        &self,
+        id: EngineTaskId,
+        expected_stage: PipelineStage,
+        task_name: &str,
+    ) -> Result<S::GuestInput, String> {
+        let view = self
+            .inner
+            .scheduler
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("missing {task_name} task"))?;
+
+        match view.state {
+            TaskState::Succeeded {
+                output: EngineOutput::GuestInput(input),
+            } => {
+                if input.stage == expected_stage {
+                    Ok(input.output)
+                } else {
+                    let err = match expected_stage {
+                        PipelineStage::Preflight => {
+                            "preflight task did not produce preflight output"
+                        }
+                        PipelineStage::Validation => {
+                            "input task did not produce validated GuestInput"
+                        }
+                        _ => "input task did not produce expected stage output",
+                    };
+                    Err(err.to_string())
+                }
+            }
+            TaskState::Succeeded { .. } => {
+                Err(format!("{task_name} task did not produce GuestInput"))
+            }
+            _ => Err(format!("{task_name} task not completed")),
+        }
+    }
+
+    async fn get_encoded_input(&self, id: EngineTaskId) -> Result<EncodedGuestInput, String> {
+        let view = self
+            .inner
+            .scheduler
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing input task".to_string())?;
+
+        match view.state {
+            TaskState::Succeeded {
+                output: EngineOutput::EncodedInput(input),
+            } => {
+                if input.stage == PipelineStage::Encode {
+                    Ok(input.output)
+                } else {
+                    Err("input task did not produce encoded GuestInput".to_string())
+                }
+            }
+            TaskState::Succeeded { .. } => {
+                Err("input task did not produce encoded input".to_string())
+            }
+            _ => Err("input task not completed".to_string()),
+        }
+    }
+
+    async fn get_proof(&self, id: EngineTaskId) -> Result<raiko2_primitives::Proof, String> {
+        let view = self
+            .inner
+            .scheduler
+            .get(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "missing dependency proof task".to_string())?;
+
+        match view.state {
+            TaskState::Succeeded {
+                output: EngineOutput::Proof(proof),
+            } => {
+                if proof.stage == PipelineStage::Prove {
+                    Ok(proof.output)
+                } else {
+                    Err("dependency task did not produce proposal proof".to_string())
+                }
+            }
+            TaskState::Succeeded { .. } => {
+                Err("dependency task did not produce Proof".to_string())
+            }
+            _ => Err("dependency task not completed".to_string()),
+        }
+    }
+
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
             EngineTask::Preflight { proposal_id } => {
@@ -270,30 +362,9 @@ where
                 proposal_id,
                 preflight_task,
             } => {
-                let input_view = self
-                    .inner
-                    .scheduler
-                    .get(preflight_task)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "missing preflight task".to_string())?;
-
-                let preflight_input = match input_view.state {
-                    TaskState::Succeeded {
-                        output: EngineOutput::GuestInput(input),
-                    } => match input.stage {
-                        PipelineStage::Preflight => input.output,
-                        _ => {
-                            return Err(
-                                "preflight task did not produce preflight output".to_string()
-                            );
-                        }
-                    },
-                    TaskState::Succeeded { .. } => {
-                        return Err("preflight task did not produce GuestInput".to_string());
-                    }
-                    _ => return Err("preflight task not completed".to_string()),
-                };
+                let preflight_input = self
+                    .get_guest_input(preflight_task, PipelineStage::Preflight, "preflight")
+                    .await?;
 
                 let ctx = self.context_for_proposal(proposal_id);
                 let pipeline = Pipeline::new(&self.inner.spec);
@@ -306,30 +377,9 @@ where
                 proposal_id,
                 input_task,
             } => {
-                let input_view = self
-                    .inner
-                    .scheduler
-                    .get(input_task)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "missing input task".to_string())?;
-
-                let guest_input = match input_view.state {
-                    TaskState::Succeeded {
-                        output: EngineOutput::GuestInput(input),
-                    } => match input.stage {
-                        PipelineStage::Validation => input.output,
-                        _ => {
-                            return Err(
-                                "input task did not produce validated GuestInput".to_string()
-                            );
-                        }
-                    },
-                    TaskState::Succeeded { .. } => {
-                        return Err("input task did not produce GuestInput".to_string());
-                    }
-                    _ => return Err("input task not completed".to_string()),
-                };
+                let guest_input = self
+                    .get_guest_input(input_task, PipelineStage::Validation, "input")
+                    .await?;
 
                 let ctx = self.context_for_proposal(proposal_id);
                 let encoded = self
@@ -347,31 +397,8 @@ where
                 proposal_id: _,
                 input_task,
             } => {
-                // NOTE: This relies on the store retaining task outputs until dependents
-                // have finished. Current stores do not garbage-collect outputs; any future
-                // GC/TTL must ensure dependency outputs remain available.
-                let input_view = self
-                    .inner
-                    .scheduler
-                    .get(input_task)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "missing input task".to_string())?;
-
-                let encoded = match input_view.state {
-                    TaskState::Succeeded {
-                        output: EngineOutput::EncodedInput(input),
-                    } => match input.stage {
-                        PipelineStage::Encode => input.output,
-                        _ => {
-                            return Err("input task did not produce encoded GuestInput".to_string());
-                        }
-                    },
-                    TaskState::Succeeded { .. } => {
-                        return Err("input task did not produce encoded input".to_string());
-                    }
-                    _ => return Err("input task not completed".to_string()),
-                };
+                // Keep dependency output until downstream completes.
+                let encoded = self.get_encoded_input(input_task).await?;
 
                 let proof = self
                     .inner
@@ -395,29 +422,7 @@ where
             } => {
                 let mut proofs = Vec::with_capacity(proof_tasks.len());
                 for proof_task in proof_tasks {
-                    let view = self
-                        .inner
-                        .scheduler
-                        .get(proof_task)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| "missing dependency proof task".to_string())?;
-                    match view.state {
-                        TaskState::Succeeded {
-                            output: EngineOutput::Proof(proof),
-                        } => match proof.stage {
-                            PipelineStage::Prove => proofs.push(proof.output),
-                            _ => {
-                                return Err(
-                                    "dependency task did not produce proposal proof".to_string()
-                                );
-                            }
-                        },
-                        TaskState::Succeeded { .. } => {
-                            return Err("dependency task did not produce Proof".to_string());
-                        }
-                        _ => return Err("dependency task not completed".to_string()),
-                    }
+                    proofs.push(self.get_proof(proof_task).await?);
                 }
 
                 let proof = self
@@ -796,5 +801,142 @@ mod tests {
 
         let view = engine.get(job_id).await.unwrap().unwrap();
         assert!(matches!(view.state, TaskState::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn validate_requires_preflight_output_stage() {
+        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
+        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use raiko2_queue::{NewTask, Priority};
+
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let proposal_id = 1;
+        let preflight_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+            proposal_id,
+            stage: ProposalStage::Preflight,
+        });
+
+        // Manually submit and complete a preflight task with WRONG stage output (e.g., Validation)
+        engine
+            .inner
+            .scheduler
+            .submit(
+                preflight_id.clone(),
+                NewTask {
+                    priority: Priority::Low,
+                    payload: EngineTask::Preflight { proposal_id },
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let lease = engine.inner.scheduler.next_ready("w1").await.unwrap().unwrap();
+
+        // Complete it with PipelineStage::Validation instead of PipelineStage::Preflight
+        let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
+            PipelineStage::Validation,
+            GuestInput::default(),
+        )));
+
+        engine
+            .inner
+            .scheduler
+            .complete(lease, Ok(wrong_output))
+            .await
+            .unwrap();
+
+        // Run the validation task directly via engine.execute to check error
+        let result = engine
+            .execute(EngineTask::Validate {
+                proposal_id,
+                preflight_task: preflight_id,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "preflight task did not produce preflight output"
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_requires_validated_guest_input() {
+        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
+        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use raiko2_queue::{NewTask, Priority};
+
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let proposal_id = 1;
+        let validation_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+            proposal_id,
+            stage: ProposalStage::Validation,
+        });
+
+        // Manually submit and complete a validation task with WRONG stage output (e.g., Preflight)
+        engine
+            .inner
+            .scheduler
+            .submit(
+                validation_id.clone(),
+                NewTask {
+                    priority: Priority::Low,
+                    payload: EngineTask::Validate {
+                        proposal_id,
+                        preflight_task: EngineTaskId::new(EngineTaskKey::Proposal {
+                            pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                            proposal_id,
+                            stage: ProposalStage::Preflight,
+                        }),
+                    },
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let lease = engine.inner.scheduler.next_ready("w1").await.unwrap().unwrap();
+
+        // Complete it with PipelineStage::Preflight instead of PipelineStage::Validation
+        let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
+            PipelineStage::Preflight,
+            GuestInput::default(),
+        )));
+
+        engine
+            .inner
+            .scheduler
+            .complete(lease, Ok(wrong_output))
+            .await
+            .unwrap();
+
+        // Run the encode task directly via engine.execute to check error
+        let result = engine
+            .execute(EngineTask::Encode {
+                proposal_id,
+                input_task: validation_id,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "input task did not produce validated GuestInput"
+        );
     }
 }

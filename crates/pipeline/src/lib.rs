@@ -162,15 +162,15 @@ impl ProverBackend for NativeBackend {
     }
 }
 
-/// RISC0 backend for Shasta guest programs.
+/// Shared ELF selector for Shasta guest programs.
 #[derive(Debug, Clone, Copy)]
-pub struct Risc0ShastaBackend {
+pub(crate) struct ShastaElfBackend {
     proposal_elf: &'static [u8],
     aggregation_elf: &'static [u8],
 }
 
-impl Risc0ShastaBackend {
-    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+impl ShastaElfBackend {
+    pub(crate) const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             proposal_elf,
             aggregation_elf,
@@ -178,36 +178,59 @@ impl Risc0ShastaBackend {
     }
 }
 
-impl ProverBackend for Risc0ShastaBackend {
+impl ProverBackend for ShastaElfBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
         Ok(match stage {
             ProofStage::Proposal => self.proposal_elf,
             ProofStage::Aggregation => self.aggregation_elf,
         })
+    }
+}
+
+/// RISC0 backend for Shasta guest programs.
+#[derive(Debug, Clone, Copy)]
+pub struct Risc0ShastaBackend {
+    elf_backend: ShastaElfBackend,
+}
+
+impl Risc0ShastaBackend {
+    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+        Self {
+            elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
+        }
+    }
+
+    pub(crate) const fn from_elf_backend(elf_backend: ShastaElfBackend) -> Self {
+        Self { elf_backend }
+    }
+}
+
+impl ProverBackend for Risc0ShastaBackend {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        self.elf_backend.elf(stage)
     }
 }
 
 /// SP1 backend for Shasta guest programs.
 #[derive(Debug, Clone, Copy)]
 pub struct Sp1ShastaBackend {
-    proposal_elf: &'static [u8],
-    aggregation_elf: &'static [u8],
+    elf_backend: ShastaElfBackend,
 }
 
 impl Sp1ShastaBackend {
     pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
-            proposal_elf,
-            aggregation_elf,
+            elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
         }
+    }
+
+    pub(crate) const fn from_elf_backend(elf_backend: ShastaElfBackend) -> Self {
+        Self { elf_backend }
     }
 }
 
 impl ProverBackend for Sp1ShastaBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
-        Ok(match stage {
-            ProofStage::Proposal => self.proposal_elf,
-            ProofStage::Aggregation => self.aggregation_elf,
-        })
+        self.elf_backend.elf(stage)
     }
 }

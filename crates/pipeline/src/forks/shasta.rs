@@ -68,12 +68,14 @@ impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
 }
 
 /// RISC0 backend preloaded with Shasta ELFs.
-pub const RISC0_SHASTA_BACKEND: Risc0ShastaBackend =
-    Risc0ShastaBackend::new(risc0::shasta::PROPOSAL_ELF, risc0::shasta::AGGREGATION_ELF);
+pub const RISC0_SHASTA_BACKEND: Risc0ShastaBackend = Risc0ShastaBackend::from_elf_backend(
+    crate::ShastaElfBackend::new(risc0::shasta::PROPOSAL_ELF, risc0::shasta::AGGREGATION_ELF),
+);
 
 /// SP1 backend preloaded with Shasta ELFs.
-pub const SP1_SHASTA_BACKEND: Sp1ShastaBackend =
-    Sp1ShastaBackend::new(sp1::shasta::PROPOSAL_ELF, sp1::shasta::AGGREGATION_ELF);
+pub const SP1_SHASTA_BACKEND: Sp1ShastaBackend = Sp1ShastaBackend::from_elf_backend(
+    crate::ShastaElfBackend::new(sp1::shasta::PROPOSAL_ELF, sp1::shasta::AGGREGATION_ELF),
+);
 
 #[async_trait::async_trait]
 impl ManifestBuilder for ShastaManifestBuilder {

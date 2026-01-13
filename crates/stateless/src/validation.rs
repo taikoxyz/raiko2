@@ -32,6 +32,88 @@ pub fn validate_block(
     stateless_validation_with_trie::<SparseState>(block, witness, callers, chain_spec, config)
 }
 
+fn decode_recovered_block(
+    block: Block,
+) -> Result<RecoveredBlock<Block>, StatelessValidationError> {
+    block
+        .try_into_recovered()
+        .map_err(|_| StatelessValidationError::SignerRecovery)
+}
+
+fn decode_headers(witness: &ExecutionWitness) -> Result<Vec<Header>, StatelessValidationError> {
+    let mut ancestor_headers: Vec<Header> = witness
+        .headers
+        .iter()
+        .map(|serialized_header| {
+            let bytes = serialized_header.as_ref();
+            Header::decode(&mut &bytes[..])
+                .map_err(|_| StatelessValidationError::HeaderDeserializationFailed)
+        })
+        .collect::<Result<_, _>>()?;
+    // Sort the headers by their block number to ensure that they are in
+    // ascending order.
+    ancestor_headers.sort_by_key(|header| header.number());
+    Ok(ancestor_headers)
+}
+
+fn determine_pre_state_root(headers: &[Header]) -> Result<B256, StatelessValidationError> {
+    match headers.last() {
+        Some(prev_header) => Ok(prev_header.state_root),
+        None => Err(StatelessValidationError::MissingAncestorHeader),
+    }
+}
+
+fn execute_block<T>(
+    current_block: &RecoveredBlock<Block>,
+    witness: &ExecutionWitness,
+    callers: AddressMap<TrieAccount>,
+    chain_spec: &TaikoChainSpec,
+    evm_config: TaikoEvmConfig,
+    ancestor_hashes: BTreeMap<u64, B256>,
+    pre_state_root: B256,
+) -> Result<B256, StatelessValidationError>
+where
+    T: StatelessTrieExt,
+{
+    // First verify that the pre-state reads are correct
+    let (mut trie, bytecode) = T::new(witness, pre_state_root)?;
+    trie.append_callers(callers);
+
+    // Create an in-memory database that will use the reads to validate the block
+    let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
+
+    // Execute the block
+    let executor = evm_config.executor(db);
+    let output = executor
+        .execute(current_block)
+        .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
+
+    // Post validation checks
+    validate_block_post_execution(
+        current_block,
+        chain_spec,
+        &output.receipts,
+        &output.requests,
+    )
+    .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+
+    validate_anchor_transaction_in_block(current_block, chain_spec)
+        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+
+    // Compute and check the post state root
+    let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
+    let state_root = trie.calculate_state_root(hashed_state)?;
+    if state_root != current_block.state_root {
+        return Err(StatelessValidationError::PostStateRootMismatch {
+            got: state_root,
+            expected: current_block.state_root,
+        });
+    }
+
+    // Return block hash
+    Ok(current_block.hash_slow())
+}
+
 // Performs stateless validation of a block using a custom `StatelessTrie` implementation.
 //
 // This is a generic version of `stateless_validation` that allows users to provide their own
@@ -48,22 +130,9 @@ fn stateless_validation_with_trie<T>(
 where
     T: StatelessTrieExt,
 {
-    let current_block = current_block
-        .try_into_recovered()
-        .map_err(|_| StatelessValidationError::SignerRecovery)?;
+    let current_block = decode_recovered_block(current_block)?;
 
-    let mut ancestor_headers: Vec<Header> = witness
-        .headers
-        .iter()
-        .map(|serialized_header| {
-            let bytes = serialized_header.as_ref();
-            Header::decode(&mut &bytes[..])
-                .map_err(|_| StatelessValidationError::HeaderDeserializationFailed)
-        })
-        .collect::<Result<_, _>>()?;
-    // Sort the headers by their block number to ensure that they are in
-    // ascending order.
-    ancestor_headers.sort_by_key(|header| header.number());
+    let ancestor_headers = decode_headers(&witness)?;
 
     // Validate block against pre-execution consensus rules
     validate_block_consensus(chain_spec.clone(), &current_block, &ancestor_headers)?;
@@ -77,48 +146,17 @@ where
     // retrieve the previous state root.
     // The edge case here would be the genesis block, but we do not create proofs for the genesis
     // block.
-    let pre_state_root = match ancestor_headers.last() {
-        Some(prev_header) => prev_header.state_root,
-        None => return Err(StatelessValidationError::MissingAncestorHeader),
-    };
+    let pre_state_root = determine_pre_state_root(&ancestor_headers)?;
 
-    // First verify that the pre-state reads are correct
-    let (mut trie, bytecode) = T::new(&witness, pre_state_root)?;
-    trie.append_callers(callers);
-
-    // Create an in-memory database that will use the reads to validate the block
-    let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
-
-    // Execute the block
-    let executor = evm_config.executor(db);
-    let output = executor
-        .execute(&current_block)
-        .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
-
-    // Post validation checks
-    validate_block_post_execution(
+    execute_block::<T>(
         &current_block,
-        &chain_spec,
-        &output.receipts,
-        &output.requests,
+        &witness,
+        callers,
+        chain_spec.as_ref(),
+        evm_config,
+        ancestor_hashes,
+        pre_state_root,
     )
-    .map_err(StatelessValidationError::ConsensusValidationFailed)?;
-
-    validate_anchor_transaction_in_block(&current_block, chain_spec.as_ref())
-        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
-
-    // Compute and check the post state root
-    let hashed_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(&output.state.state);
-    let state_root = trie.calculate_state_root(hashed_state)?;
-    if state_root != current_block.state_root {
-        return Err(StatelessValidationError::PostStateRootMismatch {
-            got: state_root,
-            expected: current_block.state_root,
-        });
-    }
-
-    // Return block hash
-    Ok(current_block.hash_slow())
 }
 
 #[derive(Debug, Clone)]

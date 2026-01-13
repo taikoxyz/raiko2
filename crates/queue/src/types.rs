@@ -29,6 +29,25 @@ pub enum Priority {
     Low,
 }
 
+impl Priority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Priority::High => "high",
+            Priority::Medium => "medium",
+            Priority::Low => "low",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "high" => Some(Priority::High),
+            "medium" => Some(Priority::Medium),
+            "low" => Some(Priority::Low),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState<O, Id> {
     Pending {

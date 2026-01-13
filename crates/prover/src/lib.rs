@@ -28,11 +28,52 @@ pub mod sp1;
 
 use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoResult};
+use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::ShastaZkAggregationGuestInput;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
+use serde_json::Value;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
+}
+
+fn config_value(config: &ProverConfig, key: &str) -> Value {
+    config.get(key).cloned().unwrap_or(Value::Null)
+}
+
+pub(crate) fn parse_proof_carry_data(config: &ProverConfig) -> ProofCarryData {
+    serde_json::from_value(config_value(config, "proof_carry_data")).unwrap_or_default()
+}
+
+pub(crate) fn parse_shasta_aggregation_input(
+    config: &ProverConfig,
+) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
+    serde_json::from_value(
+        config
+            .get("shasta_zk_aggregation_input")
+            .cloned()
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "Missing 'shasta_zk_aggregation_input' in config".to_string(),
+                )
+            })?,
+    )
+    .map_err(|e| {
+        RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {}", e))
+    })
+}
+
+pub(crate) fn validate_shasta_aggregation_lengths(
+    aggregation_input: &ShastaZkAggregationGuestInput,
+) -> Result<(), RaikoError> {
+    if aggregation_input.block_inputs.len() != aggregation_input.proof_carry_data_vec.len() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "Mismatched block_inputs and proof_carry_data_vec lengths".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Common prover trait for all proving backends.

@@ -5,6 +5,23 @@ use raiko2_primitives::{RaikoError, RaikoResult};
 
 use crate::GuestInput;
 
+fn read_kzg_bytes(
+    value: &[u8],
+    label: &str,
+    idx: usize,
+) -> RaikoResult<KzgCommitmentBytes> {
+    if value.len() != 48 {
+        return Err(RaikoError::InvalidBlobOption(format!(
+            "{label} at index {idx} has invalid length (expected 48 bytes, got {})",
+            value.len()
+        )));
+    }
+
+    let mut bytes: KzgCommitmentBytes = [0u8; 48];
+    bytes.copy_from_slice(value);
+    Ok(bytes)
+}
+
 /// Verify blob usage in proposal mode.
 ///
 /// Iterates through each data source and verifies each blob with its commitment and proof.
@@ -33,25 +50,8 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
         }
 
         for (idx, blob_data) in data_source.tx_data_from_blob.iter().enumerate() {
-            if commitments[idx].len() != 48 {
-                return Err(RaikoError::InvalidBlobOption(format!(
-                    "Commitment at index {} has invalid length (expected 48 bytes, got {})",
-                    idx,
-                    commitments[idx].len()
-                )));
-            }
-            let mut commitment_array: KzgCommitmentBytes = [0u8; 48];
-            commitment_array.copy_from_slice(&commitments[idx]);
-
-            if proofs[idx].len() != 48 {
-                return Err(RaikoError::InvalidBlobOption(format!(
-                    "Proof at index {} has invalid length (expected 48 bytes, got {})",
-                    idx,
-                    proofs[idx].len()
-                )));
-            }
-            let mut proof_array: KzgCommitmentBytes = [0u8; 48];
-            proof_array.copy_from_slice(&proofs[idx]);
+            let commitment_array = read_kzg_bytes(&commitments[idx], "Commitment", idx)?;
+            let proof_array = read_kzg_bytes(&proofs[idx], "Proof", idx)?;
 
             verify_blob_kzg_proof(blob_data, &commitment_array, &proof_array).map_err(|e| {
                 RaikoError::InvalidBlobOption(format!(

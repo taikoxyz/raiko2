@@ -6,13 +6,12 @@
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
-use raiko2_protocol_shasta::shasta::ProofCarryData;
+use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_prover};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::GuestInputCodec;
+use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
 
 /// RISC0 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,13 +113,7 @@ where
         info!("Starting RISC0 proposal proof generation...");
 
         // Extract ProofCarryData from config if available
-        let proof_carry_data: ProofCarryData = serde_json::from_value(
-            config
-                .get("proof_carry_data")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .unwrap_or_default();
+        let proof_carry_data = parse_proof_carry_data(config);
 
         // Build the executor environment with both inputs
         // The guest reads:
@@ -203,26 +196,8 @@ where
         );
 
         // Extract ShastaZkAggregationGuestInput from config
-        let aggregation_input: ShastaZkAggregationGuestInput = serde_json::from_value(
-            config
-                .get("shasta_zk_aggregation_input")
-                .cloned()
-                .ok_or_else(|| {
-                    RaikoError::InvalidRequestConfig(
-                        "Missing 'shasta_zk_aggregation_input' in config".to_string(),
-                    )
-                })?,
-        )
-        .map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {}", e))
-        })?;
-
-        // Validate input length matches
-        if aggregation_input.block_inputs.len() != aggregation_input.proof_carry_data_vec.len() {
-            return Err(RaikoError::InvalidRequestConfig(
-                "Mismatched block_inputs and proof_carry_data_vec lengths".to_string(),
-            ));
-        }
+        let aggregation_input = parse_shasta_aggregation_input(config)?;
+        validate_shasta_aggregation_lengths(&aggregation_input)?;
 
         // Get proposal image ID for proof verification
         let proposal_elf = backend.elf(ProofStage::Proposal)?;

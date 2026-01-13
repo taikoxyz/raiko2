@@ -69,7 +69,7 @@ where
     }
 
     fn ready_key(&self, prio: Priority) -> String {
-        format!("{}:ready:{}", self.namespace, prio_str(prio))
+        format!("{}:ready:{}", self.namespace, prio.as_str())
     }
 
     fn scheduled_key(&self) -> String {
@@ -102,22 +102,6 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-const fn prio_str(prio: Priority) -> &'static str {
-    match prio {
-        Priority::High => "high",
-        Priority::Medium => "medium",
-        Priority::Low => "low",
-    }
-}
-
-fn parse_prio(s: &str) -> Option<Priority> {
-    match s {
-        "high" => Some(Priority::High),
-        "medium" => Some(Priority::Medium),
-        "low" => Some(Priority::Low),
-        _ => None,
-    }
-}
 
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for RedisStore<P, O, Id>
@@ -155,7 +139,7 @@ return 1
         )
         .key(&task_key)
         .arg(FIELD_PRIORITY)
-        .arg(prio_str(prio))
+        .arg(prio.as_str())
         .arg(FIELD_STATE)
         .arg(STATE_PENDING)
         .arg(FIELD_REMAINING)
@@ -435,7 +419,7 @@ return 1
         let Some(prio) = prio else {
             return Ok(None);
         };
-        let priority = parse_prio(prio.as_str())
+        let priority = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
 
         drop(conn);
@@ -504,7 +488,7 @@ return redis.call('HGET', KEYS[1], ARGV[5])
             return Ok(None);
         };
 
-        let parsed = parse_prio(prio.as_str())
+        let parsed = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
         Ok(Some(parsed))
     }
@@ -592,7 +576,7 @@ end
         let id = self.decode_id(&id)?;
         let payload: P = bincode::deserialize(&payload_bytes)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
-        let prio = parse_prio(prio.as_str())
+        let prio = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
         Ok(Some((id, payload, prio, attempt.max(0) as u32)))
     }
@@ -649,7 +633,7 @@ return {payload, priority, attempt}
         };
         let payload: P = bincode::deserialize(&payload_bytes)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
-        let prio = parse_prio(prio.as_str())
+        let prio = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
         Ok(Some((payload, prio, attempt.max(0) as u32)))
     }

@@ -15,6 +15,7 @@ members = [
     "crates/queue",
     "bin/raiko2",
     "bin/rpc-proxy",
+    "bin/witness-check",
 ]
 exclude = ["guests/*"]
 

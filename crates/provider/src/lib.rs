@@ -3,6 +3,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 pub mod network;
+pub mod on_the_spot_witness;
 
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
@@ -11,6 +12,7 @@ use reth_ethereum_primitives::Block;
 use reth_stateless::ExecutionWitness;
 
 pub use network::NetworkProvider;
+pub use network::WitnessMode;
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
 ///

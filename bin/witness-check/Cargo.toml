@@ -1,0 +1,21 @@
+[package]
+name = "witness-check"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+anyhow = { workspace = true }
+alethia-reth-block = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+raiko2-primitives = { workspace = true }
+raiko2-provider = { workspace = true }
+raiko2-stateless = { workspace = true }
+reqwest = { workspace = true }
+reth-ethereum-primitives = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

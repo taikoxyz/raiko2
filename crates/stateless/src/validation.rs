@@ -32,9 +32,7 @@ pub fn validate_block(
     stateless_validation_with_trie::<SparseState>(block, witness, callers, chain_spec, config)
 }
 
-fn decode_recovered_block(
-    block: Block,
-) -> Result<RecoveredBlock<Block>, StatelessValidationError> {
+fn decode_recovered_block(block: Block) -> Result<RecoveredBlock<Block>, StatelessValidationError> {
     block
         .try_into_recovered()
         .map_err(|_| StatelessValidationError::SignerRecovery)
@@ -56,7 +54,7 @@ fn decode_headers(witness: &ExecutionWitness) -> Result<Vec<Header>, StatelessVa
     Ok(ancestor_headers)
 }
 
-fn determine_pre_state_root(headers: &[Header]) -> Result<B256, StatelessValidationError> {
+const fn determine_pre_state_root(headers: &[Header]) -> Result<B256, StatelessValidationError> {
     match headers.last() {
         Some(prev_header) => Ok(prev_header.state_root),
         None => Err(StatelessValidationError::MissingAncestorHeader),

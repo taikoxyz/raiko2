@@ -13,7 +13,10 @@ use sp1_sdk::{
 };
 use tracing::info;
 
-use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
+use crate::{
+    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
+    validate_shasta_aggregation_lengths,
+};
 
 /// SP1 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]

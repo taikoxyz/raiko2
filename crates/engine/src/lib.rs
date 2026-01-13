@@ -262,12 +262,8 @@ where
         task_name: &str,
     ) -> Result<S::GuestInput, String> {
         let view = self
-            .inner
-            .scheduler
-            .get(id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("missing {task_name} task"))?;
+            .get_view_or_err(id, || format!("missing {task_name} task"))
+            .await?;
 
         match view.state {
             TaskState::Succeeded {
@@ -295,14 +291,23 @@ where
         }
     }
 
-    async fn get_encoded_input(&self, id: EngineTaskId) -> Result<EncodedGuestInput, String> {
-        let view = self
-            .inner
+    async fn get_view_or_err(
+        &self,
+        id: EngineTaskId,
+        missing_msg: impl FnOnce() -> String,
+    ) -> Result<TaskView<EngineOutput<S::GuestInput>, EngineTaskKey>, String> {
+        self.inner
             .scheduler
             .get(id)
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "missing input task".to_string())?;
+            .ok_or_else(missing_msg)
+    }
+
+    async fn get_encoded_input(&self, id: EngineTaskId) -> Result<EncodedGuestInput, String> {
+        let view = self
+            .get_view_or_err(id, || "missing input task".to_string())
+            .await?;
 
         match view.state {
             TaskState::Succeeded {
@@ -323,12 +328,8 @@ where
 
     async fn get_proof(&self, id: EngineTaskId) -> Result<raiko2_primitives::Proof, String> {
         let view = self
-            .inner
-            .scheduler
-            .get(id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "missing dependency proof task".to_string())?;
+            .get_view_or_err(id, || "missing dependency proof task".to_string())
+            .await?;
 
         match view.state {
             TaskState::Succeeded {
@@ -340,9 +341,7 @@ where
                     Err("dependency task did not produce proposal proof".to_string())
                 }
             }
-            TaskState::Succeeded { .. } => {
-                Err("dependency task did not produce Proof".to_string())
-            }
+            TaskState::Succeeded { .. } => Err("dependency task did not produce Proof".to_string()),
             _ => Err("dependency task not completed".to_string()),
         }
     }
@@ -805,8 +804,8 @@ mod tests {
 
     #[tokio::test]
     async fn validate_requires_preflight_output_stage() {
-        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use raiko2_queue::{NewTask, Priority};
 
         let engine = Engine::with_store_and_scheduler_config(
@@ -838,7 +837,13 @@ mod tests {
             .await
             .unwrap();
 
-        let lease = engine.inner.scheduler.next_ready("w1").await.unwrap().unwrap();
+        let lease = engine
+            .inner
+            .scheduler
+            .next_ready("w1")
+            .await
+            .unwrap()
+            .unwrap();
 
         // Complete it with PipelineStage::Validation instead of PipelineStage::Preflight
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
@@ -870,8 +875,8 @@ mod tests {
 
     #[tokio::test]
     async fn encode_requires_validated_guest_input() {
-        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use raiko2_queue::{NewTask, Priority};
 
         let engine = Engine::with_store_and_scheduler_config(
@@ -910,7 +915,13 @@ mod tests {
             .await
             .unwrap();
 
-        let lease = engine.inner.scheduler.next_ready("w1").await.unwrap().unwrap();
+        let lease = engine
+            .inner
+            .scheduler
+            .next_ready("w1")
+            .await
+            .unwrap()
+            .unwrap();
 
         // Complete it with PipelineStage::Preflight instead of PipelineStage::Validation
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(

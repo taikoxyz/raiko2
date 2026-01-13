@@ -11,7 +11,10 @@ use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_pro
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
+use crate::{
+    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
+    validate_shasta_aggregation_lengths,
+};
 
 /// RISC0 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]

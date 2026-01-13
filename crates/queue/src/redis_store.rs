@@ -102,7 +102,6 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for RedisStore<P, O, Id>
 where

@@ -5,11 +5,7 @@ use raiko2_primitives::{RaikoError, RaikoResult};
 
 use crate::GuestInput;
 
-fn read_kzg_bytes(
-    value: &[u8],
-    label: &str,
-    idx: usize,
-) -> RaikoResult<KzgCommitmentBytes> {
+fn read_kzg_bytes(value: &[u8], label: &str, idx: usize) -> RaikoResult<KzgCommitmentBytes> {
     if value.len() != 48 {
         return Err(RaikoError::InvalidBlobOption(format!(
             "{label} at index {idx} has invalid length (expected 48 bytes, got {})",

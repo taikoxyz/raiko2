@@ -222,34 +222,31 @@ pub fn hash_derivation_source(source: &DerivationSource) -> B256 {
 /// Hash a blob slice using the same logic as the Solidity implementation
 fn hash_blob_slice(blob_slice: &BlobSlice) -> B256 {
     // Hash the blob hashes array first
-    let blob_hashes_hash = if blob_slice.blobHashes.is_empty() {
-        EMPTY_BYTES_HASH
-    } else if blob_slice.blobHashes.len() == 1 {
-        hash_two_values(
-            U256::from(blob_slice.blobHashes.len()).into(),
-            blob_slice.blobHashes[0],
-        )
-    } else if blob_slice.blobHashes.len() == 2 {
-        hash_three_values(
-            U256::from(blob_slice.blobHashes.len()).into(),
-            blob_slice.blobHashes[0],
-            blob_slice.blobHashes[1],
-        )
-    } else {
-        // For larger arrays, use memory-optimized approach
-        let array_length = blob_slice.blobHashes.len();
-        let buffer_size = 32 + (array_length * 32);
-        let mut buffer = Vec::with_capacity(buffer_size);
+    let blob_hashes = &blob_slice.blobHashes;
+    let blob_hashes_len = blob_hashes.len();
+    let blob_hashes_hash = match blob_hashes_len {
+        0 => EMPTY_BYTES_HASH,
+        1 => hash_two_values(U256::from(blob_hashes_len).into(), blob_hashes[0]),
+        2 => hash_three_values(
+            U256::from(blob_hashes_len).into(),
+            blob_hashes[0],
+            blob_hashes[1],
+        ),
+        _ => {
+            // For larger arrays, use memory-optimized approach
+            let buffer_size = 32 + (blob_hashes_len * 32);
+            let mut buffer = Vec::with_capacity(buffer_size);
 
-        // Write array length at start of buffer
-        buffer.extend_from_slice(&U256::from(array_length).to_be_bytes::<32>());
+            // Write array length at start of buffer
+            buffer.extend_from_slice(&U256::from(blob_hashes_len).to_be_bytes::<32>());
 
-        // Write each blob hash directly to buffer
-        for blob_hash in &blob_slice.blobHashes {
-            buffer.extend_from_slice(blob_hash.as_slice());
+            // Write each blob hash directly to buffer
+            for blob_hash in blob_hashes {
+                buffer.extend_from_slice(blob_hash.as_slice());
+            }
+
+            keccak256(&buffer)
         }
-
-        keccak256(&buffer)
     };
 
     // Hash the three values: blob_hashes_hash, offset, timestamp

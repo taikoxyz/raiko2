@@ -51,8 +51,7 @@ impl std::fmt::Display for TaskStoreError {
 impl Error for TaskStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            TaskStoreError::Backend(err) => Some(err.as_ref()),
-            TaskStoreError::CorruptData(err) => Some(err.as_ref()),
+            TaskStoreError::Backend(err) | TaskStoreError::CorruptData(err) => Some(err.as_ref()),
         }
     }
 }
@@ -172,11 +171,11 @@ where
         if g.tasks.contains_key(&id) {
             return Ok(false);
         }
-        g.remaining.insert(id.clone(), deps.len());
+        let remaining = deps.len();
+        g.remaining.insert(id.clone(), remaining);
         for dep in deps {
             g.dependents.entry(dep).or_default().push(id.clone());
         }
-        let remaining = g.remaining.get(&id).copied().unwrap_or(0);
         g.tasks.insert(
             id,
             TaskRecord {

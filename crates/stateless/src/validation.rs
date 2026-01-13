@@ -184,16 +184,14 @@ fn validate_block_consensus(
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[Header],
 ) -> Result<(), StatelessValidationError> {
-    let parent_header = match ancestor_headers.last() {
-        Some(header) => header,
-        None => return Err(StatelessValidationError::MissingAncestorHeader),
-    };
+    let parent_header = ancestor_headers
+        .last()
+        .ok_or(StatelessValidationError::MissingAncestorHeader)?;
 
     let parent_header = SealedHeader::seal_slow(parent_header.clone());
 
     let block_reader = Arc::new(WitnessTaikoBlockReader::from_headers(ancestor_headers));
-    let consensus_chain_spec = chain_spec.clone();
-    let consensus = TaikoBeaconConsensus::new(consensus_chain_spec, block_reader);
+    let consensus = TaikoBeaconConsensus::new(chain_spec.clone(), block_reader);
 
     consensus.validate_header(block.sealed_header())?;
 
@@ -225,13 +223,10 @@ fn compute_ancestor_hashes(
         let parent_hash = child_header.parent_hash();
         ancestor_hashes.insert(parent_header.number, parent_hash);
 
-        if parent_hash != parent_header.hash_slow() {
+        if parent_hash != parent_header.hash_slow()
+            || parent_header.number + 1 != child_header.number
+        {
             return Err(StatelessValidationError::InvalidAncestorChain); // Blocks must be contiguous
-        }
-
-        if parent_header.number + 1 != child_header.number {
-            return Err(StatelessValidationError::InvalidAncestorChain); // Header number should be
-            // contiguous
         }
 
         child_header = parent_header

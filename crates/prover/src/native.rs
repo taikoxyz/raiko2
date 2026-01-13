@@ -13,7 +13,7 @@ use raiko2_primitives_shasta::{
 };
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 
-use crate::GuestInputCodec;
+use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input};
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
@@ -52,13 +52,7 @@ where
             ));
         }
 
-        let proof_carry_data: ProofCarryData = serde_json::from_value(
-            config
-                .get("proof_carry_data")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        )
-        .unwrap_or_default();
+        let proof_carry_data: ProofCarryData = parse_proof_carry_data(config);
 
         let first = input.witnesses.first().expect("checked");
         let last = input.witnesses.last().expect("checked");
@@ -99,19 +93,8 @@ where
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let aggregation_input: ShastaZkAggregationGuestInput = serde_json::from_value(
-            config
-                .get("shasta_zk_aggregation_input")
-                .cloned()
-                .ok_or_else(|| {
-                    RaikoError::InvalidRequestConfig(
-                        "Missing 'shasta_zk_aggregation_input' in config".to_string(),
-                    )
-                })?,
-        )
-        .map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {}", e))
-        })?;
+        let aggregation_input: ShastaZkAggregationGuestInput =
+            parse_shasta_aggregation_input(config)?;
 
         let endianness = config
             .get("native_image_id_endianness")

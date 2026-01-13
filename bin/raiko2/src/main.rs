@@ -64,16 +64,11 @@ fn init_logging(cli: &Cli) -> Result<()> {
         }
     });
 
+    let registry = tracing_subscriber::registry().with(env_filter);
     if cli.json_logs {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt::layer().json())
-            .init();
+        registry.with(fmt::layer().json()).init();
     } else {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt::layer())
-            .init();
+        registry.with(fmt::layer()).init();
     }
 
     Ok(())

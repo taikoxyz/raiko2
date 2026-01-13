@@ -24,6 +24,12 @@ use crate::{Provider, on_the_spot_witness::execution_witness};
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
 
+const TAIKO_CHAIN_IDS: [u64; 4] = [167000, 167001, 167013, 167009];
+
+fn is_taiko_chain_id(chain_id: u64) -> bool {
+    TAIKO_CHAIN_IDS.contains(&chain_id)
+}
+
 /// Decode account from EIP-1186 proof response
 fn decode_account_from_proof(
     proof_response: &EIP1186AccountProofResponse,
@@ -105,7 +111,7 @@ impl NetworkProvider {
         // Map Taiko chains to standard Ethereum config for local witness generation
         // Taiko forks (SHASTA, PACAYA, etc.) are mapped to SHANGHAI (pre-Cancun)
         // to avoid EIP-4788 parent beacon block root requirement
-        let evm_config = if matches!(chain_id, 167000 | 167001 | 167013 | 167009) {
+        let evm_config = if is_taiko_chain_id(chain_id) {
             tracing::info!(
                 "Mapping Taiko chain (chain_id={}) to Ethereum SHANGHAI config for local witness generation",
                 chain_id
@@ -142,7 +148,7 @@ impl NetworkProvider {
         let provider = self.provider.clone();
 
         // For Taiko chains, use TaikoEvmConfig directly (like in on_the_spot_witness tests)
-        if matches!(chain_id, 167000 | 167001 | 167013 | 167009) {
+        if is_taiko_chain_id(chain_id) {
             let evm_config = match chain_id {
                 167000 => Arc::new(TaikoEvmConfig::new(TAIKO_MAINNET.clone())),
                 167001 => Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone())),

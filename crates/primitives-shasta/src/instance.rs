@@ -63,16 +63,17 @@ pub(crate) fn validate_shasta_aggregate_proof_carry_data(
 pub(crate) fn validate_shasta_proof_carry_data_vec(
     proof_carry_data_vec: &[ProofCarryData],
 ) -> bool {
-    if proof_carry_data_vec.is_empty() {
-        return false;
-    }
+    let first = match proof_carry_data_vec.first() {
+        Some(first) => first,
+        None => return false,
+    };
 
-    let expected_actual_prover = proof_carry_data_vec[0].transition_input.actual_prover;
-    for item in proof_carry_data_vec.iter() {
-        // Commitment uses a single `actualProver` field; make the range unambiguous.
-        if item.transition_input.actual_prover != expected_actual_prover {
-            return false;
-        }
+    let expected_actual_prover = first.transition_input.actual_prover;
+    if !proof_carry_data_vec
+        .iter()
+        .all(|item| item.transition_input.actual_prover == expected_actual_prover)
+    {
+        return false;
     }
 
     for w in proof_carry_data_vec.windows(2) {
@@ -113,6 +114,7 @@ pub fn build_shasta_commitment_from_proof_carry_data_vec(
     if !validate_shasta_proof_carry_data_vec(proof_carry_data_vec) {
         return None;
     }
+    let first = proof_carry_data_vec.first()?;
     let last = proof_carry_data_vec.last()?;
 
     let transitions: Vec<Transition> = proof_carry_data_vec
@@ -126,13 +128,11 @@ pub fn build_shasta_commitment_from_proof_carry_data_vec(
         .collect();
 
     Some(Commitment {
-        firstProposalId: Uint::from(proof_carry_data_vec[0].transition_input.proposal_id),
+        firstProposalId: Uint::from(first.transition_input.proposal_id),
         // This field is a checkpoint hash in the latest Shasta contract; we store it as bytes32.
-        firstProposalParentBlockHash: proof_carry_data_vec[0]
-            .transition_input
-            .parent_checkpoint_hash,
+        firstProposalParentBlockHash: first.transition_input.parent_checkpoint_hash,
         lastProposalHash: last.transition_input.proposal_hash,
-        actualProver: proof_carry_data_vec[0].transition_input.actual_prover,
+        actualProver: first.transition_input.actual_prover,
         endBlockNumber: last.transition_input.checkpoint.blockNumber,
         endStateRoot: last.transition_input.checkpoint.stateRoot,
         transitions,

@@ -86,10 +86,7 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to fetch witnesses")?;
 
-    let signers = blocks
-        .iter()
-        .map(collect_signers)
-        .collect::<Result<Vec<_>>>()?;
+    let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
     let accounts = provider
         .batch_accounts(&block_numbers, &signers)
         .await
@@ -114,12 +111,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn collect_signers(block: &Block) -> Result<Vec<alloy_primitives::Address>> {
-    let mut signers = Vec::new();
-    for tx in block.body.transactions() {
-        if let Ok(signer) = tx.recover_signer() {
-            signers.push(signer);
-        }
-    }
-    Ok(signers)
+fn collect_signers(block: &Block) -> Vec<alloy_primitives::Address> {
+    block
+        .body
+        .transactions()
+        .filter_map(|tx| tx.recover_signer().ok())
+        .collect()
 }

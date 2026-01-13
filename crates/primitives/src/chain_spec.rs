@@ -155,22 +155,23 @@ const fn taiko_fork_to_spec_id(_fork_name: &str) -> SpecId {
     SpecId::CANCUN
 }
 
+fn parse_spec_id_str(value: &str) -> Result<SpecId, String> {
+    match value {
+        // Taiko-specific forks - use CANCUN as placeholder
+        "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => Ok(taiko_fork_to_spec_id(value)),
+        // Standard forks - deserialize normally
+        _ => serde_json::from_str(&format!("\"{}\"", value))
+            .map_err(|_| format!("unknown SpecId variant: {}", value)),
+    }
+}
+
 /// Custom deserializer for SpecId that handles Taiko-specific fork names.
 fn deserialize_spec_id<'de, D>(deserializer: D) -> Result<SpecId, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?;
-    match s.as_str() {
-        // Taiko-specific forks - use CANCUN as placeholder
-        "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => Ok(taiko_fork_to_spec_id(&s)),
-        // Standard forks - deserialize normally
-        _ => {
-            // Try to deserialize as standard SpecId
-            serde_json::from_str(&format!("\"{}\"", s))
-                .map_err(|_| serde::de::Error::custom(format!("unknown SpecId variant: {}", s)))
-        }
-    }
+    parse_spec_id_str(&s).map_err(serde::de::Error::custom)
 }
 
 /// Custom deserializer for BTreeMap<SpecId, T> that handles Taiko-specific fork names.
@@ -195,19 +196,7 @@ where
     let mut spec_id_map = BTreeMap::new();
 
     for (key, value) in string_map {
-        let spec_id = match key.as_str() {
-            "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => {
-                // For Taiko forks, we need unique keys. Since we can't extend SpecId,
-                // we'll use CANCUN and rely on the fact that for Taiko chains,
-                // the actual fork resolution is done by TaikoChainSpec.
-                // However, this means we can only have one Taiko fork per chain spec
-                // in the hard_forks map, which is actually fine since they're ordered.
-                SpecId::CANCUN
-            }
-            _ => serde_json::from_str(&format!("\"{}\"", key)).map_err(|_| {
-                serde::de::Error::custom(format!("unknown SpecId variant: {}", key))
-            })?,
-        };
+        let spec_id = parse_spec_id_str(&key).map_err(serde::de::Error::custom)?;
         // Note: This will overwrite if multiple Taiko forks exist, but that's OK
         // because for Taiko chains, we use TaikoChainSpec which handles forks properly.
         spec_id_map.insert(spec_id, value);
@@ -239,6 +228,16 @@ pub struct ChainSpec {
 
 type VerifierAddressForks = BTreeMap<SpecId, BTreeMap<ProofType, Option<Address>>>;
 
+fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
+    match value {
+        "NATIVE" | "Native" => Ok(ProofType::Native),
+        "SP1" | "Sp1" => Ok(ProofType::Sp1),
+        "SGX" | "Sgx" => Ok(ProofType::Sgx),
+        "RISC0" | "Risc0" => Ok(ProofType::Risc0),
+        _ => Err(format!("unknown ProofType variant: {}", value)),
+    }
+}
+
 /// Custom deserializer for verifier_address_forks nested map structure.
 fn deserialize_verifier_address_forks<'de, D>(
     deserializer: D,
@@ -253,12 +252,7 @@ where
     // Convert string keys to SpecId and inner string keys to ProofType
     let mut spec_id_map: VerifierAddressForks = BTreeMap::new();
     for (key, inner_map) in string_map {
-        let spec_id = match key.as_str() {
-            "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => SpecId::CANCUN,
-            _ => serde_json::from_str(&format!("\"{}\"", key)).map_err(|_| {
-                serde::de::Error::custom(format!("unknown SpecId variant: {}", key))
-            })?,
-        };
+        let spec_id = parse_spec_id_str(&key).map_err(serde::de::Error::custom)?;
 
         // Convert inner map: skip SGXGETH, convert other keys to ProofType
         let mut proof_type_map = BTreeMap::new();
@@ -269,18 +263,8 @@ where
             }
 
             // Convert proof type string to ProofType enum
-            let proof_type = match proof_key.as_str() {
-                "NATIVE" | "Native" => ProofType::Native,
-                "SP1" | "Sp1" => ProofType::Sp1,
-                "SGX" | "Sgx" => ProofType::Sgx,
-                "RISC0" | "Risc0" => ProofType::Risc0,
-                _ => {
-                    return Err(serde::de::Error::custom(format!(
-                        "unknown ProofType variant: {}",
-                        proof_key
-                    )));
-                }
-            };
+            let proof_type =
+                parse_proof_type_str(&proof_key).map_err(serde::de::Error::custom)?;
             proof_type_map.insert(proof_type, address);
         }
 

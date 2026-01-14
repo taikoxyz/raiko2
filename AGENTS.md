@@ -7,7 +7,7 @@ Reusable crates live in `crates/` (notably `engine`, `pipeline`, `prover`, `prov
 ## Build, Test, and Development Commands
 
 - Guest builds: `just build-guest <risc0|sp1|all>` (uses docker + cargo risczero/prove via xtask).
-- Always run `cargo clippy --workspace -- -D warnings` and `cargo nextest run --workspace`.
+- Always run `cargo fmt --all`, `cargo clippy --workspace -- -D warnings`, and `cargo nextest run --workspace`.
 
 ## Coding Style & Naming Conventions
 

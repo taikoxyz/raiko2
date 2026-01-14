@@ -12,22 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(missing_docs)]
-#![allow(unreachable_pub)]
-#![allow(clippy::redundant_pub_crate)]
-
-mod app;
-mod args;
-mod db;
-mod init;
-mod rpc;
-mod trie;
-mod witness;
-
 use clap::Parser;
 
-#[actix_web::main]
-async fn main() -> anyhow::Result<()> {
-    let args = args::Args::parse();
-    app::run(args).await
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+pub struct Args {
+    /// The upstream RPC provider URL to forward requests to.
+    #[arg(long, env)]
+    pub rpc_url: String,
+
+    /// The network address and port to bind the server to.
+    #[arg(long, default_value = "127.0.0.1:8545")]
+    pub bind_address: String,
+
+    /// The initial backoff in milliseconds.
+    #[clap(long, default_value_t = 500)]
+    pub rpc_retry_backoff: u64,
+
+    /// The number of allowed Compute Units per second.
+    #[clap(long, default_value_t = 1000)]
+    pub rpc_retry_cu: u64,
 }

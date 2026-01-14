@@ -20,6 +20,7 @@ pub use tasks::{EncodedGuestInput, EngineTaskId, EngineTaskKey, ProposalStage};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::worker::WorkerConfig;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, ProofContext};
 use raiko2_prover::Prover;
@@ -234,7 +235,11 @@ where
         S::Backend: ProverBackend + 'static,
         S::Provider: Provider + 'static,
     {
-        self.start_workers_with_maintenance_interval(concurrency, Duration::from_millis(200));
+        let config = WorkerConfig {
+            concurrency,
+            ..WorkerConfig::default()
+        };
+        crate::worker::spawn_workers(self.clone(), config);
     }
 
     pub fn start_workers_with_maintenance_interval(
@@ -247,12 +252,12 @@ where
         S::Backend: ProverBackend + 'static,
         S::Provider: Provider + 'static,
     {
-        let notify = self.inner.scheduler.notifier();
-        for i in 0..concurrency {
-            spawn_worker_supervised(self.clone(), notify.clone(), format!("engine-{i}"));
-        }
-
-        spawn_maintenance_supervised(self.clone(), maintenance_interval);
+        let config = WorkerConfig {
+            concurrency,
+            maintenance_interval,
+            ..WorkerConfig::default()
+        };
+        crate::worker::spawn_workers(self.clone(), config);
     }
 
     async fn get_guest_input(
@@ -444,87 +449,32 @@ where
     }
 }
 
-fn spawn_worker_supervised<S>(engine: Engine<S>, notify: Arc<tokio::sync::Notify>, worker: String)
+#[async_trait::async_trait]
+impl<S> crate::worker::Runnable for Engine<S>
 where
     S: PipelineSpec + 'static,
     S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
     S::Backend: ProverBackend + 'static,
     S::Provider: Provider + 'static,
 {
-    tokio::spawn(async move {
-        let restart_backoff = Duration::from_secs(1);
-        loop {
-            let engine = engine.clone();
-            let notify = notify.clone();
-            let worker_inner = worker.clone();
-            let handle = tokio::spawn(async move {
-                loop {
-                    match engine.run_one(&worker_inner).await {
-                        Ok(true) => continue,
-                        Ok(false) => notify.notified().await,
-                        Err(err) => {
-                            tracing::warn!(worker = %worker_inner, error = %err, "engine worker tick failed");
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            });
+    async fn run_one(&self, worker_id: &str) -> Result<bool, String> {
+        Engine::run_one(self, worker_id)
+            .await
+            .map_err(|err| err.to_string())
+    }
 
-            match handle.await {
-                Ok(()) => {
-                    tracing::warn!(worker = %worker, "engine worker exited unexpectedly");
-                }
-                Err(err) => {
-                    if err.is_panic() {
-                        tracing::error!(worker = %worker, "engine worker panicked; restarting");
-                    } else {
-                        tracing::warn!(worker = %worker, "engine worker aborted; restarting");
-                    }
-                }
-            }
+    async fn maintenance_tick(&self) -> Result<(), String> {
+        self.inner
+            .scheduler
+            .maintenance_tick()
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
 
-            tokio::time::sleep(restart_backoff).await;
-        }
-    });
-}
-
-fn spawn_maintenance_supervised<S>(engine: Engine<S>, maintenance_interval: Duration)
-where
-    S: PipelineSpec + 'static,
-    S::Prover: Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
-    S::Backend: ProverBackend + 'static,
-    S::Provider: Provider + 'static,
-{
-    tokio::spawn(async move {
-        let restart_backoff = Duration::from_secs(1);
-        loop {
-            let engine = engine.clone();
-            let handle = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(maintenance_interval);
-                loop {
-                    interval.tick().await;
-                    if let Err(err) = engine.inner.scheduler.maintenance_tick().await {
-                        tracing::warn!(error = %err, "scheduler maintenance tick failed");
-                    }
-                }
-            });
-
-            match handle.await {
-                Ok(()) => {
-                    tracing::warn!("scheduler maintenance task exited unexpectedly");
-                }
-                Err(err) => {
-                    if err.is_panic() {
-                        tracing::error!("scheduler maintenance task panicked; restarting");
-                    } else {
-                        tracing::warn!("scheduler maintenance task aborted; restarting");
-                    }
-                }
-            }
-
-            tokio::time::sleep(restart_backoff).await;
-        }
-    });
+    fn notifier(&self) -> Arc<tokio::sync::Notify> {
+        self.inner.scheduler.notifier()
+    }
 }
 
 #[cfg(test)]

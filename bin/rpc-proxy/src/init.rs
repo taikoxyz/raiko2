@@ -12,22 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(missing_docs)]
-#![allow(unreachable_pub)]
-#![allow(clippy::redundant_pub_crate)]
+pub fn init_tracing() {
+    tracing_subscriber::fmt::init();
+}
 
-mod app;
-mod args;
-mod db;
-mod init;
-mod rpc;
-mod trie;
-mod witness;
-
-use clap::Parser;
-
-#[actix_web::main]
-async fn main() -> anyhow::Result<()> {
-    let args = args::Args::parse();
-    app::run(args).await
+pub fn init_crypto() {
+    // This is a hack to ensure that `blst` gets linked into this binary.
+    let _ = unsafe { blst::blst_p1_sizeof() };
 }

@@ -263,8 +263,7 @@ where
             }
 
             // Convert proof type string to ProofType enum
-            let proof_type =
-                parse_proof_type_str(&proof_key).map_err(serde::de::Error::custom)?;
+            let proof_type = parse_proof_type_str(&proof_key).map_err(serde::de::Error::custom)?;
             proof_type_map.insert(proof_type, address);
         }
 

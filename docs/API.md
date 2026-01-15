@@ -227,6 +227,12 @@ raiko2 --verbose
 
 # Output JSON logs
 raiko2 --json-logs
+
+# Select memory queue backend (default behavior)
+raiko2 --queue-backend memory
+
+# Select Redis queue backend (requires build with --features redis-queue)
+raiko2 --queue-backend redis --redis-url redis://localhost:6379/ --queue-namespace raiko2:queue
 ```
 
 ## Error Responses

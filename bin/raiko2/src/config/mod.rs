@@ -111,6 +111,21 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Cli;
+    use clap::Parser;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_temp_config(contents: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        path.push(format!("raiko2-config-{nanos}.toml"));
+        std::fs::write(&path, contents).expect("write temp config");
+        path
+    }
 
     #[test]
     fn test_server_config_default() {
@@ -194,6 +209,96 @@ mod tests {
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_queue_backend_cli_overrides_config_file() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+l1_rpc = "http://localhost:8545"
+l2_rpc = "http://localhost:9545"
+l1_chain_id = 1
+l2_chain_id = 167000
+
+[prover]
+prover_type = "risc0"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from([
+            "raiko2",
+            "--config",
+            path.to_str().expect("path utf8"),
+            "--queue-backend",
+            "redis",
+            "--redis-url",
+            "redis://localhost:6379/",
+        ]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.queue.backend, QueueBackend::Redis);
+        assert_eq!(
+            config.queue.redis_url.as_deref(),
+            Some("redis://localhost:6379/")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_queue_backend_redis_requires_url() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+l1_rpc = "http://localhost:8545"
+l2_rpc = "http://localhost:9545"
+l1_chain_id = 1
+l2_chain_id = 167000
+
+[prover]
+prover_type = "risc0"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from([
+            "raiko2",
+            "--config",
+            path.to_str().expect("path utf8"),
+            "--queue-backend",
+            "redis",
+        ]);
+
+        let err = Config::load(&cli).expect_err("expected config error");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Queue configuration error"),
+            "unexpected error: {err_msg}"
+        );
+        assert!(
+            err.chain().any(|e| e.to_string().contains("redis_url")),
+            "missing redis_url detail in error chain: {err_msg}"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

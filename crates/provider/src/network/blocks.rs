@@ -7,6 +7,13 @@ use reth_ethereum_primitives::Block as RethBlock;
 
 use super::NetworkProvider;
 
+// Workaround for inconsistent upstream block representations:
+// Some RPC providers / conversions may set `withdrawals_root` to the canonical
+// EMPTY_WITHDRAWALS root while omitting the actual withdrawals list (leaving it
+// as `None`). This helper normalizes such blocks by materializing an explicit
+// empty withdrawals list so downstream code can rely on a consistent
+// representation. Once upstream always returns an explicit empty list when the
+// root is EMPTY_WITHDRAWALS, this workaround can be revisited/removed.
 fn normalize_withdrawals_for_empty_root(block: &mut RethBlock) {
     if block.body.withdrawals.is_none() && block.header.withdrawals_root == Some(EMPTY_WITHDRAWALS)
     {

@@ -22,6 +22,7 @@ risc0-zkvm = { version = "3.0.4", default-features = false, features = [
 ] }
 alloy-primitives = { version = "1.5.0", default-features = false }
 bincode = "1.3.3"
+c-kzg = { version = "2.1.5", default-features = false, features = ["eip-7594", "ethereum_kzg_settings"] }
 
 [features]
 default = []

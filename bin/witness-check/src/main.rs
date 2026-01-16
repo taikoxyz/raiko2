@@ -24,6 +24,7 @@ use raiko2_primitives::chain_spec::SupportedChainSpecs;
 use raiko2_provider::{NetworkProvider, Provider};
 use raiko2_stateless::validate_block;
 use reth_ethereum_primitives::Block;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -43,11 +44,17 @@ struct Args {
     /// Whether the RPC supports debug_executionWitness.
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     debug_witness: bool,
+
+    /// Print a small timing summary (network fetches + validation).
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
+    metrics: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    let mut metrics = RunMetrics::new(args.metrics);
 
     let url = reqwest::Url::parse(&args.rpc_url).context("Invalid rpc_url")?;
     let rpc_client = RpcClient::builder().http(url);
@@ -55,10 +62,12 @@ async fn main() -> Result<()> {
 
     let chain_id = match args.chain_id {
         Some(chain_id) => chain_id,
-        None => rpc_provider
-            .get_chain_id()
-            .await
-            .context("eth_chainId failed")?,
+        None => {
+            let start = Instant::now();
+            let res = rpc_provider.get_chain_id().await;
+            metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
+            res.context("eth_chainId failed")?
+        }
     };
 
     let chain_spec = SupportedChainSpecs::default()
@@ -77,26 +86,44 @@ async fn main() -> Result<()> {
         NetworkProvider::new(&args.rpc_url)?.with_debug_witness_support(args.debug_witness);
 
     let block_numbers = vec![args.block_number];
-    let blocks = provider
-        .batch_blocks(&block_numbers)
-        .await
-        .context("Failed to fetch blocks")?;
-    let witnesses = provider
-        .batch_witnesses(&block_numbers)
-        .await
-        .context("Failed to fetch witnesses")?;
+    let blocks = {
+        let start = Instant::now();
+        let res = provider.batch_blocks(&block_numbers).await;
+        metrics.observe(
+            "provider.batch_blocks",
+            start.elapsed(),
+            block_numbers.len(),
+        );
+        res.context("Failed to fetch blocks")?
+    };
+    let witnesses = {
+        let start = Instant::now();
+        let res = provider.batch_witnesses(&block_numbers).await;
+        metrics.observe(
+            "provider.batch_witnesses",
+            start.elapsed(),
+            block_numbers.len(),
+        );
+        res.context("Failed to fetch witnesses")?
+    };
 
     let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
-    let accounts = provider
-        .batch_accounts(&block_numbers, &signers)
-        .await
-        .context("Failed to fetch accounts")?;
+    let signer_count = signers.iter().map(|v| v.len()).sum::<usize>();
+    let accounts = {
+        let start = Instant::now();
+        let res = provider.batch_accounts(&block_numbers, &signers).await;
+        metrics.observe("provider.batch_accounts", start.elapsed(), signer_count);
+        res.context("Failed to fetch accounts")?
+    };
 
     if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
         bail!("Provider returned mismatched input lengths");
     }
 
+    metrics.set_block_stats(&blocks);
+
     for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
+        let start = Instant::now();
         let block_hash = validate_block(
             block,
             witness,
@@ -105,9 +132,11 @@ async fn main() -> Result<()> {
             evm_config.clone(),
         )
         .context("Stateless validation failed")?;
+        metrics.observe("stateless.validate_block", start.elapsed(), 1);
         println!("stateless validation ok: {block_hash:?}");
     }
 
+    metrics.print_summary(chain_id, args.block_number);
     Ok(())
 }
 
@@ -117,4 +146,82 @@ fn collect_signers(block: &Block) -> Vec<alloy_primitives::Address> {
         .transactions()
         .filter_map(|tx| tx.recover_signer().ok())
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct RunMetrics {
+    enabled: bool,
+    observations: Vec<Observation>,
+    block_count: usize,
+    tx_count: usize,
+}
+
+#[derive(Debug)]
+struct Observation {
+    name: &'static str,
+    duration: Duration,
+    unit_count: usize,
+}
+
+impl RunMetrics {
+    const fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            observations: Vec::new(),
+            block_count: 0,
+            tx_count: 0,
+        }
+    }
+
+    fn observe(&mut self, name: &'static str, duration: Duration, unit_count: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.observations.push(Observation {
+            name,
+            duration,
+            unit_count,
+        });
+    }
+
+    fn set_block_stats(&mut self, blocks: &[Block]) {
+        if !self.enabled {
+            return;
+        }
+        self.block_count = blocks.len();
+        self.tx_count = blocks.iter().map(|b| b.body.transactions().count()).sum();
+    }
+
+    fn print_summary(&self, chain_id: u64, block_number: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        let total = self
+            .observations
+            .iter()
+            .fold(Duration::ZERO, |acc, o| acc.saturating_add(o.duration));
+
+        eprintln!();
+        eprintln!("=== witness-check metrics ===");
+        eprintln!("chain_id: {chain_id}");
+        eprintln!("block_number: {block_number}");
+        eprintln!("blocks: {}", self.block_count);
+        eprintln!("transactions: {}", self.tx_count);
+        eprintln!("total_observed_time: {:.3}s", total.as_secs_f64());
+        eprintln!();
+
+        for o in &self.observations {
+            let secs = o.duration.as_secs_f64();
+            let rate = if secs > 0.0 {
+                (o.unit_count as f64) / secs
+            } else {
+                0.0
+            };
+            eprintln!(
+                "{:<28} {:>9.3}s  units={:<6}  rate={:.1}/s",
+                o.name, secs, o.unit_count, rate
+            );
+        }
+    }
 }

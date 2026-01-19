@@ -125,23 +125,20 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     if profile != "release" {
         println!("[WARN] PROFILE={profile} is ignored by cargo risczero; building default profile");
     }
-    if bench {
-        println!(
-            "[WARN] --bench has no effect unless extra bins are defined in guests/risc0/Cargo.toml"
-        );
-    }
+    let manifest_path = root.join("guests/risc0/Cargo.toml");
+    let manifest = read_manifest(&manifest_path)?;
     if env::var("VERBOSE").ok().as_deref() == Some("1") {
         println!("[WARN] VERBOSE=1 is ignored by cargo risczero build");
     }
-
-    let manifest_path = root.join("guests/risc0/Cargo.toml");
-    let manifest = read_manifest(&manifest_path)?;
 
     let mut cmd = Command::new("cargo");
     cmd.arg("risczero")
         .arg("build")
         .arg("--manifest-path")
         .arg(&manifest_path);
+    if bench {
+        cmd.arg("--features").arg("bench");
+    }
 
     let target_root = env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -238,12 +235,6 @@ fn build_sp1(root: &Path, bench: bool) -> Result<()> {
     if profile != "release" {
         println!("[WARN] PROFILE={profile} is ignored by cargo prove; building default profile");
     }
-    if bench {
-        println!(
-            "[WARN] --bench has no effect unless extra bins are defined in guests/sp1/Cargo.toml"
-        );
-    }
-
     let manifest_path = root.join("guests/sp1/Cargo.toml");
     let manifest = read_manifest(&manifest_path)?;
     let output_dir = root.join("crates/guests/elf");
@@ -265,8 +256,11 @@ fn build_sp1(root: &Path, bench: bool) -> Result<()> {
             .arg("build")
             .arg("--docker")
             .arg("--tag")
-            .arg(&sp1_tag)
-            .arg("--binaries")
+            .arg(&sp1_tag);
+        if bench {
+            cmd.arg("--features").arg("bench");
+        }
+        cmd.arg("--binaries")
             .arg(&bin.name)
             .arg("--elf-name")
             .arg(&elf_name)

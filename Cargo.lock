@@ -5297,6 +5297,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest-launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "raiko2-pipeline",
+ "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
+ "serde",
+ "serde_json",
+ "sp1-sdk",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8384,6 +8399,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "preflight"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "raiko2-pipeline",
+ "raiko2-primitives",
+ "raiko2-primitives-shasta",
+ "raiko2-provider",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

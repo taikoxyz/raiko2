@@ -17,7 +17,7 @@ pub use values::{
 
 #[cfg(test)]
 mod test {
-    use crate::shasta::{BlobSlice, Derivation, DerivationSource, Proposal};
+    use crate::shasta::{BlobSlice, Commitment, Derivation, DerivationSource, Proposal, Transition};
     use alloy_primitives::{Address, B256, Uint, address, b256, hex};
 
     use super::*;
@@ -159,6 +159,77 @@ mod test {
         assert_eq!(
             alloy_primitives::hex::encode_prefixed(prove_input_hash),
             "0x0f1c0b0391c2617d236a059287ba55aeaa668cacfcd9abf6d537de314ae9fce8"
+        );
+    }
+
+    #[test]
+    fn test_hash_commitment_single_transition() {
+        let commitment = Commitment {
+            firstProposalId: Uint::from(1u64),
+            firstProposalParentBlockHash: b256!(
+                "1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            lastProposalHash: b256!(
+                "2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            actualProver: address!("0000000000000000000000000000000000001234"),
+            endBlockNumber: Uint::from(10u64),
+            endStateRoot: b256!(
+                "3333333333333333333333333333333333333333333333333333333333333333"
+            ),
+            transitions: vec![Transition {
+                proposer: address!("0000000000000000000000000000000000005678"),
+                timestamp: Uint::from(123_456u64),
+                blockHash: b256!(
+                    "4444444444444444444444444444444444444444444444444444444444444444"
+                ),
+            }],
+        };
+
+        let commitment_hash = hash_commitment(&commitment);
+        assert_eq!(
+            hex::encode(commitment_hash),
+            "9df44da19b9cad196f906ffd8f0a50dd70f737e091e82f09061e668d98380bf7"
+        );
+    }
+
+    #[test]
+    fn test_hash_commitment_multiple_transitions() {
+        let commitment = Commitment {
+            firstProposalId: Uint::from(2u64),
+            firstProposalParentBlockHash: b256!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            lastProposalHash: b256!(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ),
+            actualProver: address!("0000000000000000000000000000000000009876"),
+            endBlockNumber: Uint::from(20u64),
+            endStateRoot: b256!(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            transitions: vec![
+                Transition {
+                    proposer: address!("0000000000000000000000000000000000000001"),
+                    timestamp: Uint::from(1u64),
+                    blockHash: b256!(
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    ),
+                },
+                Transition {
+                    proposer: address!("0000000000000000000000000000000000000002"),
+                    timestamp: Uint::from(2u64),
+                    blockHash: b256!(
+                        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    ),
+                },
+            ],
+        };
+
+        let commitment_hash = hash_commitment(&commitment);
+        assert_eq!(
+            hex::encode(commitment_hash),
+            "0c3dabe1a7ef25499f0ae9d63ac7146563c77319a1ed49023d15291a0dd99665"
         );
     }
 }

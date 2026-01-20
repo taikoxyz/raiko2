@@ -66,7 +66,7 @@ pub fn hash_shasta_transition_input(transition_input: &TransitionInputData) -> B
 /// including static field ordering, offsets, and transition element packing.
 pub fn hash_commitment(commitment: &Commitment) -> B256 {
     let transitions_len = commitment.transitions.len();
-    let total_words = 9 + transitions_len * 4;
+    let total_words = 9 + transitions_len * 3;
 
     let mut buffer: Vec<B256> = Vec::with_capacity(total_words);
 

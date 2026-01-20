@@ -4857,6 +4857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfe33edd8e85a12a67454e37f8c75e730830d83e313556ab9ebf9ee7fbeb3bfb"
 dependencies = [
  "crc32fast",
+ "libz-sys",
  "miniz_oxide",
 ]
 
@@ -8778,6 +8779,7 @@ name = "raiko2-pipeline"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
+ "alethia-reth-consensus",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-trie 0.9.2",
@@ -8785,12 +8787,14 @@ dependencies = [
  "raiko2-guests",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
+ "raiko2-protocol",
  "raiko2-protocol-shasta",
  "raiko2-provider",
  "raiko2-stateless",
  "reth-ethereum-primitives",
  "reth-stateless",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -8848,9 +8852,13 @@ dependencies = [
 name = "raiko2-protocol-shasta"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
+ "alloy-rlp",
  "alloy-sol-types",
+ "flate2",
  "raiko2-protocol",
+ "reth-ethereum-primitives",
  "serde",
  "tracing",
 ]

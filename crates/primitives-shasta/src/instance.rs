@@ -9,9 +9,7 @@ use alloy_primitives::{Address, B256, Uint, keccak256};
 use alloy_sol_types::SolValue;
 use anyhow::{Result, ensure};
 use raiko2_protocol_shasta::TaikoProverData;
-use raiko2_protocol_shasta::libhash::{
-    hash_checkpoint, hash_commitment, hash_public_input, hash_two_values,
-};
+use raiko2_protocol_shasta::libhash::{hash_commitment, hash_public_input, hash_two_values};
 use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -97,10 +95,8 @@ pub(crate) fn validate_shasta_proof_carry_data_vec(
             return false;
         }
 
-        // Continuity: prev checkpoint must match next parent checkpoint hash.
-        if hash_checkpoint(&prev.transition_input.checkpoint)
-            != next.transition_input.parent_checkpoint_hash
-        {
+        // Continuity: prev checkpoint block hash must match next parent block hash.
+        if prev.transition_input.checkpoint.blockHash != next.transition_input.parent_block_hash {
             return false;
         }
     }
@@ -121,16 +117,15 @@ pub fn build_shasta_commitment_from_proof_carry_data_vec(
         .iter()
         .map(|item| Transition {
             proposer: item.transition_input.transition.proposer,
-            designatedProver: item.transition_input.transition.designatedProver,
             timestamp: Uint::from(item.transition_input.transition.timestamp),
-            checkpointHash: hash_checkpoint(&item.transition_input.checkpoint),
+            blockHash: item.transition_input.checkpoint.blockHash,
         })
         .collect();
 
     Some(Commitment {
         firstProposalId: Uint::from(first.transition_input.proposal_id),
-        // This field is a checkpoint hash in the latest Shasta contract; we store it as bytes32.
-        firstProposalParentBlockHash: first.transition_input.parent_checkpoint_hash,
+        // This field is the parent block hash in the latest Shasta contract; we store it as bytes32.
+        firstProposalParentBlockHash: first.transition_input.parent_block_hash,
         lastProposalHash: last.transition_input.proposal_hash,
         actualProver: first.transition_input.actual_prover,
         endBlockNumber: last.transition_input.checkpoint.blockNumber,

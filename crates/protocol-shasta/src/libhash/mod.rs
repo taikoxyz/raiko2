@@ -25,21 +25,45 @@ mod test {
     #[test]
     fn test_hash_proposal() {
         let proposal = Proposal {
-            id: Uint::from(3549u64),
-            timestamp: Uint::from(1761830468u64),
-            endOfSubmissionWindowTimestamp: Uint::from(0u64),
-            proposer: address!("3c44cdddb6a900fa2b585dd299e03d12fa4293bc"),
+            id: Uint::from(12_345u64),
+            timestamp: Uint::from(193_828_690u64),
+            endOfSubmissionWindowTimestamp: Uint::from(193_829_690u64),
+            proposer: address!("1234567890abcdef1234567890abcdef12345678"),
             parentProposalHash: b256!(
-                "85422bfec85e2cb6d5ca9f52858a74b680865c0134c0e29af710d8e01d58898a"
+                "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
             ),
-            derivationHash: b256!(
-                "85422bfec85e2cb6d5ca9f52858a74b680865c0134c0e29af710d8e01d58898a"
+            originBlockNumber: Uint::from(73_826u64),
+            originBlockHash: b256!(
+                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
             ),
+            basefeeSharingPctg: 42,
+            sources: vec![
+                DerivationSource {
+                    isForcedInclusion: true,
+                    blobSlice: BlobSlice {
+                        blobHashes: vec![b256!(
+                            "67890abcdef1234567890abcdef123451234567890abcdef1234567890abcdef"
+                        )],
+                        offset: Uint::from(0u32),
+                        timestamp: Uint::from(100u64),
+                    },
+                },
+                DerivationSource {
+                    isForcedInclusion: false,
+                    blobSlice: BlobSlice {
+                        blobHashes: vec![b256!(
+                            "567890abcdef123451234567890abcdef123456767890abcdef1234890abcdef"
+                        )],
+                        offset: Uint::from(100u32),
+                        timestamp: Uint::from(200u64),
+                    },
+                },
+            ],
         };
         let proposal_hash = hash_proposal(&proposal);
         assert_eq!(
             hex::encode(proposal_hash),
-            "0fd2106121ee59690d5c49dcbd1603e9eedff34da6dd6afe5de01d30188d770d"
+            "13af2d05799894db3462512e3ecf5ae8877b80b1e2db3963654ac70f6dd49f88"
         );
     }
 

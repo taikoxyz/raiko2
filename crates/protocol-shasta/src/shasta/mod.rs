@@ -167,9 +167,106 @@ pub struct ProofCarryData {
 }
 
 /// Decoded Shasta event data containing the proposal and related information
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct ShastaEventData {
     pub proposal: Proposal,
+}
+
+mod proposal_bincode_compat {
+    use super::{BlobSlice, DerivationSource, Proposal};
+    use alloy_primitives::{Address, B256, Uint};
+    use serde::{Deserialize, Serialize};
+
+    type U48 = Uint<48, 1>;
+    type U24 = Uint<24, 1>;
+
+    #[derive(Serialize, Deserialize)]
+    #[allow(non_snake_case)]
+    struct BlobSliceBin {
+        blobHashes: Vec<B256>,
+        offset: u32,
+        timestamp: u64,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[allow(non_snake_case)]
+    struct DerivationSourceBin {
+        isForcedInclusion: bool,
+        blobSlice: BlobSliceBin,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[allow(non_snake_case)]
+    pub(super) struct ProposalBin {
+        id: u64,
+        timestamp: u64,
+        endOfSubmissionWindowTimestamp: u64,
+        proposer: Address,
+        parentProposalHash: B256,
+        originBlockNumber: u64,
+        originBlockHash: B256,
+        basefeeSharingPctg: u8,
+        sources: Vec<DerivationSourceBin>,
+    }
+
+    fn u48_from_u64(n: u64) -> U48 {
+        // Ensure it fits 48 bits.
+        U48::from_limbs([n & 0xffff_ffff_ffff])
+    }
+
+    fn u24_from_u32(n: u32) -> U24 {
+        U24::from_limbs([(n as u64) & 0x00ff_ffff])
+    }
+
+    pub(super) fn to_bin(p: &Proposal) -> ProposalBin {
+        ProposalBin {
+            id: p.id.to(),
+            timestamp: p.timestamp.to(),
+            endOfSubmissionWindowTimestamp: p.endOfSubmissionWindowTimestamp.to(),
+            proposer: p.proposer,
+            parentProposalHash: p.parentProposalHash,
+            originBlockNumber: p.originBlockNumber.to(),
+            originBlockHash: p.originBlockHash,
+            basefeeSharingPctg: p.basefeeSharingPctg,
+            sources: p
+                .sources
+                .iter()
+                .map(|src| DerivationSourceBin {
+                    isForcedInclusion: src.isForcedInclusion,
+                    blobSlice: BlobSliceBin {
+                        blobHashes: src.blobSlice.blobHashes.clone(),
+                        offset: src.blobSlice.offset.to(),
+                        timestamp: src.blobSlice.timestamp.to(),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn from_bin(bin: ProposalBin) -> Proposal {
+        Proposal {
+            id: u48_from_u64(bin.id),
+            timestamp: u48_from_u64(bin.timestamp),
+            endOfSubmissionWindowTimestamp: u48_from_u64(bin.endOfSubmissionWindowTimestamp),
+            proposer: bin.proposer,
+            parentProposalHash: bin.parentProposalHash,
+            originBlockNumber: u48_from_u64(bin.originBlockNumber),
+            originBlockHash: bin.originBlockHash,
+            basefeeSharingPctg: bin.basefeeSharingPctg,
+            sources: bin
+                .sources
+                .into_iter()
+                .map(|src| DerivationSource {
+                    isForcedInclusion: src.isForcedInclusion,
+                    blobSlice: BlobSlice {
+                        blobHashes: src.blobSlice.blobHashes,
+                        offset: u24_from_u32(src.blobSlice.offset),
+                        timestamp: u48_from_u64(src.blobSlice.timestamp),
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 impl ShastaEventData {
@@ -189,6 +286,107 @@ impl ShastaEventData {
     }
 }
 
+impl Serialize for ShastaEventData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Keep JSON schema stable (proposal-only, like `raiko`).
+        // For bincode, use an explicit bincode-safe encoding for the nested `Proposal`.
+        if serializer.is_human_readable() {
+            #[derive(Serialize)]
+            struct Hr<'a> {
+                proposal: &'a Proposal,
+            }
+            Hr {
+                proposal: &self.proposal,
+            }
+            .serialize(serializer)
+        } else {
+            #[derive(Serialize)]
+            struct Bin {
+                proposal: proposal_bincode_compat::ProposalBin,
+            }
+            Bin {
+                proposal: proposal_bincode_compat::to_bin(&self.proposal),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ShastaEventData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            // Accept both the old JSON shape:
+            //   { proposal: {..}, derivation: {..} }
+            // and the new shape:
+            //   { proposal: {..all fields..} }
+            #[derive(Deserialize)]
+            struct Old {
+                proposal: ProposalLegacy,
+                derivation: Derivation,
+            }
+
+            #[derive(Deserialize)]
+            struct New {
+                proposal: Proposal,
+            }
+
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum Hr {
+                Old(Old),
+                New(New),
+            }
+
+            // Legacy proposal JSON shape (without derivation fields embedded).
+            #[derive(Deserialize)]
+            #[allow(non_snake_case)]
+            struct ProposalLegacy {
+                id: alloy_primitives::Uint<48, 1>,
+                timestamp: alloy_primitives::Uint<48, 1>,
+                endOfSubmissionWindowTimestamp: alloy_primitives::Uint<48, 1>,
+                proposer: Address,
+                parentProposalHash: B256,
+            }
+
+            let v = Hr::deserialize(deserializer)?;
+            match v {
+                Hr::New(New { proposal }) => Ok(Self { proposal }),
+                Hr::Old(Old {
+                    proposal: p,
+                    derivation: d,
+                }) => Ok(Self {
+                    proposal: Proposal {
+                        id: p.id,
+                        timestamp: p.timestamp,
+                        endOfSubmissionWindowTimestamp: p.endOfSubmissionWindowTimestamp,
+                        proposer: p.proposer,
+                        parentProposalHash: p.parentProposalHash,
+                        originBlockNumber: d.originBlockNumber,
+                        originBlockHash: d.originBlockHash,
+                        basefeeSharingPctg: d.basefeeSharingPctg,
+                        sources: d.sources,
+                    },
+                }),
+            }
+        } else {
+            #[derive(Deserialize)]
+            struct Bin {
+                proposal: proposal_bincode_compat::ProposalBin,
+            }
+            let bin = Bin::deserialize(deserializer)?;
+            Ok(Self {
+                proposal: proposal_bincode_compat::from_bin(bin.proposal),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Proposed, ShastaEventData};
@@ -199,4 +397,5 @@ mod tests {
         let event = ShastaEventData::from_proposal_event(&proposed).unwrap();
         assert_eq!(event.proposal.id, proposed.id);
     }
+
 }

@@ -78,7 +78,27 @@ impl<'de> Deserialize<'de> for ForkCondition {
     where
         D: Deserializer<'de>,
     {
-        // Handle both "TBD" (from JSON) and "Tbd" (Rust enum variant)
+        // IMPORTANT:
+        // - For binary formats (bincode in SP1 stdin), deserialize using the standard enum
+        //   representation to stay symmetric with the derived `Serialize`.
+        // - For human-readable formats (JSON), keep backward-compatible parsing of the legacy
+        //   object/string forms.
+        if !deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            enum StdForkCondition {
+                Block(BlockNumber),
+                Timestamp(u64),
+                Tbd,
+            }
+            let v = StdForkCondition::deserialize(deserializer)?;
+            return Ok(match v {
+                StdForkCondition::Block(n) => ForkCondition::Block(n),
+                StdForkCondition::Timestamp(ts) => ForkCondition::Timestamp(ts),
+                StdForkCondition::Tbd => ForkCondition::Tbd,
+            });
+        }
+
+        // Human-readable (JSON): handle both "TBD" (from JSON) and "Tbd" (Rust enum variant)
         let value: Value = Value::deserialize(deserializer)?;
 
         match value {
@@ -94,16 +114,13 @@ impl<'de> Deserialize<'de> for ForkCondition {
                 }
                 Err(serde::de::Error::custom("Invalid ForkCondition object"))
             }
-            Value::String(s) => {
-                // Handle "TBD" or "Tbd" string
-                match s.as_str() {
-                    "TBD" | "Tbd" => Ok(ForkCondition::Tbd),
-                    _ => Err(serde::de::Error::custom(format!(
-                        "Unknown ForkCondition variant: {}",
-                        s
-                    ))),
-                }
-            }
+            Value::String(s) => match s.as_str() {
+                "TBD" | "Tbd" => Ok(ForkCondition::Tbd),
+                _ => Err(serde::de::Error::custom(format!(
+                    "Unknown ForkCondition variant: {}",
+                    s
+                ))),
+            },
             _ => Err(serde::de::Error::custom("Invalid ForkCondition format")),
         }
     }
@@ -170,6 +187,13 @@ fn deserialize_spec_id<'de, D>(deserializer: D) -> Result<SpecId, D::Error>
 where
     D: Deserializer<'de>,
 {
+    // For binary formats (bincode), deserialize the enum directly so it stays symmetric
+    // with `Serialize` (and works across host/guest).
+    if !deserializer.is_human_readable() {
+        return SpecId::deserialize(deserializer);
+    }
+
+    // For JSON, accept fork names as strings (including Taiko-specific names).
     let s = String::deserialize(deserializer)?;
     parse_spec_id_str(&s).map_err(serde::de::Error::custom)
 }
@@ -182,6 +206,12 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
+    // For binary formats (bincode), deserialize the map directly so it stays symmetric with
+    // `Serialize`. The string-key workaround is only for human-readable JSON inputs.
+    if !deserializer.is_human_readable() {
+        return BTreeMap::<SpecId, T>::deserialize(deserializer);
+    }
+
     // First deserialize as a map with string keys
     let string_map: BTreeMap<String, T> = BTreeMap::deserialize(deserializer)?;
 
@@ -245,6 +275,12 @@ fn deserialize_verifier_address_forks<'de, D>(
 where
     D: Deserializer<'de>,
 {
+    // For binary formats (bincode), deserialize the nested map directly so it stays symmetric with
+    // `Serialize`. The string-key conversion is only for human-readable JSON inputs.
+    if !deserializer.is_human_readable() {
+        return VerifierAddressForks::deserialize(deserializer);
+    }
+
     // First deserialize as a map with string keys, where inner map also has string keys
     let string_map: BTreeMap<String, BTreeMap<String, Option<Address>>> =
         BTreeMap::deserialize(deserializer)?;
@@ -455,6 +491,26 @@ mod tests {
     use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
     };
+
+    #[test]
+    fn chain_spec_json_to_bincode_roundtrip_default_list() {
+        // Parse the shipped default config list (JSON), then ensure the resulting ChainSpec is
+        // bincode roundtrip-safe. This is the core host<->guest compatibility invariant.
+        let list: Vec<ChainSpec> =
+            serde_json::from_str(DEFAULT_CHAIN_SPECS).expect("parse default chain spec list JSON");
+        assert!(!list.is_empty(), "default chain spec list should not be empty");
+
+        // Pick a deterministic entry (first) to avoid relying on a specific name existing.
+        let spec = &list[0];
+
+        let bytes = bincode::serialize(spec).expect("bincode serialize ChainSpec");
+        let decoded: ChainSpec = bincode::deserialize(&bytes).expect("bincode deserialize ChainSpec");
+
+        assert_eq!(
+            &decoded, spec,
+            "ChainSpec changed after bincode roundtrip (host/guest mismatch risk)"
+        );
+    }
 
     #[test]
     fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() {

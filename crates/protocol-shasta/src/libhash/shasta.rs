@@ -107,13 +107,12 @@ pub fn hash_proposal(proposal: &Proposal) -> B256 {
 }
 
 pub fn hash_core_state(core_state: &CoreState) -> B256 {
-    hash_six_values(
+    hash_five_values(
         U256::from(core_state.nextProposalId).into(),
         U256::from(core_state.lastProposalBlockId).into(),
         U256::from(core_state.lastFinalizedProposalId).into(),
         U256::from(core_state.lastFinalizedTimestamp).into(),
         U256::from(core_state.lastCheckpointTimestamp).into(),
-        core_state.lastFinalizedBlockHash,
     )
 }
 

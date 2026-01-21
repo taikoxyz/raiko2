@@ -2677,7 +2677,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=34c446de200a0856863615936c8ce1e94097981f#34c446de200a0856863615936c8ce1e94097981f"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=5c34b7308668a3161537926501bf30ce4788d481#5c34b7308668a3161537926501bf30ce4788d481"
 dependencies = [
  "alloy",
  "serde",
@@ -8781,7 +8781,7 @@ dependencies = [
 [[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=34c446de200a0856863615936c8ce1e94097981f#34c446de200a0856863615936c8ce1e94097981f"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=5c34b7308668a3161537926501bf30ce4788d481#5c34b7308668a3161537926501bf30ce4788d481"
 dependencies = [
  "alethia-reth-consensus 0.6.0 (git+https://github.com/taikoxyz/alethia-reth?rev=5137cd8aa1a5c1602bd61b0851211dfdf5913c3b)",
  "alethia-reth-evm 0.6.0 (git+https://github.com/taikoxyz/alethia-reth?rev=5137cd8aa1a5c1602bd61b0851211dfdf5913c3b)",

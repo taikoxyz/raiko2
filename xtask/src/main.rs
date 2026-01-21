@@ -114,6 +114,38 @@ fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn find_docker_buildx_plugin() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".docker/cli-plugins/docker-buildx"));
+    }
+    candidates.push(PathBuf::from("/usr/lib/docker/cli-plugins/docker-buildx"));
+    candidates.push(PathBuf::from(
+        "/usr/local/lib/docker/cli-plugins/docker-buildx",
+    ));
+    candidates.push(PathBuf::from(
+        "/usr/libexec/docker/cli-plugins/docker-buildx",
+    ));
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     println!("[INFO] Building RISC0 guest programs...");
     ensure_docker()?;
@@ -213,6 +245,10 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     let manifest_path = root.join("guests/risc0/Cargo.toml");
     let manifest = read_manifest(&manifest_path)?;
+    let container_manifest_path = manifest_path
+        .strip_prefix(root)
+        .map(|rel| PathBuf::from("/work").join(rel))
+        .unwrap_or_else(|_| PathBuf::from("/work/guests/risc0/Cargo.toml"));
 
     let target_root = env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -234,6 +270,21 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         .arg("/work")
         .arg("-v")
         .arg("/var/run/docker.sock:/var/run/docker.sock");
+    if let Some(docker_path) = find_executable("docker") {
+        cmd.arg("-v")
+            .arg(format!("{}:/usr/bin/docker", docker_path.display()));
+    } else {
+        println!("[WARN] docker not found in PATH; cargo risczero may fail inside the toolchain image");
+    }
+    let buildx_path = find_docker_buildx_plugin().ok_or_else(|| {
+        anyhow!(
+            "docker-buildx plugin not found. Install buildx or set RISC0_TOOLCHAIN_IMAGE=none"
+        )
+    })?;
+    cmd.arg("-v").arg(format!(
+        "{}:/root/.docker/cli-plugins/docker-buildx",
+        buildx_path.display()
+    ));
 
     if let Some(extra_mount) = &extra_mount {
         cmd.arg("-v")
@@ -252,7 +303,11 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         .arg("-e")
         .arg(format!("RISC0_DOCKER_CONTAINER_TAG={risc0_docker_tag}"))
         .arg("-e")
-        .arg("RISC0_FEATURE_bigint2=1");
+        .arg("RISC0_FEATURE_bigint2=1")
+        .arg("-e")
+        .arg("DOCKER_BUILDKIT=1")
+        .arg("-e")
+        .arg("DOCKER_CLI_PLUGIN_EXTRA_DIRS=/root/.docker/cli-plugins");
 
     if let Ok(cc) = env::var("RISC0_GUEST_CC")
         && !cc.is_empty()
@@ -280,7 +335,7 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         .arg("risczero")
         .arg("build")
         .arg("--manifest-path")
-        .arg(&manifest_path);
+        .arg(&container_manifest_path);
 
     println!("[INFO] Building RISC0 guest package (toolchain image)...");
     run(cmd)?;

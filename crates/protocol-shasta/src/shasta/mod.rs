@@ -2,6 +2,7 @@
 //!
 //! This module contains all Shasta-specific protocol types and codecs.
 
+#[cfg(feature = "net")]
 pub mod anchor;
 pub mod blob_coder;
 pub mod constants;
@@ -10,6 +11,7 @@ pub mod manifest;
 pub mod payload_helpers;
 pub mod rpc_methods;
 
+#[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
 pub use blob_coder::BlobCoder;
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
@@ -302,7 +304,7 @@ impl ShastaEventData {
 }
 
 impl Serialize for ShastaEventData {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -331,7 +333,7 @@ impl Serialize for ShastaEventData {
 }
 
 impl<'de> Deserialize<'de> for ShastaEventData {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {

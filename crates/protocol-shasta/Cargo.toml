@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 raiko2-protocol.workspace = true
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", rev = "34c446de200a0856863615936c8ce1e94097981f", package = "protocol" }
 
 # Alloy types
 alloy-primitives.workspace = true

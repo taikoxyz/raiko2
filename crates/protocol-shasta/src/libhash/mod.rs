@@ -17,7 +17,9 @@ pub use values::{
 
 #[cfg(test)]
 mod test {
-    use crate::shasta::{BlobSlice, Commitment, Derivation, DerivationSource, Proposal, Transition};
+    use crate::shasta::{
+        BlobSlice, Commitment, Derivation, DerivationSource, Proposal, Transition,
+    };
     use alloy_primitives::{Address, B256, Uint, address, b256, hex};
 
     use super::*;
@@ -174,9 +176,7 @@ mod test {
             ),
             actualProver: address!("0000000000000000000000000000000000001234"),
             endBlockNumber: Uint::from(10u64),
-            endStateRoot: b256!(
-                "3333333333333333333333333333333333333333333333333333333333333333"
-            ),
+            endStateRoot: b256!("3333333333333333333333333333333333333333333333333333333333333333"),
             transitions: vec![Transition {
                 proposer: address!("0000000000000000000000000000000000005678"),
                 timestamp: Uint::from(123_456u64),
@@ -205,9 +205,7 @@ mod test {
             ),
             actualProver: address!("0000000000000000000000000000000000009876"),
             endBlockNumber: Uint::from(20u64),
-            endStateRoot: b256!(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-            ),
+            endStateRoot: b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
             transitions: vec![
                 Transition {
                     proposer: address!("0000000000000000000000000000000000000001"),

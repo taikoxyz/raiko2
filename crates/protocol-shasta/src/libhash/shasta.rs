@@ -5,7 +5,9 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::SolValue;
 
 use super::encode::{VERIFY_PROOF_B256, address_to_b256, u48_to_b256, u64_to_b256};
-use super::values::{hash_five_values, hash_four_values, hash_three_values, hash_values_impl};
+use super::values::{
+    hash_five_values, hash_four_values, hash_six_values, hash_three_values, hash_values_impl,
+};
 
 /// Hash a checkpoint using the same logic as the Solidity implementation
 pub fn hash_checkpoint(checkpoint: &Checkpoint) -> B256 {

@@ -8,6 +8,11 @@ on:
       - docker/risc0-toolchain/**
       - .github/workflows/risc0-toolchain-image.yml
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Set to true to force a rebuild"
+        required: true
+        default: "false"
 
 permissions:
   contents: read
@@ -34,7 +39,7 @@ jobs:
 
   build:
     needs: changes
-    if: needs.changes.outputs.docker == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.docker == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

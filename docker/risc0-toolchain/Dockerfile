@@ -22,10 +22,9 @@ RUN apt-get update \
         build-essential \
         pkg-config \
         libssl-dev \
-        docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-# docker.io provides the docker CLI; the container expects a host docker socket.
+# Docker is expected to be provided by the host when this image is used.
 RUN set -eux; \
     curl -fsSL "${RISC0_INSTALL_URL}" -o /tmp/risc0-install.sh; \
     echo "${RISC0_INSTALL_SHA256}  /tmp/risc0-install.sh" | sha256sum -c -; \

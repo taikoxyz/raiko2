@@ -30,8 +30,11 @@ sol! {
         bytes32 stateRoot;
     }
 
-    /// @notice Represents a source of derivation data within a Derivation
+    /// @notice Contains derivation data for a proposal that is not needed during proving.
+    /// @dev This data is hashed and stored in the Proposal struct to reduce calldata size.
     #[derive(Debug, Default, Deserialize, Serialize)]
+
+    /// @notice Represents a source of derivation data within a Derivation
     struct DerivationSource {
         /// @notice Whether this source is from a forced inclusion.
         bool isForcedInclusion;

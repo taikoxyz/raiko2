@@ -41,6 +41,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force == 'true')
     runs-on: ubuntu-latest
+    env:
+      # Keep in sync with docker/risc0-toolchain/Dockerfile.
+      RISC0_VERSION: "3.0.4"
+      RISC0_RUST_VERSION: "1.85.0"
+      RISC0_CPP_VERSION: "2024.1.5"
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -64,3 +69,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=risc0-toolchain
           cache-to: type=gha,mode=max,scope=risc0-toolchain
+          build-args: |
+            RISC0_VERSION=${{ env.RISC0_VERSION }}
+            RISC0_RUST_VERSION=${{ env.RISC0_RUST_VERSION }}
+            RISC0_CPP_VERSION=${{ env.RISC0_CPP_VERSION }}

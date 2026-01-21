@@ -2,6 +2,10 @@
 //!
 //! This module contains all Shasta-specific protocol types and codecs.
 
+pub mod blob_coder;
+pub mod constants;
+pub mod manifest;
+
 use alloy_primitives::{Address, B256, ChainId};
 use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
@@ -52,7 +56,6 @@ sol! {
         DerivationSource[] sources;
     }
 
-
     #[derive(Debug, Default, Deserialize, Serialize)]
     /// @notice Represents a proposal for L2 blocks.
     struct Proposal {
@@ -66,8 +69,14 @@ sol! {
         address proposer;
         /// @notice Hash of the parent proposal (zero for genesis).
         bytes32 parentProposalHash;
-        /// @notice Hash of the Derivation struct containing additional proposal data.
-        bytes32 derivationHash;
+        /// @notice The L1 block number when the proposal was accepted.
+        uint48 originBlockNumber;
+        /// @notice The hash of the origin block.
+        bytes32 originBlockHash;
+        /// @notice The percentage of base fee paid to coinbase.
+        uint8 basefeeSharingPctg;
+        /// @notice Array of derivation sources, where each can be regular or forced inclusion.
+        DerivationSource[] sources;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -75,12 +84,10 @@ sol! {
     struct Transition {
         /// @notice Address of the proposer.
         address proposer;
-        /// @notice Address of the designated prover.
-        address designatedProver;
         /// @notice Timestamp of the proposal.
         uint48 timestamp;
-        /// @notice checkpoint hash for the proposal.
-        bytes32 checkpointHash;
+        /// @notice end block hash for the proposal.
+        bytes32 blockHash;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -88,8 +95,8 @@ sol! {
     struct Commitment {
         /// @notice The ID of the first proposal being proven.
         uint48 firstProposalId;
-        /// @notice The checkpoint hash of the parent of the first proposal, this is used
-        /// to verify checkpoint continuity in the proof.
+        /// @notice The block hash of the parent of the first proposal, this is used
+        /// to verify block continuity in the proof.
         bytes32 firstProposalParentBlockHash;
         /// @notice The hash of the last proposal being proven.
         bytes32 lastProposalHash;
@@ -108,37 +115,28 @@ sol! {
     struct CoreState {
         /// @notice The next proposal ID to be assigned.
         uint48 nextProposalId;
-        /// @notice The last block ID where a proposal was made.
+        /// @notice The last L1 block ID where a proposal was made.
         uint48 lastProposalBlockId;
         /// @notice The ID of the last finalized proposal.
         uint48 lastFinalizedProposalId;
+        /// @notice The timestamp when the last proposal was finalized.
+        uint48 lastFinalizedTimestamp;
         /// @notice The timestamp when the last checkpoint was saved.
         /// @dev In genesis block, this is set to 0 to allow the first checkpoint to be saved.
         uint48 lastCheckpointTimestamp;
-        /// @notice The hash of the last finalized transition.
-        bytes32 lastFinalizedTransitionHash;
+        /// @notice The block hash of the last finalized proposal.
+        bytes32 lastFinalizedBlockHash;
     }
 
     #[derive(Debug, Default, Deserialize, Serialize)]
-    struct ProposedEventPayload {
-        /// @notice The proposal that was created.
-        Proposal proposal;
-        /// @notice The derivation data for the proposal.
-        Derivation derivation;
-    }
-
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    struct BlobReference {
-        uint16 blobStartIndex;
-        uint16 numBlobs;
-        uint24 offset;
-    }
-
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    event Proposed(bytes data);
-
-    #[derive(Debug, Default, Deserialize, Serialize)]
-    event Proved(bytes data);
+    event Proposed(
+        uint48 indexed id,
+        address indexed proposer,
+        bytes32 parentProposalHash,
+        uint48 endOfSubmissionWindowTimestamp,
+        uint8 basefeeSharingPctg,
+        DerivationSource[] sources
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -147,7 +145,6 @@ sol! {
 // We keep ABI-compatible field names.
 pub struct ShastaTransitionInput {
     pub proposer: Address,
-    pub designatedProver: Address,
     pub timestamp: u64,
 }
 
@@ -156,7 +153,7 @@ pub struct TransitionInputData {
     pub proposal_id: u64,
     pub proposal_hash: B256,
     pub parent_proposal_hash: B256,
-    pub parent_checkpoint_hash: B256,
+    pub parent_block_hash: B256,
     pub actual_prover: Address,
     pub transition: ShastaTransitionInput,
     pub checkpoint: Checkpoint,
@@ -173,74 +170,33 @@ pub struct ProofCarryData {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ShastaEventData {
     pub proposal: Proposal,
-    pub derivation: Derivation,
 }
 
-mod decode;
+impl ShastaEventData {
+    /// Decode a Shasta Proposed event into ShastaEventData.
+    pub fn from_proposal_event(proposal: &Proposed) -> Result<Self, alloy_sol_types::Error> {
+        Ok(Self {
+            proposal: Proposal {
+                id: proposal.id,
+                endOfSubmissionWindowTimestamp: proposal.endOfSubmissionWindowTimestamp,
+                proposer: proposal.proposer,
+                parentProposalHash: proposal.parentProposalHash,
+                basefeeSharingPctg: proposal.basefeeSharingPctg,
+                sources: proposal.sources.clone(),
+                ..Default::default()
+            },
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::ShastaEventData;
-    use alloy_primitives::hex;
+    use super::{Proposed, ShastaEventData};
 
     #[test]
-    fn test_decode_known_hex() {
-        // This is a real example: decode the provided hex-encoded payload and check fields.
-        let data = hex::decode("0000000009143c44cdddb6a900fa2b585dd299e03d12fa4293bc0000693e56cc000000000000d1374b45317e657e07505c83fc4702e8f6e043ff3e7beb2eaa0974783a4222ae0000000038aeb5f96a8745b06f7a00e5741f503d6d45c0d5ec1377960abe86e45299d6410cdf4b000100000101b1a43b3e87672be8a5102ac0d99dc4215491d8a07a7fa402d34d7f1ac9696d0000000000693e56cc36cf931b08528aa49160c33ecda1505b2c292a4947c416d9dc26646ebe9c0d35").unwrap();
-
-        // Decode using manual decoding function
-        let result = ShastaEventData::decode_event_data(&data);
-
-        assert!(
-            result.is_ok(),
-            "Failed to manually decode Shasta event data: {:?}",
-            result.err()
-        );
-
-        let event_data = result.unwrap();
-
-        // Spot-check some expected field invariants:
-
-        // Proposal
-        println!("proposal.id: {}", event_data.proposal.id);
-        println!("proposal.proposer: {:?}", event_data.proposal.proposer);
-        println!("proposal.timestamp: {}", event_data.proposal.timestamp);
-        println!(
-            "proposal.parentProposalHash: 0x{}",
-            hex::encode(event_data.proposal.parentProposalHash)
-        );
-        println!(
-            "proposal.derivationHash: 0x{}",
-            hex::encode(event_data.proposal.derivationHash)
-        );
-
-        // Derivation
-        println!(
-            "derivation.originBlockNumber: {}",
-            event_data.derivation.originBlockNumber
-        );
-        println!(
-            "derivation.originBlockHash: 0x{}",
-            hex::encode(event_data.derivation.originBlockHash)
-        );
-        println!(
-            "derivation.basefeeSharingPctg: {}",
-            event_data.derivation.basefeeSharingPctg
-        );
-        println!(
-            "derivation.sources.length: {}",
-            event_data.derivation.sources.len()
-        );
-
-        // Derivation Source
-        let s = &event_data.derivation.sources[0];
-        println!("isForcedInclusion: {}", s.isForcedInclusion);
-        println!("blobHashes.length: {}", s.blobSlice.blobHashes.len());
-        println!(
-            "blobHashes[0]: 0x{}",
-            hex::encode(s.blobSlice.blobHashes[0])
-        );
-        println!("offset: {}", s.blobSlice.offset);
-        println!("timestamp: {}", s.blobSlice.timestamp);
+    fn shasta_event_data_from_proposed() {
+        let proposed = Proposed::default();
+        let event = ShastaEventData::from_proposal_event(&proposed).unwrap();
+        assert_eq!(event.proposal.id, proposed.id);
     }
 }

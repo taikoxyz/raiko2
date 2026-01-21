@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
 const DEFAULT_SP1_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend=\"custom\"";
+const DEFAULT_RISC0_TOOLCHAIN_IMAGE: &str = "ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest";
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -116,11 +117,14 @@ fn ensure_cargo_prove() -> Result<()> {
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     println!("[INFO] Building RISC0 guest programs...");
     ensure_docker()?;
-    if let Ok(image) = env::var("RISC0_TOOLCHAIN_IMAGE") {
-        let image = image.trim();
-        if !image.is_empty() {
-            return build_risc0_with_toolchain_image(root, bench, image);
-        }
+    let toolchain_image =
+        env::var("RISC0_TOOLCHAIN_IMAGE").unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string());
+    let toolchain_image = toolchain_image.trim();
+    if !toolchain_image.is_empty()
+        && !toolchain_image.eq_ignore_ascii_case("local")
+        && !toolchain_image.eq_ignore_ascii_case("none")
+    {
+        return build_risc0_with_toolchain_image(root, bench, toolchain_image);
     }
     ensure_cargo_risczero()?;
 

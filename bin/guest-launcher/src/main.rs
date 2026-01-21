@@ -7,8 +7,8 @@ use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::shasta::{ProofCarryData, TransitionInputData};
-use sp1_sdk::utils::setup_logger;
 use sp1_sdk::network::Address;
+use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{ProverClient, SP1ProofMode, SP1Stdin};
 
 #[derive(Parser)]

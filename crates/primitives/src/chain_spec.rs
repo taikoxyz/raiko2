@@ -498,13 +498,17 @@ mod tests {
         // bincode roundtrip-safe. This is the core host<->guest compatibility invariant.
         let list: Vec<ChainSpec> =
             serde_json::from_str(DEFAULT_CHAIN_SPECS).expect("parse default chain spec list JSON");
-        assert!(!list.is_empty(), "default chain spec list should not be empty");
+        assert!(
+            !list.is_empty(),
+            "default chain spec list should not be empty"
+        );
 
         // Pick a deterministic entry (first) to avoid relying on a specific name existing.
         let spec = &list[0];
 
         let bytes = bincode::serialize(spec).expect("bincode serialize ChainSpec");
-        let decoded: ChainSpec = bincode::deserialize(&bytes).expect("bincode deserialize ChainSpec");
+        let decoded: ChainSpec =
+            bincode::deserialize(&bytes).expect("bincode deserialize ChainSpec");
 
         assert_eq!(
             &decoded, spec,

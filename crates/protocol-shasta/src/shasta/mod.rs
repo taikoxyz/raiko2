@@ -412,5 +412,4 @@ mod tests {
         let event = ShastaEventData::from_proposal_event(&proposed).unwrap();
         assert_eq!(event.proposal.id, proposed.id);
     }
-
 }

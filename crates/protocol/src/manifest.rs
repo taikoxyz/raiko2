@@ -74,6 +74,7 @@ pub struct TaikoManifest<E = (), Cp = ()> {
     /// The proposal ID being proven.
     pub proposal_id: u64,
     /// The L1 header at which the proposal was proposed.
+    #[serde(with = "l1_header_bincode_compat")]
     pub l1_header: Header,
     /// The decoded proposal event data.
     pub proposal_event: E,
@@ -83,6 +84,40 @@ pub struct TaikoManifest<E = (), Cp = ()> {
     pub prover_data: TaikoProverData<Cp>,
     /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
+}
+
+mod l1_header_bincode_compat {
+    use super::Header;
+    use alloy_rlp::Decodable;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(h: &Header, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if s.is_human_readable() {
+            return h.serialize(s);
+        }
+
+        // For bincode (SP1 stdin), encode the header as canonical RLP bytes.
+        let bytes = alloy_rlp::encode(h);
+        let v: Vec<u8> = bytes.to_vec();
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Header, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if d.is_human_readable() {
+            return Header::deserialize(d);
+        }
+
+        // For bincode (SP1 stdin), decode from RLP bytes.
+        let bytes = Vec::<u8>::deserialize(d)?;
+        let mut slice = bytes.as_slice();
+        Header::decode(&mut slice).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]

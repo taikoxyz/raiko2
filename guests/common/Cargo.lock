@@ -3271,9 +3271,11 @@ dependencies = [
 name = "raiko2-primitives-shasta"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
+ "bincode",
  "hex",
  "raiko2-primitives",
  "raiko2-protocol-shasta",
@@ -3289,6 +3291,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rlp",
  "anyhow",
  "serde",
 ]

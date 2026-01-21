@@ -11,6 +11,7 @@ workspace = true
 # Alloy types
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-rlp.workspace = true
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }

@@ -16,6 +16,8 @@ members = [
     "bin/raiko2",
     "bin/rpc-proxy",
     "bin/witness-check",
+    "bin/guest-launcher",
+    "bin/preflight",
 ]
 exclude = ["guests/*"]
 

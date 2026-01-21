@@ -5297,6 +5297,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "guest-launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "raiko2-pipeline",
+ "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
+ "serde",
+ "serde_json",
+ "sp1-sdk",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8387,6 +8402,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "preflight"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "raiko2-pipeline",
+ "raiko2-primitives",
+ "raiko2-primitives-shasta",
+ "raiko2-provider",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pretty_assertions"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8826,9 +8856,11 @@ dependencies = [
 name = "raiko2-primitives-shasta"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-sol-types",
  "anyhow",
+ "bincode",
  "hex",
  "raiko2-primitives",
  "raiko2-protocol-shasta",
@@ -8844,6 +8876,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rlp",
  "anyhow",
  "serde",
 ]

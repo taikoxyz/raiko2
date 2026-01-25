@@ -4984,6 +4984,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b375d6465b98090a5f25b1c7703f3859783755aa9a80433b36e0379a3ec2f369"
 dependencies = [
  "crc32fast",
+ "libz-sys",
  "miniz_oxide",
 ]
 
@@ -5441,11 +5442,9 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
- "hex",
  "raiko2-pipeline",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
- "risc0-zkvm",
  "serde",
  "serde_json",
  "sp1-sdk",

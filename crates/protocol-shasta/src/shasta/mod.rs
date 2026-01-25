@@ -224,12 +224,12 @@ mod proposal_bincode_compat {
         sources: Vec<DerivationSourceBin>,
     }
 
-    fn u48_from_u64(n: u64) -> U48 {
+    const fn u48_from_u64(n: u64) -> U48 {
         // Ensure it fits 48 bits.
         U48::from_limbs([n & 0xffff_ffff_ffff])
     }
 
-    fn u24_from_u32(n: u32) -> U24 {
+    const fn u24_from_u32(n: u32) -> U24 {
         U24::from_limbs([(n as u64) & 0x00ff_ffff])
     }
 

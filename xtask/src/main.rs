@@ -138,19 +138,14 @@ fn find_docker_buildx_plugin() -> Option<PathBuf> {
         "/usr/libexec/docker/cli-plugins/docker-buildx",
     ));
 
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     println!("[INFO] Building RISC0 guest programs...");
     ensure_docker()?;
-    let toolchain_image =
-        env::var("RISC0_TOOLCHAIN_IMAGE").unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string());
+    let toolchain_image = env::var("RISC0_TOOLCHAIN_IMAGE")
+        .unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string());
     let toolchain_image = toolchain_image.trim();
     if !toolchain_image.is_empty()
         && !toolchain_image.eq_ignore_ascii_case("local")
@@ -274,12 +269,12 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         cmd.arg("-v")
             .arg(format!("{}:/usr/bin/docker", docker_path.display()));
     } else {
-        println!("[WARN] docker not found in PATH; cargo risczero may fail inside the toolchain image");
+        println!(
+            "[WARN] docker not found in PATH; cargo risczero may fail inside the toolchain image"
+        );
     }
     let buildx_path = find_docker_buildx_plugin().ok_or_else(|| {
-        anyhow!(
-            "docker-buildx plugin not found. Install buildx or set RISC0_TOOLCHAIN_IMAGE=none"
-        )
+        anyhow!("docker-buildx plugin not found. Install buildx or set RISC0_TOOLCHAIN_IMAGE=none")
     })?;
     cmd.arg("-v").arg(format!(
         "{}:/root/.docker/cli-plugins/docker-buildx",

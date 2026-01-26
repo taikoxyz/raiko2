@@ -68,6 +68,7 @@ impl AppState {
     }
 }
 
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_risc0_engine(
     config: &Config,
     scheduler_config: SchedulerConfig,
@@ -129,6 +130,7 @@ async fn build_risc0_engine(
     Ok(engine)
 }
 
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_sp1_engine(
     config: &Config,
     scheduler_config: SchedulerConfig,
@@ -190,6 +192,7 @@ async fn build_sp1_engine(
     Ok(engine)
 }
 
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_native_engine(
     config: &Config,
     scheduler_config: SchedulerConfig,

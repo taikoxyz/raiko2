@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Prover configuration (JSON value for flexibility).
 pub type ProverConfig = serde_json::Value;
 
-/// Key for identifying a proof: (chain_id, block_number, block_hash, proof_type).
+/// Key for identifying a proof: (`chain_id`, `block_number`, `block_hash`, `proof_type`).
 pub type ProofKey = (ChainId, u64, B256, u8);
 
 /// The response body of a proof request.

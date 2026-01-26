@@ -18,6 +18,10 @@ where
     }
 
     /// Run the preflight stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the preflight stage fails for the provided context.
     pub async fn preflight(
         &self,
         ctx: &ProofContext,
@@ -34,6 +38,10 @@ where
     }
 
     /// Run the validation stage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails for the given input.
     pub fn validate(
         &self,
         ctx: &ProofContext,
@@ -47,6 +55,10 @@ where
     }
 
     /// Build a guest input by running the unified pipeline steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if preflight or validation fails.
     pub async fn build_guest_input(
         &self,
         ctx: &ProofContext,
@@ -157,7 +169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pipeline_empty_input() {
+    async fn test_pipeline_empty_input() -> Result<(), Box<dyn std::error::Error>> {
         let spec = EmptySpec {
             prover: (),
             backend: NativeBackend,
@@ -165,12 +177,10 @@ mod tests {
         };
         let pipeline = Pipeline::new(&spec);
         let ctx = ProofContext::new(ProofRequest::default(), ProverConfig::default());
-        let input = pipeline
-            .build_guest_input(&ctx)
-            .await
-            .expect("pipeline should succeed");
+        let input = pipeline.build_guest_input(&ctx).await?;
 
         assert!(input.output.witnesses.is_empty());
         assert_eq!(input.output.taiko.proposal_id, 0);
+        Ok(())
     }
 }

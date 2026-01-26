@@ -35,6 +35,9 @@ pub use db::{PreflightDb, ProviderConfig, ProviderDb};
 pub use rpc::{DebugApi, StorageRangeQueryResponse, StorageRangeQueryResponseEntry};
 pub use trie::{handle_modified_account, handle_new_account, handle_removed_account};
 
+/// # Errors
+///
+/// Returns an error if the block cannot be fetched, executed, or its proofs fail to build.
 pub async fn execution_witness<E, P, N>(
     evm_config: E,
     provider: &P,
@@ -92,7 +95,7 @@ where
     })
     .await?;
     let execution_outcome = execution_result?;
-    let mut db = db.unwrap();
+    let mut db = db.context("preflight db capture missing after execution")?;
 
     debug!("Building pre-state proofs");
     let (mut state_trie, mut storage_tries) = db.state_proof().await?;
@@ -105,13 +108,15 @@ where
     for (addr, account) in execution_outcome.state.state {
         match (account.original_info.is_some(), account.info.is_some()) {
             (false, true) => {
-                trie::handle_new_account(provider, block_hash, addr, &mut state_trie).await?
+                trie::handle_new_account(provider, block_hash, addr, &mut state_trie).await?;
             }
             (true, false) => {
-                trie::handle_removed_account(provider, block_hash, addr, &mut state_trie).await?
+                trie::handle_removed_account(provider, block_hash, addr, &mut state_trie).await?;
             }
             (true, true) => {
-                let storage = storage_tries.get_mut(&addr).unwrap();
+                let storage = storage_tries
+                    .get_mut(&addr)
+                    .with_context(|| format!("missing storage trie for account {addr:?}"))?;
                 trie::handle_modified_account(
                     provider,
                     block_hash,
@@ -164,17 +169,17 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn execution_witness_from_env_rpc() {
+    async fn execution_witness_from_env_rpc() -> Result<(), Box<dyn std::error::Error>> {
         let rpc_url = std::env::var("ON_THE_SPOT_WITNESS_RPC_URL").ok();
         let Some(rpc_url) = rpc_url else {
-            return;
+            return Ok(());
         };
 
-        let url = reqwest::Url::parse(&rpc_url).expect("Invalid ON_THE_SPOT_WITNESS_RPC_URL");
+        let url = reqwest::Url::parse(&rpc_url)?;
         let client = RpcClient::builder().http(url);
         let provider = ProviderBuilder::new().connect_client(client);
 
-        let chain_id = provider.get_chain_id().await.expect("eth_chainId failed");
+        let chain_id = provider.get_chain_id().await?;
         let block_id = std::env::var("ON_THE_SPOT_WITNESS_BLOCK")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -184,34 +189,32 @@ mod tests {
         let witness = match chain_id {
             167000 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_MAINNET.clone()));
-                execution_witness(evm_config, &provider, block_id)
-                    .await
-                    .expect("execution_witness failed")
+                execution_witness(evm_config, &provider, block_id).await?
             }
             167001 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone()));
-                execution_witness(evm_config, &provider, block_id)
-                    .await
-                    .expect("execution_witness failed")
+                execution_witness(evm_config, &provider, block_id).await?
             }
             167013 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_HOODI.clone()));
-                execution_witness(evm_config, &provider, block_id)
-                    .await
-                    .expect("execution_witness failed")
+                execution_witness(evm_config, &provider, block_id).await?
             }
             _ => {
-                let chain: NamedChain = chain_id.try_into().expect("Invalid chain_id");
+                let chain: NamedChain = chain_id.try_into()?;
                 let evm_config = match chain {
                     NamedChain::Mainnet => Arc::new(EthEvmConfig::ethereum(MAINNET.clone())),
                     NamedChain::Holesky => Arc::new(EthEvmConfig::ethereum(HOLESKY.clone())),
                     NamedChain::Hoodi => Arc::new(EthEvmConfig::ethereum(HOODI.clone())),
                     NamedChain::Sepolia => Arc::new(EthEvmConfig::ethereum(SEPOLIA.clone())),
-                    _ => panic!("Unsupported chain: {chain}"),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("unsupported chain: {chain}"),
+                        )
+                        .into());
+                    }
                 };
-                execution_witness(evm_config, &provider, block_id)
-                    .await
-                    .expect("execution_witness failed")
+                execution_witness(evm_config, &provider, block_id).await?
             }
         };
 
@@ -223,5 +226,6 @@ mod tests {
             !witness.headers.is_empty(),
             "witness headers should not be empty"
         );
+        Ok(())
     }
 }

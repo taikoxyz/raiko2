@@ -30,6 +30,9 @@ impl Default for SupportedChainSpecs {
 }
 
 impl SupportedChainSpecs {
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed.
     pub fn merge_from_file(file_path: PathBuf) -> Result<SupportedChainSpecs> {
         let mut known_chain_specs = SupportedChainSpecs::default();
         let file = std::fs::File::open(file_path)?;
@@ -46,14 +49,17 @@ impl SupportedChainSpecs {
         Ok(known_chain_specs)
     }
 
+    #[must_use]
     pub fn supported_networks(&self) -> Vec<String> {
         self.0.keys().cloned().collect()
     }
 
+    #[must_use]
     pub fn get_chain_spec(&self, network: &str) -> Option<ChainSpec> {
         self.0.get(network).cloned()
     }
 
+    #[must_use]
     pub fn get_chain_spec_with_chain_id(&self, chain_id: u64) -> Option<ChainSpec> {
         self.0
             .values()
@@ -117,8 +123,7 @@ impl<'de> Deserialize<'de> for ForkCondition {
             Value::String(s) => match s.as_str() {
                 "TBD" | "Tbd" => Ok(ForkCondition::Tbd),
                 _ => Err(serde::de::Error::custom(format!(
-                    "Unknown ForkCondition variant: {}",
-                    s
+                    "Unknown ForkCondition variant: {s}"
                 ))),
             },
             _ => Err(serde::de::Error::custom("Invalid ForkCondition format")),
@@ -128,6 +133,7 @@ impl<'de> Deserialize<'de> for ForkCondition {
 
 impl ForkCondition {
     /// Returns whether the condition has been met.
+    #[must_use]
     pub const fn active(&self, block_no: BlockNumber, timestamp: u64) -> bool {
         match self {
             ForkCondition::Block(block) => *block <= block_no,
@@ -158,8 +164,8 @@ impl Default for Eip1559Constants {
     }
 }
 
-/// Helper function to convert Taiko fork name string to a unique SpecId placeholder.
-/// Since standard SpecId doesn't include Taiko forks, we use a combination approach:
+/// Helper function to convert Taiko fork name string to a unique `SpecId` placeholder.
+/// Since standard `SpecId` doesn't include Taiko forks, we use a combination approach:
 /// - For Taiko forks, we use CANCUN as base and encode the fork name in a way that
 ///   allows us to distinguish them when needed
 /// - We maintain a separate mapping for Taiko fork lookups
@@ -177,12 +183,12 @@ fn parse_spec_id_str(value: &str) -> Result<SpecId, String> {
         // Taiko-specific forks - use CANCUN as placeholder
         "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => Ok(taiko_fork_to_spec_id(value)),
         // Standard forks - deserialize normally
-        _ => serde_json::from_str(&format!("\"{}\"", value))
-            .map_err(|_| format!("unknown SpecId variant: {}", value)),
+        _ => serde_json::from_str(&format!("\"{value}\""))
+            .map_err(|_| format!("unknown SpecId variant: {value}")),
     }
 }
 
-/// Custom deserializer for SpecId that handles Taiko-specific fork names.
+/// Custom deserializer for `SpecId` that handles Taiko-specific fork names.
 fn deserialize_spec_id<'de, D>(deserializer: D) -> Result<SpecId, D::Error>
 where
     D: Deserializer<'de>,
@@ -198,7 +204,7 @@ where
     parse_spec_id_str(&s).map_err(serde::de::Error::custom)
 }
 
-/// Custom deserializer for BTreeMap<SpecId, T> that handles Taiko-specific fork names.
+/// Custom deserializer for `BTreeMap<SpecId, T>` that handles Taiko-specific fork names.
 /// For Taiko forks, we need to preserve the original fork name to avoid collisions.
 /// We'll use a workaround: store them with string keys internally, then convert.
 fn deserialize_spec_id_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<SpecId, T>, D::Error>
@@ -264,11 +270,11 @@ fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
         "SP1" | "Sp1" => Ok(ProofType::Sp1),
         "SGX" | "Sgx" => Ok(ProofType::Sgx),
         "RISC0" | "Risc0" => Ok(ProofType::Risc0),
-        _ => Err(format!("unknown ProofType variant: {}", value)),
+        _ => Err(format!("unknown ProofType variant: {value}")),
     }
 }
 
-/// Custom deserializer for verifier_address_forks nested map structure.
+/// Custom deserializer for `verifier_address_forks` nested map structure.
 fn deserialize_verifier_address_forks<'de, D>(
     deserializer: D,
 ) -> Result<VerifierAddressForks, D::Error>
@@ -355,6 +361,7 @@ impl<'de> Deserialize<'de> for ChainSpec {
 
 impl ChainSpec {
     /// Creates a new configuration consisting of only one specification ID.
+    #[must_use]
     pub fn new_single(
         name: String,
         chain_id: ChainId,
@@ -370,7 +377,7 @@ impl ChainSpec {
             eip_1559_constants,
             l1_contract: BTreeMap::new(),
             l2_contract: None,
-            rpc: "".to_string(),
+            rpc: String::new(),
             beacon_rpc: None,
             verifier_address_forks: BTreeMap::new(),
             genesis_time: 0u64,
@@ -380,12 +387,17 @@ impl ChainSpec {
     }
 
     /// Returns the network chain ID.
+    #[must_use]
     pub const fn chain_id(&self) -> ChainId {
         self.chain_id
     }
 
-    /// Returns the [SpecId] for a given block number and timestamp or an error if not
+    /// Returns the [`SpecId`] for a given block number and timestamp or an error if not
     /// supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no active fork matches or if the spec exceeds `max_spec_id`.
     pub fn active_fork(&self, block_no: BlockNumber, timestamp: u64) -> Result<SpecId> {
         match self.spec_id(block_no, timestamp) {
             Some(spec_id) => {
@@ -399,10 +411,12 @@ impl ChainSpec {
     }
 
     /// Returns the Eip1559 constants
+    #[must_use]
     pub const fn gas_constants(&self) -> &Eip1559Constants {
         &self.eip_1559_constants
     }
 
+    #[must_use]
     pub fn spec_id(&self, block_no: BlockNumber, timestamp: u64) -> Option<SpecId> {
         for (spec_id, fork) in self.hard_forks.iter().rev() {
             if fork.active(block_no, timestamp) {
@@ -412,6 +426,9 @@ impl ChainSpec {
         None
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if no active fork or verifier address is configured.
     pub fn get_fork_verifier_address(
         &self,
         block_num: u64,
@@ -435,6 +452,9 @@ impl ChainSpec {
         Err(anyhow!("fork verifier is not active"))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if no active fork has an L1 contract address configured.
     pub fn get_fork_l1_contract_address(&self, block_num: u64) -> Result<Address> {
         // fall down to the first fork that is active as default
         for (spec_id, fork) in self.hard_forks.iter().rev() {
@@ -448,6 +468,7 @@ impl ChainSpec {
         Err(anyhow!("fork l1 contract is not active"))
     }
 
+    #[must_use]
     pub const fn is_taiko(&self) -> bool {
         self.is_taiko
     }
@@ -462,6 +483,10 @@ impl ChainSpec {
     /// - `167013` (Taiko Hoodi)
     ///
     /// Returns an error for non-Taiko chains or unknown Taiko chain IDs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chain is not Taiko or not supported.
     pub fn to_taiko_chain_spec(&self) -> Result<Arc<TaikoChainSpec>> {
         if !self.is_taiko {
             bail!(
@@ -471,15 +496,16 @@ impl ChainSpec {
         }
 
         match self.chain_id {
-            167000 => Ok(TAIKO_MAINNET.clone()),
-            167001 => Ok(TAIKO_DEVNET.clone()),
-            167013 => Ok(TAIKO_HOODI.clone()),
+            167_000 => Ok(TAIKO_MAINNET.clone()),
+            167_001 => Ok(TAIKO_DEVNET.clone()),
+            167_013 => Ok(TAIKO_HOODI.clone()),
             other => bail!(
                 "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
             ),
         }
     }
 
+    #[must_use]
     pub fn network(&self) -> String {
         self.name.clone()
     }
@@ -493,11 +519,11 @@ mod tests {
     };
 
     #[test]
-    fn chain_spec_json_to_bincode_roundtrip_default_list() {
+    fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
         // Parse the shipped default config list (JSON), then ensure the resulting ChainSpec is
         // bincode roundtrip-safe. This is the core host<->guest compatibility invariant.
-        let list: Vec<ChainSpec> =
-            serde_json::from_str(DEFAULT_CHAIN_SPECS).expect("parse default chain spec list JSON");
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)
+            .map_err(|e| anyhow!("parse default chain spec list JSON: {e}"))?;
         assert!(
             !list.is_empty(),
             "default chain spec list should not be empty"
@@ -506,18 +532,20 @@ mod tests {
         // Pick a deterministic entry (first) to avoid relying on a specific name existing.
         let spec = &list[0];
 
-        let bytes = bincode::serialize(spec).expect("bincode serialize ChainSpec");
-        let decoded: ChainSpec =
-            bincode::deserialize(&bytes).expect("bincode deserialize ChainSpec");
+        let bytes =
+            bincode::serialize(spec).map_err(|e| anyhow!("bincode serialize ChainSpec: {e}"))?;
+        let decoded: ChainSpec = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow!("bincode deserialize ChainSpec: {e}"))?;
 
         assert_eq!(
             &decoded, spec,
             "ChainSpec changed after bincode roundtrip (host/guest mismatch risk)"
         );
+        Ok(())
     }
 
     #[test]
-    fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() {
+    fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_mainnet".to_string(),
             167000,
@@ -526,15 +554,14 @@ mod tests {
             true,
         );
 
-        let taiko = spec
-            .to_taiko_chain_spec()
-            .expect("failed to convert to TaikoChainSpec");
+        let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_MAINNET_GENESIS_HASH);
+        Ok(())
     }
 
     #[test]
-    fn converts_taiko_devnet_to_alethia_taiko_chain_spec() {
+    fn converts_taiko_devnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_devnet".to_string(),
             167001,
@@ -543,15 +570,14 @@ mod tests {
             true,
         );
 
-        let taiko = spec
-            .to_taiko_chain_spec()
-            .expect("failed to convert to TaikoChainSpec");
+        let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_DEVNET_GENESIS_HASH);
+        Ok(())
     }
 
     #[test]
-    fn converts_taiko_hoodi_to_alethia_taiko_chain_spec() {
+    fn converts_taiko_hoodi_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_hoodi".to_string(),
             167013,
@@ -560,11 +586,10 @@ mod tests {
             true,
         );
 
-        let taiko = spec
-            .to_taiko_chain_spec()
-            .expect("failed to convert to TaikoChainSpec");
+        let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
+        Ok(())
     }
 
     #[test]

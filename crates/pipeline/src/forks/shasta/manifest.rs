@@ -17,8 +17,145 @@ pub struct ShastaManifestBuilder;
 
 impl ShastaManifestBuilder {
     /// Create a new Shasta manifest builder.
+    #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    fn parse_prover_data(ctx: &ProofContext) -> TaikoProverData {
+        let prover_address = ctx
+            .request
+            .prover
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
+
+        TaikoProverData {
+            actual_prover: prover_address,
+            designated_prover: None,
+            graffiti: ctx
+                .request
+                .graffiti
+                .as_ref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
+            parent_transition_hash: None,
+            checkpoint: None,
+            last_anchor_block_number: None,
+        }
+    }
+
+    fn build_chain_spec(ctx: &ProofContext) -> ManifestChainSpec {
+        ManifestChainSpec {
+            name: ctx.l2_chain_spec.inner.chain.to_string(),
+            chain_id: ctx.l2_chain_spec.inner.chain.id(),
+            is_taiko: true,
+        }
+    }
+
+    fn parse_proposal_event(ctx: &ProofContext) -> RaikoResult<ShastaEventData> {
+        if let Some(event) = Self::parse_config(&ctx.config, "shasta_proposal_event")? {
+            return Ok(event);
+        }
+        if let Some(proposed) =
+            Self::parse_config::<Proposed>(&ctx.config, "shasta_proposed_event")?
+        {
+            return ShastaEventData::from_proposal_event(&proposed).map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!("invalid shasta_proposed_event: {err}"))
+            });
+        }
+        Ok(ShastaEventData::default())
+    }
+
+    fn resolve_manifest_payload(
+        manifest_payload: Option<Vec<u8>>,
+        manifest_payloads: Option<&Vec<Vec<u8>>>,
+    ) -> Option<Vec<u8>> {
+        manifest_payload.or_else(|| {
+            manifest_payloads.and_then(|payloads| {
+                if payloads.is_empty() {
+                    None
+                } else {
+                    let mut concatenated = Vec::new();
+                    for payload in payloads {
+                        concatenated.extend_from_slice(payload);
+                    }
+                    Some(concatenated)
+                }
+            })
+        })
+    }
+
+    fn derive_data_sources(
+        proposal_event: &ShastaEventData,
+        payload: &[u8],
+        manifest_payloads: Option<&Vec<Vec<u8>>>,
+    ) -> Vec<InputDataSource> {
+        let sources = &proposal_event.proposal.sources;
+        if sources.is_empty() {
+            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
+                payloads.clone()
+            } else {
+                vec![payload.to_vec()]
+            };
+            return vec![InputDataSource {
+                tx_data_from_blob,
+                is_forced_inclusion: false,
+                ..Default::default()
+            }];
+        }
+
+        if sources.len() == 1 {
+            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
+                payloads.clone()
+            } else {
+                vec![payload.to_vec()]
+            };
+            return vec![InputDataSource {
+                tx_data_from_blob,
+                is_forced_inclusion: sources[0].isForcedInclusion,
+                ..Default::default()
+            }];
+        }
+
+        if let Some(payloads) = manifest_payloads {
+            let mut cursor = 0usize;
+            let mut data_sources = Vec::with_capacity(sources.len());
+            for source in sources {
+                let expected = source.blobSlice.blobHashes.len();
+                let end = cursor.saturating_add(expected).min(payloads.len());
+                let blob_payloads = if cursor < end {
+                    payloads[cursor..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                cursor = end;
+                data_sources.push(InputDataSource {
+                    tx_data_from_blob: blob_payloads,
+                    is_forced_inclusion: source.isForcedInclusion,
+                    ..Default::default()
+                });
+            }
+            return data_sources;
+        }
+
+        let tx_data_from_blob = vec![payload.to_vec()];
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let blob_payloads = if index == sources.len() - 1 {
+                    tx_data_from_blob.clone()
+                } else {
+                    Vec::new()
+                };
+                InputDataSource {
+                    tx_data_from_blob: blob_payloads,
+                    is_forced_inclusion: source.isForcedInclusion,
+                    ..Default::default()
+                }
+            })
+            .collect()
     }
 
     fn parse_config<T>(config: &Value, key: &str) -> RaikoResult<Option<T>>
@@ -95,48 +232,12 @@ impl ManifestBuilder for ShastaManifestBuilder {
         );
 
         // TODO: Implement actual L1 proposal fetching using raiko2-protocol.
-        let prover_address = ctx
-            .request
-            .prover
-            .as_ref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default();
-
-        let prover_data = TaikoProverData {
-            actual_prover: prover_address,
-            designated_prover: None,
-            graffiti: ctx
-                .request
-                .graffiti
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
-            parent_transition_hash: None,
-            checkpoint: None,
-            last_anchor_block_number: None,
-        };
-
-        let chain_spec = ManifestChainSpec {
-            name: ctx.l2_chain_spec.inner.chain.to_string(),
-            chain_id: ctx.l2_chain_spec.inner.chain.id(),
-            is_taiko: true,
-        };
+        let prover_data = Self::parse_prover_data(ctx);
+        let chain_spec = Self::build_chain_spec(ctx);
 
         let l1_header = Self::parse_config(&ctx.config, "l1_header")?
             .unwrap_or_else(alloy_consensus::Header::default);
-        let proposal_event: ShastaEventData = if let Some(event) =
-            Self::parse_config(&ctx.config, "shasta_proposal_event")?
-        {
-            event
-        } else if let Some(proposed) =
-            Self::parse_config::<Proposed>(&ctx.config, "shasta_proposed_event")?
-        {
-            ShastaEventData::from_proposal_event(&proposed).map_err(|err| {
-                RaikoError::InvalidRequestConfig(format!("invalid shasta_proposed_event: {err}"))
-            })?
-        } else {
-            ShastaEventData::default()
-        };
+        let proposal_event = Self::parse_proposal_event(ctx)?;
         let mut data_sources =
             Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "shasta_data_sources")?
                 .unwrap_or_default();
@@ -146,19 +247,8 @@ impl ManifestBuilder for ShastaManifestBuilder {
             Self::parse_config::<Vec<u8>>(&ctx.config, "shasta_manifest_payload")?;
         let manifest_payloads =
             Self::parse_config::<Vec<Vec<u8>>>(&ctx.config, "shasta_manifest_blob_payloads")?;
-        let manifest_payload = manifest_payload.or_else(|| {
-            manifest_payloads.as_ref().and_then(|payloads| {
-                if payloads.is_empty() {
-                    None
-                } else {
-                    let mut concatenated = Vec::new();
-                    for payload in payloads {
-                        concatenated.extend_from_slice(payload);
-                    }
-                    Some(concatenated)
-                }
-            })
-        });
+        let manifest_payload =
+            Self::resolve_manifest_payload(manifest_payload, manifest_payloads.as_ref());
 
         if let Some(payload) = &manifest_payload {
             let manifest = DerivationSourceManifest::decompress_and_decode(
@@ -181,61 +271,8 @@ impl ManifestBuilder for ShastaManifestBuilder {
             }
 
             if data_sources.is_empty() {
-                let sources = &proposal_event.proposal.sources;
-                if sources.is_empty() {
-                    let tx_data_from_blob = if let Some(payloads) = &manifest_payloads {
-                        payloads.clone()
-                    } else {
-                        vec![payload.clone()]
-                    };
-                    data_sources.push(InputDataSource {
-                        tx_data_from_blob,
-                        is_forced_inclusion: false,
-                        ..Default::default()
-                    });
-                } else if sources.len() == 1 {
-                    let tx_data_from_blob = if let Some(payloads) = &manifest_payloads {
-                        payloads.clone()
-                    } else {
-                        vec![payload.clone()]
-                    };
-                    data_sources.push(InputDataSource {
-                        tx_data_from_blob,
-                        is_forced_inclusion: sources[0].isForcedInclusion,
-                        ..Default::default()
-                    });
-                } else if let Some(payloads) = &manifest_payloads {
-                    let mut cursor = 0usize;
-                    for source in sources {
-                        let expected = source.blobSlice.blobHashes.len();
-                        let end = cursor.saturating_add(expected).min(payloads.len());
-                        let blob_payloads = if cursor < end {
-                            payloads[cursor..end].to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        cursor = end;
-                        data_sources.push(InputDataSource {
-                            tx_data_from_blob: blob_payloads,
-                            is_forced_inclusion: source.isForcedInclusion,
-                            ..Default::default()
-                        });
-                    }
-                } else {
-                    let tx_data_from_blob = vec![payload.clone()];
-                    for (index, source) in sources.iter().enumerate() {
-                        let blob_payloads = if index == sources.len() - 1 {
-                            tx_data_from_blob.clone()
-                        } else {
-                            Vec::new()
-                        };
-                        data_sources.push(InputDataSource {
-                            tx_data_from_blob: blob_payloads,
-                            is_forced_inclusion: source.isForcedInclusion,
-                            ..Default::default()
-                        });
-                    }
-                }
+                data_sources =
+                    Self::derive_data_sources(&proposal_event, payload, manifest_payloads.as_ref());
             }
         }
 

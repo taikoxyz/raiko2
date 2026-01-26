@@ -87,26 +87,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_provider_empty() {
+    async fn test_mock_provider_empty() -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockProvider { blocks: vec![] };
-        let blocks = provider.batch_blocks(&[1, 2, 3]).await.unwrap();
+        let blocks = provider.batch_blocks(&[1, 2, 3]).await?;
         assert!(blocks.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_mock_provider_accounts() {
+    async fn test_mock_provider_accounts() -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockProvider { blocks: vec![] };
         let accounts = provider
             .batch_accounts(&[1], &[vec![Address::ZERO]])
-            .await
-            .unwrap();
+            .await?;
         assert!(accounts.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_mock_provider_witnesses() {
+    async fn test_mock_provider_witnesses() -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockProvider { blocks: vec![] };
-        let witnesses = provider.batch_witnesses(&[1]).await.unwrap();
+        let witnesses = provider.batch_witnesses(&[1]).await?;
         assert!(witnesses.is_empty());
+        Ok(())
     }
 }

@@ -7,7 +7,7 @@
 use crate::{GuestInput, input::ShastaRawAggregationGuestInput};
 use alloy_primitives::{Address, B256, Uint, keccak256};
 use alloy_sol_types::SolValue;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use raiko2_protocol_shasta::TaikoProverData;
 use raiko2_protocol_shasta::libhash::{hash_commitment, hash_public_input, hash_two_values};
 use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
@@ -15,6 +15,7 @@ use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+#[must_use]
 pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     for i in 0..8 {
@@ -24,6 +25,7 @@ pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
     bytes
 }
 
+#[must_use]
 pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
     let mut bytes = [0u8; 32];
     for i in 0..8 {
@@ -34,17 +36,20 @@ pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
 }
 
 #[allow(dead_code)]
-pub(crate) fn aggregation_output_combine(public_inputs: Vec<B256>) -> Vec<u8> {
+pub(crate) fn aggregation_output_combine(public_inputs: &[B256]) -> Vec<u8> {
     let mut output = Vec::with_capacity(public_inputs.len() * 32);
-    for public_input in public_inputs.iter() {
+    for public_input in public_inputs {
         output.extend_from_slice(&public_input.0);
     }
     output
 }
 
 #[allow(dead_code)]
-pub(crate) fn aggregation_output(program: B256, public_inputs: Vec<B256>) -> Vec<u8> {
-    aggregation_output_combine([vec![program], public_inputs].concat())
+pub(crate) fn aggregation_output(program: B256, public_inputs: &[B256]) -> Vec<u8> {
+    let mut inputs = Vec::with_capacity(public_inputs.len() + 1);
+    inputs.push(program);
+    inputs.extend_from_slice(public_inputs);
+    aggregation_output_combine(&inputs)
 }
 
 #[allow(dead_code)]
@@ -61,9 +66,8 @@ pub(crate) fn validate_shasta_aggregate_proof_carry_data(
 pub(crate) fn validate_shasta_proof_carry_data_vec(
     proof_carry_data_vec: &[ProofCarryData],
 ) -> bool {
-    let first = match proof_carry_data_vec.first() {
-        Some(first) => first,
-        None => return false,
+    let Some(first) = proof_carry_data_vec.first() else {
+        return false;
     };
 
     let expected_actual_prover = first.transition_input.actual_prover;
@@ -104,6 +108,7 @@ pub(crate) fn validate_shasta_proof_carry_data_vec(
     true
 }
 
+#[must_use]
 pub fn build_shasta_commitment_from_proof_carry_data_vec(
     proof_carry_data_vec: &[ProofCarryData],
 ) -> Option<Commitment> {
@@ -134,6 +139,7 @@ pub fn build_shasta_commitment_from_proof_carry_data_vec(
     })
 }
 
+#[must_use]
 pub fn shasta_zk_aggregation_public_input_from_proof_carry_data_vec(
     sub_image_id: B256,
     proof_carry_data_vec: &[ProofCarryData],
@@ -146,6 +152,7 @@ pub fn shasta_zk_aggregation_public_input_from_proof_carry_data_vec(
     Some(shasta_zk_aggregation_output(sub_image_id, aggregation_hash))
 }
 
+#[must_use]
 pub fn shasta_aggregation_output(
     prove_input: &Commitment,
     chain_id: u64,
@@ -156,6 +163,7 @@ pub fn shasta_aggregation_output(
     hash_public_input(prove_input_hash, chain_id, verifier_address, sgx_instance)
 }
 
+#[must_use]
 pub fn shasta_zk_aggregation_output(sub_image_id: B256, sub_input_hash: B256) -> B256 {
     hash_two_values(sub_image_id, sub_input_hash)
 }
@@ -189,6 +197,7 @@ pub struct ProtocolInstance {
 
 impl ProtocolInstance {
     /// Calculate the instance hash for the protocol instance.
+    #[must_use]
     pub fn instance_hash(&self) -> B256 {
         let data = (
             self.transition.parent_hash,
@@ -224,15 +233,15 @@ pub(crate) fn calculate_txs_hash(tx_list_hash: B256, blob_hashes: &[B256]) -> B2
 #[allow(dead_code)]
 pub(crate) fn new_protocol_instance(
     proposal_input: &GuestInput,
-    blocks: Vec<Block>,
+    blocks: &[Block],
     prover_data: &TaikoProverData,
     chain_id: u64,
     verifier_address: Address,
 ) -> Result<ProtocolInstance> {
     ensure!(!blocks.is_empty(), "blocks cannot be empty");
 
-    let first_block = blocks.first().unwrap();
-    let last_block = blocks.last().unwrap();
+    let first_block = blocks.first().context("blocks cannot be empty")?;
+    let last_block = blocks.last().context("blocks cannot be empty")?;
 
     let transition = ShastaTransition {
         parent_hash: first_block.header.parent_hash,

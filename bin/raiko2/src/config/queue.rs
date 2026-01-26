@@ -91,7 +91,7 @@ impl std::str::FromStr for QueueBackend {
         match s.trim().to_lowercase().as_str() {
             "memory" => Ok(QueueBackend::Memory),
             "redis" => Ok(QueueBackend::Redis),
-            _ => Err(format!("Unknown queue backend: {}", s)),
+            _ => Err(format!("Unknown queue backend: {s}")),
         }
     }
 }

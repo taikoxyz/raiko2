@@ -30,6 +30,7 @@ pub enum Priority {
 }
 
 impl Priority {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Priority::High => "high",
@@ -38,6 +39,7 @@ impl Priority {
         }
     }
 
+    #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "high" => Some(Priority::High),
@@ -74,6 +76,7 @@ pub enum TaskState<O, Id> {
 }
 
 impl<O, Id> TaskState<O, Id> {
+    #[must_use]
     pub const fn pending(remaining: usize) -> Self {
         TaskState::Pending {
             remaining_deps: remaining,
@@ -102,6 +105,9 @@ impl fmt::Display for TaskIdCodecError {
 
 impl Error for TaskIdCodecError {}
 
+/// # Errors
+///
+/// Returns an error if the task ID cannot be serialized.
 pub fn encode_task_id<Id>(id: &TaskId<Id>) -> Result<String, TaskIdCodecError>
 where
     Id: Serialize,
@@ -111,6 +117,9 @@ where
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// # Errors
+///
+/// Returns an error if the task ID cannot be decoded or deserialized.
 pub fn decode_task_id<Id>(raw: &str) -> Result<TaskId<Id>, TaskIdCodecError>
 where
     Id: for<'de> Deserialize<'de>,

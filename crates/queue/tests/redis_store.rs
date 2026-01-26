@@ -19,32 +19,30 @@ fn docker_available() -> bool {
 }
 
 #[tokio::test]
-async fn redis_store_persists_task_state_across_scheduler_restart() {
+async fn redis_store_persists_task_state_across_scheduler_restart()
+-> Result<(), Box<dyn std::error::Error>> {
     if !docker_available() {
         eprintln!("skipping redis store test: docker unavailable");
-        return;
+        return Ok(());
     }
 
     let container = GenericImage::new("redis", "7-alpine")
         .with_exposed_port(6379.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
         .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(6379).await.unwrap();
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
     let url = format!("redis://127.0.0.1:{port}/");
     let namespace = format!(
         "test-{}",
         std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
 
     let store =
         RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
-            .await
-            .unwrap();
+            .await?;
     let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let id = sched
@@ -56,48 +54,48 @@ async fn redis_store_persists_task_state_across_scheduler_restart() {
             },
             vec![],
         )
-        .await
-        .unwrap();
+        .await?;
 
     drop(sched);
 
     let store2 =
         RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
-            .await
-            .unwrap();
+            .await?;
     let sched2: Scheduler<String, String, u64> = Scheduler::new(store2);
 
-    let view = sched2.get(id).await.unwrap().unwrap();
+    let view = sched2
+        .get(id)
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
     assert!(matches!(view.state, TaskState::Ready));
+    Ok(())
 }
 
 #[tokio::test]
-async fn redis_store_releases_dependent_after_all_deps_complete() {
+async fn redis_store_releases_dependent_after_all_deps_complete()
+-> Result<(), Box<dyn std::error::Error>> {
     if !docker_available() {
         eprintln!("skipping redis store test: docker unavailable");
-        return;
+        return Ok(());
     }
 
     let container = GenericImage::new("redis", "7-alpine")
         .with_exposed_port(6379.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
         .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(6379).await.unwrap();
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
     let url = format!("redis://127.0.0.1:{port}/");
     let namespace = format!(
         "test-fanin-{}",
         std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
 
     let store =
         RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
-            .await
-            .unwrap();
+            .await?;
     let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let a1 = sched
@@ -109,8 +107,7 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
             },
             vec![],
         )
-        .await
-        .unwrap();
+        .await?;
     let a2 = sched
         .submit(
             TaskId::new(2),
@@ -120,8 +117,7 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
             },
             vec![],
         )
-        .await
-        .unwrap();
+        .await?;
     let b = sched
         .submit(
             TaskId::new(3),
@@ -131,47 +127,54 @@ async fn redis_store_releases_dependent_after_all_deps_complete() {
             },
             vec![a1, a2],
         )
-        .await
-        .unwrap();
+        .await?;
 
-    let t1 = sched.next_ready("w").await.unwrap().unwrap();
-    let t2 = sched.next_ready("w").await.unwrap().unwrap();
-    assert!(sched.next_ready("w").await.unwrap().is_none());
+    let t1 = sched
+        .next_ready("w")
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected ready task"))?;
+    let t2 = sched
+        .next_ready("w")
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected ready task"))?;
+    assert!(sched.next_ready("w").await?.is_none());
 
-    sched.complete(t1, Ok("ok".to_string())).await.unwrap();
-    assert!(sched.next_ready("w").await.unwrap().is_none());
+    sched.complete(t1, Ok("ok".to_string())).await?;
+    assert!(sched.next_ready("w").await?.is_none());
 
-    sched.complete(t2, Ok("ok".to_string())).await.unwrap();
-    assert_eq!(sched.next_ready("w").await.unwrap().unwrap().id, b);
+    sched.complete(t2, Ok("ok".to_string())).await?;
+    let next = sched
+        .next_ready("w")
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected ready task"))?;
+    assert_eq!(next.id, b);
+    Ok(())
 }
 
 #[tokio::test]
-async fn redis_store_requeues_task_after_lease_expires() {
+async fn redis_store_requeues_task_after_lease_expires() -> Result<(), Box<dyn std::error::Error>> {
     if !docker_available() {
         eprintln!("skipping redis store test: docker unavailable");
-        return;
+        return Ok(());
     }
 
     let container = GenericImage::new("redis", "7-alpine")
         .with_exposed_port(6379.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
         .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(6379).await.unwrap();
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
     let url = format!("redis://127.0.0.1:{port}/");
     let namespace = format!(
         "test-lease-{}",
         std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
 
     let store =
         RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_millis(50))
-            .await
-            .unwrap();
+            .await?;
     let sched: Scheduler<String, String, u64> = Scheduler::new(store);
 
     let id = sched
@@ -183,17 +186,23 @@ async fn redis_store_requeues_task_after_lease_expires() {
             },
             vec![],
         )
-        .await
-        .unwrap();
+        .await?;
 
-    let lease1 = sched.next_ready("w1").await.unwrap().unwrap();
+    let lease1 = sched
+        .next_ready("w1")
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected ready task"))?;
     assert_eq!(lease1.id, id);
     assert_eq!(lease1.attempt, 1);
 
     tokio::time::sleep(Duration::from_millis(120)).await;
-    sched.maintenance_tick().await.unwrap();
+    sched.maintenance_tick().await?;
 
-    let lease2 = sched.next_ready("w2").await.unwrap().unwrap();
+    let lease2 = sched
+        .next_ready("w2")
+        .await?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected ready task"))?;
     assert_eq!(lease2.id, id);
     assert_eq!(lease2.attempt, 2);
+    Ok(())
 }

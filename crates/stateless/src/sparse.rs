@@ -176,14 +176,15 @@ impl StatelessTrie for SparseState {
     /// Returns the storage slot value that corresponds to the given (address, slot) tuple.
     fn storage(&self, address: Address, slot: U256) -> Result<U256, ProviderError> {
         let storages = self.storages.borrow();
-        // storage() is always be called after account(), so the storage trie must already exist
-        let storage_trie = storages.get(&keccak256(address)).unwrap();
+        let storage_trie = storages.get(&keccak256(address)).ok_or_else(|| {
+            ProviderError::TrieWitnessError(format!("storage trie missing for {address}"))
+        })?;
         Ok(storage_trie
             .get(keccak256(B256::from(slot)))?
             .unwrap_or(U256::ZERO))
     }
 
-    /// Computes the new state root from the HashedPostState.
+    /// Computes the new state root from the `HashedPostState`.
     fn calculate_state_root(
         &mut self,
         state: HashedPostState,
@@ -198,12 +199,17 @@ impl StatelessTrie for SparseState {
 
             // apply storage changes before computing the storage root
             let storage_root = match state.storages.get(&hashed_address) {
-                None => self.storage_trie_mut(hashed_address).unwrap().hash(),
+                None => self
+                    .storage_trie_mut(hashed_address)
+                    .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?
+                    .hash(),
                 Some(storage) => {
                     let storage_trie = if storage.wiped {
                         self.clear_storage(hashed_address)
                     } else {
-                        self.storage_trie_mut(hashed_address).unwrap()
+                        self.storage_trie_mut(hashed_address).map_err(|e| {
+                            StatelessValidationError::StatelessExecutionFailed(e.to_string())
+                        })?
                     };
 
                     // apply all state modifications
@@ -232,9 +238,9 @@ impl StatelessTrie for SparseState {
             };
             self.state.insert(hashed_address, account);
         }
-        removed_accounts
-            .iter()
-            .for_each(|hashed_address| self.remove_account(hashed_address));
+        for hashed_address in &removed_accounts {
+            self.remove_account(hashed_address);
+        }
 
         Ok(self.state.hash())
     }

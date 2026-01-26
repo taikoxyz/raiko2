@@ -69,7 +69,7 @@ where
 
         // Collect signers for each block to fetch the touched accounts.
         let mut all_signers = Vec::with_capacity(blocks.len());
-        for block in blocks.iter() {
+        for block in &blocks {
             let mut signers = Vec::new();
             for tx in block.body.transactions() {
                 if let Ok(signer) = tx.recover_signer() {
@@ -156,10 +156,10 @@ where
 
             validate_block(
                 stateless_input.block.clone(),
-                stateless_input.witness.clone(),
+                &stateless_input.witness,
                 stateless_input.accounts.clone(),
-                taiko_chain_spec.clone(),
-                evm_config.clone(),
+                &taiko_chain_spec,
+                &evm_config,
             )?;
         }
 

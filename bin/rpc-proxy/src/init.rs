@@ -18,5 +18,7 @@ pub fn init_tracing() {
 
 pub fn init_crypto() {
     // This is a hack to ensure that `blst` gets linked into this binary.
+    #[allow(unsafe_code)]
+    // SAFETY: We only call a size accessor to force the linker to include `blst` symbols.
     let _ = unsafe { blst::blst_p1_sizeof() };
 }

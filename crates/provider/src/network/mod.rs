@@ -21,7 +21,7 @@ mod witness;
 pub use witness::WitnessMode;
 
 // For Taiko chains
-const TAIKO_CHAIN_IDS: [u64; 4] = [167000, 167001, 167013, 167009];
+const TAIKO_CHAIN_IDS: [u64; 4] = [167_000, 167_001, 167_013, 167_009];
 
 pub(super) fn is_taiko_chain_id(chain_id: u64) -> bool {
     TAIKO_CHAIN_IDS.contains(&chain_id)
@@ -37,6 +37,9 @@ pub struct NetworkProvider {
 }
 
 impl NetworkProvider {
+    /// # Errors
+    ///
+    /// Returns an error if the RPC URL is invalid.
     pub fn new(rpc_url: &str) -> RaikoResult<Self> {
         let url = reqwest::Url::parse(rpc_url)
             .map_err(|e| RaikoError::RPC(format!("Invalid RPC URL: {e}")))?;
@@ -55,16 +58,19 @@ impl NetworkProvider {
         })
     }
 
+    #[must_use]
     pub fn with_evm_config(self, evm_config: Arc<EthEvmConfig>) -> Self {
         let _ = self.evm_config.set(evm_config);
         self
     }
 
+    #[must_use]
     pub const fn with_witness_mode(mut self, mode: WitnessMode) -> Self {
         self.witness_mode = mode;
         self
     }
 
+    #[must_use]
     pub const fn with_debug_witness_support(mut self, supported: bool) -> Self {
         self.debug_witness_supported = Some(supported);
         self

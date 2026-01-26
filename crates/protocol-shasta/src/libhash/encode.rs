@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, B256, U256, b256};
 
 // Helper to encode a u48 (Rust u64 is fine, always left-padded in Solidity as uint256)
+#[must_use]
 pub fn u48_to_b256(val: u64) -> B256 {
     // Truncate to 48 bits
     let val = val & 0xffff_ffff_ffff;
@@ -8,11 +9,13 @@ pub fn u48_to_b256(val: u64) -> B256 {
 }
 
 // Helper to encode a u48 (Rust u64 is fine, always left-padded in Solidity as uint256)
+#[must_use]
 pub fn u64_to_b256(val: u64) -> B256 {
     U256::from(val).into()
 }
 
 /// Convert an Address to B256 by zero-padding (equivalent to bytes32(uint256(uint160(address))))
+#[must_use]
 pub fn address_to_b256(address: Address) -> B256 {
     B256::left_padding_from(address.as_slice())
 }

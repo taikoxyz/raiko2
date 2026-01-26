@@ -22,7 +22,7 @@ pub struct NativeProver;
 impl GuestInputCodec<GuestInput> for NativeProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
         let bytes = bincode::serialize(input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {e}")))?;
         Ok(Bytes::from(bytes))
     }
 }
@@ -45,7 +45,7 @@ where
         _backend: &B,
     ) -> RaikoResult<Proof> {
         let input: GuestInput = bincode::deserialize(input.as_ref())
-            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {}", e)))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         if input.witnesses.is_empty() {
             return Err(RaikoError::Guest(
                 "GuestInput must contain at least one witness".to_string(),
@@ -54,8 +54,12 @@ where
 
         let proof_carry_data: ProofCarryData = parse_proof_carry_data(config);
 
-        let first = input.witnesses.first().expect("checked");
-        let last = input.witnesses.last().expect("checked");
+        let first = input.witnesses.first().ok_or_else(|| {
+            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
+        })?;
+        let last = input.witnesses.last().ok_or_else(|| {
+            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
+        })?;
 
         let transition = ShastaTransition {
             parent_hash: first.block.header.parent_hash,
@@ -64,7 +68,7 @@ where
         };
 
         let proposal_metadata = ShastaProposalMetadata {
-            info_hash: Default::default(),
+            info_hash: B256::default(),
             proposer: proof_carry_data.transition_input.transition.proposer,
             proposal_id: proof_carry_data.transition_input.proposal_id,
             proposed_at: proof_carry_data.transition_input.transition.timestamp,

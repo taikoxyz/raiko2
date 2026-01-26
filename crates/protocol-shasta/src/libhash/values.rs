@@ -13,19 +13,23 @@ use alloy_primitives::{B256, keccak256};
 ///     result := keccak256(m, 0x40)
 /// }
 /// ```
+#[must_use]
 pub fn hash_two_values(value0: B256, value1: B256) -> B256 {
     hash_values_impl(&[value0, value1])
 }
 
 /// Returns `keccak256(abi.encode(value0, value1, value2))`
+#[must_use]
 pub fn hash_three_values(value0: B256, value1: B256, value2: B256) -> B256 {
     hash_values_impl(&[value0, value1, value2])
 }
 
+#[must_use]
 pub fn hash_four_values(value0: B256, value1: B256, value2: B256, value3: B256) -> B256 {
     hash_values_impl(&[value0, value1, value2, value3])
 }
 
+#[must_use]
 pub fn hash_five_values(
     value0: B256,
     value1: B256,
@@ -36,6 +40,7 @@ pub fn hash_five_values(
     hash_values_impl(&[value0, value1, value2, value3, value4])
 }
 
+#[must_use]
 pub fn hash_six_values(
     value0: B256,
     value1: B256,

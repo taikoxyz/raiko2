@@ -2,6 +2,7 @@ use alloy_primitives::B256;
 use raiko2_primitives::Proof;
 use serde::{Deserialize, Serialize};
 use sp1_sdk::{SP1ProofMode, SP1ProofWithPublicValues, SP1VerifyingKey};
+use tracing::error;
 
 /// SP1 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,12 +84,20 @@ pub struct Sp1Response {
 
 impl From<Sp1Response> for Proof {
     fn from(value: Sp1Response) -> Self {
+        let quote = match value.sp1_proof.as_ref() {
+            Some(proof) => match serde_json::to_string(&proof.proof) {
+                Ok(serialized) => Some(serialized),
+                Err(err) => {
+                    error!(error = %err, "failed to serialize sp1 proof");
+                    None
+                }
+            },
+            None => None,
+        };
+
         Self {
             proof: value.proof,
-            quote: value
-                .sp1_proof
-                .as_ref()
-                .map(|p| serde_json::to_string(&p.proof).unwrap()),
+            quote,
             input: Some(value.input),
             uuid: value.vkey_hash,
             kzg_proof: None,

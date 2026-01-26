@@ -127,10 +127,12 @@ struct TaskRecord<P, O, Id> {
 }
 
 impl<P, O, Id> MemoryStore<P, O, Id> {
+    #[must_use]
     pub fn new() -> Self {
         Self::with_lease(Duration::from_secs(60))
     }
 
+    #[must_use]
     pub fn with_lease(lease: Duration) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -298,7 +300,8 @@ where
             worker: worker.to_string(),
             attempt,
         };
-        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
+        let lease_ms =
+            u64::try_from(self.lease.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
         Ok(Some((payload, record.priority, attempt)))
     }
@@ -374,7 +377,7 @@ where
         let mut g = self.inner.lock().await;
         let mut expired = Vec::new();
 
-        for (id, record) in g.tasks.iter_mut() {
+        for (id, record) in &mut g.tasks {
             if expired.len() >= limit {
                 break;
             }
@@ -412,10 +415,13 @@ where
 fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System time is before UNIX_EPOCH")
-        .as_millis() as u64
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -423,13 +429,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn ready_push_pop_respects_priority() {
+    async fn ready_push_pop_respects_priority() -> StoreResult<()> {
         let store: MemoryStore<(), (), u64> = MemoryStore::new();
         let a = TaskId::new(1);
         let b = TaskId::new(2);
-        store.push_ready(Priority::Low, a.clone()).await.unwrap();
-        store.push_ready(Priority::High, b.clone()).await.unwrap();
-        assert_eq!(store.pop_ready(Priority::High).await.unwrap(), Some(b));
-        assert_eq!(store.pop_ready(Priority::Low).await.unwrap(), Some(a));
+        store.push_ready(Priority::Low, a.clone()).await?;
+        store.push_ready(Priority::High, b.clone()).await?;
+        assert_eq!(store.pop_ready(Priority::High).await?, Some(b));
+        assert_eq!(store.pop_ready(Priority::Low).await?, Some(a));
+        Ok(())
     }
 }

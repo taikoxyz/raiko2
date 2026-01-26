@@ -2,28 +2,31 @@
 use raiko2_primitives_shasta::GuestInput;
 
 #[test]
-fn guest_input_json_to_bincode_roundtrip_test_json() {
+fn guest_input_json_to_bincode_roundtrip_test_json() -> Result<(), Box<dyn std::error::Error>> {
     // Keep this test pinned to the repo's `test.json` so we catch any newly introduced
     // non-bincode-compatible custom serde early (before SP1 runtime).
     let json = include_str!("../../../test.json");
-    let input: GuestInput = serde_json::from_str(json).expect("parse test.json into GuestInput");
+    let input: GuestInput = serde_json::from_str(json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     // First, isolate the problematic region: Taiko manifest's proposal_event.
     // This makes failures much faster to debug than full GuestInput.
     {
         let ev = &input.taiko.proposal_event;
-        let ev_bytes = bincode::serialize(ev).expect("bincode serialize taiko.proposal_event");
-        let _: raiko2_protocol_shasta::shasta::ShastaEventData =
-            bincode::deserialize(&ev_bytes).expect("bincode deserialize taiko.proposal_event");
+        let ev_bytes = bincode::serialize(ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let _: raiko2_protocol_shasta::shasta::ShastaEventData = bincode::deserialize(&ev_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     }
     {
-        let w_bytes =
-            bincode::serialize(&input.witnesses).expect("bincode serialize GuestInput.witnesses");
-        let _: Vec<raiko2_primitives::StatelessInput> =
-            bincode::deserialize(&w_bytes).expect("bincode deserialize GuestInput.witnesses");
+        let w_bytes = bincode::serialize(&input.witnesses)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let _: Vec<raiko2_primitives::StatelessInput> = bincode::deserialize(&w_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     }
     {
-        let t_bytes = bincode::serialize(&input.taiko).expect("bincode serialize GuestInput.taiko");
+        let t_bytes = bincode::serialize(&input.taiko)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         use std::io::{Cursor, Read};
 
         struct CountingReader<R> {
@@ -54,12 +57,17 @@ fn guest_input_json_to_bincode_roundtrip_test_json() {
                     r.pos
                 );
                 explain_taiko_manifest_offset(&input.taiko, r.pos);
-                panic!("bincode deserialize GuestInput.taiko: {e}");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("bincode deserialize GuestInput.taiko: {e}"),
+                )
+                .into());
             }
         }
     }
 
-    let bytes = bincode::serialize(&input).expect("bincode serialize GuestInput");
+    let bytes = bincode::serialize(&input)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     let decoded: GuestInput = {
         use std::io::{Cursor, Read};
 
@@ -91,17 +99,23 @@ fn guest_input_json_to_bincode_roundtrip_test_json() {
                     r.pos
                 );
                 explain_guest_input_offset(&input, r.pos);
-                panic!(
-                    "bincode deserialize GuestInput failed at byte {}: {e}",
-                    r.pos
-                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "bincode deserialize GuestInput failed at byte {}: {e}",
+                        r.pos
+                    ),
+                )
+                .into());
             }
         }
     };
 
     // Ensure the encoding is stable (helps catch accidental config-dependent encoding).
-    let bytes2 = bincode::serialize(&decoded).expect("bincode re-serialize GuestInput");
+    let bytes2 = bincode::serialize(&decoded)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     assert_eq!(bytes2, bytes, "bincode bytes changed after roundtrip");
+    Ok(())
 }
 
 fn explain_taiko_manifest_offset(m: &raiko2_protocol_shasta::TaikoManifest, off: usize) {

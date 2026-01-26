@@ -101,7 +101,7 @@ mod l1_header_bincode_compat {
 
         // For bincode (SP1 stdin), encode the header as canonical RLP bytes.
         let bytes = alloy_rlp::encode(h);
-        let v: Vec<u8> = bytes.to_vec();
+        let v: Vec<u8> = bytes.clone();
         v.serialize(s)
     }
 
@@ -125,16 +125,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_blob_proof_type_from_str() {
+    fn test_blob_proof_type_from_str() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
-            "kzg_versioned_hash".parse::<BlobProofType>().unwrap(),
+            "kzg_versioned_hash".parse::<BlobProofType>()?,
             BlobProofType::KzgVersionedHash
         );
         assert_eq!(
-            "proof_of_equivalence".parse::<BlobProofType>().unwrap(),
+            "proof_of_equivalence".parse::<BlobProofType>()?,
             BlobProofType::ProofOfEquivalence
         );
         assert!("invalid".parse::<BlobProofType>().is_err());
+        Ok(())
     }
 
     #[test]

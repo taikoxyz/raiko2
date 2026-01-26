@@ -41,7 +41,7 @@ use std::{
     hash::{BuildHasher, Hash},
 };
 
-/// A simple revm [RevmDatabase] wrapper that records all DB queries.
+/// A simple `revm` [`RevmDatabase`] wrapper that records all DB queries.
 #[derive(Clone, Default)]
 pub struct PreflightDb<D> {
     accounts: AddressHashMap<B256HashSet>,
@@ -53,7 +53,7 @@ pub struct PreflightDb<D> {
     inner: D,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct AccountProofs(AddressHashMap<AccountProof>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +61,7 @@ struct AccountProof {
     /// The account information as stored in the account trie.
     account: Option<StateAccount>,
     /// The inclusion proof for this account.
-    account_proof: Vec<Bytes>,
+    account_rlp_proof: Vec<Bytes>,
     /// The MPT inclusion proofs for several storage slots.
     storage_proofs: B256HashMap<StorageProof>,
 }
@@ -80,22 +80,25 @@ impl<D> Debug for PreflightDb<D> {
             .field("accounts", &self.accounts)
             .field("contracts", &self.contracts)
             .field("block_hash_numbers", &self.block_hash_numbers)
+            .field("code_addresses", &self.code_addresses)
+            .field("proofs", &self.proofs)
+            .field("inner", &"<opaque>")
             .finish()
     }
 }
 
 impl<D> PreflightDb<D> {
-    /// Creates a new ProofDb instance, with a [RevmDatabase].
+    /// Creates a new `PreflightDb` instance, with a [`RevmDatabase`].
     pub(crate) fn new(db: D) -> Self
     where
         D: RevmDatabase,
     {
         Self {
-            accounts: Default::default(),
-            contracts: Default::default(),
-            block_hash_numbers: Default::default(),
-            code_addresses: Default::default(),
-            proofs: Default::default(),
+            accounts: AddressHashMap::default(),
+            contracts: B256HashMap::default(),
+            block_hash_numbers: HashSet::default(),
+            code_addresses: B256Map::default(),
+            proofs: AccountProofs::default(),
             inner: db,
         }
     }
@@ -167,8 +170,8 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
         Ok(ancestors)
     }
 
-    /// Returns the merkle proofs (sparse [MerkleTrie]) for the state and all storage queries
-    /// recorded by the [RevmDatabase].
+    /// Returns the Merkle proofs (sparse [`MerkleTrie`]) for the state and all storage queries
+    /// recorded by the [`RevmDatabase`].
     pub(crate) async fn state_proof(&mut self) -> Result<(MerkleTrie, AddressMap<MerkleTrie>)> {
         // if no accounts were accessed, use the state root of the corresponding block as is
         if self.accounts.is_empty() {
@@ -199,7 +202,7 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
             .accounts
             .keys()
             .filter_map(|address| proofs.get(address))
-            .flat_map(|proof| proof.account_proof.iter());
+            .flat_map(|proof| proof.account_rlp_proof.iter());
         let state_trie = MerkleTrie::from_rlp(state_nodes).context("accountProof invalid")?;
 
         let mut storage_tries: AddressMap<MerkleTrie> = AddressMap::default();
@@ -208,10 +211,7 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
             let proof = proofs.get(address).unwrap();
 
             // create a new trie for this root
-            let storage_root = proof
-                .account
-                .map(|a| a.storage_root)
-                .unwrap_or(EMPTY_ROOT_HASH);
+            let storage_root = proof.account.map_or(EMPTY_ROOT_HASH, |a| a.storage_root);
             let mut storage_trie = MerkleTrie::from_digest(storage_root);
 
             // hydrate the trie if storage slots were accessed
@@ -253,14 +253,13 @@ impl<N: Network, P: Provider<N>> RevmDatabase for PreflightDb<ProviderDb<N, P>> 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         self.accounts.entry(address).or_default();
 
-        let account = match self.proofs.get(&address) {
-            Some(proof) => proof.account,
-            None => {
-                let proof = self.inner.get_proof_blocking(address, vec![])?;
-                self.proofs.add(proof).context("invalid proof response")?
-            }
+        let account = if let Some(proof) = self.proofs.get(&address) {
+            proof.account
+        } else {
+            let proof = self.inner.get_proof_blocking(address, vec![])?;
+            self.proofs.add(proof).context("invalid proof response")?
         };
-        let code_hash = account.map(|acc| acc.code_hash).unwrap_or(KECCAK256_EMPTY);
+        let code_hash = account.map_or(KECCAK256_EMPTY, |acc| acc.code_hash);
         if code_hash != KECCAK256_EMPTY {
             self.code_addresses.insert(code_hash, address);
         }
@@ -334,7 +333,7 @@ impl AccountProofs {
                 let account_proof = entry.get_mut();
                 ensure!(
                     account_proof.account == account
-                        && account_proof.account_proof == proof_response.account_proof,
+                        && account_proof.account_rlp_proof == proof_response.account_proof,
                     "inconsistent account proof"
                 );
                 account_proof.storage_proofs = merge_checked_maps(
@@ -345,7 +344,7 @@ impl AccountProofs {
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(AccountProof {
                     account,
-                    account_proof: proof_response.account_proof,
+                    account_rlp_proof: proof_response.account_proof,
                     storage_proofs,
                 });
             }
@@ -360,7 +359,7 @@ impl AccountProofs {
         keys: impl IntoIterator<Item = &'a StorageKey>,
     ) -> Option<Vec<StorageKey>> {
         let Some(proof) = self.get(address) else {
-            return Some(keys.into_iter().cloned().unique().collect());
+            return Some(keys.into_iter().copied().unique().collect());
         };
 
         let storage_root = proof.account.map_or(EMPTY_ROOT_HASH, |a| a.storage_root);
@@ -369,7 +368,7 @@ impl AccountProofs {
         }
 
         let new_key = |k: &&StorageKey| !proof.storage_proofs.contains_key(*k);
-        let missing_keys: Vec<_> = keys.into_iter().filter(new_key).cloned().unique().collect();
+        let missing_keys: Vec<_> = keys.into_iter().filter(new_key).copied().unique().collect();
 
         // we only need to request additional proofs if some keys are missing
         if missing_keys.is_empty() {
@@ -380,7 +379,7 @@ impl AccountProofs {
     }
 }
 
-/// Merges two HashMaps, checking for consistency on overlapping keys.
+/// Merges two `HashMaps`, checking for consistency on overlapping keys.
 /// Panics if values for the same key are different. Consumes both maps.
 fn merge_checked_maps<K, V, S, T>(mut map: HashMap<K, V, S>, iter: T) -> HashMap<K, V, S>
 where
@@ -400,14 +399,13 @@ where
             }
             hash_map::Entry::Occupied(entry) => {
                 let value1 = entry.get();
-                if value1 != &value2 {
-                    panic!(
-                        "mismatching values for key {:?}: existing={:?}, other={:?}",
-                        entry.key(),
-                        value1,
-                        value2
-                    );
-                }
+                assert!(
+                    value1 == &value2,
+                    "mismatching values for key {:?}: existing={:?}, other={:?}",
+                    entry.key(),
+                    value1,
+                    value2
+                );
             }
         }
     }

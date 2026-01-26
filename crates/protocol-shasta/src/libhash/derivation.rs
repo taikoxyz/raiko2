@@ -5,6 +5,7 @@ use super::encode::EMPTY_BYTES_HASH;
 use super::values::{hash_three_values, hash_two_values};
 
 /// Hash a derivation source (isForcedInclusion flag + blobSlice)
+#[must_use]
 pub fn hash_derivation_source(source: &DerivationSource) -> B256 {
     hash_two_values(
         if source.isForcedInclusion {
@@ -54,6 +55,7 @@ fn hash_blob_slice(blob_slice: &BlobSlice) -> B256 {
     )
 }
 
+#[must_use]
 pub fn hash_derivation(derivation: &Derivation) -> B256 {
     let sources_length = derivation.sources.len();
 
@@ -109,7 +111,7 @@ pub fn hash_derivation(derivation: &Derivation) -> B256 {
 
         // DerivationSource head
         // [dataCursor] isForcedInclusion (1 or 0)
-        let is_forced_inclusion_value = if source.isForcedInclusion { 1u64 } else { 0u64 };
+        let is_forced_inclusion_value = u64::from(source.isForcedInclusion);
         write_word(
             &mut buffer,
             data_cursor,

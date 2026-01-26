@@ -285,7 +285,11 @@ mod proposal_bincode_compat {
 }
 
 impl ShastaEventData {
-    /// Decode a Shasta Proposed event into ShastaEventData.
+    /// Decode a Shasta Proposed event into `ShastaEventData`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event cannot be decoded.
     pub fn from_proposal_event(
         proposal: &Proposed,
     ) -> std::result::Result<Self, alloy_sol_types::Error> {
@@ -409,9 +413,10 @@ mod tests {
     use super::{Proposed, ShastaEventData};
 
     #[test]
-    fn shasta_event_data_from_proposed() {
+    fn shasta_event_data_from_proposed() -> Result<(), Box<dyn std::error::Error>> {
         let proposed = Proposed::default();
-        let event = ShastaEventData::from_proposal_event(&proposed).unwrap();
+        let event = ShastaEventData::from_proposal_event(&proposed)?;
         assert_eq!(event.proposal.id, proposed.id);
+        Ok(())
     }
 }

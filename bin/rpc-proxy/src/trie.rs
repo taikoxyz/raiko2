@@ -82,10 +82,10 @@ where
     let keys: Vec<B256> = storage
         .iter()
         .filter_map(|(key, slot)| {
-            if slot.original_value().is_zero() != slot.present_value().is_zero() {
-                Some(B256::from(*key))
-            } else {
+            if slot.original_value().is_zero() == slot.present_value().is_zero() {
                 None
+            } else {
+                Some(B256::from(*key))
             }
         })
         .collect();
@@ -107,7 +107,7 @@ where
         storage_trie.hydrate_from_rlp(&storage_proof.proof)?;
         if storage_proof.value.is_zero() {
             match storage_trie.resolve_orphan(hashed_key, &storage_proof.proof) {
-                Ok(_) => {}
+                Ok(()) => {}
                 Err(orphan::Error::Unresolvable(prefix)) => {
                     unresolvable.insert(prefix);
                 }

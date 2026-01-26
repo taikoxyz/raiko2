@@ -138,6 +138,9 @@ where
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue required tasks.
     pub async fn submit_proposal_proof(
         &self,
         proposal_id: u64,
@@ -207,6 +210,9 @@ where
             .await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot fetch the task.
     pub async fn get(
         &self,
         id: EngineTaskId,
@@ -214,10 +220,16 @@ where
         self.inner.scheduler.get(id).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot cancel the task.
     pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
         self.inner.scheduler.cancel(id).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot lease or complete work.
     pub async fn run_one(&self, worker: &str) -> Result<bool, TaskStoreError> {
         let Some(lease) = self.inner.scheduler.next_ready(worker).await? else {
             return Ok(false);
@@ -239,7 +251,7 @@ where
             concurrency,
             ..WorkerConfig::default()
         };
-        crate::worker::spawn_workers(self.clone(), config);
+        crate::worker::spawn_workers(self.clone(), &config);
     }
 
     pub fn start_workers_with_maintenance_interval(
@@ -257,7 +269,7 @@ where
             maintenance_interval,
             ..WorkerConfig::default()
         };
-        crate::worker::spawn_workers(self.clone(), config);
+        crate::worker::spawn_workers(self.clone(), &config);
     }
 
     async fn get_guest_input(
@@ -701,7 +713,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_proposal_proof_runs_dependency_pipeline() {
+    async fn submit_proposal_proof_runs_dependency_pipeline()
+    -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
             test_context(),
@@ -709,27 +722,37 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
-        let job_id = engine.submit_proposal_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await?;
 
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(!engine.run_one("w1").await.unwrap());
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(!engine.run_one("w1").await?);
 
-        let view = engine.get(job_id).await.unwrap().unwrap();
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
         match view.state {
             TaskState::Succeeded {
                 output: EngineOutput::Proof(proof),
             } => {
                 assert_eq!(proof.output.proof.as_deref(), Some("mock-proof"));
             }
-            other => panic!("unexpected task state: {other:?}"),
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("unexpected task state: {other:?}"),
+                )
+                .into());
+            }
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn retry_policy_none_fails_task_immediately() {
+    async fn retry_policy_none_fails_task_immediately() -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
             retry: RetryPolicy::None,
@@ -741,19 +764,23 @@ mod tests {
             scheduler_config,
         );
 
-        let job_id = engine.submit_proposal_proof(1).await.unwrap();
+        let job_id = engine.submit_proposal_proof(1).await?;
 
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
-        assert!(engine.run_one("w1").await.unwrap());
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
 
-        let view = engine.get(job_id).await.unwrap().unwrap();
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
         assert!(matches!(view.state, TaskState::Failed { .. }));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn validate_requires_preflight_output_stage() {
+    async fn validate_requires_preflight_output_stage() -> Result<(), Box<dyn std::error::Error>> {
         use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
         use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use raiko2_queue::{NewTask, Priority};
@@ -784,16 +811,16 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
         let lease = engine
             .inner
             .scheduler
             .next_ready("w1")
-            .await
-            .unwrap()
-            .unwrap();
+            .await?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "expected ready lease")
+            })?;
 
         // Complete it with PipelineStage::Validation instead of PipelineStage::Preflight
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
@@ -805,8 +832,7 @@ mod tests {
             .inner
             .scheduler
             .complete(lease, Ok(wrong_output))
-            .await
-            .unwrap();
+            .await?;
 
         // Run the validation task directly via engine.execute to check error
         let result = engine
@@ -821,10 +847,11 @@ mod tests {
             result.unwrap_err(),
             "preflight task did not produce preflight output"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn encode_requires_validated_guest_input() {
+    async fn encode_requires_validated_guest_input() -> Result<(), Box<dyn std::error::Error>> {
         use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
         use raiko2_pipeline::{PipelineStage, PipelineStageResult};
         use raiko2_queue::{NewTask, Priority};
@@ -862,16 +889,16 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
         let lease = engine
             .inner
             .scheduler
             .next_ready("w1")
-            .await
-            .unwrap()
-            .unwrap();
+            .await?
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "expected ready lease")
+            })?;
 
         // Complete it with PipelineStage::Preflight instead of PipelineStage::Validation
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
@@ -883,8 +910,7 @@ mod tests {
             .inner
             .scheduler
             .complete(lease, Ok(wrong_output))
-            .await
-            .unwrap();
+            .await?;
 
         // Run the encode task directly via engine.execute to check error
         let result = engine
@@ -899,5 +925,6 @@ mod tests {
             result.unwrap_err(),
             "input task did not produce validated GuestInput"
         );
+        Ok(())
     }
 }

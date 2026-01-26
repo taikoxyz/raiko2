@@ -24,13 +24,16 @@ exclude = ["guests/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.93"
 
 [workspace.lints.rust]
+unsafe_code = "warn"
 unreachable_pub = "warn"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
 redundant_pub_crate = "warn"
 missing_const_for_fn = "warn"
 

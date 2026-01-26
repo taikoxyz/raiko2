@@ -177,7 +177,7 @@ impl From<StatelessValidationError> for RaikoError {
             StatelessValidationError::InvalidAncestorChain => {
                 "Invalid ancestor chain: headers are not contiguous".to_string()
             }
-            _ => format!("{:?}", e),
+            _ => format!("{e:?}"),
         };
         RaikoError::StatelessValidationDetailed {
             reason,
@@ -245,18 +245,18 @@ mod tests {
     }
 
     #[test]
-    fn test_stateless_validation_detailed() {
+    fn test_stateless_validation_detailed() -> Result<(), Box<dyn std::error::Error>> {
         let err = RaikoError::stateless_validation_detailed("state root mismatch", Some(12345));
-        if let RaikoError::StatelessValidationDetailed {
+        let RaikoError::StatelessValidationDetailed {
             reason,
             block_number,
         } = err
-        {
-            assert_eq!(reason, "state root mismatch");
-            assert_eq!(block_number, Some(12345));
-        } else {
-            panic!("Expected StatelessValidationDetailed");
-        }
+        else {
+            return Err("Expected StatelessValidationDetailed".into());
+        };
+        assert_eq!(reason, "state root mismatch");
+        assert_eq!(block_number, Some(12345));
+        Ok(())
     }
 
     #[test]

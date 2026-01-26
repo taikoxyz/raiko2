@@ -34,7 +34,7 @@ RUN set -eux; \
     url="https://github.com/succinctlabs/sp1/releases/download/${version}/cargo_prove_${version}_linux_${arch}.tar.gz"; \
     curl -fsSL "$url" | tar -xzC /usr/local/bin; \
     chmod +x /usr/local/bin/cargo-prove; \
-    cargo-prove prove --version; \
+    cargo prove --version; \
     rustc +succinct --version
 
 # Pre-install the host Rust toolchain for this repo to avoid downloading it on every guest build.

@@ -4,21 +4,31 @@
 
 #[cfg(feature = "net")]
 pub mod anchor;
+#[cfg(feature = "net")]
 pub mod blob_coder;
+#[cfg(feature = "net")]
 pub mod constants;
+#[cfg(feature = "net")]
 pub mod error;
+#[cfg(feature = "net")]
 pub mod manifest;
+#[cfg(feature = "net")]
 pub mod payload_helpers;
+#[cfg(feature = "net")]
 pub mod rpc_methods;
 
 #[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
+#[cfg(feature = "net")]
 pub use blob_coder::BlobCoder;
+#[cfg(feature = "net")]
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
+#[cfg(feature = "net")]
 pub use payload_helpers::{
     PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data, encode_transactions,
     encode_tx_list, payload_id_to_bytes,
 };
+#[cfg(feature = "net")]
 pub use rpc_methods::DriverRpcMethod;
 
 use alloy_primitives::{Address, B256, ChainId};

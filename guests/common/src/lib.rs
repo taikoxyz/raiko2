@@ -46,10 +46,10 @@ pub fn prove_shasta_proposal(
         |stateless_input, runtime| {
             validate_block(
                 stateless_input.block.clone(),
-                stateless_input.witness.clone(),
+                &stateless_input.witness,
                 stateless_input.accounts.clone(),
-                runtime.chain_spec.clone(),
-                runtime.evm_config.clone(),
+                &runtime.chain_spec,
+                &runtime.evm_config,
             )
             .map_err(|e| anyhow::anyhow!(e))
         },

@@ -2,7 +2,7 @@ default:
     @just --list
 
 build-guest backend="all" *args:
-    cargo run -p xtask -- build-guest {{backend}} {{args}}
+    cargo run -r -p xtask -- build-guest {{backend}} {{args}}
 
 build-guest-risc0:
     just build-guest risc0
@@ -12,6 +12,12 @@ build-guest-sp1:
 
 build-guest-all:
     just build-guest all
+
+build-sp1-toolchain-image tag="raiko2-sp1-toolchain:local" *args:
+    docker build -f docker/sp1-toolchain/Dockerfile -t {{tag}} docker/sp1-toolchain {{args}}
+
+bench-guest backend="sp1" *args:
+    cargo run -r -p xtask -- bench-guest {{backend}} {{args}}
 
 update-alethia-reth:
     cargo update -p alethia-reth-block

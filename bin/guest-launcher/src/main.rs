@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -7,6 +8,7 @@ use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::shasta::{ProofCarryData, TransitionInputData};
+use serde::Serialize;
 use sp1_sdk::network::Address;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{ProverClient, SP1ProofMode, SP1Stdin};
@@ -27,6 +29,10 @@ struct Args {
     /// Proof mode when generating proofs.
     #[arg(long, value_enum, default_value = "plonk")]
     proof_mode: ProofMode,
+
+    /// Optional path to write a JSON benchmark report.
+    #[arg(long)]
+    json_out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -46,6 +52,51 @@ enum ProofMode {
     Core,
     Compressed,
     Plonk,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchCycleEntry {
+    label: String,
+    cycles: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchReport {
+    stage: &'static str,
+    mode: &'static str,
+    proof_mode: &'static str,
+    input: String,
+    public_values: String,
+    wall_time_ms: u64,
+    cycle_tracker: Vec<BenchCycleEntry>,
+}
+
+impl Stage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Stage::Proposal => "proposal",
+            Stage::Aggregation => "aggregation",
+        }
+    }
+}
+
+impl Mode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Mode::Execute => "execute",
+            Mode::Prove => "prove",
+        }
+    }
+}
+
+impl ProofMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            ProofMode::Core => "core",
+            ProofMode::Compressed => "compressed",
+            ProofMode::Plonk => "plonk",
+        }
+    }
 }
 
 impl From<ProofMode> for SP1ProofMode {
@@ -101,26 +152,49 @@ fn main() -> Result<()> {
 
     let prover = ProverClient::from_env();
 
+    let mut report = BenchReport {
+        stage: args.stage.as_str(),
+        mode: args.mode.as_str(),
+        proof_mode: args.proof_mode.as_str(),
+        input: args.input.display().to_string(),
+        public_values: String::new(),
+        wall_time_ms: 0,
+        cycle_tracker: Vec::new(),
+    };
+
     match args.mode {
         Mode::Execute => {
-            let (public_values, report) = prover.execute(elf, &stdin).run()?;
-            println!("public_values: {}", public_values.raw());
-            if !report.cycle_tracker.is_empty() {
+            let start = Instant::now();
+            let (public_values, execution_report) = prover.execute(elf, &stdin).run()?;
+            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            report.public_values = public_values.raw();
+
+            println!("public_values: {}", report.public_values);
+            if !execution_report.cycle_tracker.is_empty() {
                 println!("cycle_tracker:");
-                for (label, cycles) in report.cycle_tracker {
+                for (label, cycles) in execution_report.cycle_tracker {
                     println!("  {label}: {cycles}");
+                    report.cycle_tracker.push(BenchCycleEntry { label, cycles });
                 }
             }
         }
         Mode::Prove => {
             let (pk, _vk) = prover.setup(elf);
+            let start = Instant::now();
             let proof = prover
                 .prove(&pk, &stdin)
                 .mode(args.proof_mode.into())
                 .run()
                 .context("prove failed")?;
-            println!("public_values: {}", proof.public_values.raw());
+            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            report.public_values = proof.public_values.raw();
+            println!("public_values: {}", report.public_values);
         }
+    }
+
+    if let Some(path) = &args.json_out {
+        let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
+        fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     }
 
     Ok(())

@@ -1,7 +1,8 @@
 # Keep in sync with rust-toolchain.toml.
 ARG RUST_VERSION=1.93
 
-# Keep in sync with guests/sp1/Cargo.lock (sp1-zkvm version).
+# Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
+# For example, sp1-zkvm 5.2.4 in Cargo.lock corresponds to Docker tag v5.2.4 here.
 ARG SP1_DOCKER_TAG=v5.2.4
 FROM ghcr.io/succinctlabs/sp1:${SP1_DOCKER_TAG}
 

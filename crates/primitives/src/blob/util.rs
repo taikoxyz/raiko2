@@ -188,11 +188,15 @@ mod test {
         let commitment_bytes =
             blob_to_commitment_with_settings(&blob_bytes, kzg_settings).context("commitment")?;
 
-        let blob_fr = bytes_to_blob(&blob_bytes).context("bytes_to_blob")?;
-        let commitment_point =
-            blob_to_kzg_commitment_rust(&blob_fr, kzg_settings).context("commitment point")?;
+        let blob_fr = bytes_to_blob(&blob_bytes)
+            .map_err(anyhow::Error::msg)
+            .context("bytes_to_blob")?;
+        let commitment_point = blob_to_kzg_commitment_rust(&blob_fr, kzg_settings)
+            .map_err(anyhow::Error::msg)
+            .context("commitment point")?;
 
         let proof_point = compute_blob_kzg_proof_rust(&blob_fr, &commitment_point, kzg_settings)
+            .map_err(anyhow::Error::msg)
             .context("proof")?;
 
         verify_blob_kzg_proof_with_settings(
@@ -237,11 +241,15 @@ mod test {
         let embedded_settings = get_kzg_settings().context("load embedded settings")?;
 
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
-        let blob_fr = bytes_to_blob(&blob_bytes).context("bytes_to_blob")?;
+        let blob_fr = bytes_to_blob(&blob_bytes)
+            .map_err(anyhow::Error::msg)
+            .context("bytes_to_blob")?;
 
-        let commitment_embedded =
-            blob_to_kzg_commitment_rust(&blob_fr, embedded_settings).context("commit embedded")?;
+        let commitment_embedded = blob_to_kzg_commitment_rust(&blob_fr, embedded_settings)
+            .map_err(anyhow::Error::msg)
+            .context("commit embedded")?;
         let commitment_deser = blob_to_kzg_commitment_rust(&blob_fr, &deserialized_settings)
+            .map_err(anyhow::Error::msg)
             .context("commit deser")?;
         assert_eq!(
             commitment_embedded.to_bytes(),
@@ -251,9 +259,11 @@ mod test {
 
         let proof_embedded =
             compute_blob_kzg_proof_rust(&blob_fr, &commitment_embedded, embedded_settings)
+                .map_err(anyhow::Error::msg)
                 .context("proof embedded")?;
         let proof_deser =
             compute_blob_kzg_proof_rust(&blob_fr, &commitment_deser, &deserialized_settings)
+                .map_err(anyhow::Error::msg)
                 .context("proof deser")?;
         assert_eq!(
             proof_embedded.to_bytes(),

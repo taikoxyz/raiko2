@@ -41,6 +41,7 @@ pub enum PipelineKey {
 }
 
 impl PipelineKey {
+    #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             PipelineKey::ShastaRisc0 => "shasta-risc0",
@@ -88,6 +89,9 @@ pub trait ManifestBuilder: Send + Sync {
 /// Validate a guest input for the hardfork.
 pub trait Validation: Send + Sync {
     type Input;
+    /// # Errors
+    ///
+    /// Returns an error if validation fails for the provided input.
     fn validate(&self, ctx: &ProofContext, input: &Self::Input) -> RaikoResult<()>;
 }
 
@@ -96,6 +100,7 @@ pub trait Validation: Send + Sync {
 pub struct NoopValidation<I>(std::marker::PhantomData<I>);
 
 impl<I> NoopValidation<I> {
+    #[must_use]
     pub const fn new() -> Self {
         Self(std::marker::PhantomData)
     }
@@ -147,6 +152,9 @@ pub trait PipelineSpec: Send + Sync {
 
 /// Prover backend abstraction for selecting guest programs.
 pub trait ProverBackend: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot provide an ELF for the requested stage.
     fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
 }
 
@@ -170,6 +178,7 @@ pub(crate) struct ShastaElfBackend {
 }
 
 impl ShastaElfBackend {
+    #[must_use]
     pub(crate) const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             proposal_elf,
@@ -194,6 +203,7 @@ pub struct Risc0ShastaBackend {
 }
 
 impl Risc0ShastaBackend {
+    #[must_use]
     pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
@@ -218,6 +228,7 @@ pub struct Sp1ShastaBackend {
 }
 
 impl Sp1ShastaBackend {
+    #[must_use]
     pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),

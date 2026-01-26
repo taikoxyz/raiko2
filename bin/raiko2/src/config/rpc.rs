@@ -26,7 +26,7 @@ impl Default for RpcConfig {
             l1_rpc: "http://localhost:8545".to_string(),
             l2_rpc: "http://localhost:9545".to_string(),
             l1_chain_id: 1,
-            l2_chain_id: 167000,
+            l2_chain_id: 167_000,
         }
     }
 }

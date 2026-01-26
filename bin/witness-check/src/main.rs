@@ -37,11 +37,11 @@ struct Args {
     #[arg(long)]
     block_number: u64,
 
-    /// Explicit chain ID (defaults to eth_chainId if omitted).
+    /// Explicit chain ID (defaults to `eth_chainId` if omitted).
     #[arg(long)]
     chain_id: Option<u64>,
 
-    /// Whether the RPC supports debug_executionWitness.
+    /// Whether the RPC supports `debug_executionWitness`.
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     debug_witness: bool,
 
@@ -60,14 +60,13 @@ async fn main() -> Result<()> {
     let rpc_client = RpcClient::builder().http(url);
     let rpc_provider = ProviderBuilder::new().connect_client(rpc_client);
 
-    let chain_id = match args.chain_id {
-        Some(chain_id) => chain_id,
-        None => {
-            let start = Instant::now();
-            let res = rpc_provider.get_chain_id().await;
-            metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
-            res.context("eth_chainId failed")?
-        }
+    let chain_id = if let Some(chain_id) = args.chain_id {
+        chain_id
+    } else {
+        let start = Instant::now();
+        let res = rpc_provider.get_chain_id().await;
+        metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
+        res.context("eth_chainId failed")?
     };
 
     let chain_spec = SupportedChainSpecs::default()
@@ -108,7 +107,7 @@ async fn main() -> Result<()> {
     };
 
     let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
-    let signer_count = signers.iter().map(|v| v.len()).sum::<usize>();
+    let signer_count = signers.iter().map(Vec::len).sum::<usize>();
     let accounts = {
         let start = Instant::now();
         let res = provider.batch_accounts(&block_numbers, &signers).await;
@@ -124,14 +123,8 @@ async fn main() -> Result<()> {
 
     for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
         let start = Instant::now();
-        let block_hash = validate_block(
-            block,
-            witness,
-            callers,
-            taiko_chain_spec.clone(),
-            evm_config.clone(),
-        )
-        .context("Stateless validation failed")?;
+        let block_hash = validate_block(block, &witness, callers, &taiko_chain_spec, &evm_config)
+            .context("Stateless validation failed")?;
         metrics.observe("stateless.validate_block", start.elapsed(), 1);
         println!("stateless validation ok: {block_hash:?}");
     }
@@ -213,8 +206,9 @@ impl RunMetrics {
 
         for o in &self.observations {
             let secs = o.duration.as_secs_f64();
+            let unit_count = u32::try_from(o.unit_count).unwrap_or(u32::MAX);
             let rate = if secs > 0.0 {
-                (o.unit_count as f64) / secs
+                f64::from(unit_count) / secs
             } else {
                 0.0
             };

@@ -21,6 +21,10 @@ fn read_kzg_bytes(value: &[u8], label: &str, idx: usize) -> RaikoResult<KzgCommi
 /// Verify blob usage in proposal mode.
 ///
 /// Iterates through each data source and verifies each blob with its commitment and proof.
+///
+/// # Errors
+///
+/// Returns an error if blob counts mismatch, KZG inputs are invalid, or blob verification fails.
 pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<()> {
     for data_source in &guest_input.taiko.data_sources {
         if data_source.tx_data_from_blob.is_empty() {
@@ -51,8 +55,7 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
 
             verify_blob_kzg_proof(blob_data, &commitment_array, &proof_array).map_err(|e| {
                 RaikoError::InvalidBlobOption(format!(
-                    "Blob verification failed at index {}: {}",
-                    idx, e
+                    "Blob verification failed at index {idx}: {e}"
                 ))
             })?;
         }

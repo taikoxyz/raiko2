@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
 const DEFAULT_SP1_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend=\"custom\"";
+const DEFAULT_RISC0_TOOLCHAIN_IMAGE: &str = "ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest";
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -113,9 +114,45 @@ fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn find_docker_buildx_plugin() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".docker/cli-plugins/docker-buildx"));
+    }
+    candidates.push(PathBuf::from("/usr/lib/docker/cli-plugins/docker-buildx"));
+    candidates.push(PathBuf::from(
+        "/usr/local/lib/docker/cli-plugins/docker-buildx",
+    ));
+    candidates.push(PathBuf::from(
+        "/usr/libexec/docker/cli-plugins/docker-buildx",
+    ));
+
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     println!("[INFO] Building RISC0 guest programs...");
     ensure_docker()?;
+    let toolchain_image = env::var("RISC0_TOOLCHAIN_IMAGE")
+        .unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string());
+    let toolchain_image = toolchain_image.trim();
+    if !toolchain_image.is_empty()
+        && !toolchain_image.eq_ignore_ascii_case("local")
+        && !toolchain_image.eq_ignore_ascii_case("none")
+    {
+        return build_risc0_with_toolchain_image(root, bench, toolchain_image);
+    }
     ensure_cargo_risczero()?;
 
     let risc0_docker_tag =
@@ -173,6 +210,129 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     }
 
     println!("[INFO] Building RISC0 guest package (docker via cargo risczero)...");
+    run(cmd)?;
+
+    export_risc0_elves(root, &manifest, &target_root)?;
+    println!("[INFO] RISC0 guest build complete");
+    Ok(())
+}
+
+fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Result<()> {
+    println!("[INFO] Using RISC0 toolchain image: {image}");
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
+    if profile != "release" {
+        println!("[WARN] PROFILE={profile} is ignored by cargo risczero; building default profile");
+    }
+    if bench {
+        println!(
+            "[WARN] --bench has no effect unless extra bins are defined in guests/risc0/Cargo.toml"
+        );
+    }
+    if env::var("VERBOSE").ok().as_deref() == Some("1") {
+        println!("[WARN] VERBOSE=1 is ignored by cargo risczero build");
+    }
+
+    let risc0_docker_tag =
+        env::var("RISC0_DOCKER_CONTAINER_TAG").unwrap_or_else(|_| "r0.1.91.1".to_string());
+    let rustflags =
+        env::var("RISC0_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_RISC0_RUSTFLAGS.to_string());
+
+    let manifest_path = root.join("guests/risc0/Cargo.toml");
+    let manifest = read_manifest(&manifest_path)?;
+    let container_manifest_path = manifest_path
+        .strip_prefix(root)
+        .map(|rel| PathBuf::from("/work").join(rel))
+        .unwrap_or_else(|_| PathBuf::from("/work/guests/risc0/Cargo.toml"));
+
+    let target_root = env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| root.join("target"));
+    let (container_target_dir, extra_mount) = match target_root
+        .strip_prefix(root)
+        .ok()
+        .map(|rel| rel.to_path_buf())
+    {
+        Some(rel) => (PathBuf::from("/work").join(rel), None),
+        None => (PathBuf::from("/target"), Some(target_root.clone())),
+    };
+
+    let mut cmd = Command::new("docker");
+    cmd.arg("run").arg("--rm");
+    cmd.arg("-v")
+        .arg(format!("{}:/work", root.display()))
+        .arg("-w")
+        .arg("/work")
+        .arg("-v")
+        .arg("/var/run/docker.sock:/var/run/docker.sock");
+    if let Some(docker_path) = find_executable("docker") {
+        cmd.arg("-v")
+            .arg(format!("{}:/usr/bin/docker", docker_path.display()));
+    } else {
+        println!(
+            "[WARN] docker not found in PATH; cargo risczero may fail inside the toolchain image"
+        );
+    }
+    let buildx_path = find_docker_buildx_plugin().ok_or_else(|| {
+        anyhow!("docker-buildx plugin not found. Install buildx or set RISC0_TOOLCHAIN_IMAGE=none")
+    })?;
+    cmd.arg("-v").arg(format!(
+        "{}:/root/.docker/cli-plugins/docker-buildx",
+        buildx_path.display()
+    ));
+
+    if let Some(extra_mount) = &extra_mount {
+        cmd.arg("-v")
+            .arg(format!("{}:/target", extra_mount.display()));
+    }
+
+    cmd.arg("-e")
+        .arg(format!(
+            "CARGO_TARGET_DIR={}",
+            container_target_dir.display()
+        ))
+        .arg("-e")
+        .arg(format!(
+            "CARGO_TARGET_RISCV32IM_RISC0_ZKVM_ELF_RUSTFLAGS={rustflags}"
+        ))
+        .arg("-e")
+        .arg(format!("RISC0_DOCKER_CONTAINER_TAG={risc0_docker_tag}"))
+        .arg("-e")
+        .arg("RISC0_FEATURE_bigint2=1")
+        .arg("-e")
+        .arg("DOCKER_BUILDKIT=1")
+        .arg("-e")
+        .arg("DOCKER_CLI_PLUGIN_EXTRA_DIRS=/root/.docker/cli-plugins");
+
+    if let Ok(cc) = env::var("RISC0_GUEST_CC")
+        && !cc.is_empty()
+    {
+        cmd.arg("-e").arg(format!("CC={cc}"));
+    }
+    if let Ok(cflags) = env::var("RISC0_GUEST_CFLAGS")
+        && !cflags.is_empty()
+    {
+        cmd.arg("-e").arg(format!("CFLAGS={cflags}"));
+    }
+    if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
+        && !platform.is_empty()
+    {
+        cmd.arg("-e")
+            .arg(format!("DOCKER_DEFAULT_PLATFORM={platform}"));
+    }
+    if env::var("MOCK").ok().as_deref() == Some("1") {
+        cmd.arg("-e").arg("RISC0_DEV_MODE=1");
+        println!("[INFO] RISC0_DEV_MODE enabled");
+    }
+
+    cmd.arg(image)
+        .arg("cargo")
+        .arg("risczero")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(&container_manifest_path);
+
+    println!("[INFO] Building RISC0 guest package (toolchain image)...");
     run(cmd)?;
 
     export_risc0_elves(root, &manifest, &target_root)?;
@@ -316,7 +476,8 @@ fn update_image_ids(root: &Path, backend: &str) -> Result<()> {
 
     let script = root.join("script/update_imageid.sh");
     if !script.exists() {
-        return Err(anyhow!("update_imageid.sh not found at {script:?}"));
+        println!("[WARN] update_imageid.sh not found at {script:?}, skipping image ID update");
+        return Ok(());
     }
 
     let mut cmd = Command::new(script);

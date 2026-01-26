@@ -36,14 +36,14 @@ impl Config {
         };
 
         // Override with CLI arguments
-        config.server.host = cli.host.clone();
+        config.server.host.clone_from(&cli.host);
         config.server.port = cli.port;
 
         if let Some(l1_rpc) = &cli.l1_rpc {
-            config.rpc.l1_rpc = l1_rpc.clone();
+            config.rpc.l1_rpc.clone_from(l1_rpc);
         }
         if let Some(l2_rpc) = &cli.l2_rpc {
-            config.rpc.l2_rpc = l2_rpc.clone();
+            config.rpc.l2_rpc.clone_from(l2_rpc);
         }
         config.rpc.l1_chain_id = cli.l1_chain_id;
         config.rpc.l2_chain_id = cli.l2_chain_id;
@@ -56,7 +56,7 @@ impl Config {
                 .map_err(|e: String| anyhow::anyhow!(e))?;
         }
         if let Some(queue_namespace) = &cli.queue_namespace {
-            config.queue.namespace = queue_namespace.clone();
+            config.queue.namespace.clone_from(queue_namespace);
         }
         if let Some(queue_workers) = cli.queue_workers {
             config.queue.workers = queue_workers;
@@ -93,8 +93,9 @@ impl Config {
     /// Load configuration from a TOML file.
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file: {:?}", path))?;
-        toml::from_str(&content).with_context(|| format!("Failed to parse config file: {:?}", path))
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse config file: {}", path.display()))
     }
 
     /// Validate the entire configuration.

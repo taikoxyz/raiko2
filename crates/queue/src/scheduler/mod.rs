@@ -65,6 +65,7 @@ where
         }
     }
 
+    #[must_use]
     pub fn notifier(&self) -> Arc<Notify> {
         self.notify.clone()
     }
@@ -76,6 +77,9 @@ where
     O: Clone + Send + 'static,
     Id: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
 {
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn submit(
         &self,
         id: TaskId<Id>,
@@ -106,6 +110,9 @@ where
         Ok(id)
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn next_ready(
         &self,
         worker: &str,
@@ -127,6 +134,9 @@ where
         Ok(None)
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn complete(
         &self,
         lease: TaskLease<P, Id>,
@@ -185,7 +195,8 @@ where
                     }
 
                     let now_ms = now_millis();
-                    let next_ready_at_ms = now_ms.saturating_add(delay.as_millis() as u64);
+                    let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                    let next_ready_at_ms = now_ms.saturating_add(delay_ms);
                     self.store
                         .set_state(
                             &id,
@@ -231,6 +242,9 @@ where
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn cancel(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
         let Some(current) = self.store.get_state(&id).await? else {
             self.notify.notify_one();
@@ -253,6 +267,9 @@ where
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn get(&self, id: TaskId<Id>) -> Result<Option<TaskView<O, Id>>, TaskStoreError> {
         let Some((state, priority)) = self.store.get_view(&id).await? else {
             return Ok(None);
@@ -264,10 +281,16 @@ where
         }))
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn maintenance_tick(&self) -> Result<usize, TaskStoreError> {
         self.maintenance_tick_at(now_millis()).await
     }
 
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn maintenance_tick_at(&self, now_ms: u64) -> Result<usize, TaskStoreError> {
         let moved_scheduled = self
             .store
@@ -321,10 +344,13 @@ where
 fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System time is before UNIX_EPOCH")
-        .as_millis() as u64
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -332,6 +358,7 @@ mod tests {
     use super::*;
     use crate::MemoryStore;
     use crate::StoreResult;
+    use crate::TaskStoreError;
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -642,7 +669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_ready_picks_high_before_low() {
+    async fn next_ready_picks_high_before_low() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
@@ -654,8 +681,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -665,17 +691,23 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let first = sched.next_ready("w").await.unwrap().unwrap();
+        let first = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready task"))?;
         assert_eq!(first.id, b);
-        let second = sched.next_ready("w").await.unwrap().unwrap();
+        let second = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready task"))?;
         assert_eq!(second.id, a);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn next_ready_uses_atomic_store_take_when_available() {
+    async fn next_ready_uses_atomic_store_take_when_available() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(BuggyTakeStore {
             inner: MemoryStore::new(),
         });
@@ -689,14 +721,14 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        assert!(sched.next_ready("w").await.unwrap().is_some());
+        assert!(sched.next_ready("w").await?.is_some());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn duplicate_dependencies_do_not_block_dependents() {
+    async fn duplicate_dependencies_do_not_block_dependents() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(UniqueDependentsStore::new());
 
@@ -709,8 +741,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -720,19 +751,25 @@ mod tests {
                 },
                 vec![a.clone(), a.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease.id, a);
-        sched.complete(lease, Ok("ok")).await.unwrap();
+        sched.complete(lease, Ok("ok")).await?;
 
-        let dependent = sched.next_ready("w").await.unwrap().unwrap();
+        let dependent = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected dependent lease"))?;
         assert_eq!(dependent.id, b);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn dependent_enters_ready_after_all_deps_complete() {
+    async fn dependent_enters_ready_after_all_deps_complete() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(MemoryStore::new());
 
@@ -745,8 +782,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let _a2 = sched
             .submit(
                 test_id(2),
@@ -756,8 +792,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
         let b = sched
             .submit(
@@ -768,24 +803,34 @@ mod tests {
                 },
                 vec![_a1, _a2],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let t1 = sched.next_ready("w").await.unwrap().unwrap();
+        let t1 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready lease"))?;
         assert_ne!(t1.id, b);
-        let t2 = sched.next_ready("w").await.unwrap().unwrap();
+        let t2 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready lease"))?;
         assert_ne!(t2.id, b);
-        assert!(sched.next_ready("w").await.unwrap().is_none());
+        assert!(sched.next_ready("w").await?.is_none());
 
-        sched.complete(t1, Ok("ok")).await.unwrap();
-        assert!(sched.next_ready("w").await.unwrap().is_none());
+        sched.complete(t1, Ok("ok")).await?;
+        assert!(sched.next_ready("w").await?.is_none());
 
-        sched.complete(t2, Ok("ok")).await.unwrap();
-        assert_eq!(sched.next_ready("w").await.unwrap().unwrap().id, b);
+        sched.complete(t2, Ok("ok")).await?;
+        let next = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected dependent lease"))?;
+        assert_eq!(next.id, b);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn failure_propagates_to_dependents() {
+    async fn failure_propagates_to_dependents() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
@@ -797,8 +842,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -808,22 +852,26 @@ mod tests {
                 },
                 vec![a.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease.id, a);
-        sched
-            .complete(lease, Err("boom".to_string()))
-            .await
-            .unwrap();
+        sched.complete(lease, Err("boom".to_string())).await?;
 
-        let b_state = sched.get(b).await.unwrap().unwrap().state;
+        let b_state = sched
+            .get(b)
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected dependent task view"))?
+            .state;
         assert!(matches!(b_state, TaskState::Failed { .. }));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn failure_propagates_transitively() {
+    async fn failure_propagates_transitively() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
@@ -835,8 +883,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -846,8 +893,7 @@ mod tests {
                 },
                 vec![a.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
         let c = sched
             .submit(
                 test_id(3),
@@ -857,28 +903,36 @@ mod tests {
                 },
                 vec![b.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease.id, a);
-        sched
-            .complete(lease, Err("boom".to_string()))
-            .await
-            .unwrap();
+        sched.complete(lease, Err("boom".to_string())).await?;
 
         assert!(matches!(
-            sched.get(b).await.unwrap().unwrap().state,
+            sched
+                .get(b)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for b"))?
+                .state,
             TaskState::Failed { .. }
         ));
         assert!(matches!(
-            sched.get(c).await.unwrap().unwrap().state,
+            sched
+                .get(c)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for c"))?
+                .state,
             TaskState::Failed { .. }
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn cancel_propagates_to_dependents() {
+    async fn cancel_propagates_to_dependents() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
@@ -890,8 +944,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -901,18 +954,22 @@ mod tests {
                 },
                 vec![a.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        sched.cancel(a.clone()).await.unwrap();
+        sched.cancel(a.clone()).await?;
         assert!(matches!(
-            sched.get(b).await.unwrap().unwrap().state,
+            sched
+                .get(b)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for b"))?
+                .state,
             TaskState::Failed { .. }
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn cancel_is_terminal_even_if_worker_completes_late() {
+    async fn cancel_is_terminal_even_if_worker_completes_late() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(MemoryStore::new());
 
@@ -925,23 +982,30 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease.id, a);
 
-        sched.cancel(a.clone()).await.unwrap();
-        sched.complete(lease, Ok("late-ok")).await.unwrap();
+        sched.cancel(a.clone()).await?;
+        sched.complete(lease, Ok("late-ok")).await?;
 
         assert!(matches!(
-            sched.get(a).await.unwrap().unwrap().state,
+            sched
+                .get(a)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for a"))?
+                .state,
             TaskState::Cancelled
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn cancel_after_success_is_noop() {
+    async fn cancel_after_success_is_noop() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(MemoryStore::new());
 
@@ -954,23 +1018,30 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease = sched.next_ready("w").await.unwrap().unwrap();
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease.id, a);
 
-        sched.complete(lease, Ok("ok")).await.unwrap();
-        sched.cancel(a.clone()).await.unwrap();
+        sched.complete(lease, Ok("ok")).await?;
+        sched.cancel(a.clone()).await?;
 
         assert!(matches!(
-            sched.get(a).await.unwrap().unwrap().state,
+            sched
+                .get(a)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for a"))?
+                .state,
             TaskState::Succeeded { .. }
         ));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn memory_store_requeues_task_after_lease_expires() {
+    async fn memory_store_requeues_task_after_lease_expires() -> StoreResult<()> {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(store);
 
@@ -983,25 +1054,30 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease1 = sched.next_ready("w1").await.unwrap().unwrap();
+        let lease1 = sched
+            .next_ready("w1")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease1.id, id);
         assert_eq!(lease1.attempt, 1);
 
         sched
             .maintenance_tick_at(super::now_millis().saturating_add(10_000))
-            .await
-            .unwrap();
+            .await?;
 
-        let lease2 = sched.next_ready("w2").await.unwrap().unwrap();
+        let lease2 = sched
+            .next_ready("w2")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected requeued lease"))?;
         assert_eq!(lease2.id, id);
         assert_eq!(lease2.attempt, 2);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn stale_completion_is_ignored_after_task_is_reacquired() {
+    async fn stale_completion_is_ignored_after_task_is_reacquired() -> StoreResult<()> {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
         let sched: Scheduler<&'static str, &'static str, TestId> = Scheduler::new(store);
 
@@ -1014,37 +1090,49 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let lease1 = sched.next_ready("w").await.unwrap().unwrap();
+        let lease1 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
         assert_eq!(lease1.id, id);
         assert_eq!(lease1.attempt, 1);
 
         // Force the lease to expire and requeue the task.
         sched
             .maintenance_tick_at(super::now_millis().saturating_add(10_000))
-            .await
-            .unwrap();
+            .await?;
 
-        let lease2 = sched.next_ready("w").await.unwrap().unwrap();
+        let lease2 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected requeued lease"))?;
         assert_eq!(lease2.id, id);
         assert_eq!(lease2.attempt, 2);
 
         // Complete in the wrong order: the stale lease completes after the task was
         // already re-leased. The stale completion must not win.
-        sched.complete(lease1, Ok("old")).await.unwrap();
-        sched.complete(lease2, Ok("new")).await.unwrap();
+        sched.complete(lease1, Ok("old")).await?;
+        sched.complete(lease2, Ok("new")).await?;
 
-        let view = sched.get(id).await.unwrap().unwrap();
+        let view = sched
+            .get(id)
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view"))?;
         match view.state {
             TaskState::Succeeded { output } => assert_eq!(output, "new"),
-            other => panic!("unexpected task state: {other:?}"),
+            other => {
+                return Err(TaskStoreError::corrupt_msg(format!(
+                    "unexpected task state: {other:?}"
+                )));
+            }
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn retry_defers_dependent_failure_until_exhausted() {
+    async fn retry_defers_dependent_failure_until_exhausted() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
             MemoryStore::new(),
             SchedulerConfig {
@@ -1065,8 +1153,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 test_id(2),
@@ -1076,27 +1163,35 @@ mod tests {
                 },
                 vec![a.clone()],
             )
-            .await
-            .unwrap();
+            .await?;
 
         for attempt in 1..=3 {
-            let lease = sched.next_ready("w").await.unwrap().unwrap();
+            let lease = sched
+                .next_ready("w")
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
             assert_eq!(lease.id, a);
             assert_eq!(lease.attempt, attempt);
-            sched
-                .complete(lease, Err("boom".to_string()))
-                .await
-                .unwrap();
+            sched.complete(lease, Err("boom".to_string())).await?;
         }
 
         assert!(matches!(
-            sched.get(a).await.unwrap().unwrap().state,
+            sched
+                .get(a)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for a"))?
+                .state,
             TaskState::Failed { .. }
         ));
         assert!(matches!(
-            sched.get(b).await.unwrap().unwrap().state,
+            sched
+                .get(b)
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view for b"))?
+                .state,
             TaskState::Failed { .. }
         ));
+        Ok(())
     }
 
     #[test]

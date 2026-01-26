@@ -2,9 +2,24 @@
 //!
 //! This module contains all Shasta-specific protocol types and codecs.
 
+#[cfg(feature = "net")]
+pub mod anchor;
 pub mod blob_coder;
 pub mod constants;
+pub mod error;
 pub mod manifest;
+pub mod payload_helpers;
+pub mod rpc_methods;
+
+#[cfg(feature = "net")]
+pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
+pub use blob_coder::BlobCoder;
+pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
+pub use payload_helpers::{
+    PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data, encode_transactions,
+    encode_tx_list, payload_id_to_bytes,
+};
+pub use rpc_methods::DriverRpcMethod;
 
 use alloy_primitives::{Address, B256, ChainId};
 use alloy_sol_types::sol;
@@ -209,12 +224,12 @@ mod proposal_bincode_compat {
         sources: Vec<DerivationSourceBin>,
     }
 
-    fn u48_from_u64(n: u64) -> U48 {
+    const fn u48_from_u64(n: u64) -> U48 {
         // Ensure it fits 48 bits.
         U48::from_limbs([n & 0xffff_ffff_ffff])
     }
 
-    fn u24_from_u32(n: u32) -> U24 {
+    const fn u24_from_u32(n: u32) -> U24 {
         U24::from_limbs([(n as u64) & 0x00ff_ffff])
     }
 
@@ -270,8 +285,14 @@ mod proposal_bincode_compat {
 }
 
 impl ShastaEventData {
-    /// Decode a Shasta Proposed event into ShastaEventData.
-    pub fn from_proposal_event(proposal: &Proposed) -> Result<Self, alloy_sol_types::Error> {
+    /// Decode a Shasta Proposed event into `ShastaEventData`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event cannot be decoded.
+    pub fn from_proposal_event(
+        proposal: &Proposed,
+    ) -> std::result::Result<Self, alloy_sol_types::Error> {
         Ok(Self {
             proposal: Proposal {
                 id: proposal.id,
@@ -287,7 +308,7 @@ impl ShastaEventData {
 }
 
 impl Serialize for ShastaEventData {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -316,7 +337,7 @@ impl Serialize for ShastaEventData {
 }
 
 impl<'de> Deserialize<'de> for ShastaEventData {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
@@ -392,10 +413,10 @@ mod tests {
     use super::{Proposed, ShastaEventData};
 
     #[test]
-    fn shasta_event_data_from_proposed() {
+    fn shasta_event_data_from_proposed() -> Result<(), Box<dyn std::error::Error>> {
         let proposed = Proposed::default();
-        let event = ShastaEventData::from_proposal_event(&proposed).unwrap();
+        let event = ShastaEventData::from_proposal_event(&proposed)?;
         assert_eq!(event.proposal.id, proposed.id);
+        Ok(())
     }
-
 }

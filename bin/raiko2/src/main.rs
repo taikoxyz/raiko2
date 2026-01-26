@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    init_logging(&cli)?;
+    init_logging(&cli);
 
     info!("Starting Raiko V2 Prover Server");
 
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_logging(cli: &Cli) -> Result<()> {
+fn init_logging(cli: &Cli) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         if cli.verbose {
             EnvFilter::new("debug")
@@ -70,6 +70,4 @@ fn init_logging(cli: &Cli) -> Result<()> {
     } else {
         registry.with(fmt::layer()).init();
     }
-
-    Ok(())
 }

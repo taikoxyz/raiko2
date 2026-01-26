@@ -35,6 +35,9 @@ use serde_json::Value;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
@@ -60,7 +63,7 @@ pub(crate) fn parse_shasta_aggregation_input(
             })?,
     )
     .map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {}", e))
+        RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {e}"))
     })
 }
 
@@ -84,6 +87,9 @@ where
 {
     type GuestInput: Send + Sync + 'static;
 
+    /// # Errors
+    ///
+    /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes>;
 
     /// Generate a proof for the given input.

@@ -26,10 +26,11 @@ pub enum EngineTaskKey {
 }
 
 impl EngineTaskKey {
+    #[must_use]
     pub const fn pipeline_key(&self) -> PipelineKey {
         match self {
-            EngineTaskKey::Proposal { pipeline, .. } => *pipeline,
-            EngineTaskKey::Aggregate { pipeline, .. } => *pipeline,
+            EngineTaskKey::Proposal { pipeline, .. }
+            | EngineTaskKey::Aggregate { pipeline, .. } => *pipeline,
         }
     }
 }
@@ -78,7 +79,7 @@ mod tests {
     use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::GuestInput;
-    use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler};
+    use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler, StoreResult, TaskStoreError};
 
     fn proposal_task_id(
         pipeline: PipelineKey,
@@ -93,7 +94,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregation_depends_on_proposals() {
+    async fn aggregation_depends_on_proposals() -> StoreResult<()> {
         let sched: Scheduler<EngineTask, EngineOutput<GuestInput>, EngineTaskKey> =
             Scheduler::new(MemoryStore::new());
 
@@ -113,8 +114,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let a2 = sched
             .submit(
                 proposal_task_id(PipelineKey::ShastaNative, 2, ProposalStage::Prove),
@@ -131,8 +131,7 @@ mod tests {
                 },
                 vec![],
             )
-            .await
-            .unwrap();
+            .await?;
         let b = sched
             .submit(
                 TaskId::new(EngineTaskKey::Aggregate {
@@ -148,23 +147,31 @@ mod tests {
                 },
                 vec![a1, a2],
             )
-            .await
-            .unwrap();
+            .await?;
 
-        let t1 = sched.next_ready("w").await.unwrap().unwrap();
-        let t2 = sched.next_ready("w").await.unwrap().unwrap();
-        assert!(sched.next_ready("w").await.unwrap().is_none());
+        let t1 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready task in queue"))?;
+        let t2 = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready task in queue"))?;
+        assert!(sched.next_ready("w").await?.is_none());
 
         let proof = PipelineStageResult::new(PipelineStage::Prove, Proof::default());
         sched
             .complete(t1, Ok(EngineOutput::Proof(Box::new(proof.clone()))))
-            .await
-            .unwrap();
+            .await?;
         sched
             .complete(t2, Ok(EngineOutput::Proof(Box::new(proof))))
-            .await
-            .unwrap();
+            .await?;
 
-        assert_eq!(sched.next_ready("w").await.unwrap().unwrap().id, b);
+        let next = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected aggregate task to be ready"))?;
+        assert_eq!(next.id, b);
+        Ok(())
     }
 }

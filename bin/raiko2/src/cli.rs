@@ -52,7 +52,7 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_QUEUE_BACKEND")]
     pub queue_backend: Option<String>,
 
-    /// Redis URL for queue backend (e.g. redis://localhost:6379/)
+    /// Redis URL for queue backend (e.g. <redis://localhost:6379/>)
     #[arg(long, env = "RAIKO2_REDIS_URL")]
     pub redis_url: Option<String>,
 
@@ -76,15 +76,15 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_ATTEMPTS")]
     pub queue_retry_max_attempts: Option<u32>,
 
-    /// Fixed retry delay in milliseconds (when retry_strategy=fixed)
+    /// Fixed retry delay in milliseconds (when `retry_strategy=fixed`)
     #[arg(long, env = "RAIKO2_QUEUE_RETRY_FIXED_DELAY_MS")]
     pub queue_retry_fixed_delay_ms: Option<u64>,
 
-    /// Exponential retry base delay in milliseconds (when retry_strategy=exponential)
+    /// Exponential retry base delay in milliseconds (when `retry_strategy=exponential`)
     #[arg(long, env = "RAIKO2_QUEUE_RETRY_BASE_DELAY_MS")]
     pub queue_retry_base_delay_ms: Option<u64>,
 
-    /// Exponential retry maximum delay in milliseconds (when retry_strategy=exponential)
+    /// Exponential retry maximum delay in milliseconds (when `retry_strategy=exponential`)
     #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_DELAY_MS")]
     pub queue_retry_max_delay_ms: Option<u64>,
 }

@@ -3,6 +3,7 @@ use raiko2_primitives::Proof;
 use serde::{Deserialize, Serialize};
 
 /// RISC0 prover configuration parameters.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Risc0Config {
     /// Whether to use Bonsai proving service.

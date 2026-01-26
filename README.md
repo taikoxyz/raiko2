@@ -165,6 +165,13 @@ RISC0_DOCKER_TAG=r0.1.88.0 SP1_DOCKER_TAG=v5.2.4 DOCKER_DEFAULT_PLATFORM=linux/a
   just build-guest all
 ```
 
+Optional (no local `rzup` install): use the prebuilt RISC0 toolchain image.
+
+```bash
+RISC0_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest \\
+  just build-guest all
+```
+
 If you don't use `just`:
 
 ```bash

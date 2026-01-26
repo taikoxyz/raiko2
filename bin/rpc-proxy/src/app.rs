@@ -102,7 +102,7 @@ async fn forward_request(body: &web::Bytes, client: &Client, upstream_url: &str)
             let mut response_builder = HttpResponse::build(status_code);
 
             // Copy headers from the upstream response to the new response.
-            for (name, value) in upstream_response.headers().iter() {
+            for (name, value) in upstream_response.headers() {
                 response_builder.insert_header((name.as_str(), value.as_bytes()));
             }
 

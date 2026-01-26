@@ -29,7 +29,7 @@ use std::{future::IntoFuture, marker::PhantomData};
 use tokio::runtime::Handle;
 use tracing::trace;
 
-/// Errors returned by the [ProviderDb].
+/// Errors returned by the [`ProviderDb`].
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0} failed")]
@@ -42,13 +42,13 @@ pub enum Error {
 
 impl DBErrorMarker for Error {}
 
-/// A [RevmDatabase] backed by an alloy [Provider].
+/// A [`RevmDatabase`] backed by an alloy [`Provider`].
 ///
 /// When accessing the database, it'll use the given provider to fetch the corresponding account's
 /// data. It will block the current thread to execute provider calls, Therefore, its methods
 /// must *not* be executed inside an async runtime, or it will panic when trying to block. If the
 /// immediate context is only synchronous, but a transitive caller is async, use
-/// [tokio::task::spawn_blocking] around the calls that need to be blocked.
+/// [`tokio::task::spawn_blocking`] around the calls that need to be blocked.
 #[derive(Clone)]
 pub struct ProviderDb<N: Network, P: Provider<N>> {
     /// Provider to fetch the data from.
@@ -65,7 +65,7 @@ pub struct ProviderDb<N: Network, P: Provider<N>> {
     phantom: PhantomData<N>,
 }
 
-/// Additional configuration for a [Provider].
+/// Additional configuration for a [`Provider`].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ProviderConfig {
@@ -82,7 +82,7 @@ impl Default for ProviderConfig {
 }
 
 impl<N: Network, P: Provider<N>> ProviderDb<N, P> {
-    /// Creates a new AlloyDb instance, with a [Provider] and a block.
+    /// Creates a new `ProviderDb` instance, with a [`Provider`] and a block.
     ///
     /// This will panic if called outside the context of a Tokio runtime.
     pub(crate) fn new(provider: P, config: ProviderConfig, block_hash: BlockHash) -> Self {
@@ -91,12 +91,12 @@ impl<N: Network, P: Provider<N>> ProviderDb<N, P> {
             provider_config: config,
             block: block_hash,
             handle: Handle::current(),
-            contracts: Default::default(),
+            contracts: B256HashMap::default(),
             phantom: PhantomData,
         }
     }
 
-    /// Returns the [Provider].
+    /// Returns the [`Provider`].
     pub(crate) const fn provider(&self) -> &P {
         &self.provider
     }
@@ -106,7 +106,7 @@ impl<N: Network, P: Provider<N>> ProviderDb<N, P> {
         self.block
     }
 
-    /// Gets the bytecode located at the corresponding [Address].
+    /// Gets the bytecode located at the corresponding [`Address`].
     pub(crate) fn get_code_at(&mut self, address: Address) -> Result<Bytecode, Error> {
         trace!(%address, "eth_getCode");
         let get_code = self.provider.get_code_at(address).hash(self.block);

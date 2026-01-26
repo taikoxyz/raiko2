@@ -38,8 +38,10 @@ impl RetryPolicy {
                 }
 
                 let exponent = attempt.saturating_sub(1);
-                let base_ms = base_delay.as_millis().min(u64::MAX as u128) as u64;
-                let max_ms = max_delay.as_millis().min(u64::MAX as u128) as u64;
+                let base_ms = u64::try_from(base_delay.as_millis().min(u128::from(u64::MAX)))
+                    .unwrap_or(u64::MAX);
+                let max_ms = u64::try_from(max_delay.as_millis().min(u128::from(u64::MAX)))
+                    .unwrap_or(u64::MAX);
                 let factor = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
                 let delay_ms = base_ms.saturating_mul(factor).min(max_ms);
                 Some(Duration::from_millis(delay_ms))

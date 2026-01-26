@@ -12,17 +12,12 @@ use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
 
 use super::NetworkProvider;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum WitnessMode {
+    #[default]
     Auto,
     ForceRemote,
     ForceLocal,
-}
-
-impl Default for WitnessMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,9 +56,9 @@ impl NetworkProvider {
         // For Taiko chains, use TaikoEvmConfig directly (like in on_the_spot_witness tests)
         if super::is_taiko_chain_id(chain_id) {
             let evm_config = match chain_id {
-                167000 => Arc::new(TaikoEvmConfig::new(TAIKO_MAINNET.clone())),
-                167001 => Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone())),
-                167013 => Arc::new(TaikoEvmConfig::new(TAIKO_HOODI.clone())),
+                167_000 => Arc::new(TaikoEvmConfig::new(TAIKO_MAINNET.clone())),
+                167_001 => Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone())),
+                167_013 => Arc::new(TaikoEvmConfig::new(TAIKO_HOODI.clone())),
                 _ => {
                     return Err(RaikoError::RPC(format!(
                         "Unsupported Taiko chain_id: {chain_id}"

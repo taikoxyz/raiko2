@@ -16,11 +16,10 @@ impl NetworkProvider {
                 .await
                 .map_err(|e| {
                     RaikoError::RPC(format!(
-                        "eth_getBlockByNumber failed for block {}: {e}",
-                        block_number
+                        "eth_getBlockByNumber failed for block {block_number}: {e}"
                     ))
                 })?
-                .ok_or_else(|| RaikoError::RPC(format!("Block {} not found", block_number)))?;
+                .ok_or_else(|| RaikoError::RPC(format!("Block {block_number} not found")))?;
 
             // Convert alloy BlockResponse to RethBlock
             let reth_block: RethBlock = rpc_block.into();

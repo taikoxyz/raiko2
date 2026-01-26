@@ -47,7 +47,7 @@ impl std::str::FromStr for ProofType {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
             "risc0" => Ok(ProofType::Risc0),
-            _ => Err(format!("Unknown proof type {}", s)),
+            _ => Err(format!("Unknown proof type {s}")),
         }
     }
 }
@@ -60,18 +60,18 @@ impl TryFrom<u8> for ProofType {
             0 => Ok(Self::Native),
             1 => Ok(Self::Sp1),
             3 => Ok(Self::Risc0),
-            _ => Err(format!("Unknown proof type {}", value)),
+            _ => Err(format!("Unknown proof type {value}")),
         }
     }
 }
 
-/// Module for serializing ProofType as lowercase strings
+/// Module for serializing `ProofType` as lowercase strings
 #[allow(dead_code)]
 pub mod lowercase {
     use super::ProofType;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(proof_type: &ProofType, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(proof_type: ProofType, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {

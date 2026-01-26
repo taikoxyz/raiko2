@@ -50,16 +50,19 @@ fn blob_to_commitment_with_settings(
     kzg_settings: &KZGSettings,
 ) -> RaikoResult<KzgCommitmentBytes> {
     let blob_fields = bytes_to_blob(blob)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {e}")))?;
 
-    let commitment = blob_to_kzg_commitment_rust(&blob_fields, kzg_settings).map_err(|e| {
-        RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {}", e))
-    })?;
+    let commitment = blob_to_kzg_commitment_rust(&blob_fields, kzg_settings)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {e}")))?;
 
     Ok(g1_to_kzg_commitment_bytes(&commitment))
 }
 
 /// Convert blob (Vec<u8>) to KZG commitment using the static KZG settings.
+///
+/// # Errors
+///
+/// Returns an error if the blob cannot be converted or the commitment computation fails.
 pub fn blob_to_commitment(blob: &[u8]) -> RaikoResult<KzgCommitmentBytes> {
     blob_to_commitment_with_settings(blob, get_kzg_settings()?)
 }
@@ -70,13 +73,13 @@ fn blob_to_proof_with_settings(
     kzg_settings: &KZGSettings,
 ) -> RaikoResult<KzgCommitmentBytes> {
     let blob_fields = bytes_to_blob(blob)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {e}")))?;
 
     let kzg_commitment = G1::from_bytes(commitment)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {e}")))?;
 
     let proof = compute_blob_kzg_proof_rust(&blob_fields, &kzg_commitment, kzg_settings)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute proof: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute proof: {e}")))?;
 
     Ok(g1_to_kzg_commitment_bytes(&proof))
 }
@@ -107,6 +110,11 @@ fn blob_to_proof_with_settings(
 /// protocol, see [EIP-4844].
 ///
 /// [EIP-4844]: https://eips.ethereum.org/EIPS/eip-4844
+///
+/// # Errors
+///
+/// Returns an error if the blob cannot be converted, the commitment is invalid,
+/// or the proof computation fails.
 pub fn blob_to_proof(
     blob: &[u8],
     commitment: &KzgCommitmentBytes,
@@ -116,7 +124,8 @@ pub fn blob_to_proof(
 
 /// Convert KZG commitment to versioned hash (EIP-4844).
 ///
-/// Computes SHA256 hash of the commitment and sets the first byte to VERSIONED_HASH_VERSION_KZG.
+/// Computes SHA256 hash of the commitment and sets the first byte to `VERSIONED_HASH_VERSION_KZG`.
+#[must_use]
 pub fn commitment_to_version_hash(commitment: &KzgCommitmentBytes) -> B256 {
     let mut out = hash(commitment);
     out[0] = VERSIONED_HASH_VERSION_KZG;
@@ -130,16 +139,16 @@ pub(crate) fn verify_blob_kzg_proof_with_settings(
     kzg_settings: &KZGSettings,
 ) -> RaikoResult<()> {
     let blob_fields = bytes_to_blob(blob)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {e}")))?;
 
     let kzg_commitment = G1::from_bytes(commitment)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {e}")))?;
     let kzg_proof = G1::from_bytes(proof)
-        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid proof: {}", e)))?;
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid proof: {e}")))?;
 
     let is_valid =
         verify_blob_kzg_proof_rust(&blob_fields, &kzg_commitment, &kzg_proof, kzg_settings)
-            .map_err(|e| RaikoError::InvalidBlobOption(format!("Verification error: {}", e)))?;
+            .map_err(|e| RaikoError::InvalidBlobOption(format!("Verification error: {e}")))?;
     if !is_valid {
         return Err(RaikoError::InvalidBlobOption(
             "KZG proof verification failed".to_string(),
@@ -149,6 +158,10 @@ pub(crate) fn verify_blob_kzg_proof_with_settings(
 }
 
 /// Verify blob KZG proof using the static KZG settings.
+///
+/// # Errors
+///
+/// Returns an error if the proof is invalid or verification fails.
 pub fn verify_blob_kzg_proof(
     blob: &[u8],
     commitment: &KzgCommitmentBytes,
@@ -164,22 +177,27 @@ pub fn verify_blob_kzg_proof(
 mod test {
     use super::*;
     use alloy_primitives::hex;
+    use anyhow::{Context, Result};
     use kzg_traits::eip_4844::BYTES_PER_BLOB;
 
     #[test]
-    fn blob_commitment_version_hash_and_proof_verify() {
-        let kzg_settings = get_kzg_settings().expect("embedded settings load");
+    fn blob_commitment_version_hash_and_proof_verify() -> Result<()> {
+        let kzg_settings = get_kzg_settings().context("embedded settings load")?;
 
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
         let commitment_bytes =
-            blob_to_commitment_with_settings(&blob_bytes, kzg_settings).expect("commitment");
+            blob_to_commitment_with_settings(&blob_bytes, kzg_settings).context("commitment")?;
 
-        let blob_fr = bytes_to_blob(&blob_bytes).expect("bytes_to_blob");
-        let commitment_point =
-            blob_to_kzg_commitment_rust(&blob_fr, kzg_settings).expect("commitment point");
+        let blob_fr = bytes_to_blob(&blob_bytes)
+            .map_err(anyhow::Error::msg)
+            .context("bytes_to_blob")?;
+        let commitment_point = blob_to_kzg_commitment_rust(&blob_fr, kzg_settings)
+            .map_err(anyhow::Error::msg)
+            .context("commitment point")?;
 
-        let proof_point =
-            compute_blob_kzg_proof_rust(&blob_fr, &commitment_point, kzg_settings).expect("proof");
+        let proof_point = compute_blob_kzg_proof_rust(&blob_fr, &commitment_point, kzg_settings)
+            .map_err(anyhow::Error::msg)
+            .context("proof")?;
 
         verify_blob_kzg_proof_with_settings(
             &blob_bytes,
@@ -187,20 +205,21 @@ mod test {
             &proof_point.to_bytes(),
             kzg_settings,
         )
-        .expect("verify proof");
+        .context("verify proof")?;
 
         let version_hash = commitment_to_version_hash(&commitment_bytes);
         let mut expected = hash(&commitment_bytes);
         expected[0] = VERSIONED_HASH_VERSION_KZG;
         assert_eq!(version_hash, B256::from_slice(&expected));
+        Ok(())
     }
 
     #[test]
-    fn bincode_deserialize_kzg_settings_bin() {
+    fn bincode_deserialize_kzg_settings_bin() -> Result<()> {
         static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
         let start = std::time::Instant::now();
         let deserialized_settings: KZGSettings =
-            bincode::deserialize(BIN).expect("Failed to deserialize KZGSettings from binary");
+            bincode::deserialize(BIN).context("Failed to deserialize KZGSettings from binary")?;
         println!(
             "✓ bincode deserialized KZGSettings in {:.2}s ({} bytes)",
             start.elapsed().as_secs_f64(),
@@ -208,25 +227,30 @@ mod test {
         );
 
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
-        let _commitment =
-            blob_to_commitment_with_settings(&blob_bytes, &deserialized_settings).expect("commit");
+        let _commitment = blob_to_commitment_with_settings(&blob_bytes, &deserialized_settings)
+            .context("commit")?;
+        Ok(())
     }
 
     #[test]
-    fn bincode_settings_matches_embedded_settings_commit_proof_verify() {
+    fn bincode_settings_matches_embedded_settings_commit_proof_verify() -> Result<()> {
         static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
         let deserialized_settings: KZGSettings =
-            bincode::deserialize(BIN).expect("Failed to deserialize KZGSettings from binary");
+            bincode::deserialize(BIN).context("Failed to deserialize KZGSettings from binary")?;
 
-        let embedded_settings = get_kzg_settings().expect("load embedded settings");
+        let embedded_settings = get_kzg_settings().context("load embedded settings")?;
 
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
-        let blob_fr = bytes_to_blob(&blob_bytes).expect("bytes_to_blob");
+        let blob_fr = bytes_to_blob(&blob_bytes)
+            .map_err(anyhow::Error::msg)
+            .context("bytes_to_blob")?;
 
-        let commitment_embedded =
-            blob_to_kzg_commitment_rust(&blob_fr, embedded_settings).expect("commit embedded");
-        let commitment_deser =
-            blob_to_kzg_commitment_rust(&blob_fr, &deserialized_settings).expect("commit deser");
+        let commitment_embedded = blob_to_kzg_commitment_rust(&blob_fr, embedded_settings)
+            .map_err(anyhow::Error::msg)
+            .context("commit embedded")?;
+        let commitment_deser = blob_to_kzg_commitment_rust(&blob_fr, &deserialized_settings)
+            .map_err(anyhow::Error::msg)
+            .context("commit deser")?;
         assert_eq!(
             commitment_embedded.to_bytes(),
             commitment_deser.to_bytes(),
@@ -235,10 +259,12 @@ mod test {
 
         let proof_embedded =
             compute_blob_kzg_proof_rust(&blob_fr, &commitment_embedded, embedded_settings)
-                .expect("proof embedded");
+                .map_err(anyhow::Error::msg)
+                .context("proof embedded")?;
         let proof_deser =
             compute_blob_kzg_proof_rust(&blob_fr, &commitment_deser, &deserialized_settings)
-                .expect("proof deser");
+                .map_err(anyhow::Error::msg)
+                .context("proof deser")?;
         assert_eq!(
             proof_embedded.to_bytes(),
             proof_deser.to_bytes(),
@@ -253,23 +279,24 @@ mod test {
             &proof_bytes,
             embedded_settings,
         )
-        .expect("verify with embedded settings");
+        .context("verify with embedded settings")?;
         verify_blob_kzg_proof_with_settings(
             &blob_bytes,
             &commitment_bytes,
             &proof_bytes,
             &deserialized_settings,
         )
-        .expect("verify with bincode-deserialized settings");
+        .context("verify with bincode-deserialized settings")?;
+        Ok(())
     }
 
     #[test]
-    fn blob_to_proof_computes_verifiable_proof_for_mainnet_blob() {
+    fn blob_to_proof_computes_verifiable_proof_for_mainnet_blob() -> Result<()> {
         use std::fs;
 
         // Read blob from file
         let blob_file = concat!(env!("CARGO_MANIFEST_DIR"), "/blob_13326465_0.bin");
-        let blob_bytes = fs::read(blob_file).expect("Failed to read blob file");
+        let blob_bytes = fs::read(blob_file).context("Failed to read blob file")?;
         println!("Read blob: {} bytes", blob_bytes.len());
 
         // Given commitment from mainnet
@@ -278,26 +305,28 @@ mod test {
             .strip_prefix("0x")
             .unwrap_or(expected_commitment);
         let commitment_bytes: [u8; 48] = hex::decode(commitment_str)
-            .expect("Failed to decode commitment hex")
+            .context("Failed to decode commitment hex")?
             .try_into()
-            .expect("Commitment must be 48 bytes");
+            .map_err(|_| anyhow::anyhow!("Commitment must be 48 bytes"))?;
 
         // Check that our computed commitment matches the expected commitment_hex above
         let computed_commitment =
-            blob_to_commitment(&blob_bytes).expect("Failed to compute commitment");
+            blob_to_commitment(&blob_bytes).context("Failed to compute commitment")?;
         assert_eq!(
             computed_commitment, commitment_bytes,
             "Calculated commitment does not match expected commitment!"
         );
 
         // Compute proof
-        let proof = blob_to_proof(&blob_bytes, &commitment_bytes).expect("Failed to compute proof");
+        let proof =
+            blob_to_proof(&blob_bytes, &commitment_bytes).context("Failed to compute proof")?;
         println!("Computed proof: 0x{}", hex::encode(proof));
 
         // Verify proof
         verify_blob_kzg_proof(&blob_bytes, &commitment_bytes, &proof)
-            .expect("Failed to verify proof");
+            .context("Failed to verify proof")?;
 
         println!("✓ Proof verified successfully!");
+        Ok(())
     }
 }

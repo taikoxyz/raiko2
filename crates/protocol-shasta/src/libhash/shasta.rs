@@ -8,6 +8,7 @@ use super::encode::{VERIFY_PROOF_B256, address_to_b256, u48_to_b256, u64_to_b256
 use super::values::{hash_five_values, hash_four_values, hash_three_values, hash_values_impl};
 
 /// Hash a checkpoint using the same logic as the Solidity implementation
+#[must_use]
 pub fn hash_checkpoint(checkpoint: &Checkpoint) -> B256 {
     hash_three_values(
         U256::from(checkpoint.blockNumber).into(),
@@ -31,6 +32,7 @@ pub fn hash_shasta_subproof_input(carry: &ProofCarryData) -> B256 {
     )
 }
 
+#[must_use]
 pub fn hash_shasta_transition_input(transition_input: &TransitionInputData) -> B256 {
     // IMPORTANT (soundness): Aggregation checks rely on fields beyond `Transition`.
     // This hash must bind all continuity-critical fields; otherwise a caller can tamper with
@@ -64,6 +66,7 @@ pub fn hash_shasta_transition_input(transition_input: &TransitionInputData) -> B
 /// Optimized hashing for commitment data, matching Solidity's hashCommitment implementation.
 /// Flattens all fields following the same memory layout as the Solidity buffer,
 /// including static field ordering, offsets, and transition element packing.
+#[must_use]
 pub fn hash_commitment(commitment: &Commitment) -> B256 {
     let transitions_len = commitment.transitions.len();
     let total_words = 9 + transitions_len * 3;
@@ -102,10 +105,12 @@ pub fn hash_commitment(commitment: &Commitment) -> B256 {
     hash_values_impl(&buffer)
 }
 
+#[must_use]
 pub fn hash_proposal(proposal: &Proposal) -> B256 {
-    keccak256(proposal.abi_encode().as_slice()).into()
+    keccak256(proposal.abi_encode().as_slice())
 }
 
+#[must_use]
 pub fn hash_core_state(core_state: &CoreState) -> B256 {
     hash_five_values(
         U256::from(core_state.nextProposalId).into(),
@@ -116,6 +121,7 @@ pub fn hash_core_state(core_state: &CoreState) -> B256 {
     )
 }
 
+#[must_use]
 pub fn hash_public_input(
     prove_input_hash: B256,
     chain_id: u64,

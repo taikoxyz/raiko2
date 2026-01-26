@@ -21,13 +21,18 @@ use std::{
 };
 
 /// Performs stateless validation of a block using the provided witness data.
+///
+/// # Errors
+///
+/// Returns `StatelessValidationError` when witness data is invalid, consensus checks fail,
+/// or the computed post-state root mismatches.
 #[inline]
 pub fn validate_block(
     block: Block,
-    witness: ExecutionWitness,
+    witness: &ExecutionWitness,
     callers: AddressMap<TrieAccount>,
-    chain_spec: Arc<TaikoChainSpec>,
-    config: TaikoEvmConfig,
+    chain_spec: &Arc<TaikoChainSpec>,
+    config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError> {
     stateless_validation_with_trie::<SparseState>(block, witness, callers, chain_spec, config)
 }
@@ -50,7 +55,7 @@ fn decode_headers(witness: &ExecutionWitness) -> Result<Vec<Header>, StatelessVa
         .collect::<Result<_, _>>()?;
     // Sort the headers by their block number to ensure that they are in
     // ascending order.
-    ancestor_headers.sort_by_key(|header| header.number());
+    ancestor_headers.sort_by_key(BlockHeader::number);
     Ok(ancestor_headers)
 }
 
@@ -66,7 +71,7 @@ fn execute_block<T>(
     witness: &ExecutionWitness,
     callers: AddressMap<TrieAccount>,
     chain_spec: &TaikoChainSpec,
-    evm_config: TaikoEvmConfig,
+    evm_config: &TaikoEvmConfig,
     ancestor_hashes: BTreeMap<u64, B256>,
     pre_state_root: B256,
 ) -> Result<B256, StatelessValidationError>
@@ -120,20 +125,20 @@ where
 // See `stateless_validation` for detailed documentation of the validation process.
 fn stateless_validation_with_trie<T>(
     current_block: Block,
-    witness: ExecutionWitness,
+    witness: &ExecutionWitness,
     callers: AddressMap<TrieAccount>,
-    chain_spec: Arc<TaikoChainSpec>,
-    evm_config: TaikoEvmConfig,
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
 ) -> Result<B256, StatelessValidationError>
 where
     T: StatelessTrieExt,
 {
     let current_block = decode_recovered_block(current_block)?;
 
-    let ancestor_headers = decode_headers(&witness)?;
+    let ancestor_headers = decode_headers(witness)?;
 
     // Validate block against pre-execution consensus rules
-    validate_block_consensus(chain_spec.clone(), &current_block, &ancestor_headers)?;
+    validate_block_consensus(chain_spec, &current_block, &ancestor_headers)?;
 
     // Check that the ancestor headers form a contiguous chain and are not just random headers.
     let ancestor_hashes = compute_ancestor_hashes(&current_block, &ancestor_headers)?;
@@ -148,7 +153,7 @@ where
 
     execute_block::<T>(
         &current_block,
-        &witness,
+        witness,
         callers,
         chain_spec.as_ref(),
         evm_config,
@@ -180,7 +185,7 @@ impl TaikoBlockReader for WitnessTaikoBlockReader {
 }
 
 fn validate_block_consensus(
-    chain_spec: Arc<TaikoChainSpec>,
+    chain_spec: &Arc<TaikoChainSpec>,
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[Header],
 ) -> Result<(), StatelessValidationError> {
@@ -229,7 +234,7 @@ fn compute_ancestor_hashes(
             return Err(StatelessValidationError::InvalidAncestorChain); // Blocks must be contiguous
         }
 
-        child_header = parent_header
+        child_header = parent_header;
     }
 
     Ok(ancestor_hashes)
@@ -289,7 +294,7 @@ mod tests {
         };
 
         let callers = Default::default();
-        let result = validate_block(block, witness, callers, chain_spec, evm_config);
+        let result = validate_block(block, &witness, callers, &chain_spec, &evm_config);
 
         // Shasta requires timestamps to strictly increase.
         assert!(matches!(
@@ -299,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_transaction_root() {
+    fn rejects_mismatched_transaction_root() -> Result<(), Box<dyn std::error::Error>> {
         let chain_spec = TAIKO_DEVNET.clone();
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
 
@@ -319,13 +324,13 @@ mod tests {
         };
 
         let callers = Default::default();
-        let result = validate_block(block, witness, callers, chain_spec, evm_config);
+        let result = validate_block(block, &witness, callers, &chain_spec, &evm_config);
 
         match result {
             Err(StatelessValidationError::ConsensusValidationFailed(
                 ConsensusError::BodyTransactionRootDiff(_),
-            )) => {}
-            other => panic!("unexpected result: {other:?}"),
+            )) => Ok(()),
+            other => Err(format!("unexpected result: {other:?}").into()),
         }
     }
 }

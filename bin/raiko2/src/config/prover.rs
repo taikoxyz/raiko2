@@ -18,7 +18,7 @@ impl std::str::FromStr for ProverType {
             "risc0" => Ok(ProverType::Risc0),
             "sp1" => Ok(ProverType::Sp1),
             "native" => Ok(ProverType::Native),
-            _ => Err(format!("Unknown prover type: {}", s)),
+            _ => Err(format!("Unknown prover type: {s}")),
         }
     }
 }

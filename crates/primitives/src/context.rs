@@ -30,7 +30,7 @@ impl Default for ProofRequest {
     fn default() -> Self {
         Self {
             l1_chain_id: 1,
-            l2_chain_id: 167000,
+            l2_chain_id: 167_000,
             proposal_id: 0,
             proof_type: "risc0".to_string(),
             blob_proof_type: None,
@@ -50,6 +50,7 @@ pub struct ProofContext {
 }
 
 impl ProofContext {
+    #[must_use]
     pub fn new(request: ProofRequest, config: ProverConfig) -> Self {
         Self {
             l1_chain_spec: Arc::new(RethChainSpec::default()),
@@ -77,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn test_proof_request_serialization() {
+    fn test_proof_request_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let req = ProofRequest {
             l1_chain_id: 1,
             l2_chain_id: 167000,
@@ -88,11 +89,12 @@ mod tests {
             graffiti: Some("test".to_string()),
         };
 
-        let json = serde_json::to_string(&req).unwrap();
-        let deserialized: ProofRequest = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&req)?;
+        let deserialized: ProofRequest = serde_json::from_str(&json)?;
 
         assert_eq!(req.proposal_id, deserialized.proposal_id);
         assert_eq!(req.proof_type, deserialized.proof_type);
         assert_eq!(req.blob_proof_type, deserialized.blob_proof_type);
+        Ok(())
     }
 }

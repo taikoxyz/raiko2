@@ -30,6 +30,9 @@ use reth_stateless::ExecutionWitness;
 use std::collections::HashSet;
 use tracing::{Span, debug};
 
+/// # Errors
+///
+/// Returns an error if the block cannot be fetched, executed, or its proofs fail to build.
 pub async fn execution_witness<E, P, N>(
     evm_config: E,
     provider: &P,
@@ -87,7 +90,7 @@ where
     })
     .await?;
     let execution_outcome = execution_result?;
-    let mut db = db.unwrap();
+    let mut db = db.context("preflight db capture missing after execution")?;
 
     debug!("Building pre-state proofs");
     let (mut state_trie, mut storage_tries) = db.state_proof().await?;
@@ -100,13 +103,15 @@ where
     for (addr, account) in execution_outcome.state.state {
         match (account.original_info.is_some(), account.info.is_some()) {
             (false, true) => {
-                handle_new_account(provider, block_hash, addr, &mut state_trie).await?
+                handle_new_account(provider, block_hash, addr, &mut state_trie).await?;
             }
             (true, false) => {
-                handle_removed_account(provider, block_hash, addr, &mut state_trie).await?
+                handle_removed_account(provider, block_hash, addr, &mut state_trie).await?;
             }
             (true, true) => {
-                let storage = storage_tries.get_mut(&addr).unwrap();
+                let storage = storage_tries
+                    .get_mut(&addr)
+                    .with_context(|| format!("missing storage trie for account {addr:?}"))?;
                 handle_modified_account(provider, block_hash, addr, &account.storage, storage)
                     .await?;
             }

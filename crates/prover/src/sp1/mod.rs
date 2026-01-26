@@ -26,6 +26,7 @@ pub struct Sp1Prover {
 
 impl Sp1Prover {
     /// Create a new SP1 prover with the given configuration.
+    #[must_use]
     pub const fn new(config: Sp1Config) -> Self {
         Self { config }
     }
@@ -34,7 +35,7 @@ impl Sp1Prover {
 impl GuestInputCodec<GuestInput> for Sp1Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
         let bytes = bincode::serialize(input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {}", e)))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize input: {e}")))?;
         Ok(Bytes::from(bytes))
     }
 }
@@ -92,7 +93,7 @@ where
             .run()
             .map_err(|e| {
                 tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 proposal proof generation failed: {}", e))
+                RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
             })?;
 
         info!("SP1 proposal proof generated successfully");
@@ -101,7 +102,7 @@ where
         if self.config.verify {
             client.verify(&proof, &vk).map_err(|e| {
                 tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 proposal proof verification failed: {}", e))
+                RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
             })?;
             info!("SP1 proposal proof verified successfully");
         }
@@ -116,7 +117,7 @@ where
 
         // Encode proof
         let proof_bytes = bincode::serialize(&proof)
-            .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {}", e)))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
 
         Ok(Sp1Response {
             proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
@@ -162,13 +163,12 @@ where
             // The proof is stored as hex-encoded bincode in the 'proof' field
             if let Some(proof_hex) = &proof.proof {
                 let proof_bytes = alloy_primitives::hex::decode(proof_hex)
-                    .map_err(|e| RaikoError::Guest(format!("Failed to decode proof hex: {}", e)))?;
+                    .map_err(|e| RaikoError::Guest(format!("Failed to decode proof hex: {e}")))?;
 
                 let sp1_proof_with_pv: SP1ProofWithPublicValues =
                     bincode::deserialize(&proof_bytes).map_err(|e| {
                         RaikoError::Guest(format!(
-                            "Failed to deserialize SP1ProofWithPublicValues: {}",
-                            e
+                            "Failed to deserialize SP1ProofWithPublicValues: {e}"
                         ))
                     })?;
 
@@ -202,7 +202,7 @@ where
             .run()
             .map_err(|e| {
                 tracing::error!("Failed to generate SP1 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 aggregation proof generation failed: {}", e))
+                RaikoError::Guest(format!("SP1 aggregation proof generation failed: {e}"))
             })?;
 
         info!("SP1 aggregation proof generated successfully");
@@ -211,7 +211,7 @@ where
         if self.config.verify {
             client.verify(&proof, &vk).map_err(|e| {
                 tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 aggregation proof verification failed: {}", e))
+                RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
             })?;
             info!("SP1 aggregation proof verified successfully");
         }
@@ -226,7 +226,7 @@ where
 
         // Encode proof
         let proof_bytes = bincode::serialize(&proof)
-            .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {}", e)))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
 
         Ok(Sp1Response {
             proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),

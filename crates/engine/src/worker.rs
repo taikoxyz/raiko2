@@ -45,7 +45,7 @@ pub trait Runnable: Clone + Send + Sync + 'static {
 }
 
 /// Spawn supervised workers for the given runnable.
-pub fn spawn_workers<R: Runnable>(runnable: R, config: WorkerConfig) {
+pub fn spawn_workers<R: Runnable>(runnable: R, config: &WorkerConfig) {
     let notify = runnable.notifier();
 
     for i in 0..config.concurrency {
@@ -81,7 +81,7 @@ fn spawn_worker_supervised<R: Runnable>(
             let handle = tokio::spawn(async move {
                 loop {
                     match runnable.run_one(&worker_inner).await {
-                        Ok(true) => continue,
+                        Ok(true) => {}
                         Ok(false) => notify.notified().await,
                         Err(err) => {
                             tracing::warn!(

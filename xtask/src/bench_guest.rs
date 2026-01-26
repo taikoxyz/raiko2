@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Args, ValueEnum};
+use clap::Args;
 use serde::{Deserialize, Serialize};
 
 use crate::Backend;
@@ -86,17 +86,13 @@ pub(crate) struct BenchGuestArgs {
     #[arg(long)]
     pub(crate) sp1_docker_tag: Option<String>,
 
-    /// Proof stage to run.
-    #[arg(long, value_enum, default_value = "proposal")]
-    pub(crate) stage: BenchStage,
-
     /// Execution mode.
-    #[arg(long, value_enum, default_value = "execute")]
-    pub(crate) mode: BenchMode,
+    #[arg(long, default_value = "execute")]
+    pub(crate) mode: String,
 
     /// Proof mode when generating proofs (only used when `--mode=prove`).
-    #[arg(long, value_enum, default_value = "plonk")]
-    pub(crate) proof_mode: BenchProofMode,
+    #[arg(long, default_value = "plonk")]
+    pub(crate) proof_mode: String,
 
     /// Warmup runs (not included in summary).
     #[arg(long, default_value_t = 0)]
@@ -109,53 +105,6 @@ pub(crate) struct BenchGuestArgs {
     /// Optional path to write an aggregated JSON report.
     #[arg(long)]
     pub(crate) json_out: Option<PathBuf>,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum BenchStage {
-    Proposal,
-    Aggregation,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum BenchMode {
-    Execute,
-    Prove,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug)]
-pub(crate) enum BenchProofMode {
-    Core,
-    Compressed,
-    Plonk,
-}
-
-impl BenchStage {
-    const fn as_str(self) -> &'static str {
-        match self {
-            BenchStage::Proposal => "proposal",
-            BenchStage::Aggregation => "aggregation",
-        }
-    }
-}
-
-impl BenchMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            BenchMode::Execute => "execute",
-            BenchMode::Prove => "prove",
-        }
-    }
-}
-
-impl BenchProofMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            BenchProofMode::Core => "core",
-            BenchProofMode::Compressed => "compressed",
-            BenchProofMode::Plonk => "plonk",
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -214,9 +163,6 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
     if !matches!(args.backend, Backend::Sp1) {
         bail!("bench-guest currently supports backend=sp1 only");
     }
-    if matches!(args.stage, BenchStage::Aggregation) {
-        bail!("bench-guest currently supports stage=proposal only");
-    }
 
     let input_path = prepare_input(root, &args)?;
 
@@ -248,24 +194,15 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
         .unwrap_or_default()
         .as_millis();
 
+    let mode = args.mode.trim();
+    ensure!(!mode.is_empty(), "--mode must not be empty");
+    let proof_mode = args.proof_mode.trim();
+    ensure!(!proof_mode.is_empty(), "--proof-mode must not be empty");
+
     let mut measured_reports = Vec::with_capacity(args.repeat);
     for i in 0..(args.warmup + args.repeat) {
-        let result_path = results_dir.join(format!(
-            "sp1-{}-{}-{}-{}-run{}.json",
-            args.stage.as_str(),
-            args.mode.as_str(),
-            args.proof_mode.as_str(),
-            run_id,
-            i + 1
-        ));
-        run_guest_launcher(
-            &launcher_path,
-            &input_path,
-            args.stage,
-            args.mode,
-            args.proof_mode,
-            &result_path,
-        )?;
+        let result_path = results_dir.join(format!("sp1-proposal-{run_id}-run{}.json", i + 1));
+        run_guest_launcher(&launcher_path, &input_path, mode, proof_mode, &result_path)?;
         if i >= args.warmup {
             let report = read_report(&result_path)?;
             measured_reports.push(report);
@@ -278,9 +215,9 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
     if let Some(path) = &args.json_out {
         let report = BenchGuestReport {
             backend: "sp1".to_string(),
-            stage: args.stage.as_str().to_string(),
-            mode: args.mode.as_str().to_string(),
-            proof_mode: args.proof_mode.as_str().to_string(),
+            stage: "proposal".to_string(),
+            mode: mode.to_string(),
+            proof_mode: proof_mode.to_string(),
             input: input_path.display().to_string(),
             built_guest,
             sp1_docker_tag: built_guest.then(|| sp1_docker_tag.clone()),
@@ -390,25 +327,18 @@ fn build_guest_launcher(root: &Path) -> Result<PathBuf> {
 fn run_guest_launcher(
     launcher: &Path,
     input: &Path,
-    stage: BenchStage,
-    mode: BenchMode,
-    proof_mode: BenchProofMode,
+    mode: &str,
+    proof_mode: &str,
     json_out: &Path,
 ) -> Result<()> {
-    println!(
-        "[INFO] Running guest-launcher ({} {})",
-        stage.as_str(),
-        mode.as_str()
-    );
+    println!("[INFO] Running guest-launcher ({mode})");
     let mut cmd = Command::new(launcher);
     cmd.arg("--input")
         .arg(input)
-        .arg("--stage")
-        .arg(stage.as_str())
         .arg("--mode")
-        .arg(mode.as_str())
+        .arg(mode)
         .arg("--proof-mode")
-        .arg(proof_mode.as_str())
+        .arg(proof_mode)
         .arg("--json-out")
         .arg(json_out);
     let status = cmd

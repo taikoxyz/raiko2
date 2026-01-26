@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{ProofStage, ProverBackend};
@@ -20,9 +20,6 @@ struct Args {
     /// Path to the input JSON file.
     #[arg(long)]
     input: PathBuf,
-    /// Proof stage to run (proposal or aggregation).
-    #[arg(long, value_enum, default_value = "proposal")]
-    stage: Stage,
     /// Execution mode (execute for simulation, prove for proof generation).
     #[arg(long, value_enum, default_value = "execute")]
     mode: Mode,
@@ -33,12 +30,6 @@ struct Args {
     /// Optional path to write a JSON benchmark report.
     #[arg(long)]
     json_out: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Stage {
-    Proposal,
-    Aggregation,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -69,15 +60,6 @@ struct BenchReport {
     public_values: String,
     wall_time_ms: u64,
     cycle_tracker: Vec<BenchCycleEntry>,
-}
-
-impl Stage {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Stage::Proposal => "proposal",
-            Stage::Aggregation => "aggregation",
-        }
-    }
 }
 
 impl Mode {
@@ -116,10 +98,6 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    if matches!(args.stage, Stage::Aggregation) {
-        bail!("aggregation stage is not implemented yet for this launcher");
-    }
-
     let input = read_input(&args.input)?;
     let mut stdin = SP1Stdin::new();
     // IMPORTANT: pass GuestInput as raw bincode bytes.
@@ -153,7 +131,7 @@ fn main() -> Result<()> {
     let prover = ProverClient::from_env();
 
     let mut report = BenchReport {
-        stage: args.stage.as_str(),
+        stage: "proposal",
         mode: args.mode.as_str(),
         proof_mode: args.proof_mode.as_str(),
         input: args.input.display().to_string(),

@@ -17,7 +17,16 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        binutils-riscv64-unknown-elf \
+        gcc-riscv64-unknown-elf \
+        picolibc-riscv64-unknown-elf \
     && rm -rf /var/lib/apt/lists/*
+
+# Default cross compiler for the guest target. This avoids relying on host toolchains and enables
+# building crates with C/C++ sources (e.g. `c-kzg`) under `riscv32im-succinct-zkvm-elf`.
+ENV CC_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-gcc -specs=picolibc.specs"
+ENV CXX_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.specs"
+ENV AR_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
 
 # Install cargo-prove to enable running `cargo prove build` inside this image.
 # By default, it matches the SP1 docker tag (e.g. v5.2.4).

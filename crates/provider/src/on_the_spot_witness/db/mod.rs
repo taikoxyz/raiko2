@@ -255,6 +255,7 @@ impl<N: Network, P: Provider<N>> RevmDatabase for PreflightDb<ProviderDb<N, P>> 
         }
 
         Ok(account.map(|acc| AccountInfo {
+            account_id: None,
             balance: acc.balance,
             nonce: acc.nonce,
             code_hash: acc.code_hash,

@@ -219,6 +219,7 @@ impl<N: Network, P: Provider<N>> RevmDatabase for ProviderDb<N, P> {
         self.contracts.insert(code_hash, bytecode);
 
         Ok(Some(AccountInfo {
+            account_id: None,
             nonce,
             balance,
             code_hash,

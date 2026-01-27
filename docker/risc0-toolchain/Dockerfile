@@ -1,5 +1,5 @@
 # Keep in sync with rust-toolchain.toml.
-ARG RUST_VERSION=1.90
+ARG RUST_VERSION=1.93
 FROM rust:${RUST_VERSION}-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive

@@ -97,6 +97,7 @@ where
         chain_spec,
         &output.receipts,
         &output.requests,
+        None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 

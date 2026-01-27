@@ -534,6 +534,15 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
             "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
         ));
 
+    // Ensure crates with C/C++ sources (e.g. `c-kzg`, `blst`) cross-compile for the guest target.
+    // Prefer the RISC-V bare-metal GCC toolchain: it provides a proper sysroot with standard headers.
+    cmd.arg("-e")
+        .arg("CC_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
+    cmd.arg("-e")
+        .arg("CXX_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
+    cmd.arg("-e")
+        .arg("AR_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
+
     if let Ok(cc) = env::var("SP1_GUEST_CC")
         && !cc.is_empty()
     {

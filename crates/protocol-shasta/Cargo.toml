@@ -16,6 +16,7 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-rlp.workspace = true
 alloy-eips.workspace = true
+alloy-consensus.workspace = true
 reth-ethereum-primitives.workspace = true
 
 # Serialization

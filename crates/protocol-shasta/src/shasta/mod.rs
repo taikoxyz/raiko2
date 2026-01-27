@@ -10,7 +10,6 @@ pub mod blob_coder;
 pub mod constants;
 #[cfg(feature = "net")]
 pub mod error;
-#[cfg(feature = "net")]
 pub mod manifest;
 #[cfg(feature = "net")]
 pub mod payload_helpers;

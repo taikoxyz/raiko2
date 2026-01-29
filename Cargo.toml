@@ -70,22 +70,22 @@ alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch 
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 
-# Reth (v1.10.1 - same as alethia-reth main)
-reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.10.1" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-stateless = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
-reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.1" }
+# Reth (v1.10.2 - same as alethia-reth main)
+reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.10.2" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-stateless = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
 
 # Alloy
 alloy-rlp = { version = "0.3.4", default-features = false }

@@ -48,6 +48,26 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_L2_CHAIN_ID", default_value = "167000")]
     pub l2_chain_id: u64,
 
+    /// RPC request timeout in milliseconds
+    #[arg(long, env = "RAIKO2_RPC_TIMEOUT_MS")]
+    pub rpc_timeout_ms: Option<u64>,
+
+    /// RPC concurrency limit
+    #[arg(long, env = "RAIKO2_RPC_CONCURRENCY_LIMIT")]
+    pub rpc_concurrency_limit: Option<usize>,
+
+    /// RPC retry max attempts (0 disables retry)
+    #[arg(long, env = "RAIKO2_RPC_RETRY_MAX_ATTEMPTS")]
+    pub rpc_retry_max_attempts: Option<u32>,
+
+    /// RPC retry initial backoff in milliseconds
+    #[arg(long, env = "RAIKO2_RPC_RETRY_INITIAL_BACKOFF_MS")]
+    pub rpc_retry_initial_backoff_ms: Option<u64>,
+
+    /// RPC retry compute units per second budget
+    #[arg(long, env = "RAIKO2_RPC_RETRY_CU_PER_SECOND")]
+    pub rpc_retry_cu_per_second: Option<u64>,
+
     /// Queue backend (memory, redis)
     #[arg(long, env = "RAIKO2_QUEUE_BACKEND")]
     pub queue_backend: Option<String>,

@@ -21,7 +21,9 @@ pub(crate) fn build_context(config: &Config, proof_type: &str) -> ProofContext {
 }
 
 pub(crate) fn build_provider(config: &Config) -> Result<NetworkProvider> {
-    NetworkProvider::new(&config.rpc.l2_rpc).map_err(|e| anyhow::anyhow!(e))
+    let rpc_config = config.rpc.provider_client_config();
+    NetworkProvider::new_with_config(&config.rpc.l2_rpc, &rpc_config)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[allow(clippy::missing_const_for_fn)]

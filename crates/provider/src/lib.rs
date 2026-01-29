@@ -4,6 +4,7 @@
 
 pub mod network;
 pub mod on_the_spot_witness;
+pub mod rpc;
 
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
@@ -13,6 +14,7 @@ use reth_stateless::ExecutionWitness;
 
 pub use network::NetworkProvider;
 pub use network::WitnessMode;
+pub use rpc::{RpcClientConfig, RpcRetryConfig};
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
 ///

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::Provider;
+use crate::rpc::{RpcClientConfig, build_rpc_client};
 
 mod accounts;
 mod blocks;
@@ -41,10 +42,14 @@ impl NetworkProvider {
     ///
     /// Returns an error if the RPC URL is invalid.
     pub fn new(rpc_url: &str) -> RaikoResult<Self> {
-        let url = reqwest::Url::parse(rpc_url)
-            .map_err(|e| RaikoError::RPC(format!("Invalid RPC URL: {e}")))?;
+        Self::new_with_config(rpc_url, &RpcClientConfig::default())
+    }
 
-        let client = RpcClient::builder().http(url);
+    /// # Errors
+    ///
+    /// Returns an error if the RPC URL is invalid or the client cannot be constructed.
+    pub fn new_with_config(rpc_url: &str, config: &RpcClientConfig) -> RaikoResult<Self> {
+        let client = build_rpc_client(rpc_url, config)?;
         let provider = ProviderBuilder::new()
             .connect_client(client.clone())
             .erased();

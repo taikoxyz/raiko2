@@ -31,6 +31,24 @@ GET /health
 }
 ```
 
+### Readiness Check
+
+```http
+GET /ready
+```
+
+#### Response
+
+```json
+{
+  "status": "ok",
+  "reth": { "ok": true },
+  "queue": { "ok": true }
+}
+```
+
+If dependencies are unavailable, returns HTTP 503 with error details per subsystem.
+
 ### Server Info
 
 ```http
@@ -156,6 +174,11 @@ Note: the status reflects the task state after the cancel attempt.
 | `RAIKO2_PROVER`                       | `risc0`   | Default prover type                          |
 | `RAIKO2_L1_CHAIN_ID`                  | `1`       | L1 chain ID                                  |
 | `RAIKO2_L2_CHAIN_ID`                  | `167000`  | L2 chain ID (Taiko Mainnet)                  |
+| `RAIKO2_RPC_TIMEOUT_MS`               | `10000`   | RPC request timeout (ms)                     |
+| `RAIKO2_RPC_CONCURRENCY_LIMIT`        | `32`      | RPC concurrency limit                        |
+| `RAIKO2_RPC_RETRY_MAX_ATTEMPTS`       | `3`       | RPC retry max attempts (0 disables retry)    |
+| `RAIKO2_RPC_RETRY_INITIAL_BACKOFF_MS` | `500`     | RPC retry initial backoff (ms)               |
+| `RAIKO2_RPC_RETRY_CU_PER_SECOND`      | `1000`    | RPC retry CU budget per second               |
 | `RAIKO2_CONFIG`                       | -         | Path to config file                          |
 | `RAIKO2_QUEUE_BACKEND`                | -         | Queue backend (memory, redis)                |
 | `RAIKO2_REDIS_URL`                    | -         | Redis URL (required for redis)               |
@@ -181,6 +204,15 @@ l1_rpc = "https://ethereum-rpc.example.com"
 l2_rpc = "https://taiko-rpc.example.com"
 l1_chain_id = 1
 l2_chain_id = 167000
+
+[rpc.client]
+timeout_ms = 10000
+concurrency_limit = 32
+
+[rpc.client.retry]
+max_attempts = 3
+initial_backoff_ms = 500
+compute_units_per_second = 1000
 
 [prover]
 prover_type = "risc0"

@@ -153,29 +153,75 @@ crate carries its own `[patch.crates-io]` in `Cargo.toml` to keep RISC0 and SP1 
 ELF outputs into `crates/guests/elf` for use by the host. `just` is the preferred
 wrapper.
 
-Prerequisites: `docker`, `just`, `cargo risczero` (via `rzup install`), and `cargo prove` (via `sp1up`).
+Prerequisites: `docker` and `just`.
+
+By default, `xtask` uses prebuilt toolchain images (no local `rzup` / `sp1up` installs required):
+
+- RISC0: `RISC0_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest`
+- SP1: `SP1_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/sp1-toolchain:latest`
+
+Docker-based guest builds reuse a persistent Cargo download cache by default:
+
+- Disable: `DOCKER_CARGO_CACHE=none`
+- Override the volume name: `DOCKER_CARGO_CACHE_VOLUME=...` (e.g. `raiko2-cargo-sp1`)
+
+To use local toolchains instead, set `RISC0_TOOLCHAIN_IMAGE=none` and/or `SP1_TOOLCHAIN_IMAGE=none`.
 
 ```bash
 just build-guest all
 # or individually:
 just build-guest risc0
 just build-guest sp1
-# Override images/tags/platform if needed:
+# Override tags/platform if needed (only applies to docker-based guest builds):
 RISC0_DOCKER_TAG=r0.1.88.0 SP1_DOCKER_TAG=v5.2.4 DOCKER_DEFAULT_PLATFORM=linux/amd64 \\
+  RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \\
   just build-guest all
 ```
 
-Optional (no local `rzup` install): use the prebuilt RISC0 toolchain image.
+To build the SP1 toolchain image locally:
 
 ```bash
-RISC0_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest \\
-  just build-guest all
+docker build -f docker/sp1-toolchain/Dockerfile -t raiko2-sp1-toolchain:local docker/sp1-toolchain
+SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local just build-guest sp1
 ```
 
 If you don't use `just`:
 
 ```bash
-cargo run -p xtask -- build-guest all
+cargo run -r -p xtask -- build-guest all
+```
+
+## Guest Benchmarking
+
+The `bench-guest` task reproduces the PR #9 workflow for measuring guest execution costs:
+
+1. (Optional) Run `preflight` to dump a `GuestInput` JSON.
+2. Build SP1 guest ELFs with the `bench` feature enabled (docker).
+3. Run `guest-launcher` and collect a JSON report (cycles + wall time).
+
+Examples:
+
+```bash
+# Build ELFs (docker) + enable cycle tracking, then run
+cargo run -r -p xtask -- bench-guest sp1 --input ./test.json --repeat 3
+
+# Reuse prebuilt ELFs (skip docker build)
+cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test.json --repeat 3
+
+# Generate input via preflight and write an aggregated report
+cargo run -r -p xtask -- bench-guest sp1 \
+  --rpc-url http://35.226.222.182:8545 \
+  --l2-chain-id 167001 \
+  --proposal-id 3 \
+  --repeat 3 \
+  --json-out target/bench/guest-report.json
+```
+
+If `guest-launcher` fails with a `GuestInput` deserialization panic, your checked-in ELFs may be out of
+date. Rebuild them with:
+
+```bash
+cargo run -r -p xtask -- build-guest sp1 --bench
 ```
 
 ## Running

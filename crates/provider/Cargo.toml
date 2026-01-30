@@ -31,6 +31,7 @@ serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tower.workspace = true
 
 # Alethia reth for Taiko chains
 alethia-reth-block.workspace = true

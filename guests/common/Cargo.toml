@@ -8,8 +8,8 @@ raiko2-primitives = { path = "../../crates/primitives" }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 raiko2-stateless = { path = "../../crates/stateless" }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/block_serde", default-features = false }
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/block_serde", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false, features = [
     "serde",
 ] }
 alloy-primitives = { version = "1.5.0", default-features = false }

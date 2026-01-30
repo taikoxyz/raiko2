@@ -10,7 +10,7 @@ workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true
-raiko2-protocol-shasta.workspace = true
+raiko2-protocol-shasta = { workspace = true }
 raiko2-guests.workspace = true
 raiko2-stateless.workspace = true
 raiko2-provider.workspace = true

@@ -3,6 +3,7 @@
 mod app;
 mod handlers;
 mod net;
+mod ready;
 mod routes;
 mod run;
 mod state;

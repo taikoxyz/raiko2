@@ -8,9 +8,12 @@ use tracing::info;
 use super::AppState;
 use super::app;
 use super::net;
+use super::ready;
 
 /// Run the HTTP server.
 pub async fn run_server(config: Config) -> Result<()> {
+    ready::ensure_startup_ready(&config).await?;
+
     // Create application state
     let state = AppState::new(config.clone()).await?;
 

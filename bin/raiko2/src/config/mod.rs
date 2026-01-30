@@ -47,6 +47,21 @@ impl Config {
         }
         config.rpc.l1_chain_id = cli.l1_chain_id;
         config.rpc.l2_chain_id = cli.l2_chain_id;
+        if let Some(timeout_ms) = cli.rpc_timeout_ms {
+            config.rpc.client.timeout_ms = timeout_ms;
+        }
+        if let Some(concurrency_limit) = cli.rpc_concurrency_limit {
+            config.rpc.client.concurrency_limit = concurrency_limit;
+        }
+        if let Some(max_attempts) = cli.rpc_retry_max_attempts {
+            config.rpc.client.retry.max_attempts = max_attempts;
+        }
+        if let Some(initial_backoff_ms) = cli.rpc_retry_initial_backoff_ms {
+            config.rpc.client.retry.initial_backoff_ms = initial_backoff_ms;
+        }
+        if let Some(cu_per_second) = cli.rpc_retry_cu_per_second {
+            config.rpc.client.retry.compute_units_per_second = cu_per_second;
+        }
 
         config.prover.prover_type = cli.prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 

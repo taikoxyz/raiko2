@@ -63,29 +63,29 @@ raiko2-guests = { path = "./crates/guests" }
 risc0-zkvm = "3.0.4"
 sp1-sdk = "5.2.3"
 
-# Alethia reth (feat/block_serde branch)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/block_serde", default-features = false, features = [
+# Alethia reth (main branch)
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false, features = [
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/block_serde", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/block_serde", default-features = false }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 
-# Reth (v1.10.0 - same as alethia-reth uses)
-reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.10.0" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-stateless = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
-reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0" }
+# Reth (v1.10.2 - same as alethia-reth main)
+reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.10.2" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-stateless = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
 
 # Alloy
 alloy-rlp = { version = "0.3.4", default-features = false }
@@ -147,7 +147,7 @@ alloy = { version = "1.4.3", features = ["full", "serde"] }
 alloy-chains = { version = "0.2.23", features = ["serde"] }
 blst = "0.3"
 itertools = "0.14"
-revm = { version = "33.1.0", default-features = false }
+revm = { version = "34.0.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.0" }
 
 # kzg

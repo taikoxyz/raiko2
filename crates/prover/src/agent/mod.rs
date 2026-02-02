@@ -56,11 +56,11 @@ impl AgentClient {
         })
     }
 
-    pub async fn poll_status(&self, _request_id: &str) -> RaikoResult<StatusResponse> {
+    pub async fn poll_status(&self, request_id: &str) -> RaikoResult<StatusResponse> {
         let url = format!(
             "{}/status/{}",
             self.config.base_url.trim_end_matches('/'),
-            _request_id
+            request_id
         );
         let mut builder = self.http.get(url);
         if let Some(key) = &self.config.api_key {

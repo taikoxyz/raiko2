@@ -142,7 +142,7 @@ impl RpcConfig {
     }
 
     #[must_use]
-    pub fn provider_client_config(&self) -> ProviderRpcClientConfig {
+    pub const fn provider_client_config(&self) -> ProviderRpcClientConfig {
         ProviderRpcClientConfig {
             timeout_ms: self.client.timeout_ms,
             concurrency_limit: self.client.concurrency_limit,

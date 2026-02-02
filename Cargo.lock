@@ -9007,6 +9007,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 name = "raiko2"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "axum 0.8.8",
  "clap",
@@ -9172,6 +9173,7 @@ dependencies = [
  "alethia-reth-chainspec 0.6.0 (git+https://github.com/taikoxyz/alethia-reth?branch=main)",
  "alloy",
  "alloy-chains",
+ "alloy-json-rpc",
  "alloy-primitives",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
@@ -9193,6 +9195,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.2",
  "tracing",
 ]
 

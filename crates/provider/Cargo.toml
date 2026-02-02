@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 alloy.workspace = true
 alloy-chains.workspace = true
+alloy-json-rpc.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true

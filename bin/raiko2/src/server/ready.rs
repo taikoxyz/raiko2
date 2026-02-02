@@ -3,7 +3,6 @@ use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use anyhow::{Context, Result, bail};
 use raiko2_provider::rpc::build_rpc_client;
 use serde::Serialize;
-use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 pub struct ReadyCheck {
@@ -13,14 +12,14 @@ pub struct ReadyCheck {
 }
 
 impl ReadyCheck {
-    fn ok() -> Self {
+    const fn ok() -> Self {
         Self {
             ok: true,
             error: None,
         }
     }
 
-    fn err(err: anyhow::Error) -> Self {
+    fn err(err: &anyhow::Error) -> Self {
         Self {
             ok: false,
             error: Some(err.to_string()),
@@ -38,12 +37,25 @@ pub struct ReadyResponse {
 pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
     let reth = match check_reth(config).await {
         Ok(()) => ReadyCheck::ok(),
-        Err(err) => ReadyCheck::err(err),
+        Err(err) => ReadyCheck::err(&err),
     };
 
-    let queue = match check_queue(config).await {
-        Ok(()) => ReadyCheck::ok(),
-        Err(err) => ReadyCheck::err(err),
+    let queue = {
+        #[cfg(feature = "redis-queue")]
+        {
+            match check_queue(config).await {
+                Ok(()) => ReadyCheck::ok(),
+                Err(err) => ReadyCheck::err(&err),
+            }
+        }
+
+        #[cfg(not(feature = "redis-queue"))]
+        {
+            match check_queue(config) {
+                Ok(()) => ReadyCheck::ok(),
+                Err(err) => ReadyCheck::err(&err),
+            }
+        }
     };
 
     let status = if reth.ok && queue.ok { "ok" } else { "error" };
@@ -57,9 +69,13 @@ pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
 
 pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
     check_reth(config).await.context("reth readiness failed")?;
+    #[cfg(feature = "redis-queue")]
     check_queue(config)
         .await
         .context("queue readiness failed")?;
+
+    #[cfg(not(feature = "redis-queue"))]
+    check_queue(config).context("queue readiness failed")?;
     Ok(())
 }
 
@@ -81,6 +97,7 @@ async fn check_reth(config: &Config) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "redis-queue")]
 async fn check_queue(config: &Config) -> Result<()> {
     match config.queue.backend {
         QueueBackend::Memory => Ok(()),
@@ -88,18 +105,29 @@ async fn check_queue(config: &Config) -> Result<()> {
     }
 }
 
+#[cfg(not(feature = "redis-queue"))]
+fn check_queue(config: &Config) -> Result<()> {
+    match config.queue.backend {
+        QueueBackend::Memory => Ok(()),
+        QueueBackend::Redis => check_redis_queue(&config.queue),
+    }
+}
+
 #[cfg(feature = "redis-queue")]
 async fn check_redis_queue(config: &QueueConfig) -> Result<()> {
     let url = config.redis_url.clone().unwrap_or_default();
     let namespace = config.namespace.clone();
-    let _store =
-        raiko2_queue::RedisStore::<(), (), ()>::connect(&url, &namespace, Duration::from_secs(60))
-            .await
-            .context("failed to connect to redis queue")?;
+    let _store = raiko2_queue::RedisStore::<(), (), ()>::connect(
+        &url,
+        &namespace,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .context("failed to connect to redis queue")?;
     Ok(())
 }
 
 #[cfg(not(feature = "redis-queue"))]
-async fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
+fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
     bail!("redis queue requires building raiko2 with `--features redis-queue`");
 }

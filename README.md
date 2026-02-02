@@ -252,7 +252,7 @@ timeout_ms = 300000
 prover_type = "boundless"
 ```
 
-ELF uploads are handled by the agent; raiko2 will upload on change or retry after an \"image not uploaded\" error.
+ELF uploads are handled by the agent; raiko2 will upload on change or retry after an "image not uploaded" error.
 
 ## Documentation
 

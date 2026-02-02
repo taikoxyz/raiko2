@@ -32,6 +32,7 @@ pub struct AgentClient {
 }
 
 impl AgentClient {
+    #[must_use]
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -39,6 +40,10 @@ impl AgentClient {
         }
     }
 
+    /// Submit a proof request to the agent.
+    ///
+    /// # Errors
+    /// Returns an error if the request cannot be sent or the response cannot be parsed.
     pub async fn submit_proof(
         &self,
         request: &AsyncProofRequestData,
@@ -56,6 +61,10 @@ impl AgentClient {
         })
     }
 
+    /// Poll the agent for the status of a request.
+    ///
+    /// # Errors
+    /// Returns an error if the request cannot be sent or the response cannot be parsed.
     pub async fn poll_status(&self, request_id: &str) -> RaikoResult<StatusResponse> {
         let url = format!(
             "{}/status/{}",
@@ -81,6 +90,7 @@ pub struct AgentProver {
 }
 
 impl AgentProver {
+    #[must_use]
     pub fn new(config: AgentConfig) -> Self {
         Self {
             client: AgentClient::new(config),
@@ -121,7 +131,7 @@ where
             Vec::new(),
         );
         let proof_data = self.submit_and_wait(&request).await?;
-        decode_risc0_proof(proof_data)
+        decode_risc0_proof(&proof_data)
     }
 
     async fn aggregate(
@@ -148,7 +158,7 @@ where
             Vec::new(),
         );
         let proof_data = self.submit_and_wait(&request).await?;
-        decode_risc0_proof(proof_data)
+        decode_risc0_proof(&proof_data)
     }
 }
 
@@ -182,8 +192,8 @@ impl AgentProver {
     }
 }
 
-fn decode_risc0_proof(proof_data: Vec<u8>) -> RaikoResult<Proof> {
-    let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
+fn decode_risc0_proof(proof_data: &[u8]) -> RaikoResult<Proof> {
+    let decoded: Risc0Response = bincode::deserialize(proof_data).map_err(|e| {
         RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
     })?;
     Ok(Proof {

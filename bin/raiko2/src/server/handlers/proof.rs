@@ -32,10 +32,9 @@ pub struct ProofResponse {
 fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> PipelineKey {
     let prover_type = req.prover_type.unwrap_or(state.config.prover.prover_type);
     match prover_type {
-        ProverType::Risc0 => PipelineKey::ShastaRisc0,
+        ProverType::Risc0 | ProverType::AgentRisc0 => PipelineKey::ShastaRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
-        ProverType::AgentRisc0 => PipelineKey::ShastaRisc0,
     }
 }
 

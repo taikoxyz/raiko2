@@ -13,6 +13,7 @@ pub struct AsyncProofRequestData {
 }
 
 impl AsyncProofRequestData {
+    #[must_use]
     pub fn new(prover_type: &str, proof_type: &str, input: Vec<u8>, output: Vec<u8>) -> Self {
         Self {
             prover_type: prover_type.to_string(),

@@ -20,7 +20,7 @@ pub fn build_risc0_aggregation_input(agg: &AggregationInput) -> RaikoResult<Vec<
         .collect::<RaikoResult<Vec<_>>>()?;
 
     let input = BoundlessAggregationGuestInput {
-        image_id: Digest::ZERO,
+        image_id: agg.expected_image_id.unwrap_or(Digest::ZERO),
         receipts,
     };
 

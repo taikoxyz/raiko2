@@ -33,6 +33,17 @@ impl ProverBackend for TestBackend {
     }
 }
 
+fn prover_for(server: &MockServer) -> AgentProver {
+    let config = AgentConfig {
+        base_url: server.url(""),
+        prover_type: "boundless".to_string(),
+        api_key: None,
+        poll_interval_ms: 1,
+        timeout_ms: 5,
+    };
+    AgentProver::new(config)
+}
+
 #[tokio::test]
 async fn agent_submit_proposal_returns_proof() {
     let server = MockServer::start();
@@ -60,14 +71,7 @@ async fn agent_submit_proposal_returns_proof() {
         }));
     });
 
-    let config = AgentConfig {
-        base_url: server.url(""),
-        prover_type: "boundless".to_string(),
-        api_key: None,
-        poll_interval_ms: 1,
-        timeout_ms: 1000,
-    };
-    let prover = AgentProver::new(config);
+    let prover = prover_for(&server);
 
     let proof: Proof = prover
         .prove_encoded(vec![1, 2, 3].into(), &serde_json::Value::Null, &TestBackend)
@@ -76,4 +80,146 @@ async fn agent_submit_proposal_returns_proof() {
 
     assert_eq!(proof.proof.as_deref(), Some("0xaabb"));
     assert_eq!(proof.quote.as_deref(), Some("{\"receipt\":true}"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_returns_failed_status_error() {
+    let server = MockServer::start();
+
+    let _submit = server.mock(|when, then| {
+        when.method(POST).path("/proof");
+        then.status(200).json_body(json!({
+            "request_id": "req_fail",
+            "prover_type": "boundless",
+            "status": "preparing",
+            "message": "ok"
+        }));
+    });
+
+    let _status = server.mock(|when, then| {
+        when.method(GET).path("/status/req_fail");
+        then.status(200).json_body(json!({
+            "request_id": "req_fail",
+            "prover_type": "boundless",
+            "status": "failed",
+            "status_message": "boom",
+            "error": "boom"
+        }));
+    });
+
+    let prover = prover_for(&server);
+    let err = prover
+        .prove_encoded(vec![1].into(), &serde_json::Value::Null, &TestBackend)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("boom"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_times_out() {
+    let server = MockServer::start();
+
+    let _submit = server.mock(|when, then| {
+        when.method(POST).path("/proof");
+        then.status(200).json_body(json!({
+            "request_id": "req_timeout",
+            "prover_type": "boundless",
+            "status": "preparing",
+            "message": "ok"
+        }));
+    });
+
+    let _status = server.mock(|when, then| {
+        when.method(GET).path("/status/req_timeout");
+        then.status(200).json_body(json!({
+            "request_id": "req_timeout",
+            "prover_type": "boundless",
+            "status": "running",
+            "status_message": "wait"
+        }));
+    });
+
+    let prover = prover_for(&server);
+    let err = prover
+        .prove_encoded(vec![1].into(), &serde_json::Value::Null, &TestBackend)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_missing_proof_data() {
+    let server = MockServer::start();
+
+    let _submit = server.mock(|when, then| {
+        when.method(POST).path("/proof");
+        then.status(200).json_body(json!({
+            "request_id": "req_missing",
+            "prover_type": "boundless",
+            "status": "preparing",
+            "message": "ok"
+        }));
+    });
+
+    let _status = server.mock(|when, then| {
+        when.method(GET).path("/status/req_missing");
+        then.status(200).json_body(json!({
+            "request_id": "req_missing",
+            "prover_type": "boundless",
+            "status": "fulfilled",
+            "status_message": "done",
+            "proof_data": null
+        }));
+    });
+
+    let prover = prover_for(&server);
+    let err = prover
+        .prove_encoded(vec![1].into(), &serde_json::Value::Null, &TestBackend)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Missing proof_data"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_submission_error() {
+    let server = MockServer::start();
+
+    let _submit = server.mock(|when, then| {
+        when.method(POST).path("/proof");
+        then.status(500).body("oops");
+    });
+
+    let prover = prover_for(&server);
+    let err = prover
+        .prove_encoded(vec![1].into(), &serde_json::Value::Null, &TestBackend)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Failed to parse proof response"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_polling_error() {
+    let server = MockServer::start();
+
+    let _submit = server.mock(|when, then| {
+        when.method(POST).path("/proof");
+        then.status(200).json_body(json!({
+            "request_id": "req_poll",
+            "prover_type": "boundless",
+            "status": "preparing",
+            "message": "ok"
+        }));
+    });
+
+    let _status = server.mock(|when, then| {
+        when.method(GET).path("/status/req_poll");
+        then.status(500).body("oops");
+    });
+
+    let prover = prover_for(&server);
+    let err = prover
+        .prove_encoded(vec![1].into(), &serde_json::Value::Null, &TestBackend)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Failed to parse status response"));
 }

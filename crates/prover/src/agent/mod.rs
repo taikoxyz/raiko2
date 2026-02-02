@@ -120,42 +120,8 @@ where
             input.to_vec(),
             Vec::new(),
         );
-        let response = self.client.submit_proof(&request).await?;
-        let start = Instant::now();
-        let poll_interval = Duration::from_millis(self.client.config.poll_interval_ms);
-        let timeout = Duration::from_millis(self.client.config.timeout_ms);
-
-        loop {
-            let status = self.client.poll_status(&response.request_id).await?;
-            let status_lower = status.status.to_lowercase();
-            if status_lower == "fulfilled" {
-                let proof_data = status.proof_data.ok_or_else(|| {
-                    RaikoError::InvalidRequestConfig("Missing proof_data".to_string())
-                })?;
-                let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
-                    RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
-                })?;
-                return Ok(Proof {
-                    proof: Some(encode_prefixed(decoded.journal)),
-                    quote: decoded.receipt,
-                    input: None,
-                    uuid: None,
-                    kzg_proof: None,
-                    extra_data: None,
-                });
-            }
-            if status_lower == "failed" {
-                return Err(RaikoError::InvalidRequestConfig(
-                    status.error.unwrap_or_else(|| "Agent failed".to_string()),
-                ));
-            }
-            if start.elapsed() > timeout {
-                return Err(RaikoError::InvalidRequestConfig(
-                    "Agent polling timed out".to_string(),
-                ));
-            }
-            tokio::time::sleep(poll_interval).await;
-        }
+        let proof_data = self.submit_and_wait(&request).await?;
+        decode_risc0_proof(proof_data)
     }
 
     async fn aggregate(
@@ -181,7 +147,14 @@ where
             bytes,
             Vec::new(),
         );
-        let response = self.client.submit_proof(&request).await?;
+        let proof_data = self.submit_and_wait(&request).await?;
+        decode_risc0_proof(proof_data)
+    }
+}
+
+impl AgentProver {
+    async fn submit_and_wait(&self, request: &AsyncProofRequestData) -> RaikoResult<Vec<u8>> {
+        let response = self.client.submit_proof(request).await?;
         let start = Instant::now();
         let poll_interval = Duration::from_millis(self.client.config.poll_interval_ms);
         let timeout = Duration::from_millis(self.client.config.timeout_ms);
@@ -190,19 +163,8 @@ where
             let status = self.client.poll_status(&response.request_id).await?;
             let status_lower = status.status.to_lowercase();
             if status_lower == "fulfilled" {
-                let proof_data = status.proof_data.ok_or_else(|| {
+                return status.proof_data.ok_or_else(|| {
                     RaikoError::InvalidRequestConfig("Missing proof_data".to_string())
-                })?;
-                let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
-                    RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
-                })?;
-                return Ok(Proof {
-                    proof: Some(encode_prefixed(decoded.journal)),
-                    quote: decoded.receipt,
-                    input: None,
-                    uuid: None,
-                    kzg_proof: None,
-                    extra_data: None,
                 });
             }
             if status_lower == "failed" {
@@ -220,6 +182,20 @@ where
     }
 }
 
+fn decode_risc0_proof(proof_data: Vec<u8>) -> RaikoResult<Proof> {
+    let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
+        RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
+    })?;
+    Ok(Proof {
+        proof: Some(encode_prefixed(decoded.journal)),
+        quote: decoded.receipt,
+        input: None,
+        uuid: None,
+        kzg_proof: None,
+        extra_data: None,
+    })
+}
+
 fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
     let mut artifacts = Vec::new();
     if let Some(receipt) = proof.quote {
@@ -232,7 +208,7 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
     ProofEnvelope {
         backend: "risc0".to_string(),
         public_inputs: PublicInputs {
-            input_hash: proof.input.map(|value| format!("0x{value:x}")),
+            input_hash: proof.input.map(|value| encode_prefixed(value.as_slice())),
             instance_hash: None,
         },
         payload: ProofPayload {

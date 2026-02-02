@@ -4,11 +4,19 @@ pub mod aggregation;
 pub mod types;
 
 use crate::agent::types::{AsyncProofRequestData, AsyncProofResponse, StatusResponse};
-use raiko2_primitives::{RaikoError, RaikoResult};
+use alloy_primitives::hex::encode_prefixed;
+use alloy_primitives::Bytes;
+use raiko2_pipeline::ProverBackend;
+use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::GuestInput;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
     pub base_url: String,
+    pub prover_type: String,
     pub api_key: Option<String>,
     pub poll_interval_ms: u64,
     pub timeout_ms: u64,
@@ -17,25 +25,144 @@ pub struct AgentConfig {
 #[derive(Clone)]
 pub struct AgentClient {
     config: AgentConfig,
+    http: Client,
 }
 
 impl AgentClient {
     pub fn new(config: AgentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            http: Client::new(),
+        }
     }
 
     pub async fn submit_proof(
         &self,
-        _request: &AsyncProofRequestData,
+        request: &AsyncProofRequestData,
     ) -> RaikoResult<AsyncProofResponse> {
-        Err(RaikoError::InvalidRequestConfig(
-            "Agent client not implemented".to_string(),
-        ))
+        let url = format!("{}/proof", self.config.base_url.trim_end_matches('/'));
+        let mut builder = self.http.post(url).json(request);
+        if let Some(key) = &self.config.api_key {
+            builder = builder.header("x-api-key", key);
+        }
+        let response = builder.send().await.map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Failed to submit proof: {e}"))
+        })?;
+        response.json::<AsyncProofResponse>().await.map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Failed to parse proof response: {e}"))
+        })
     }
 
     pub async fn poll_status(&self, _request_id: &str) -> RaikoResult<StatusResponse> {
+        let url = format!(
+            "{}/status/{}",
+            self.config.base_url.trim_end_matches('/'),
+            _request_id
+        );
+        let mut builder = self.http.get(url);
+        if let Some(key) = &self.config.api_key {
+            builder = builder.header("x-api-key", key);
+        }
+        let response = builder.send().await.map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Failed to poll status: {e}"))
+        })?;
+        response.json::<StatusResponse>().await.map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Failed to parse status response: {e}"))
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct AgentProver {
+    client: AgentClient,
+}
+
+impl AgentProver {
+    pub fn new(config: AgentConfig) -> Self {
+        Self {
+            client: AgentClient::new(config),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Risc0Response {
+    seal: Vec<u8>,
+    journal: Vec<u8>,
+    receipt: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl<B> crate::Prover<B> for AgentProver
+where
+    B: ProverBackend,
+{
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::InvalidRequestConfig(format!("Encode failed: {e}")))?;
+        Ok(Bytes::from(bytes))
+    }
+
+    async fn prove_encoded(
+        &self,
+        input: Bytes,
+        _config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
+        let request = AsyncProofRequestData::new(
+            &self.client.config.prover_type,
+            "batch",
+            input.to_vec(),
+            Vec::new(),
+        );
+        let response = self.client.submit_proof(&request).await?;
+        let start = Instant::now();
+        let poll_interval = Duration::from_millis(self.client.config.poll_interval_ms);
+        let timeout = Duration::from_millis(self.client.config.timeout_ms);
+
+        loop {
+            let status = self.client.poll_status(&response.request_id).await?;
+            let status_lower = status.status.to_lowercase();
+            if status_lower == "fulfilled" {
+                let proof_data = status.proof_data.ok_or_else(|| {
+                    RaikoError::InvalidRequestConfig("Missing proof_data".to_string())
+                })?;
+                let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
+                    RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
+                })?;
+                return Ok(Proof {
+                    proof: Some(encode_prefixed(decoded.journal)),
+                    quote: decoded.receipt,
+                    input: None,
+                    uuid: None,
+                    kzg_proof: None,
+                    extra_data: None,
+                });
+            }
+            if status_lower == "failed" {
+                return Err(RaikoError::InvalidRequestConfig(
+                    status.error.unwrap_or_else(|| "Agent failed".to_string()),
+                ));
+            }
+            if start.elapsed() > timeout {
+                return Err(RaikoError::InvalidRequestConfig(
+                    "Agent polling timed out".to_string(),
+                ));
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    async fn aggregate(
+        &self,
+        _input: raiko2_primitives::AggregationGuestInput,
+        _config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
         Err(RaikoError::InvalidRequestConfig(
-            "Agent client not implemented".to_string(),
+            "Aggregation not implemented".to_string(),
         ))
     }
 }

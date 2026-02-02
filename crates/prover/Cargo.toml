@@ -17,6 +17,7 @@ serde_json.workspace = true
 tracing.workspace = true
 bincode.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 
 # Alloy types
 alloy-primitives.workspace = true
@@ -29,3 +30,6 @@ sp1-sdk.workspace = true
 
 [features]
 default = []
+
+[dev-dependencies]
+httpmock = "0.7"

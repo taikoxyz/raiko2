@@ -7,6 +7,9 @@ use crate::agent::types::{AsyncProofRequestData, AsyncProofResponse, StatusRespo
 use alloy_primitives::hex::encode_prefixed;
 use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
+use raiko2_primitives::proof::{
+    AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
+};
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
 use reqwest::Client;
@@ -157,12 +160,87 @@ where
 
     async fn aggregate(
         &self,
-        _input: raiko2_primitives::AggregationGuestInput,
+        input: raiko2_primitives::AggregationGuestInput,
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        Err(RaikoError::InvalidRequestConfig(
-            "Aggregation not implemented".to_string(),
-        ))
+        let agg = AggregationInput {
+            proofs: input
+                .proofs
+                .into_iter()
+                .map(proof_to_envelope)
+                .collect(),
+            expected_image_id: None,
+            metadata: None,
+        };
+
+        let bytes = aggregation::build_risc0_aggregation_input(&agg)?;
+        let request = AsyncProofRequestData::new(
+            &self.client.config.prover_type,
+            "aggregate",
+            bytes,
+            Vec::new(),
+        );
+        let response = self.client.submit_proof(&request).await?;
+        let start = Instant::now();
+        let poll_interval = Duration::from_millis(self.client.config.poll_interval_ms);
+        let timeout = Duration::from_millis(self.client.config.timeout_ms);
+
+        loop {
+            let status = self.client.poll_status(&response.request_id).await?;
+            let status_lower = status.status.to_lowercase();
+            if status_lower == "fulfilled" {
+                let proof_data = status.proof_data.ok_or_else(|| {
+                    RaikoError::InvalidRequestConfig("Missing proof_data".to_string())
+                })?;
+                let decoded: Risc0Response = bincode::deserialize(&proof_data).map_err(|e| {
+                    RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
+                })?;
+                return Ok(Proof {
+                    proof: Some(encode_prefixed(decoded.journal)),
+                    quote: decoded.receipt,
+                    input: None,
+                    uuid: None,
+                    kzg_proof: None,
+                    extra_data: None,
+                });
+            }
+            if status_lower == "failed" {
+                return Err(RaikoError::InvalidRequestConfig(
+                    status.error.unwrap_or_else(|| "Agent failed".to_string()),
+                ));
+            }
+            if start.elapsed() > timeout {
+                return Err(RaikoError::InvalidRequestConfig(
+                    "Agent polling timed out".to_string(),
+                ));
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
+
+fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
+    let mut artifacts = Vec::new();
+    if let Some(receipt) = proof.quote {
+        artifacts.push(VerifierArtifact {
+            kind: "receipt_json".to_string(),
+            value: serde_json::Value::String(receipt),
+        });
+    }
+
+    ProofEnvelope {
+        backend: "risc0".to_string(),
+        public_inputs: PublicInputs {
+            input_hash: proof.input.map(|value| format!("0x{value:x}")),
+            instance_hash: None,
+        },
+        payload: ProofPayload {
+            payload_kind: "risc0_journal".to_string(),
+            bytes: Vec::new(),
+        },
+        verifier_artifacts: artifacts,
+        carry_data: None,
+        metadata: None,
     }
 }

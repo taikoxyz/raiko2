@@ -7,7 +7,7 @@ Raiko V2 is the next-generation zkVM prover for Taiko, built on top of [alethia-
 - **Modular Architecture**: Clean separation between primitives, protocol, pipeline, provider, engine, and prover
 - **alethia-reth Integration**: Uses Taiko's new reth fork for improved performance
 - **Shasta Protocol**: Native support for Taiko Shasta (Based Contestable Rollup)
-- **zkVM Provers**: Support for RISC0, SP1, and agent-backed provers
+- **zkVM Provers**: Support for RISC0, SP1, and agent-backed provers (agent-risc0)
 - **Native Prover**: Local execution with public-input output (no zk proof)
 
 ## Project Structure
@@ -66,7 +66,7 @@ Key abstractions:
 - `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
 - `Pipeline`: hardfork-agnostic preflight + validation flow.
 - `Engine`: schedules pipeline stages and prover work.
-- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent).
+- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent-risc0).
 
 Architecture diagram:
 
@@ -238,11 +238,11 @@ RAIKO2_L2_RPC=http://localhost:9545 \
 
 ## Agent Prover
 
-To delegate proof generation to `raiko-agent`, set the prover type to `agent` and configure the agent endpoint:
+To delegate proof generation to `raiko-agent`, set the prover type to `agent-risc0` and configure the agent endpoint:
 
 ```toml
 [prover]
-prover_type = "agent"
+prover_type = "agent-risc0"
 
 [prover.agent]
 url = "http://localhost:9999"

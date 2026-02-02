@@ -35,7 +35,7 @@ fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> Pi
         ProverType::Risc0 => PipelineKey::ShastaRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
-        ProverType::Agent => PipelineKey::ShastaRisc0,
+        ProverType::AgentRisc0 => PipelineKey::ShastaRisc0,
     }
 }
 
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn proposal_proof_request_accepts_optional_prover_type() -> Result<(), serde_json::Error> {
-        let raw = r#"{"proposal_id": 1, "prover_type": "risc0"}"#;
+        let raw = r#"{"proposal_id": 1, "prover_type": "agent-risc0"}"#;
         let req = serde_json::from_str::<ProposalProofRequest>(raw)?;
         assert_eq!(req.proposal_id, 1);
         assert!(req.prover_type.is_some());

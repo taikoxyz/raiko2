@@ -61,7 +61,7 @@ GET /v1/info
 {
   "version": "0.1.0",
   "prover": "Risc0",
-  "supported_provers": ["risc0", "sp1", "native", "agent"]
+  "supported_provers": ["risc0", "sp1", "native", "agent-risc0"]
 }
 ```
 
@@ -78,7 +78,7 @@ Content-Type: application/json
 | -------------------- | -------- | -------- | -------------------------------------------------- |
 | `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
 | `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
-| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent" (defaults to config) |
+| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config) |
 | `prover`             | `string` | No       | Prover address (hex)                               |
 
 #### Example Request
@@ -86,7 +86,7 @@ Content-Type: application/json
 ```json
 {
   "proposal_id": 12345,
-  "prover_type": "risc0"
+  "prover_type": "agent-risc0"
 }
 ```
 

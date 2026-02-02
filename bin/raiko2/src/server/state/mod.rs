@@ -55,7 +55,7 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
-        if matches!(config.prover.prover_type, crate::config::ProverType::Agent) {
+        if matches!(config.prover.prover_type, crate::config::ProverType::AgentRisc0) {
             let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
             agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
             factory.insert(PipelineKey::ShastaRisc0, Arc::new(agent_engine));

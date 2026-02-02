@@ -8,7 +8,7 @@ pub enum ProverType {
     Risc0,
     Sp1,
     Native,
-    Agent,
+    AgentRisc0,
 }
 
 impl std::str::FromStr for ProverType {
@@ -19,7 +19,7 @@ impl std::str::FromStr for ProverType {
             "risc0" => Ok(ProverType::Risc0),
             "sp1" => Ok(ProverType::Sp1),
             "native" => Ok(ProverType::Native),
-            "agent" => Ok(ProverType::Agent),
+            "agent-risc0" => Ok(ProverType::AgentRisc0),
             _ => Err(format!("Unknown prover type: {s}")),
         }
     }

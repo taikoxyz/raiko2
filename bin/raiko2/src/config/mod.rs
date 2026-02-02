@@ -182,6 +182,7 @@ mod tests {
             l2_rpc: "wss://taiko-rpc.example.com".to_string(),
             l1_chain_id: 1,
             l2_chain_id: 167000,
+            ..Default::default()
         };
         assert!(config.validate().is_ok());
     }
@@ -193,6 +194,7 @@ mod tests {
             l2_rpc: "http://localhost:9545".to_string(),
             l1_chain_id: 1,
             l2_chain_id: 167000,
+            ..Default::default()
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -206,6 +208,7 @@ mod tests {
             l2_rpc: "http://localhost:9545".to_string(),
             l1_chain_id: 0,
             l2_chain_id: 167000,
+            ..Default::default()
         };
         assert!(config.validate().is_err());
     }

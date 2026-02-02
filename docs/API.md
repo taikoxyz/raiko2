@@ -74,23 +74,17 @@ Content-Type: application/json
 
 #### Request Body
 
-| Field                | Type     | Required | Description                                        |
-| -------------------- | -------- | -------- | -------------------------------------------------- |
-| `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
-| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
-| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", or "native" (defaults to config) |
-| `blob_proof_type`    | `string` | No       | Blob proof type: "kzg" or "proof_of_equivalence"   |
-| `prover`             | `string` | No       | Prover address (hex)                               |
-| `graffiti`           | `string` | No       | Custom graffiti string                             |
+| Field         | Type     | Required | Description                                                  |
+| ------------- | -------- | -------- | ------------------------------------------------------------ |
+| `proposal_id` | `u64`    | Yes      | The proposal ID to prove                                     |
+| `prover_type` | `string` | No       | Prover type: "risc0", "sp1", or "native" (defaults to config) |
 
 #### Example Request
 
 ```json
 {
   "proposal_id": 12345,
-  "l1_inclusion_block": 50000,
-  "prover_type": "risc0",
-  "blob_proof_type": "kzg"
+  "prover_type": "risc0"
 }
 ```
 
@@ -98,10 +92,12 @@ Content-Type: application/json
 
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "id": "<proof_id>",
   "status": "pending"
 }
 ```
+
+The `proof_id` is an opaque URL-safe base64 string. Treat it as an opaque identifier.
 
 #### Status Codes
 
@@ -121,7 +117,7 @@ GET /v1/proof/{proof_id}
 
 | Parameter  | Type     | Description                                  |
 | ---------- | -------- | -------------------------------------------- |
-| `proof_id` | `string` | The proof ID returned from the proposal request |
+| `proof_id` | `string` | The proof ID returned from the proposal request (opaque URL-safe base64) |
 
 #### Response
 
@@ -305,13 +301,13 @@ curl http://localhost:8080/v1/info
 # Request proof
 curl -X POST http://localhost:8080/v1/proof/proposal \
   -H "Content-Type: application/json" \
-  -d '{"proposal_id": 12345, "l1_inclusion_block": 50000}'
+  -d '{"proposal_id": 12345, "prover_type": "risc0"}'
 
 # Get proof status
-curl http://localhost:8080/v1/proof/550e8400-e29b-41d4-a716-446655440000
+curl http://localhost:8080/v1/proof/<proof_id>
 
 # Cancel proof
-curl -X POST http://localhost:8080/v1/proof/550e8400-e29b-41d4-a716-446655440000/cancel
+curl -X POST http://localhost:8080/v1/proof/<proof_id>/cancel
 ```
 
 ### Python
@@ -324,7 +320,6 @@ response = requests.post(
     "http://localhost:8080/v1/proof/proposal",
     json={
         "proposal_id": 12345,
-        "l1_inclusion_block": 50000,
         "prover_type": "risc0"
     }
 )

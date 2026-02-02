@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
 use raiko2_engine::EngineTaskKey;
@@ -15,18 +15,11 @@ use crate::config::ProverType;
 
 /// Proposal proof request.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields will be used when full proof generation is implemented
+#[serde(deny_unknown_fields)]
 pub struct ProposalProofRequest {
     pub proposal_id: u64,
-    pub l1_inclusion_block: u64,
     #[serde(default)]
-    pub prover_type: Option<String>,
-    #[serde(default)]
-    pub blob_proof_type: Option<String>,
-    #[serde(default)]
-    pub prover: Option<String>,
-    #[serde(default)]
-    pub graffiti: Option<String>,
+    pub prover_type: Option<ProverType>,
 }
 
 /// Proof response.
@@ -36,36 +29,30 @@ pub struct ProofResponse {
     pub status: ProofStatus,
 }
 
-fn pipeline_key_from_request(
-    state: &AppState,
-    req: &ProposalProofRequest,
-) -> Result<PipelineKey, ApiError> {
-    let prover_type = match req.prover_type.as_deref() {
-        Some(raw) => raw.parse::<ProverType>().map_err(|err| ApiError {
-            status: StatusCode::BAD_REQUEST,
-            message: err,
-        })?,
-        None => state.config.prover.prover_type,
-    };
-
-    Ok(match prover_type {
+fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> PipelineKey {
+    let prover_type = req.prover_type.unwrap_or(state.config.prover.prover_type);
+    match prover_type {
         ProverType::Risc0 => PipelineKey::ShastaRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
-    })
+    }
 }
 
 /// Request a proposal proof.
 pub async fn request_proposal_proof(
     State(state): State<AppState>,
-    Json(req): Json<ProposalProofRequest>,
+    req: Result<Json<ProposalProofRequest>, JsonRejection>,
 ) -> Result<Json<ProofResponse>, ApiError> {
+    let Json(req) = req.map_err(|err| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: err.to_string(),
+    })?;
     info!(
-        "Received proposal proof request: proposal_id={}, l1_block={}",
-        req.proposal_id, req.l1_inclusion_block
+        "Received proposal proof request: proposal_id={}",
+        req.proposal_id
     );
 
-    let pipeline_key = pipeline_key_from_request(&state, &req)?;
+    let pipeline_key = pipeline_key_from_request(&state, &req);
     let engine = state.pipelines.get(pipeline_key).ok_or(ApiError {
         status: StatusCode::NOT_FOUND,
         message: format!("Pipeline not available: {}", pipeline_key.as_str()),
@@ -86,6 +73,34 @@ pub async fn request_proposal_proof(
         id,
         status: ProofStatus::Pending,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProposalProofRequest;
+
+    #[test]
+    fn proposal_proof_request_rejects_unknown_fields() {
+        let raw = r#"{"proposal_id": 1, "l1_inclusion_block": 2}"#;
+        let err = serde_json::from_str::<ProposalProofRequest>(raw).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn proposal_proof_request_accepts_optional_prover_type() -> Result<(), serde_json::Error> {
+        let raw = r#"{"proposal_id": 1, "prover_type": "risc0"}"#;
+        let req = serde_json::from_str::<ProposalProofRequest>(raw)?;
+        assert_eq!(req.proposal_id, 1);
+        assert!(req.prover_type.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn proposal_proof_request_rejects_invalid_prover_type() {
+        let raw = r#"{"proposal_id": 1, "prover_type": "bogus"}"#;
+        let err = serde_json::from_str::<ProposalProofRequest>(raw).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
 }
 
 /// Proof status response.

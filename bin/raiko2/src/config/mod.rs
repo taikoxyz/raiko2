@@ -221,6 +221,8 @@ mod tests {
         assert_eq!("SP1".parse::<ProverType>().unwrap(), ProverType::Sp1);
         assert_eq!("native".parse::<ProverType>().unwrap(), ProverType::Native);
         assert_eq!("NATIVE".parse::<ProverType>().unwrap(), ProverType::Native);
+        assert_eq!("agent".parse::<ProverType>().unwrap(), ProverType::Agent);
+        assert_eq!("AGENT".parse::<ProverType>().unwrap(), ProverType::Agent);
         assert!("invalid".parse::<ProverType>().is_err());
     }
 

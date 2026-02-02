@@ -75,6 +75,16 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     }
 }
 
+pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::AgentConfig {
+    raiko2_prover::agent::AgentConfig {
+        base_url: config.prover.agent.url.clone(),
+        prover_type: config.prover.agent.prover_type.clone(),
+        api_key: config.prover.agent.api_key.clone(),
+        poll_interval_ms: config.prover.agent.poll_interval_ms,
+        timeout_ms: config.prover.agent.timeout_ms,
+    }
+}
+
 #[cfg(feature = "redis-queue")]
 use raiko2_pipeline::PipelineKey;
 

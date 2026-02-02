@@ -35,6 +35,7 @@ fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> Pi
         ProverType::Risc0 => PipelineKey::ShastaRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
+        ProverType::Agent => PipelineKey::ShastaRisc0,
     }
 }
 

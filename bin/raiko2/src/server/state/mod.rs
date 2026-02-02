@@ -15,7 +15,12 @@ use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
-use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
+use raiko2_prover::{
+    agent::AgentProver,
+    native::NativeProver,
+    risc0::Risc0Prover,
+    sp1::Sp1Prover,
+};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use std::sync::Arc;
@@ -32,6 +37,7 @@ type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
+type AgentSpec = ShastaSpec<AgentProver, Risc0ShastaBackend, NetworkProvider>;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -49,9 +55,15 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
-        let risc0_engine = build_risc0_engine(&config, scheduler_config.clone()).await?;
-        risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-        factory.insert(PipelineKey::ShastaRisc0, Arc::new(risc0_engine));
+        if matches!(config.prover.prover_type, crate::config::ProverType::Agent) {
+            let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
+            agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+            factory.insert(PipelineKey::ShastaRisc0, Arc::new(agent_engine));
+        } else {
+            let risc0_engine = build_risc0_engine(&config, scheduler_config.clone()).await?;
+            risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+            factory.insert(PipelineKey::ShastaRisc0, Arc::new(risc0_engine));
+        }
 
         let sp1_engine = build_sp1_engine(&config, scheduler_config.clone()).await?;
         sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
@@ -235,6 +247,68 @@ async fn build_native_engine(
                     PipelineKey::ShastaNative,
                     NativeProver,
                     NativeBackend,
+                    provider,
+                );
+                Engine::with_store_and_scheduler_config(spec, context, store, scheduler_config)
+            }
+
+            #[cfg(not(feature = "redis-queue"))]
+            {
+                anyhow::bail!(
+                    "queue backend redis requires building raiko2 with `--features redis-queue`"
+                );
+            }
+        }
+    };
+
+    Ok(engine)
+}
+
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
+async fn build_agent_engine(
+    config: &Config,
+    scheduler_config: SchedulerConfig,
+) -> Result<Engine<AgentSpec>> {
+    let agent_config = setup::agent_prover_config(config);
+
+    let engine = match config.queue.backend {
+        QueueBackend::Memory => {
+            let provider = setup::build_provider(config)?;
+            let context = setup::build_context(config, "agent");
+            let spec = ShastaSpec::new(
+                PipelineKey::ShastaRisc0,
+                AgentProver::new(agent_config),
+                RISC0_SHASTA_BACKEND,
+                provider,
+            );
+            Engine::with_store_and_scheduler_config(
+                spec,
+                context,
+                MemoryStore::new(),
+                scheduler_config,
+            )
+        }
+        QueueBackend::Redis => {
+            #[cfg(feature = "redis-queue")]
+            {
+                type AgentOutput =
+                    EngineOutput<<AgentSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
+                let provider = setup::build_provider(config)?;
+                let context = setup::build_context(config, "agent");
+                let url = config.queue.redis_url.clone().unwrap_or_default();
+                let namespace =
+                    setup::queue_namespace(&config.queue.namespace, PipelineKey::ShastaRisc0);
+                let store =
+                    raiko2_queue::RedisStore::<EngineTask, AgentOutput, EngineTaskKey>::connect(
+                        &url,
+                        &namespace,
+                        Duration::from_secs(60),
+                    )
+                    .await?;
+                let spec = ShastaSpec::new(
+                    PipelineKey::ShastaRisc0,
+                    AgentProver::new(agent_config),
+                    RISC0_SHASTA_BACKEND,
                     provider,
                 );
                 Engine::with_store_and_scheduler_config(spec, context, store, scheduler_config)

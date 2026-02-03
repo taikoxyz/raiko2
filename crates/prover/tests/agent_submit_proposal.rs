@@ -5,6 +5,7 @@ use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::Proof;
+use raiko2_prover::Prover;
 use raiko2_prover::agent::{AgentConfig, AgentProver};
 use serde_json::json;
 

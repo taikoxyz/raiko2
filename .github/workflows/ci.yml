@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'bin/**'
+              - 'xtask/**'
+              - 'config/**'
+              - 'test.json'
+              - 'justfile'
+              - '.github/workflows/ci.yml'
+
+  rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+          components: rustfmt, clippy
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: nextest
+        run: cargo nextest run --workspace
+

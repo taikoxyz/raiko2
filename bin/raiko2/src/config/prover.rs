@@ -8,6 +8,7 @@ pub enum ProverType {
     Risc0,
     Sp1,
     Native,
+    #[serde(rename = "agent-risc0", alias = "agentrisc0")]
     AgentRisc0,
 }
 
@@ -19,7 +20,7 @@ impl std::str::FromStr for ProverType {
             "risc0" => Ok(ProverType::Risc0),
             "sp1" => Ok(ProverType::Sp1),
             "native" => Ok(ProverType::Native),
-            "agent-risc0" => Ok(ProverType::AgentRisc0),
+            "agent-risc0" | "agentrisc0" => Ok(ProverType::AgentRisc0),
             _ => Err(format!("Unknown prover type: {s}")),
         }
     }

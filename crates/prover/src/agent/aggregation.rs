@@ -29,10 +29,7 @@ pub fn build_risc0_aggregation_input(agg: &AggregationInput) -> RaikoResult<Vec<
         None => Digest::ZERO,
     };
 
-    let input = BoundlessAggregationGuestInput {
-        image_id,
-        receipts,
-    };
+    let input = BoundlessAggregationGuestInput { image_id, receipts };
 
     bincode::serialize(&input)
         .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to encode input: {e}")))
@@ -49,15 +46,12 @@ fn extract_receipt(artifacts: &[VerifierArtifact]) -> RaikoResult<ZkvmReceipt> {
     let receipt_json = match &artifact.value {
         Value::String(value) => value.clone(),
         other => serde_json::to_string(other).map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!(
-                "Failed to serialize receipt artifact: {e}"
-            ))
+            RaikoError::InvalidRequestConfig(format!("Failed to serialize receipt artifact: {e}"))
         })?,
     };
 
-    serde_json::from_str(&receipt_json).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Failed to parse receipt JSON: {e}"))
-    })
+    serde_json::from_str(&receipt_json)
+        .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to parse receipt JSON: {e}")))
 }
 
 fn parse_expected_image_id(raw: &str) -> RaikoResult<Digest> {

@@ -22,8 +22,8 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
-pub mod native;
 pub mod agent;
+pub mod native;
 pub mod risc0;
 pub mod sp1;
 

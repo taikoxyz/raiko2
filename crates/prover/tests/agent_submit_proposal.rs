@@ -28,7 +28,10 @@ fn proof_response_bytes() -> Vec<u8> {
 struct TestBackend;
 
 impl ProverBackend for TestBackend {
-    fn elf(&self, _stage: raiko2_pipeline::ProofStage) -> raiko2_primitives::RaikoResult<&'static [u8]> {
+    fn elf(
+        &self,
+        _stage: raiko2_pipeline::ProofStage,
+    ) -> raiko2_primitives::RaikoResult<&'static [u8]> {
         Ok(&[])
     }
 }

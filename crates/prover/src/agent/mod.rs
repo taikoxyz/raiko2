@@ -4,8 +4,8 @@ pub mod aggregation;
 pub mod types;
 
 use crate::agent::types::{AsyncProofRequestData, AsyncProofResponse, StatusResponse};
-use alloy_primitives::hex::encode_prefixed;
 use alloy_primitives::Bytes;
+use alloy_primitives::hex::encode_prefixed;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::proof::{
     AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
@@ -78,9 +78,10 @@ impl AgentClient {
         if let Some(key) = &self.config.api_key {
             builder = builder.header("x-api-key", key);
         }
-        let response = builder.send().await.map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to poll status: {e}"))
-        })?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to poll status: {e}")))?;
         response.json::<StatusResponse>().await.map_err(|e| {
             RaikoError::InvalidRequestConfig(format!("Failed to parse status response: {e}"))
         })
@@ -144,11 +145,7 @@ where
         _backend: &B,
     ) -> RaikoResult<Proof> {
         let agg = AggregationInput {
-            proofs: input
-                .proofs
-                .into_iter()
-                .map(proof_to_envelope)
-                .collect(),
+            proofs: input.proofs.into_iter().map(proof_to_envelope).collect(),
             expected_image_id: None,
             metadata: None,
         };
@@ -196,9 +193,8 @@ impl AgentProver {
 }
 
 fn decode_risc0_proof(proof_data: &[u8]) -> RaikoResult<Proof> {
-    let decoded: Risc0Response = bincode::deserialize(proof_data).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}"))
-    })?;
+    let decoded: Risc0Response = bincode::deserialize(proof_data)
+        .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to decode proof: {e}")))?;
     Ok(Proof {
         proof: Some(encode_prefixed(decoded.journal)),
         quote: decoded.receipt,

@@ -28,7 +28,10 @@ fn proof_response_bytes() -> Vec<u8> {
 struct TestBackend;
 
 impl ProverBackend for TestBackend {
-    fn elf(&self, _stage: raiko2_pipeline::ProofStage) -> raiko2_primitives::RaikoResult<&'static [u8]> {
+    fn elf(
+        &self,
+        _stage: raiko2_pipeline::ProofStage,
+    ) -> raiko2_primitives::RaikoResult<&'static [u8]> {
         Ok(&[])
     }
 }
@@ -77,7 +80,9 @@ async fn agent_submit_aggregation_returns_proof() {
         extra_data: None,
     };
 
-    let agg_input = AggregationGuestInput { proofs: vec![proof] };
+    let agg_input = AggregationGuestInput {
+        proofs: vec![proof],
+    };
 
     let result = prover
         .aggregate(agg_input, &serde_json::Value::Null, &TestBackend)

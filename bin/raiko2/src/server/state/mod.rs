@@ -15,12 +15,7 @@ use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
-use raiko2_prover::{
-    agent::AgentProver,
-    native::NativeProver,
-    risc0::Risc0Prover,
-    sp1::Sp1Prover,
-};
+use raiko2_prover::{agent::AgentProver, native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use std::sync::Arc;
@@ -55,7 +50,10 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
-        if matches!(config.prover.prover_type, crate::config::ProverType::AgentRisc0) {
+        if matches!(
+            config.prover.prover_type,
+            crate::config::ProverType::AgentRisc0
+        ) {
             let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
             agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
             factory.insert(PipelineKey::ShastaRisc0, Arc::new(agent_engine));

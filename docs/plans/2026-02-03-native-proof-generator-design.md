@@ -9,7 +9,7 @@ Align raiko2 native proof outputs with the **old raiko Shasta SGX proof format**
 65 bytes recoverable secp256k1 signature (v = 27/28)
 ```
 
-The signature must be over the correct Shasta hash (proposal instance hash or PCD aggregation hash). The **instance id is fixed** to `0xB16B00B5` for this phase.
+The signature must be over the correct Shasta hash (proposal instance hash or PCD aggregation hash). The **instance id is fixed** to `0xDEAD_C0DE` for this phase.
 
 ## Scope
 - Proposal native proofs (`NativeProver::prove_encoded`) emit `Proof.proof` as the SGX-format bytes (hex string), `Proof.input` as the proposal instance hash, and `Proof.extra_data` as the PCD JSON.
@@ -30,7 +30,7 @@ Non-goals: zk aggregation, changing proof envelope schema, HTTP API flows.
 
 ## Deliverables
 - Update `crates/prover/src/native.rs` to emit SGX-format proof bytes for proposal + aggregation.
-- Fixed instance id constant `0xB16B00B5`.
+- Fixed instance id constant `0xDEAD_C0DE`.
 - Tests for signature recovery and proof format.
 
 ## Rollout

@@ -24,7 +24,7 @@ pub struct NativeProver;
 const NATIVE_PROOF_PRIVATE_KEY: &str =
     "92954368afd3caa1f3ce3ead0069c1af414054aefe1ef9aeacc1bf426222ce38";
 const SHASTA_SGX_PROOF_LEN: usize = 89;
-const SHASTA_SGX_INSTANCE_ID: u32 = 0xDEAD_C0DE;
+const SHASTA_NATIVE_MOCK_INSTANCE_ID: u32 = 0xDEAD_C0DE;
 
 impl GuestInputCodec<GuestInput> for NativeProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
@@ -93,7 +93,8 @@ where
         let instance_hash = instance.instance_hash();
         let signature = sign_hash(instance_hash)?;
         let sgx_instance = signer_address()?;
-        let proof = build_shasta_proof_bytes(SHASTA_SGX_INSTANCE_ID, sgx_instance, signature);
+        let proof =
+            build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
@@ -155,7 +156,8 @@ where
         let aggregation_hash =
             shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
         let signature = sign_hash(aggregation_hash)?;
-        let proof = build_shasta_proof_bytes(SHASTA_SGX_INSTANCE_ID, sgx_instance, signature);
+        let proof =
+            build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
@@ -226,7 +228,7 @@ mod tests {
     use std::str::FromStr;
 
     const EXPECTED_ADDR: &str = "0x0000777735367b36bC9B61C50022d9D0700dB4Ec";
-    const EXPECTED_INSTANCE_ID: u32 = 0xB16B00B5;
+    const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
 
     fn recover_address(sig_bytes: &[u8; 65], message: B256) -> Address {
         let rec_id = secp256k1::ecdsa::RecoveryId::try_from((sig_bytes[64] - 27) as i32)

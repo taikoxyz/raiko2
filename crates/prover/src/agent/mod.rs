@@ -49,12 +49,15 @@ impl AgentClient {
         request: &AsyncProofRequestData,
     ) -> RaikoResult<AsyncProofResponse> {
         let url = format!("{}/proof", self.config.base_url.trim_end_matches('/'));
-        let mut builder = self.http.post(url).json(request);
+        let mut builder = self.http.post(url.clone()).json(request);
         if let Some(key) = &self.config.api_key {
             builder = builder.header("x-api-key", key);
         }
         let response = builder.send().await.map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to submit proof: {e}"))
+            RaikoError::InvalidRequestConfig(format!(
+                "Failed to submit proof to agent at {} (prover_type={}): {e}",
+                url, self.config.prover_type
+            ))
         })?;
         response.json::<AsyncProofResponse>().await.map_err(|e| {
             RaikoError::InvalidRequestConfig(format!("Failed to parse proof response: {e}"))

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Raiko V2 - Taiko zkVM Prover Server"
 authors = ["Taiko Labs"]
-license = "MIT"
+license.workspace = true
 workspace = "../.."
 
 [lints]

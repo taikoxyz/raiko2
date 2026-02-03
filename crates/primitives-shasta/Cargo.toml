@@ -2,6 +2,7 @@
 name = "raiko2-primitives-shasta"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 description = "Taiko Shasta primitives for Raiko V2"
 

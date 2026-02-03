@@ -1,51 +1,68 @@
 # Raiko V2
 
-Raiko V2 is the next-generation zkVM prover for Taiko, built on top of [alethia-reth](https://github.com/taikoxyz/alethia-reth).
+Raiko V2 is a zkVM prover for Taiko, built on top of [alethia-reth](https://github.com/taikoxyz/alethia-reth).
+
+## Quickstart
+
+```bash
+cp config.example.toml config.toml
+cargo run -r -p raiko2 -- --config config.toml
+```
+
+Configuration is loaded from a TOML file via `--config` (or `RAIKO2_CONFIG`). CLI flags and
+environment variables override values from the file.
 
 ## Features
 
-- **Modular Architecture**: Clean separation between primitives, protocol, pipeline, provider, engine, and prover
-- **alethia-reth Integration**: Uses Taiko's new reth fork for improved performance
-- **Shasta Protocol**: Native support for Taiko Shasta (Based Contestable Rollup)
-- **zkVM Provers**: Support for RISC0, SP1, and agent-backed provers (agent-risc0)
-- **Native Prover**: Local execution with public-input output (no zk proof)
+- Split into focused crates: `primitives`, `protocol`, `pipeline`, `provider`, `engine`, `queue`, `stateless`, `prover`
+- Built on Taiko's `alethia-reth`
+- Shasta protocol support (Based Contestable Rollup)
+- Prover backends: RISC0, SP1, and `agent-risc0`
+- Native mode: runs locally and outputs public inputs (no zk proof)
 
-## Project Structure
+## Project structure
 
 ```
 raiko2/
-├── Cargo.toml          # Workspace root
-├── justfile            # Task entrypoints (build-guest, etc.)
-├── crates/
-│   ├── primitives/     # Core types and traits
-│   ├── protocol/       # Shasta protocol implementation
-│   ├── pipeline/       # Pipeline spec + manifest builder
-│   ├── provider/       # Data provider interfaces
-│   ├── engine/         # Execution engine
-│   ├── stateless/      # Stateless validation
-│   ├── prover/         # zkVM prover adapters (risc0, sp1, agent)
-│   └── guests/         # Guest ELF assets (compiled outputs)
-├── bin/
-│   ├── raiko2/         # Main binary (HTTP server + CLI)
-│   └── rpc-proxy/      # RPC proxy service
-├── docs/               # Documentation
-├── xtask/              # Automation (guest builds via cargo risczero/prove)
-├── guests/             # Guest program sources (out-of-workspace)
-│   ├── common/         # Shared guest abstractions
-│   ├── risc0/          # RISC0 guest programs
-│   └── sp1/            # SP1 guest programs
-└── script/             # Helper scripts (prove-block, update_imageid, etc.)
+├── Cargo.toml                 # Workspace root
+├── justfile                   # Task entrypoints (build-guest, etc.)
+├── bin/                       # Standalone binaries
+│   ├── raiko2/                # Prover server (HTTP API + CLI)
+│   ├── rpc-proxy/             # RPC proxy service
+│   ├── preflight/             # Preflight CLI (build GuestInput)
+│   ├── guest-launcher/        # Local guest runner
+│   └── witness-check/         # Witness/debug helpers
+├── crates/                    # Reusable library crates
+│   ├── primitives/            # Core types and traits
+│   ├── primitives-shasta/     # Shasta-specific primitives
+│   ├── protocol/              # Protocol core types
+│   ├── protocol-shasta/       # Shasta types and codecs
+│   ├── pipeline/              # Pipeline spec + manifest builder
+│   ├── provider/              # Data provider interfaces
+│   ├── engine/                # Execution engine
+│   ├── queue/                 # Queue + scheduler backends
+│   ├── stateless/             # Stateless validation
+│   ├── prover/                # Prover backends (risc0, sp1, agent)
+│   └── guests/                # Guest ELF assets (compiled outputs)
+├── config/                    # Chain spec lists and config assets
+├── docker/                    # Toolchain images
+├── docs/                      # Documentation
+├── xtask/                     # Automation (guest builds via xtask)
+└── guests/                    # Guest program sources (not in workspace)
+    ├── common/                # Shared guest abstractions
+    ├── risc0/                 # RISC0 guest programs
+    └── sp1/                   # SP1 guest programs
 ```
 
-## Architecture
+## How it works
 
-Core flow:
+Main flow:
 
-1. **Preflight** builds `GuestInput` (includes `TaikoManifest`) from RPC/provider data.
-2. **Validation** checks `GuestInput` (stateless validation for Shasta).
-3. **Encode** serializes `GuestInput` for the prover backend.
-4. **Prover** runs the zkVM using hardfork-selected ELF.
-5. **Aggregate** combines proposal proofs (aggregation stage).
+1. `Preflight` builds `GuestInput` (includes `TaikoManifest`) from RPC/provider data.
+2. `Validation` runs stateless checks for Shasta.
+3. `Encode` serializes `GuestInput` for the prover backend.
+4. `Prover` runs the zkVM using the hardfork-selected ELF.
+5. `Aggregate` combines proposal proofs (aggregation stage).
 
 Dataflow diagram:
 
@@ -60,7 +77,7 @@ flowchart LR
   PO -.-> AG["Aggregate"]
 ```
 
-Key abstractions:
+Key traits and types:
 
 - `PipelineSpec`: binds `Preflight` + `Validation` + `ManifestBuilder` for a fork.
 - `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
@@ -68,7 +85,7 @@ Key abstractions:
 - `Engine`: schedules pipeline stages and prover work.
 - `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent-risc0).
 
-Architecture diagram:
+High-level view:
 
 ```mermaid
 flowchart LR
@@ -129,38 +146,37 @@ sequenceDiagram
   API-->>C: status + proof
 ```
 
-## Building
+## Build
 
 ```bash
-cd raiko2
-cargo build --release
+cargo build --release -p raiko2
 ```
 
-## Testing
+## Test
 
-Always run:
+Before opening a PR, run:
 
 ```bash
+cargo fmt --all
 cargo clippy --workspace -- -D warnings
 cargo nextest run --workspace
 ```
 
-## Building Guests
+## Build guests
 
-Guest programs live in `guests/` as standalone crates (not part of the root workspace). Each guest
-crate carries its own `[patch.crates-io]` in `Cargo.toml` to keep RISC0 and SP1 dependencies isolated.
-`xtask` uses the official Docker images (no local toolchains required), and copies
-ELF outputs into `crates/guests/elf` for use by the host. `just` is the preferred
-wrapper.
+Guest programs live in `guests/` as standalone crates (they are not part of the workspace). Each guest
+crate has its own `[patch.crates-io]` in its `Cargo.toml` so RISC0/SP1 dependency versions stay
+isolated. `xtask` builds guests using the published Docker toolchain images and copies the resulting
+ELFs into `crates/guests/elf` for the host to load. Use `just` unless you have a reason not to.
 
 Prerequisites: `docker` and `just`.
 
-By default, `xtask` uses prebuilt toolchain images (no local `rzup` / `sp1up` installs required):
+By default, `xtask` uses prebuilt toolchain images, so you don't need local `rzup` / `sp1up` installs:
 
 - RISC0: `RISC0_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest`
 - SP1: `SP1_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/sp1-toolchain:latest`
 
-Docker-based guest builds reuse a persistent Cargo download cache by default:
+Docker builds reuse a persistent Cargo download cache by default:
 
 - Disable: `DOCKER_CARGO_CACHE=none`
 - Override the volume name: `DOCKER_CARGO_CACHE_VOLUME=...` (e.g. `raiko2-cargo-sp1`)
@@ -172,9 +188,10 @@ just build-guest all
 # or individually:
 just build-guest risc0
 just build-guest sp1
-# Override tags/platform if needed (only applies to docker-based guest builds):
-RISC0_DOCKER_TAG=r0.1.88.0 SP1_DOCKER_TAG=v5.2.4 DOCKER_DEFAULT_PLATFORM=linux/amd64 \\
-  RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \\
+# Override docker tags/platform if needed (only applies when toolchain images are disabled):
+RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
+  RISC0_DOCKER_CONTAINER_TAG=<risc0-tag> SP1_DOCKER_TAG=<sp1-tag> \
+  DOCKER_DEFAULT_PLATFORM=linux/amd64 \
   just build-guest all
 ```
 
@@ -185,15 +202,15 @@ docker build -f docker/sp1-toolchain/Dockerfile -t raiko2-sp1-toolchain:local do
 SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local just build-guest sp1
 ```
 
-If you don't use `just`:
+Without `just`:
 
 ```bash
 cargo run -r -p xtask -- build-guest all
 ```
 
-## Guest Benchmarking
+## Guest benchmarking
 
-The `bench-guest` task reproduces the PR #9 workflow for measuring guest execution costs:
+The `bench-guest` task measures guest execution costs (cycles + wall time):
 
 1. (Optional) Run `preflight` to dump a `GuestInput` JSON.
 2. Build SP1 guest ELFs with the `bench` feature enabled (docker).
@@ -210,24 +227,25 @@ cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test.json 
 
 # Generate input via preflight and write an aggregated report
 cargo run -r -p xtask -- bench-guest sp1 \
-  --rpc-url http://35.226.222.182:8545 \
-  --l2-chain-id 167001 \
+  --rpc-url http://localhost:9545 \
+  --l2-chain-id 167000 \
   --proposal-id 3 \
   --repeat 3 \
   --json-out target/bench/guest-report.json
 ```
 
-If `guest-launcher` fails with a `GuestInput` deserialization panic, your checked-in ELFs may be out of
-date. Rebuild them with:
+If `guest-launcher` panics while deserializing `GuestInput`, the checked-in ELFs are probably stale.
+Rebuild them with:
 
 ```bash
 cargo run -r -p xtask -- build-guest sp1 --bench
 ```
 
-## Running
+## Run
 
 ```bash
 # Start the prover server
+cp config.example.toml config.toml
 ./target/release/raiko2 --config config.toml
 
 # Or with environment variables
@@ -236,9 +254,9 @@ RAIKO2_L2_RPC=http://localhost:9545 \
 ./target/release/raiko2
 ```
 
-## Agent Prover
+## Agent prover
 
-To delegate proof generation to `raiko-agent`, set the prover type to `agent-risc0` and configure the agent endpoint:
+To use `raiko-agent`, set the prover type to `agent-risc0` and configure the agent endpoint:
 
 ```toml
 [prover]
@@ -252,7 +270,8 @@ timeout_ms = 300000
 prover_type = "boundless"
 ```
 
-ELF uploads are handled by the agent; raiko2 will upload on change or retry after an "image not uploaded" error.
+The agent handles ELF uploads. raiko2 uploads new ELFs when they change and retries if the agent
+returns an "image not uploaded" error.
 
 ## Documentation
 
@@ -261,4 +280,12 @@ ELF uploads are handled by the agent; raiko2 will upload on change or retry afte
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE)
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Some files are derived from third-party projects and may include their own copyright and license
+notices; those file-level terms apply.

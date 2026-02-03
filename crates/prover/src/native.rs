@@ -263,6 +263,13 @@ mod tests {
         input
     }
 
+    #[test]
+    fn signer_address_matches_golden_touch_account() {
+        let address = super::signer_address().expect("signer address");
+        let expected = Address::from_str(EXPECTED_ADDR).expect("expected address");
+        assert_eq!(address, expected);
+    }
+
     #[tokio::test]
     async fn native_proposal_proof_matches_shasta_format() {
         let prover = NativeProver::default();

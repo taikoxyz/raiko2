@@ -1,7 +1,6 @@
 //! Native prover implementation (no zk proof).
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
@@ -14,6 +13,7 @@ use raiko2_primitives_shasta::{
     },
 };
 use raiko2_protocol_shasta::shasta::ProofCarryData;
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input};
 
@@ -24,7 +24,7 @@ pub struct NativeProver;
 const NATIVE_PROOF_PRIVATE_KEY: &str =
     "92954368afd3caa1f3ce3ead0069c1af414054aefe1ef9aeacc1bf426222ce38";
 const SHASTA_SGX_PROOF_LEN: usize = 89;
-const SHASTA_SGX_INSTANCE_ID: u32 = 0xB16B00B5;
+const SHASTA_SGX_INSTANCE_ID: u32 = 0xDEAD_C0DE;
 
 impl GuestInputCodec<GuestInput> for NativeProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
@@ -172,15 +172,16 @@ fn sign_hash(hash: B256) -> RaikoResult<[u8; 65]> {
     let secret_key = SecretKey::from_slice(&key_bytes).map_err(|e| {
         RaikoError::InvalidRequestConfig(format!("Invalid native proof private key: {e}"))
     })?;
-    let message = Message::from_digest_slice(hash.as_slice()).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Invalid hash: {e}"))
-    })?;
+    let message = Message::from_digest_slice(hash.as_slice())
+        .map_err(|e| RaikoError::InvalidRequestConfig(format!("Invalid hash: {e}")))?;
     let secp = Secp256k1::new();
     let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
     let (rec_id, data) = sig.serialize_compact();
     let mut sig_bytes = [0u8; 65];
     sig_bytes[..64].copy_from_slice(&data);
-    sig_bytes[64] = (i32::from(rec_id) + 27) as u8;
+    let recovery_byte = i32::from(rec_id) + 27;
+    sig_bytes[64] = u8::try_from(recovery_byte)
+        .map_err(|_| RaikoError::InvalidRequestConfig("Invalid recovery id value".to_string()))?;
     Ok(sig_bytes)
 }
 
@@ -234,7 +235,10 @@ mod tests {
             .expect("recoverable signature");
         let secp = Secp256k1::new();
         let public_key = secp
-            .recover_ecdsa(&Message::from_digest_slice(message.as_slice()).unwrap(), &sig)
+            .recover_ecdsa(
+                &Message::from_digest_slice(message.as_slice()).unwrap(),
+                &sig,
+            )
             .expect("recover public key");
         public_key_to_address(&public_key)
     }
@@ -251,7 +255,9 @@ mod tests {
 
     fn minimal_guest_input() -> GuestInput {
         let mut input = GuestInput::default();
-        input.witnesses.push(raiko2_primitives::StatelessInput::default());
+        input
+            .witnesses
+            .push(raiko2_primitives::StatelessInput::default());
         input
     }
 
@@ -260,7 +266,10 @@ mod tests {
         let prover = NativeProver::default();
         let config = ProverConfig::default();
         let input = minimal_guest_input();
-        let proof = prover.prove(input, &config, &NativeBackend).await.expect("prove");
+        let proof = prover
+            .prove(input, &config, &NativeBackend)
+            .await
+            .expect("prove");
 
         let proof_hex = proof.proof.expect("missing proof");
         let bytes = decode_proof_bytes(&proof_hex);
@@ -296,8 +305,8 @@ mod tests {
             .await
             .expect("aggregate");
 
-        let commitment = build_shasta_commitment_from_proof_carry_data_vec(&[proof_carry])
-            .expect("commitment");
+        let commitment =
+            build_shasta_commitment_from_proof_carry_data_vec(&[proof_carry]).expect("commitment");
         let expected_hash = shasta_aggregation_output(
             &commitment,
             1,

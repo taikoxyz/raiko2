@@ -221,6 +221,14 @@ mod tests {
         assert_eq!("SP1".parse::<ProverType>().unwrap(), ProverType::Sp1);
         assert_eq!("native".parse::<ProverType>().unwrap(), ProverType::Native);
         assert_eq!("NATIVE".parse::<ProverType>().unwrap(), ProverType::Native);
+        assert_eq!(
+            "agent-risc0".parse::<ProverType>().unwrap(),
+            ProverType::AgentRisc0
+        );
+        assert_eq!(
+            "AGENT-RISC0".parse::<ProverType>().unwrap(),
+            ProverType::AgentRisc0
+        );
         assert!("invalid".parse::<ProverType>().is_err());
     }
 

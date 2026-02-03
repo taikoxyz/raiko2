@@ -8,6 +8,7 @@ pub enum ProverType {
     Risc0,
     Sp1,
     Native,
+    AgentRisc0,
 }
 
 impl std::str::FromStr for ProverType {
@@ -18,6 +19,7 @@ impl std::str::FromStr for ProverType {
             "risc0" => Ok(ProverType::Risc0),
             "sp1" => Ok(ProverType::Sp1),
             "native" => Ok(ProverType::Native),
+            "agent-risc0" => Ok(ProverType::AgentRisc0),
             _ => Err(format!("Unknown prover type: {s}")),
         }
     }
@@ -33,6 +35,9 @@ pub struct ProverConfig {
     /// SP1 specific configuration.
     #[serde(default)]
     pub sp1: Sp1Config,
+    /// Agent-specific configuration.
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 /// RISC0 configuration.
@@ -63,6 +68,28 @@ impl Default for Sp1Config {
         Self {
             network: true,
             plonk: true,
+        }
+    }
+}
+
+/// Agent configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    pub url: String,
+    pub api_key: Option<String>,
+    pub poll_interval_ms: u64,
+    pub timeout_ms: u64,
+    pub prover_type: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:9999".to_string(),
+            api_key: None,
+            poll_interval_ms: 1_000,
+            timeout_ms: 300_000,
+            prover_type: "boundless".to_string(),
         }
     }
 }

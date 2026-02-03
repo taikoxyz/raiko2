@@ -27,6 +27,46 @@ pub struct Proof {
     pub extra_data: Option<serde_json::Value>,
 }
 
+/// Public inputs associated with a proof.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicInputs {
+    pub input_hash: Option<String>,
+    pub instance_hash: Option<String>,
+}
+
+/// Opaque proof payload with a backend-specific kind tag.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProofPayload {
+    pub payload_kind: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Additional verifier artifacts (e.g., receipts, vkey hashes).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct VerifierArtifact {
+    pub kind: String,
+    pub value: serde_json::Value,
+}
+
+/// Backend-agnostic proof envelope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProofEnvelope {
+    pub backend: String,
+    pub public_inputs: PublicInputs,
+    pub payload: ProofPayload,
+    pub verifier_artifacts: Vec<VerifierArtifact>,
+    pub carry_data: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Canonical aggregation input built from proof envelopes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AggregationInput {
+    pub proofs: Vec<ProofEnvelope>,
+    pub expected_image_id: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
 impl std::fmt::Display for Proof {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

@@ -13,7 +13,7 @@ mod context;
 mod error;
 mod input;
 mod output;
-mod proof;
+pub mod proof;
 pub(crate) mod proof_type;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};

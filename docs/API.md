@@ -61,7 +61,7 @@ GET /v1/info
 {
   "version": "0.1.0",
   "prover": "Risc0",
-  "supported_provers": ["risc0", "sp1", "native"]
+  "supported_provers": ["risc0", "sp1", "native", "agent-risc0"]
 }
 ```
 
@@ -74,17 +74,19 @@ Content-Type: application/json
 
 #### Request Body
 
-| Field         | Type     | Required | Description                                                  |
-| ------------- | -------- | -------- | ------------------------------------------------------------ |
-| `proposal_id` | `u64`    | Yes      | The proposal ID to prove                                     |
-| `prover_type` | `string` | No       | Prover type: "risc0", "sp1", or "native" (defaults to config) |
+| Field                | Type     | Required | Description                                        |
+| -------------------- | -------- | -------- | -------------------------------------------------- |
+| `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
+| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
+| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config) |
+| `prover`             | `string` | No       | Prover address (hex)                               |
 
 #### Example Request
 
 ```json
 {
   "proposal_id": 12345,
-  "prover_type": "risc0"
+  "prover_type": "agent-risc0"
 }
 ```
 
@@ -220,6 +222,13 @@ snark = true
 [prover.sp1]
 network = true
 plonk = true
+
+[prover.agent]
+url = "http://localhost:9999"
+api_key = "optional-api-key"
+poll_interval_ms = 1000
+timeout_ms = 300000
+prover_type = "boundless"
 
 [queue]
 backend = "memory"

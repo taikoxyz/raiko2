@@ -10,3 +10,6 @@ mod state;
 
 pub use run::run_server;
 pub use state::AppState;
+
+#[cfg(test)]
+mod e2e;

@@ -6,6 +6,8 @@ use raiko2_primitives::proof::{
 use raiko2_prover::agent::aggregation::build_risc0_aggregation_input;
 use serde_json::json;
 
+mod fixtures;
+
 #[test]
 fn builds_risc0_aggregation_input() {
     let proof = ProofEnvelope {
@@ -20,7 +22,7 @@ fn builds_risc0_aggregation_input() {
         },
         verifier_artifacts: vec![VerifierArtifact {
             kind: "receipt_json".to_string(),
-            value: json!("{\"receipt\":true}"),
+            value: json!(fixtures::risc0_receipt_json()),
         }],
         carry_data: None,
         metadata: None,
@@ -50,7 +52,7 @@ fn rejects_invalid_expected_image_id() {
         },
         verifier_artifacts: vec![VerifierArtifact {
             kind: "receipt_json".to_string(),
-            value: json!("{\"receipt\":true}"),
+            value: json!(fixtures::risc0_receipt_json()),
         }],
         carry_data: None,
         metadata: None,
@@ -63,5 +65,5 @@ fn rejects_invalid_expected_image_id() {
     };
 
     let err = build_risc0_aggregation_input(&agg).unwrap_err();
-    assert!(err.to_string().contains("image_id"));
+    assert!(err.to_string().contains("expected_image_id"));
 }

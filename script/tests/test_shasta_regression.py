@@ -44,3 +44,19 @@ class TestBinaries(unittest.TestCase):
 
         missing = check_binaries("/nope/preflight", "/nope/guest-launcher")
         self.assertTrue(missing)
+
+
+class TestSelection(unittest.TestCase):
+    def test_range_overrides_count(self):
+        from shasta_regression import select_proposals
+
+        proposals = list(range(1, 11))
+        picked = select_proposals(proposals, range_tuple=(3, 6), count=2)
+        self.assertEqual(picked, [3, 4, 5, 6])
+
+    def test_count_selects_latest(self):
+        from shasta_regression import select_proposals
+
+        proposals = [1, 2, 3, 4, 5]
+        picked = select_proposals(proposals, range_tuple=None, count=2)
+        self.assertEqual(picked, [4, 5])

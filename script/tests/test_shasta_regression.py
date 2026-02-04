@@ -60,3 +60,12 @@ class TestSelection(unittest.TestCase):
         proposals = [1, 2, 3, 4, 5]
         picked = select_proposals(proposals, range_tuple=None, count=2)
         self.assertEqual(picked, [4, 5])
+
+
+class TestAggregationGrouping(unittest.TestCase):
+    def test_grouping(self):
+        from shasta_regression import group_for_aggregation
+
+        proofs = ["a", "b", "c", "d", "e"]
+        groups = group_for_aggregation(proofs, size=2)
+        self.assertEqual(groups, [["a", "b"], ["c", "d"], ["e"]])

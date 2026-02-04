@@ -22,6 +22,17 @@ def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[st
     return None
 
 
+def resolve_event_address_from_chain_spec(
+    spec_path: Path, chain_name: str, fork: str
+) -> Optional[str]:
+    data = json.loads(Path(spec_path).read_text())
+    for entry in data:
+        if entry.get("name") == chain_name:
+            contracts = entry.get("l1_contract", {})
+            return contracts.get(fork)
+    return None
+
+
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
@@ -234,6 +245,7 @@ def main() -> int:
     chain_spec_list = config.get("chain_spec_list")
     l1_chain = config.get("l1_chain")
     l2_chain = config.get("l2_chain")
+    l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
     l1_rpc = config.get("l1_rpc")
     l2_rpc = config.get("l2_rpc")
     if chain_spec_list and (l1_chain or l2_chain):
@@ -242,6 +254,10 @@ def main() -> int:
             l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
         if l2_chain and not l2_rpc:
             l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
+        if l1_chain and not event_address:
+            event_address = resolve_event_address_from_chain_spec(
+                spec_path, l1_chain, l1_contract_fork
+            )
     event_address = config.get("event_address")
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")

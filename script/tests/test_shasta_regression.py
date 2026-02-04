@@ -133,3 +133,25 @@ class TestChainSpecLookup(unittest.TestCase):
                 )
             )
             self.assertEqual(resolve_rpc_from_chain_spec(spec_path, "l2"), "http://l2")
+
+
+class TestChainSpecContracts(unittest.TestCase):
+    def test_resolve_event_address_from_chain_spec(self):
+        from shasta_regression import resolve_event_address_from_chain_spec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "taiko_dev",
+                            "l1_contract": {"SHASTA": "0xabc"},
+                        }
+                    ]
+                )
+            )
+            self.assertEqual(
+                resolve_event_address_from_chain_spec(spec_path, "taiko_dev", "SHASTA"),
+                "0xabc",
+            )

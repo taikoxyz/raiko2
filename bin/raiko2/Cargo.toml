@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Raiko V2 - Taiko zkVM Prover Server"
 authors = ["Taiko Labs"]
-license = "MIT"
+license.workspace = true
 workspace = "../.."
 
 [lints]
@@ -50,3 +50,13 @@ dotenvy = "0.15"
 [features]
 default = []
 redis-queue = ["raiko2-queue/redis"]
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util = "0.1"
+async-trait.workspace = true
+raiko2-primitives-shasta.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-stateless.workspace = true
+alloy-primitives.workspace = true
+alloy-trie.workspace = true

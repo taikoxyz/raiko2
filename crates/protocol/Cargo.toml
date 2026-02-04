@@ -2,6 +2,7 @@
 name = "raiko2-protocol"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Taiko protocol core types for Raiko V2"
 
 [lints]

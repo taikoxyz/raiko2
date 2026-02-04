@@ -1,0 +1,71 @@
+# Example configuration for the raiko2 prover server.
+#
+# Load with:
+#   raiko2 --config ./config.toml
+# or:
+#   RAIKO2_CONFIG=./config.toml raiko2
+#
+# CLI flags and environment variables override values from this file.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+l1_rpc = "http://localhost:8545"
+l2_rpc = "http://localhost:9545"
+l1_chain_id = 1
+l2_chain_id = 167000
+
+# Optional RPC client tuning.
+[rpc.client]
+timeout_ms = 10000
+concurrency_limit = 32
+
+[rpc.client.retry]
+# Set to 0 to disable retries.
+max_attempts = 3
+initial_backoff_ms = 500
+compute_units_per_second = 1000
+
+[prover]
+# Supported values:
+#   "risc0" | "sp1" | "native" | "agent-risc0"
+prover_type = "risc0"
+
+[prover.risc0]
+bonsai = true
+snark = true
+
+[prover.sp1]
+network = true
+plonk = true
+
+# Used only when prover_type = "agent-risc0".
+[prover.agent]
+url = "http://localhost:9999"
+# api_key = "optional-api-key"
+poll_interval_ms = 1000
+timeout_ms = 300000
+prover_type = "boundless"
+
+[queue]
+# Supported values:
+#   "memory" | "redis"
+#
+# Redis requires building raiko2 with:
+#   cargo build -r -p raiko2 --features redis-queue
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+# redis_url = "redis://localhost:6379/"
+
+[queue.retry]
+# Supported values:
+#   "none" | "fixed" | "exponential"
+strategy = "exponential"
+max_attempts = 3
+fixed_delay_ms = 1000
+base_delay_ms = 1000
+max_delay_ms = 30000

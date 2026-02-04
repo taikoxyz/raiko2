@@ -5,8 +5,11 @@ use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof};
+use raiko2_prover::Prover;
 use raiko2_prover::agent::{AgentConfig, AgentProver};
 use serde_json::json;
+
+mod fixtures;
 
 fn proof_response_bytes() -> Vec<u8> {
     #[derive(serde::Serialize)]
@@ -74,7 +77,7 @@ async fn agent_submit_aggregation_returns_proof() {
     let proof = Proof {
         proof: None,
         input: None,
-        quote: Some("{\"receipt\":true}".to_string()),
+        quote: Some(fixtures::risc0_receipt_json()),
         uuid: None,
         kzg_proof: None,
         extra_data: None,

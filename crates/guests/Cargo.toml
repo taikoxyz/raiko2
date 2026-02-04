@@ -2,6 +2,7 @@
 name = "raiko2-guests"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true

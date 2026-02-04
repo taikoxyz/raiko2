@@ -13,3 +13,7 @@ def output_paths(out_dir: Path, proposal_id: int) -> dict:
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
         "proof": Path(out_dir) / f"proposal_{proposal_id}.proof.json",
     }
+
+
+def check_binaries(preflight: str, guest: str) -> bool:
+    return not (Path(preflight).is_file() and Path(guest).is_file())

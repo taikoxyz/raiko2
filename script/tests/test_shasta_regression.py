@@ -36,3 +36,11 @@ class TestConfigAndPaths(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBinaries(unittest.TestCase):
+    def test_missing_binaries(self):
+        from shasta_regression import check_binaries
+
+        missing = check_binaries("/nope/preflight", "/nope/guest-launcher")
+        self.assertTrue(missing)

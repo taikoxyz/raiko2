@@ -69,3 +69,14 @@ class TestAggregationGrouping(unittest.TestCase):
         proofs = ["a", "b", "c", "d", "e"]
         groups = group_for_aggregation(proofs, size=2)
         self.assertEqual(groups, [["a", "b"], ["c", "d"], ["e"]])
+
+
+class TestSummary(unittest.TestCase):
+    def test_write_summary(self):
+        from shasta_regression import write_summary
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_summary.json"
+            write_summary(path, {"successes": [1], "failures": []})
+            data = json.loads(path.read_text())
+            self.assertIn("successes", data)

@@ -283,7 +283,10 @@ def main() -> int:
         return 2
 
     if not l2_rpc:
-        logger.error("Missing l2_rpc in config.")
+        logger.error("Missing l2_rpc in config or chain spec lookup.")
+        return 2
+    if not event_address:
+        logger.error("Missing event_address (resolve from chain spec).")
         return 2
     if not timeout:
         timeout = 10

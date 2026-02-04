@@ -177,3 +177,11 @@ class TestConfigEventAddress(unittest.TestCase):
                 "l1_contract_fork": "SHASTA",
             }
             self.assertEqual(resolve_event_address_from_config(config), "0xabc")
+
+
+class TestConfigValidation(unittest.TestCase):
+    def test_resolve_event_address_missing_chain_spec(self):
+        from shasta_regression import resolve_event_address_from_config
+
+        config = {"l1_chain": "taiko_dev_l1"}
+        self.assertIsNone(resolve_event_address_from_config(config))

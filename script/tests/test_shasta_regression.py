@@ -80,3 +80,39 @@ class TestSummary(unittest.TestCase):
             write_summary(path, {"successes": [1], "failures": []})
             data = json.loads(path.read_text())
             self.assertIn("successes", data)
+
+
+class TestExtradataParsing(unittest.TestCase):
+    def test_extract_proposal_id_from_extradata(self):
+        from shasta_regression import extract_proposal_id_from_extradata
+
+        # 0x + 1 byte config + 6 bytes proposal id (uint48, big-endian)
+        extradata = "0x4b000000000005"
+        self.assertEqual(extract_proposal_id_from_extradata(extradata), 5)
+
+
+class TestDiscovery(unittest.TestCase):
+    def test_discover_proposals_from_blocks(self):
+        from shasta_regression import discover_proposals_from_blocks
+
+        blocks = [
+            {"number": 1, "extraData": "0x4b000000000001"},
+            {"number": 2, "extraData": "0x4b000000000001"},
+            {"number": 3, "extraData": "0x4b000000000002"},
+        ]
+        self.assertEqual(discover_proposals_from_blocks(blocks), [1, 2])
+
+
+class TestLatestDiscovery(unittest.TestCase):
+    def test_discover_latest_proposals_from_blocks(self):
+        from shasta_regression import discover_latest_proposals_from_blocks
+
+        blocks = [
+            {"number": 1, "extraData": "0x4b000000000001"},
+            {"number": 2, "extraData": "0x4b000000000001"},
+            {"number": 3, "extraData": "0x4b000000000002"},
+            {"number": 4, "extraData": "0x4b000000000002"},
+            {"number": 5, "extraData": "0x4b000000000003"},
+        ]
+        latest = discover_latest_proposals_from_blocks(list(reversed(blocks)), count=2)
+        self.assertEqual(latest, [2, 3])

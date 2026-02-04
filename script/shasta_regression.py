@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import subprocess
 from typing import Dict, Iterable, List, Optional
+import requests
 import argparse
 import logging
 import time
@@ -37,6 +38,93 @@ def group_for_aggregation(proofs, size):
     if size <= 0:
         return []
     return [proofs[i : i + size] for i in range(0, len(proofs), size)]
+
+
+def extract_proposal_id_from_extradata(extradata: str) -> Optional[int]:
+    if not extradata:
+        return None
+    data = extradata[2:] if extradata.startswith("0x") else extradata
+    if len(data) < 14:
+        return None
+    try:
+        proposal_hex = data[2:14]
+        return int(proposal_hex, 16)
+    except ValueError:
+        return None
+
+
+def discover_proposals_from_blocks(blocks: Iterable[Dict]) -> List[int]:
+    proposals: List[int] = []
+    last_id: Optional[int] = None
+    for block in blocks:
+        proposal_id = extract_proposal_id_from_extradata(block.get("extraData", ""))
+        if proposal_id is None:
+            continue
+        if proposal_id != last_id:
+            proposals.append(proposal_id)
+            last_id = proposal_id
+    return proposals
+
+
+def discover_latest_proposals_from_blocks(blocks: Iterable[Dict], count: int) -> List[int]:
+    proposals: List[int] = []
+    last_id: Optional[int] = None
+    for block in blocks:
+        proposal_id = extract_proposal_id_from_extradata(block.get("extraData", ""))
+        if proposal_id is None:
+            continue
+        if proposal_id != last_id:
+            proposals.append(proposal_id)
+            last_id = proposal_id
+        if len(proposals) >= count:
+            break
+    return list(reversed(proposals))
+
+
+def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Dict:
+    response = requests.post(
+        rpc_url,
+        json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def get_l2_block(rpc_url: str, block_number: int, timeout: int) -> Optional[Dict]:
+    payload = rpc_call(rpc_url, "eth_getBlockByNumber", [hex(block_number), False], timeout)
+    return payload.get("result")
+
+
+def get_latest_l2_block_number(rpc_url: str, timeout: int) -> int:
+    payload = rpc_call(rpc_url, "eth_blockNumber", [], timeout)
+    return int(payload.get("result", "0x0"), 16)
+
+
+def discover_proposals_from_l2_range(
+    rpc_url: str, start: int, end: int, timeout: int
+) -> List[int]:
+    blocks: List[Dict] = []
+    for num in range(start, end + 1):
+        block = get_l2_block(rpc_url, num, timeout)
+        if block:
+            blocks.append(block)
+    return discover_proposals_from_blocks(blocks)
+
+
+def discover_latest_proposals_from_l2(
+    rpc_url: str, count: int, timeout: int
+) -> List[int]:
+    latest = get_latest_l2_block_number(rpc_url, timeout)
+    blocks: List[Dict] = []
+    for num in range(latest, -1, -1):
+        block = get_l2_block(rpc_url, num, timeout)
+        if block:
+            blocks.append(block)
+        proposals = discover_latest_proposals_from_blocks(blocks, count)
+        if len(proposals) >= count:
+            return proposals
+    return discover_latest_proposals_from_blocks(blocks, count)
 
 
 def run_command(cmd: List[str]) -> subprocess.CompletedProcess:
@@ -151,9 +239,22 @@ def main() -> int:
         logger.error("Missing binaries. Run script/prepare_regression.sh first.")
         return 2
 
-    # TODO: hook in discovery logic from old stress_shasta_proposal.py
-    proposals = []
-    selected = select_proposals(proposals, parse_range(args.range_value), args.count)
+    if not l2_rpc:
+        logger.error("Missing l2_rpc in config.")
+        return 2
+    if not timeout:
+        timeout = 10
+
+    range_tuple = parse_range(args.range_value)
+    if range_tuple:
+        proposals = discover_proposals_from_l2_range(l2_rpc, range_tuple[0], range_tuple[1], timeout)
+    elif args.count:
+        proposals = discover_latest_proposals_from_l2(l2_rpc, args.count, timeout)
+    else:
+        logger.error("Either --range or --count must be provided.")
+        return 2
+
+    selected = select_proposals(proposals, range_tuple, args.count)
     summary = {
         "timestamp": int(time.time()),
         "inputs": {

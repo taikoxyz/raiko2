@@ -33,6 +33,20 @@ def resolve_event_address_from_chain_spec(
     return None
 
 
+def resolve_event_address_from_config(config: Dict) -> Optional[str]:
+    event_address = config.get("event_address")
+    if event_address:
+        return event_address
+    chain_spec_list = config.get("chain_spec_list")
+    l1_chain = config.get("l1_chain")
+    l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
+    if not (chain_spec_list and l1_chain):
+        return None
+    return resolve_event_address_from_chain_spec(
+        Path(chain_spec_list), l1_chain, l1_contract_fork
+    )
+
+
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
@@ -245,19 +259,15 @@ def main() -> int:
     chain_spec_list = config.get("chain_spec_list")
     l1_chain = config.get("l1_chain")
     l2_chain = config.get("l2_chain")
-    l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
     l1_rpc = config.get("l1_rpc")
     l2_rpc = config.get("l2_rpc")
+    event_address = resolve_event_address_from_config(config)
     if chain_spec_list and (l1_chain or l2_chain):
         spec_path = Path(chain_spec_list)
         if l1_chain and not l1_rpc:
             l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
         if l2_chain and not l2_rpc:
             l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
-        if l1_chain and not event_address:
-            event_address = resolve_event_address_from_chain_spec(
-                spec_path, l1_chain, l1_contract_fork
-            )
     event_address = config.get("event_address")
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")

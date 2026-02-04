@@ -155,3 +155,25 @@ class TestChainSpecContracts(unittest.TestCase):
                 resolve_event_address_from_chain_spec(spec_path, "taiko_dev", "SHASTA"),
                 "0xabc",
             )
+
+
+class TestConfigEventAddress(unittest.TestCase):
+    def test_resolve_event_address_from_config(self):
+        from shasta_regression import resolve_event_address_from_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps([
+                    {
+                        "name": "taiko_dev_l1",
+                        "l1_contract": {"SHASTA": "0xabc"},
+                    }
+                ])
+            )
+            config = {
+                "chain_spec_list": str(spec_path),
+                "l1_chain": "taiko_dev_l1",
+                "l1_contract_fork": "SHASTA",
+            }
+            self.assertEqual(resolve_event_address_from_config(config), "0xabc")

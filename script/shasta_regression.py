@@ -14,6 +14,14 @@ def load_config(path: Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[str]:
+    data = json.loads(Path(spec_path).read_text())
+    for entry in data:
+        if entry.get("name") == chain_name:
+            return entry.get("rpc")
+    return None
+
+
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
@@ -223,8 +231,17 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
+    chain_spec_list = config.get("chain_spec_list")
+    l1_chain = config.get("l1_chain")
+    l2_chain = config.get("l2_chain")
     l1_rpc = config.get("l1_rpc")
     l2_rpc = config.get("l2_rpc")
+    if chain_spec_list and (l1_chain or l2_chain):
+        spec_path = Path(chain_spec_list)
+        if l1_chain and not l1_rpc:
+            l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
+        if l2_chain and not l2_rpc:
+            l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
     event_address = config.get("event_address")
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")

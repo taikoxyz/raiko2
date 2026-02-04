@@ -116,3 +116,20 @@ class TestLatestDiscovery(unittest.TestCase):
         ]
         latest = discover_latest_proposals_from_blocks(list(reversed(blocks)), count=2)
         self.assertEqual(latest, [2, 3])
+
+
+class TestChainSpecLookup(unittest.TestCase):
+    def test_resolve_rpc_from_chain_spec(self):
+        from shasta_regression import resolve_rpc_from_chain_spec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {"name": "l1", "rpc": "http://l1"},
+                        {"name": "l2", "rpc": "http://l2"},
+                    ]
+                )
+            )
+            self.assertEqual(resolve_rpc_from_chain_spec(spec_path, "l2"), "http://l2")

@@ -59,6 +59,14 @@ class TestSelection(unittest.TestCase):
         self.assertEqual(picked, [4, 5])
 
 
+class TestSelectionAll(unittest.TestCase):
+    def test_select_all_proposals_returns_all(self):
+        from shasta_regression import select_all_proposals
+
+        proposals = [3, 4, 7]
+        self.assertEqual(select_all_proposals(proposals), proposals)
+
+
 class TestAggregationGrouping(unittest.TestCase):
     def test_grouping(self):
         from shasta_regression import group_for_aggregation
@@ -66,6 +74,15 @@ class TestAggregationGrouping(unittest.TestCase):
         proofs = ["a", "b", "c", "d", "e"]
         groups = group_for_aggregation(proofs, size=2)
         self.assertEqual(groups, [["a", "b"], ["c", "d"], ["e"]])
+
+
+class TestAggregationGroupingPaths(unittest.TestCase):
+    def test_grouping_paths(self):
+        from shasta_regression import group_for_aggregation
+
+        proofs = [Path("/tmp/a"), Path("/tmp/b"), Path("/tmp/c")]
+        groups = group_for_aggregation(proofs, size=2)
+        self.assertEqual(groups, [[Path("/tmp/a"), Path("/tmp/b")], [Path("/tmp/c")]])
 
 
 class TestSummary(unittest.TestCase):
@@ -284,6 +301,112 @@ class TestRpcCall(unittest.TestCase):
         with mock.patch("shasta_regression.requests.post") as post:
             post.side_effect = Exception("boom")
             self.assertIsNone(rpc_call("http://rpc", "eth_blockNumber", [], 1))
+
+
+class TestCountValidation(unittest.TestCase):
+    def test_count_is_capped(self):
+        from shasta_regression import validate_count_option
+
+        ok, message = validate_count_option(count=6)
+        self.assertFalse(ok)
+        self.assertIn("max", message.lower())
+
+
+class TestRangeParsing(unittest.TestCase):
+    def test_parse_range_invalid_returns_none(self):
+        from shasta_regression import parse_range
+
+        self.assertIsNone(parse_range("1"))
+        self.assertIsNone(parse_range("1:"))
+        self.assertIsNone(parse_range("1:2:3"))
+        self.assertIsNone(parse_range("a:b"))
+
+
+class TestConfigErrors(unittest.TestCase):
+    def test_load_config_missing_file_raises(self):
+        from shasta_regression import load_config
+
+        with self.assertRaises(ValueError):
+            load_config(Path("/nope/config.json"))
+
+    def test_load_config_invalid_json_raises(self):
+        from shasta_regression import load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text("{invalid json}")
+            with self.assertRaises(ValueError):
+                load_config(cfg_path)
+
+
+class TestChainSpecErrors(unittest.TestCase):
+    def test_load_chain_specs_invalid_json_raises(self):
+        from shasta_regression import load_chain_specs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text("{invalid json}")
+            with self.assertRaises(ValueError):
+                load_chain_specs(spec_path)
+
+
+class TestRangeExpansion(unittest.TestCase):
+    def test_expand_range_to_proposal_boundaries(self):
+        from shasta_regression import expand_range_to_proposal_boundaries
+
+        def extradata(pid: int) -> str:
+            return f"0x4b{pid:012x}"
+
+        block_map = {}
+        for num in range(8, 13):
+            block_map[num] = {"number": num, "extraData": extradata(100)}
+        for num in range(13, 16):
+            block_map[num] = {"number": num, "extraData": extradata(101)}
+        for num in range(16, 19):
+            block_map[num] = {"number": num, "extraData": extradata(102)}
+        for num in range(19, 23):
+            block_map[num] = {"number": num, "extraData": extradata(103)}
+
+        def fake_get_block(_rpc, num, _timeout):
+            return block_map.get(num)
+
+        with mock.patch("shasta_regression.get_l2_block", side_effect=fake_get_block):
+            with mock.patch(
+                "shasta_regression.get_latest_l2_block_number", return_value=22
+            ):
+                start, end, start_pid, end_pid = expand_range_to_proposal_boundaries(
+                    "http://rpc", 11, 17, timeout=1
+                )
+        self.assertEqual((start, end), (8, 18))
+        self.assertEqual((start_pid, end_pid), (100, 102))
+
+
+class TestCompletedProposalDiscovery(unittest.TestCase):
+    def test_discover_latest_completed_proposals_skips_current(self):
+        from shasta_regression import discover_latest_completed_proposals_from_l2
+
+        def extradata(pid: int) -> str:
+            return f"0x4b{pid:012x}"
+
+        block_map = {}
+        for num in range(0, 4):
+            block_map[num] = {"number": num, "extraData": extradata(1)}
+        for num in range(4, 7):
+            block_map[num] = {"number": num, "extraData": extradata(2)}
+        for num in range(7, 10):
+            block_map[num] = {"number": num, "extraData": extradata(3)}
+
+        def fake_get_block(_rpc, num, _timeout):
+            return block_map.get(num)
+
+        with mock.patch("shasta_regression.get_l2_block", side_effect=fake_get_block):
+            with mock.patch(
+                "shasta_regression.get_latest_l2_block_number", return_value=9
+            ):
+                proposals = discover_latest_completed_proposals_from_l2(
+                    "http://rpc", count=2, timeout=1, max_scan=20
+                )
+        self.assertEqual(proposals, [1, 2])
 
 
 if __name__ == "__main__":

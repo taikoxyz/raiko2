@@ -10,12 +10,19 @@ import logging
 import time
 
 
+def load_json_file(path: Path, label: str) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as err:
+        raise ValueError(f"{label} is invalid: {path}") from err
+
+
 def load_config(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return load_json_file(path, "config")  # type: ignore[return-value]
 
 
 def load_chain_specs(spec_path: Path) -> List[Dict]:
-    return json.loads(spec_path.read_text())
+    return load_json_file(spec_path, "chain spec")  # type: ignore[return-value]
 
 
 def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[str]:
@@ -112,7 +119,11 @@ def select_proposals(
     return proposals
 
 
-def group_for_aggregation(proofs, size):
+def select_all_proposals(proposals: List[int]) -> List[int]:
+    return proposals
+
+
+def group_for_aggregation(proofs: List[Path], size: int) -> List[List[Path]]:
     if size <= 0:
         return []
     return [proofs[i : i + size] for i in range(0, len(proofs), size)]
@@ -285,8 +296,79 @@ def write_summary(path: Path, summary: Dict) -> None:
 def parse_range(value: Optional[str]) -> Optional[tuple]:
     if not value:
         return None
-    start, end = value.split(":")
-    return (int(start), int(end))
+    try:
+        start, end = value.split(":")
+        return (int(start), int(end))
+    except (ValueError, TypeError):
+        return None
+
+
+def validate_count_option(count: Optional[int], max_count: int = 5) -> tuple:
+    if count is None:
+        return True, ""
+    if count <= 0:
+        return False, "count must be positive"
+    if count > max_count:
+        return False, f"count exceeds max {max_count}"
+    return True, ""
+
+
+def expand_range_to_proposal_boundaries(
+    rpc_url: str, start: int, end: int, timeout: int
+) -> tuple:
+    start_pid = proposal_id_for_block(rpc_url, start, timeout)
+    end_pid = proposal_id_for_block(rpc_url, end, timeout)
+    if start_pid is None or end_pid is None:
+        return start, end, start_pid, end_pid
+
+    expanded_start = start
+    while expanded_start > 0:
+        candidate = expanded_start - 1
+        pid = proposal_id_for_block(rpc_url, candidate, timeout)
+        if pid is None or pid != start_pid:
+            break
+        expanded_start = candidate
+
+    latest = get_latest_l2_block_number(rpc_url, timeout)
+    expanded_end = end
+    while expanded_end < latest:
+        candidate = expanded_end + 1
+        pid = proposal_id_for_block(rpc_url, candidate, timeout)
+        if pid is None or pid != end_pid:
+            break
+        expanded_end = candidate
+
+    return expanded_start, expanded_end, start_pid, end_pid
+
+
+def discover_latest_completed_proposals_from_l2(
+    rpc_url: str,
+    count: int,
+    timeout: int,
+    max_scan: int = 5000,
+) -> List[int]:
+    latest = get_latest_l2_block_number(rpc_url, timeout)
+    current_pid = proposal_id_for_block(rpc_url, latest, timeout)
+    proposals: List[int] = []
+    last_seen: Optional[int] = None
+    scanned = 0
+    for num in range(latest, -1, -1):
+        block = get_l2_block(rpc_url, num, timeout)
+        scanned += 1
+        if scanned > max_scan:
+            break
+        if not block:
+            continue
+        pid = extract_proposal_id_from_extradata(block.get("extraData", ""))
+        if pid is None or pid == current_pid:
+            continue
+        if pid != last_seen:
+            proposals.append(pid)
+            last_seen = pid
+        if len(proposals) >= count:
+            break
+    proposals.reverse()
+    return proposals
 
 
 def setup_logger(log_path: Path) -> logging.Logger:
@@ -303,11 +385,23 @@ def setup_logger(log_path: Path) -> logging.Logger:
     return logger
 
 
+def proposal_id_for_block(rpc_url: str, block_number: int, timeout: int) -> Optional[int]:
+    block = get_l2_block(rpc_url, block_number, timeout)
+    if not block:
+        return None
+    return extract_proposal_id_from_extradata(block.get("extraData", ""))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Shasta regression runner")
     parser.add_argument("--config", required=True, help="Path to JSON config")
     parser.add_argument("--range", dest="range_value", help="L2 range start:end", default=None)
-    parser.add_argument("--count", type=int, default=None, help="Most recent N proposals")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=None,
+        help="Most recent N completed proposals (max 5; skips current)",
+    )
     parser.add_argument("--aggregate", type=int, default=0, help="Aggregation group size (0=off)")
     parser.add_argument("--out-dir", default="test/regression/shasta")
     parser.add_argument("--prove-type", default="native")
@@ -325,7 +419,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = load_config(Path(args.config))
+    try:
+        config = load_config(Path(args.config))
+    except ValueError as err:
+        print(f"ERROR: {err}")
+        return 2
     chain_spec_list = config.get("chain_spec_list")
     l1_chain = config.get("l1_chain")
     l2_chain = config.get("l2_chain")
@@ -335,7 +433,11 @@ def main() -> int:
     l2_chain_id = config.get("l2_chain_id")
     specs = None
     if chain_spec_list:
-        specs = load_chain_specs(Path(chain_spec_list))
+        try:
+            specs = load_chain_specs(Path(chain_spec_list))
+        except ValueError as err:
+            print(f"ERROR: {err}")
+            return 2
     event_address = resolve_event_address_from_config(config, specs)
     if chain_spec_list and (l1_chain or l2_chain):
         if specs is None:
@@ -348,10 +450,10 @@ def main() -> int:
             l1_chain_id = resolve_chain_id_from_specs(specs, l1_chain)
         if l2_chain and not l2_chain_id:
             l2_chain_id = resolve_chain_id_from_specs(specs, l2_chain)
+    # TODO: Use event_abi/anchor_abi when adding L1 event-based discovery.
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")
-    poll_interval = args.poll_interval or config.get("poll_interval_sec")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -379,21 +481,46 @@ def main() -> int:
         timeout = 10
 
     range_tuple = parse_range(args.range_value)
+    ok, message = validate_count_option(args.count)
+    if not ok:
+        logger.error("%s", message)
+        return 2
+
     if range_tuple:
-        proposals = discover_proposals_from_l2_range(l2_rpc, range_tuple[0], range_tuple[1], timeout)
+        expanded_start, expanded_end, start_pid, end_pid = expand_range_to_proposal_boundaries(
+            l2_rpc, range_tuple[0], range_tuple[1], timeout
+        )
+        logger.info(
+            "Resolved range %s:%s (proposals %s..%s)",
+            expanded_start,
+            expanded_end,
+            start_pid,
+            end_pid,
+        )
+        proposals = discover_proposals_from_l2_range(
+            l2_rpc, expanded_start, expanded_end, timeout
+        )
+        summary_range = f"{expanded_start}:{expanded_end}"
+        summary_proposals = [start_pid, end_pid]
     elif args.count:
-        proposals = discover_latest_proposals_from_l2(l2_rpc, args.count, timeout)
+        proposals = discover_latest_completed_proposals_from_l2(
+            l2_rpc, args.count, timeout
+        )
+        summary_range = None
+        summary_proposals = None
     else:
         logger.error("Either --range or --count must be provided.")
         return 2
 
     logger.info("Discovered %s proposals", len(proposals))
-    selected = select_proposals(proposals, range_tuple, args.count)
+    selected = select_all_proposals(proposals)
     logger.info("Selected %s proposals", len(selected))
     summary = {
         "timestamp": int(time.time()),
         "inputs": {
             "range": args.range_value,
+            "resolved_range": summary_range,
+            "resolved_proposals": summary_proposals,
             "count": args.count,
             "aggregate": args.aggregate,
             "prove_type": args.prove_type,

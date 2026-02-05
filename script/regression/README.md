@@ -17,7 +17,10 @@ script/regression/prepare_regression.sh
 ## Run
 
 ```bash
-python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --count 1
+python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --range 1000:1010
+
+# Or run the most recent completed proposals (skips the current in-progress proposal).
+python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --count 3
 ```
 
 ## Outputs

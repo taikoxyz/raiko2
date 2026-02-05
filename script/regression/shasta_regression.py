@@ -179,7 +179,16 @@ def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[
         )
         response.raise_for_status()
         return response.json()
-    except Exception:
+    except Exception as err:
+        logger = logging.getLogger("shasta_regression")
+        logger.debug(
+            "RPC call failed: url=%s method=%s params=%s timeout=%s error=%s",
+            rpc_url,
+            method,
+            params,
+            timeout,
+            err,
+        )
         return None
 
 

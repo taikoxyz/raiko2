@@ -4,7 +4,7 @@
 
 **Goal:** Add a Python regression driver that discovers Shasta proposals, runs preflight + guest-launcher release binaries, and optionally aggregates proofs, writing artifacts to `test/regression/shasta/`.
 
-**Architecture:** A single CLI script (`script/shasta_regression.py`) loads JSON config + CLI overrides, discovers proposal IDs via L1 events/L2 lookup, then runs binaries in sequence. A helper shell script (`script/prepare_regression.sh`) builds the release binaries. Outputs are deterministic per proposal ID.
+**Architecture:** A single CLI script (`script/regression/shasta_regression.py`) loads JSON config + CLI overrides, discovers proposal IDs via L1 events/L2 lookup, then runs binaries in sequence. A helper shell script (`script/regression/prepare_regression.sh`) builds the release binaries. Outputs are deterministic per proposal ID.
 
 **Tech Stack:** Python 3, `requests`, `web3`, `argparse`, `subprocess`, JSON; Rust binaries (`preflight`, `guest-launcher`).
 
@@ -15,7 +15,7 @@
 ### 1) Build binaries
 
 ```bash
-script/prepare_regression.sh
+script/regression/prepare_regression.sh
 ```
 
 ### 2) Create config
@@ -35,7 +35,7 @@ script/prepare_regression.sh
 ### 3) Run regression
 
 ```bash
-python script/shasta_regression.py --config ./config.json --count 10 --aggregate 3
+python script/regression/shasta_regression.py --config ./config.json --count 10 --aggregate 3
 ```
 
 ### Outputs

@@ -1,7 +1,7 @@
 # Shasta Regression Harness — Design
 
 ## Goal
-Create a regression harness that validates Shasta proposal proof generation via **preflight → guest-launcher (SP1) → proof JSON**, and supports **SP1 aggregation** using proof JSON outputs. The harness is file-based, deterministic, and independent of HTTP API testing.
+Create a regression harness that validates Shasta proposal proof generation via **preflight → guest-launcher (native or SP1) → proof JSON**, and supports **SP1 aggregation** using proof JSON outputs. The harness is file-based, deterministic, and independent of HTTP API testing.
 
 ## Scope
 - Python script: `script/regression/shasta_regression.py` (in raiko2 repo).
@@ -23,13 +23,13 @@ Non-goals: API testing, parallel execution, and Rust-based discovery.
 - `script/regression/shasta_regression.py`
   - Required: `--config <json>` (chain spec list + rpc + chain ids)
   - Discovery: `--range <start:end>` or `--count <N>` (count capped)
-  - Proof: `--prove-type native` (default)
-  - Aggregation: `--aggregate N`
-  - Output: `--out-dir test/regression/shasta`
+- Proof: `--proof-type native` (default; set to `sp1` for SP1 proofs/aggregation)
+- Aggregation: `--aggregate N`
+- Output: `--out-dir test/regression/shasta`
 
 ## `guest-launcher` usage
-- Proposal: `--input <path> --mode prove --proof-mode compressed --output <path>`
-- Aggregation: `--aggregate <proof...> --mode prove --output <path>`
+- Proposal: `--input <path> --mode prove --proof-mode compressed --proof-type <native|sp1> --output <path>`
+- Aggregation: `--aggregate <proof...> --mode prove --proof-type sp1 --output <path>`
 
 ## Proof Format
 - `Proof` JSON (raiko2 primitives)

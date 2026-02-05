@@ -5784,9 +5784,11 @@ dependencies = [
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
+ "raiko2-prover",
  "serde",
  "serde_json",
  "sp1-sdk",
+ "tokio",
 ]
 
 [[package]]

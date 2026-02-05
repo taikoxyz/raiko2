@@ -290,6 +290,7 @@ def build_guest_launcher_cmd(
     mode: str,
     proof_mode: str,
     output_path: Optional[Path],
+    proof_type: str,
 ) -> List[str]:
     cmd = [
         guest_bin,
@@ -299,6 +300,8 @@ def build_guest_launcher_cmd(
         mode,
         "--proof-mode",
         proof_mode,
+        "--proof-type",
+        proof_type,
     ]
     if output_path:
         cmd.extend(["--output", str(output_path)])
@@ -311,6 +314,7 @@ def run_guest_launcher(
     mode: str,
     proof_mode: str,
     output_path: Optional[Path],
+    proof_type: str,
 ) -> subprocess.CompletedProcess:
     cmd = build_guest_launcher_cmd(
         guest_bin=guest_bin,
@@ -318,6 +322,7 @@ def run_guest_launcher(
         mode=mode,
         proof_mode=proof_mode,
         output_path=output_path,
+        proof_type=proof_type,
     )
     return run_command(cmd)
 
@@ -326,6 +331,7 @@ def run_aggregation(
     guest_bin: str,
     proof_files: Iterable[Path],
     out_path: Path,
+    proof_type: str,
 ) -> subprocess.CompletedProcess:
     cmd = [
         guest_bin,
@@ -333,6 +339,8 @@ def run_aggregation(
         *[str(p) for p in proof_files],
         "--mode",
         "prove",
+        "--proof-type",
+        proof_type,
         "--output",
         str(out_path),
     ]
@@ -454,7 +462,11 @@ def main() -> int:
     )
     parser.add_argument("--aggregate", type=int, default=0, help="Aggregation group size (0=off)")
     parser.add_argument("--out-dir", default="test/regression/shasta")
-    parser.add_argument("--prove-type", default="native")
+    parser.add_argument(
+        "--proof-type",
+        default=None,
+        help="Proof backend to use (native or sp1). Defaults to config value or native.",
+    )
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--poll-interval", type=int, default=None)
     parser.add_argument(
@@ -504,6 +516,7 @@ def main() -> int:
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")
+    proof_type = args.proof_type or config.get("proof_type") or "native"
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -513,7 +526,12 @@ def main() -> int:
         logger.error("Missing binaries. Run script/prepare_regression.sh first.")
         return 2
 
-    logger.info("Starting discovery (range=%s, count=%s)", args.range_value, args.count)
+    logger.info(
+        "Starting discovery (range=%s, count=%s, proof_type=%s)",
+        args.range_value,
+        args.count,
+        proof_type,
+    )
 
     preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
     if not preflight_rpc:
@@ -573,16 +591,19 @@ def main() -> int:
             "resolved_proposals": summary_proposals,
             "count": args.count,
             "aggregate": args.aggregate,
-            "prove_type": args.prove_type,
+            "proof_type": proof_type,
         },
         "successes": [],
         "failures": [],
         "errors": {},
     }
 
-    guest_mode = "execute"
+    guest_mode = "prove" if proof_type == "native" else "execute"
     proof_mode = "plonk"
     if args.aggregate and args.aggregate > 0:
+        if proof_type != "sp1":
+            logger.error("Aggregation requires proof_type=sp1.")
+            return 2
         if guest_mode != "prove":
             logger.warning("Aggregation requested; switching guest-launcher to prove mode.")
         guest_mode = "prove"
@@ -598,7 +619,7 @@ def main() -> int:
             preflight_rpc,
             l2_chain_id,
             l1_chain_id,
-            args.prove_type,
+            proof_type,
         )
         if preflight.returncode != 0:
             logger.error("preflight failed for %s: %s", proposal_id, preflight.stderr)
@@ -613,6 +634,7 @@ def main() -> int:
             guest_mode,
             proof_mode,
             paths["proof"] if guest_mode == "prove" else None,
+            proof_type,
         )
         if guest.returncode != 0:
             logger.error("guest-launcher failed for %s: %s", proposal_id, guest.stderr)
@@ -628,7 +650,7 @@ def main() -> int:
         for idx, group in enumerate(groups, start=1):
             logger.info(format_progress(idx, len(groups), "aggregate"))
             out_path = out_dir / f"aggregation_{idx}.proof.json"
-            result = run_aggregation(args.guest_launcher_bin, group, out_path)
+            result = run_aggregation(args.guest_launcher_bin, group, out_path, "sp1")
             if result.returncode != 0:
                 logger.error("aggregation failed for group %s: %s", idx, result.stderr)
 

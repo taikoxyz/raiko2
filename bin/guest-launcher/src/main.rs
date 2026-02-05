@@ -2,24 +2,28 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
 use alloy_primitives::{B256, hex};
+use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
-use raiko2_pipeline::{ProofStage, ProverBackend};
+use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::Proof;
-use raiko2_primitives_shasta::GuestInput;
 use raiko2_primitives_shasta::decode_proof_carry_data;
 use raiko2_primitives_shasta::encode_proof_carry_data;
-use raiko2_primitives_shasta::ShastaZkAggregationGuestInput;
 use raiko2_primitives_shasta::instance::words_to_bytes_be;
+use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::{ProofCarryData, TransitionInputData};
+use raiko2_prover::Prover;
+use raiko2_prover::native::NativeProver;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, SP1ProofWithPublicValues};
+use serde_json::json;
 use sp1_sdk::network::Address;
 use sp1_sdk::utils::setup_logger;
-use sp1_sdk::{ProverClient, SP1ProofMode, SP1Stdin, SP1VerifyingKey};
+use sp1_sdk::{
+    HashableKey, ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
+};
+use tokio::runtime::Runtime;
 
 #[derive(Parser)]
 #[command(name = "guest-launcher")]
@@ -37,6 +41,9 @@ struct Args {
     /// Proof mode when generating proofs.
     #[arg(long, value_enum, default_value = "plonk")]
     proof_mode: ProofMode,
+    /// Proof backend to use.
+    #[arg(long, value_enum, default_value = "native")]
+    proof_type: ProofType,
     /// Path to write proof JSON output.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -50,6 +57,12 @@ struct Args {
 enum Mode {
     Execute,
     Prove,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum ProofType {
+    Native,
+    Sp1,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -125,93 +138,20 @@ fn read_input(path: &PathBuf) -> Result<GuestInput> {
 }
 
 fn run_proposal(args: Args) -> Result<()> {
-    let input_path = args.input.context("missing --input")?;
+    let input_path = args.input.clone().context("missing --input")?;
     let input = read_input(&input_path)?;
-    let mut stdin = SP1Stdin::new();
-    // IMPORTANT: pass GuestInput as raw bincode bytes.
-    // This avoids host/guest schema/config mismatches in SP1's typed IO for complex structs.
-    let guest_input_bytes = bincode::serialize(&input).context("bincode serialize GuestInput")?;
-    stdin.write_vec(guest_input_bytes);
+    let proof_carry_data = build_proof_carry_data(&input);
 
-    // Chain id must match what the guest expects for the witness' chain spec.
-    // Prefer the witness' chain id (it is what the pipeline executes against), and fall back to
-    // the manifest chain id if the witness list is empty.
-    let chain_id = input
-        .witnesses
-        .first()
-        .map(|w| w.chain_spec.chain_id)
-        .filter(|&id| id != 0)
-        .unwrap_or(input.taiko.chain_spec.chain_id);
-    let proof_carry_data = ProofCarryData {
-        chain_id,
-        verifier: Address::default(),
-        transition_input: TransitionInputData {
-            proposal_id: input.taiko.proposal_id,
-            ..Default::default()
-        },
-    };
-    stdin.write(&proof_carry_data);
-
-    let elf = SP1_SHASTA_BACKEND
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")?;
-
-    let prover = ProverClient::from_env();
-
-    let mut report = BenchReport {
-        stage: "proposal",
-        mode: args.mode.as_str(),
-        proof_mode: args.proof_mode.as_str(),
-        input: input_path.display().to_string(),
-        public_values: String::new(),
-        wall_time_ms: 0,
-        cycle_tracker: Vec::new(),
-    };
-
-    match args.mode {
-        Mode::Execute => {
-            let start = Instant::now();
-            let (public_values, execution_report) = prover.execute(elf, &stdin).run()?;
-            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            report.public_values = public_values.raw();
-
-            println!("public_values: {}", report.public_values);
-            if !execution_report.cycle_tracker.is_empty() {
-                println!("cycle_tracker:");
-                for (label, cycles) in execution_report.cycle_tracker {
-                    println!("  {label}: {cycles}");
-                    report.cycle_tracker.push(BenchCycleEntry { label, cycles });
-                }
-            }
-        }
-        Mode::Prove => {
-            let (pk, vk) = prover.setup(elf);
-            let start = Instant::now();
-            let proof = prover
-                .prove(&pk, &stdin)
-                .mode(args.proof_mode.into())
-                .run()
-                .context("prove failed")?;
-            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            report.public_values = proof.public_values.raw();
-            println!("public_values: {}", report.public_values);
-
-            if let Some(path) = &args.output {
-                let output = build_sp1_proof_output(&proof, &vk, Some(&proof_carry_data))?;
-                write_proof_json(path, &output)?;
-            }
-        }
+    match args.proof_type {
+        ProofType::Sp1 => run_sp1_proposal(args, input_path, input, proof_carry_data),
+        ProofType::Native => run_native_proposal(args, input_path, input, proof_carry_data),
     }
-
-    if let Some(path) = &args.json_out {
-        let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
-        fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
-    }
-
-    Ok(())
 }
 
 fn run_aggregation(args: Args) -> Result<()> {
+    if args.proof_type != ProofType::Sp1 {
+        anyhow::bail!("aggregation is supported only for --proof-type sp1");
+    }
     if args.aggregate.is_empty() {
         anyhow::bail!("missing --aggregate proofs");
     }
@@ -307,11 +247,154 @@ fn build_sp1_proof_output(
     })
 }
 
+fn build_proof_carry_data(input: &GuestInput) -> ProofCarryData {
+    // Chain id must match what the guest expects for the witness' chain spec.
+    // Prefer the witness' chain id (it is what the pipeline executes against), and fall back to
+    // the manifest chain id if the witness list is empty.
+    let chain_id = input
+        .witnesses
+        .first()
+        .map(|w| w.chain_spec.chain_id)
+        .filter(|&id| id != 0)
+        .unwrap_or(input.taiko.chain_spec.chain_id);
+    ProofCarryData {
+        chain_id,
+        verifier: Address::default(),
+        transition_input: TransitionInputData {
+            proposal_id: input.taiko.proposal_id,
+            ..Default::default()
+        },
+    }
+}
+
+fn run_sp1_proposal(
+    args: Args,
+    input_path: PathBuf,
+    input: GuestInput,
+    proof_carry_data: ProofCarryData,
+) -> Result<()> {
+    let mut stdin = SP1Stdin::new();
+    // IMPORTANT: pass GuestInput as raw bincode bytes.
+    // This avoids host/guest schema/config mismatches in SP1's typed IO for complex structs.
+    let guest_input_bytes = bincode::serialize(&input).context("bincode serialize GuestInput")?;
+    stdin.write_vec(guest_input_bytes);
+    stdin.write(&proof_carry_data);
+
+    let elf = SP1_SHASTA_BACKEND
+        .elf(ProofStage::Proposal)
+        .context("load SP1 proposal ELF")?;
+
+    let prover = ProverClient::from_env();
+
+    let mut report = BenchReport {
+        stage: "proposal",
+        mode: args.mode.as_str(),
+        proof_mode: args.proof_mode.as_str(),
+        input: input_path.display().to_string(),
+        public_values: String::new(),
+        wall_time_ms: 0,
+        cycle_tracker: Vec::new(),
+    };
+
+    match args.mode {
+        Mode::Execute => {
+            let start = Instant::now();
+            let (public_values, execution_report) = prover.execute(elf, &stdin).run()?;
+            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            report.public_values = public_values.raw();
+
+            println!("public_values: {}", report.public_values);
+            if !execution_report.cycle_tracker.is_empty() {
+                println!("cycle_tracker:");
+                for (label, cycles) in execution_report.cycle_tracker {
+                    println!("  {label}: {cycles}");
+                    report.cycle_tracker.push(BenchCycleEntry { label, cycles });
+                }
+            }
+        }
+        Mode::Prove => {
+            let (pk, vk) = prover.setup(elf);
+            let start = Instant::now();
+            let proof = prover
+                .prove(&pk, &stdin)
+                .mode(args.proof_mode.into())
+                .run()
+                .context("prove failed")?;
+            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            report.public_values = proof.public_values.raw();
+            println!("public_values: {}", report.public_values);
+
+            if let Some(path) = &args.output {
+                let output = build_sp1_proof_output(&proof, &vk, Some(&proof_carry_data))?;
+                write_proof_json(path, &output)?;
+            }
+        }
+    }
+
+    if let Some(path) = &args.json_out {
+        let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
+        fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn run_native_proposal(
+    args: Args,
+    input_path: PathBuf,
+    input: GuestInput,
+    proof_carry_data: ProofCarryData,
+) -> Result<()> {
+    if args.mode == Mode::Execute {
+        anyhow::bail!("native backend does not support --mode execute");
+    }
+    let output_path = args
+        .output
+        .as_ref()
+        .context("missing --output for native prove")?;
+    let config = json!({ "proof_carry_data": proof_carry_data });
+
+    let backend = NativeBackend;
+    let prover = NativeProver;
+    let rt = Runtime::new().context("create tokio runtime")?;
+
+    let start = Instant::now();
+    let proof = rt
+        .block_on(prover.prove(input, &config, &backend))
+        .context("native prove failed")?;
+    let wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    write_proof_json(output_path, &proof)?;
+
+    if let Some(input_hash) = proof.input {
+        println!("public_values: {input_hash:#x}");
+    }
+
+    if let Some(path) = &args.json_out {
+        let report = BenchReport {
+            stage: "proposal",
+            mode: args.mode.as_str(),
+            proof_mode: args.proof_mode.as_str(),
+            input: input_path.display().to_string(),
+            public_values: proof
+                .input
+                .map(|h| format!("{h:#x}"))
+                .unwrap_or_else(String::new),
+            wall_time_ms,
+            cycle_tracker: Vec::new(),
+        };
+        let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
+        fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
 fn read_proofs(paths: &[PathBuf]) -> Result<Vec<Proof>> {
     let mut proofs = Vec::with_capacity(paths.len());
     for path in paths {
-        let contents = fs::read_to_string(path)
-            .with_context(|| format!("read proof {}", path.display()))?;
+        let contents =
+            fs::read_to_string(path).with_context(|| format!("read proof {}", path.display()))?;
         let proof: Proof =
             serde_json::from_str(&contents).with_context(|| format!("parse {}", path.display()))?;
         proofs.push(proof);
@@ -321,7 +404,11 @@ fn read_proofs(paths: &[PathBuf]) -> Result<Vec<Proof>> {
 
 fn build_aggregation_inputs(
     proofs: &[Proof],
-) -> Result<(ShastaZkAggregationGuestInput, Vec<SP1ProofWithPublicValues>, [u32; 8])> {
+) -> Result<(
+    ShastaZkAggregationGuestInput,
+    Vec<SP1ProofWithPublicValues>,
+    [u32; 8],
+)> {
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
     let mut block_inputs = Vec::with_capacity(proofs.len());
     let mut sp1_proofs = Vec::with_capacity(proofs.len());
@@ -396,13 +483,7 @@ mod tests {
         assert_eq!(
             image_id,
             [
-                0x00010203,
-                0x04050607,
-                0x08090a0b,
-                0x0c0d0e0f,
-                0x10111213,
-                0x14151617,
-                0x18191a1b,
+                0x00010203, 0x04050607, 0x08090a0b, 0x0c0d0e0f, 0x10111213, 0x14151617, 0x18191a1b,
                 0x1c1d1e1f
             ]
         );

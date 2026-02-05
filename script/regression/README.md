@@ -23,6 +23,9 @@ python script/regression/shasta_regression.py --config script/regression/config/
 python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --count 3
 ```
 
+- Proof backend defaults to `native`; switch with `--proof-type sp1`.
+- Aggregation (`--aggregate N`) is supported only when `--proof-type sp1`.
+
 ## Outputs
 
 Artifacts are written under `test/regression/shasta/`.

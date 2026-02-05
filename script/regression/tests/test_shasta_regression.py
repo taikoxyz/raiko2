@@ -283,6 +283,7 @@ class TestGuestLauncherCommand(unittest.TestCase):
             mode="prove",
             proof_mode="compressed",
             output_path=Path("/tmp/proof.json"),
+            proof_type="sp1",
         )
         self.assertIn("--mode", cmd)
         self.assertIn("prove", cmd)
@@ -290,6 +291,8 @@ class TestGuestLauncherCommand(unittest.TestCase):
         self.assertIn("compressed", cmd)
         self.assertIn("--output", cmd)
         self.assertIn("/tmp/proof.json", cmd)
+        self.assertIn("--proof-type", cmd)
+        self.assertIn("sp1", cmd)
 
 
 class TestProgressLogging(unittest.TestCase):

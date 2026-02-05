@@ -65,6 +65,10 @@ def event_address_from_config(config: Dict) -> Optional[str]:
     return resolve_event_address_from_config(config)
 
 
+def preflight_rpc_from_config(config: Dict) -> Optional[str]:
+    return config.get("l2_rpc") or config.get("l1_rpc")
+
+
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
@@ -323,7 +327,8 @@ def main() -> int:
         logger.error("Missing binaries. Run script/prepare_regression.sh first.")
         return 2
 
-    if not l2_rpc:
+    preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
+    if not preflight_rpc:
         logger.error("Missing l2_rpc in config or chain spec lookup.")
         return 2
     if not l2_chain_id:
@@ -366,7 +371,7 @@ def main() -> int:
             args.preflight_bin,
             paths["input"],
             proposal_id,
-            l1_rpc or l2_rpc,
+            preflight_rpc,
             l2_chain_id,
             l1_chain_id,
             args.prove_type,

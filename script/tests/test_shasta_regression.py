@@ -249,3 +249,11 @@ class TestPreflightCommand(unittest.TestCase):
         self.assertIn("--l1-chain-id", cmd)
         self.assertIn("--proposal-id", cmd)
         self.assertNotIn("--l1-rpc", cmd)
+
+
+class TestPreflightRpc(unittest.TestCase):
+    def test_preflight_rpc_uses_l2(self):
+        from shasta_regression import preflight_rpc_from_config
+
+        cfg = {"l1_rpc": "http://l1", "l2_rpc": "http://l2"}
+        self.assertEqual(preflight_rpc_from_config(cfg), "http://l2")

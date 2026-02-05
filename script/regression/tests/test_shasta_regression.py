@@ -35,10 +35,6 @@ class TestConfigAndPaths(unittest.TestCase):
             self.assertTrue(paths["proof"].name.endswith("proposal_42.proof.json"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestBinaries(unittest.TestCase):
     def test_missing_binaries(self):
         from shasta_regression import check_binaries
@@ -288,3 +284,7 @@ class TestRpcCall(unittest.TestCase):
         with mock.patch("shasta_regression.requests.post") as post:
             post.side_effect = Exception("boom")
             self.assertIsNone(rpc_call("http://rpc", "eth_blockNumber", [], 1))
+
+
+if __name__ == "__main__":
+    unittest.main()

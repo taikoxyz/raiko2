@@ -11,11 +11,11 @@ import time
 
 
 def load_config(path: Path) -> dict:
-    return json.loads(Path(path).read_text())
+    return json.loads(path.read_text())
 
 
 def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[str]:
-    data = json.loads(Path(spec_path).read_text())
+    data = json.loads(spec_path.read_text())
     for entry in data:
         if entry.get("name") == chain_name:
             return entry.get("rpc")
@@ -25,7 +25,7 @@ def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[st
 def resolve_event_address_from_chain_spec(
     spec_path: Path, chain_name: str, fork: str
 ) -> Optional[str]:
-    data = json.loads(Path(spec_path).read_text())
+    data = json.loads(spec_path.read_text())
     for entry in data:
         if entry.get("name") == chain_name:
             contracts = entry.get("l1_contract", {})
@@ -34,7 +34,7 @@ def resolve_event_address_from_chain_spec(
 
 
 def resolve_chain_id_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[int]:
-    data = json.loads(Path(spec_path).read_text())
+    data = json.loads(spec_path.read_text())
     for entry in data:
         if entry.get("name") == chain_name:
             return entry.get("chain_id")
@@ -76,8 +76,8 @@ def format_progress(index: int, total: int, stage: str, proposal_id: Optional[in
 
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
-        "input": Path(out_dir) / f"proposal_{proposal_id}.json",
-        "proof": Path(out_dir) / f"proposal_{proposal_id}.proof.json",
+        "input": out_dir / f"proposal_{proposal_id}.json",
+        "proof": out_dir / f"proposal_{proposal_id}.proof.json",
     }
 
 
@@ -254,7 +254,7 @@ def run_aggregation(
 
 
 def write_summary(path: Path, summary: Dict) -> None:
-    Path(path).write_text(json.dumps(summary, indent=2))
+    path.write_text(json.dumps(summary, indent=2))
 
 
 def parse_range(value: Optional[str]) -> Optional[tuple]:

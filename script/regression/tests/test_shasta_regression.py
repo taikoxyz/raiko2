@@ -267,3 +267,14 @@ class TestProgressLogging(unittest.TestCase):
         self.assertIn("2/10", msg)
         self.assertIn("preflight", msg)
         self.assertIn("42", msg)
+
+
+class TestChainSpecCache(unittest.TestCase):
+    def test_resolve_rpc_from_specs(self):
+        from shasta_regression import resolve_rpc_from_specs
+
+        specs = [
+            {"name": "l1", "rpc": "http://l1"},
+            {"name": "l2", "rpc": "http://l2"},
+        ]
+        self.assertEqual(resolve_rpc_from_specs(specs, "l2"), "http://l2")

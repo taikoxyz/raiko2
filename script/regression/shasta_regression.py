@@ -14,9 +14,16 @@ def load_config(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def load_chain_specs(spec_path: Path) -> List[Dict]:
+    return json.loads(spec_path.read_text())
+
+
 def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[str]:
-    data = json.loads(spec_path.read_text())
-    for entry in data:
+    return resolve_rpc_from_specs(load_chain_specs(spec_path), chain_name)
+
+
+def resolve_rpc_from_specs(specs: List[Dict], chain_name: str) -> Optional[str]:
+    for entry in specs:
         if entry.get("name") == chain_name:
             return entry.get("rpc")
     return None
@@ -25,8 +32,14 @@ def resolve_rpc_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[st
 def resolve_event_address_from_chain_spec(
     spec_path: Path, chain_name: str, fork: str
 ) -> Optional[str]:
-    data = json.loads(spec_path.read_text())
-    for entry in data:
+    specs = load_chain_specs(spec_path)
+    return resolve_event_address_from_specs(specs, chain_name, fork)
+
+
+def resolve_event_address_from_specs(
+    specs: List[Dict], chain_name: str, fork: str
+) -> Optional[str]:
+    for entry in specs:
         if entry.get("name") == chain_name:
             contracts = entry.get("l1_contract", {})
             return contracts.get(fork)
@@ -34,14 +47,18 @@ def resolve_event_address_from_chain_spec(
 
 
 def resolve_chain_id_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[int]:
-    data = json.loads(spec_path.read_text())
-    for entry in data:
+    specs = load_chain_specs(spec_path)
+    return resolve_chain_id_from_specs(specs, chain_name)
+
+
+def resolve_chain_id_from_specs(specs: List[Dict], chain_name: str) -> Optional[int]:
+    for entry in specs:
         if entry.get("name") == chain_name:
             return entry.get("chain_id")
     return None
 
 
-def resolve_event_address_from_config(config: Dict) -> Optional[str]:
+def resolve_event_address_from_config(config: Dict, specs: Optional[List[Dict]] = None) -> Optional[str]:
     event_address = config.get("event_address")
     if event_address:
         return event_address
@@ -49,15 +66,16 @@ def resolve_event_address_from_config(config: Dict) -> Optional[str]:
     l1_chain = config.get("l1_chain")
     l2_chain = config.get("l2_chain")
     l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
-    if not chain_spec_list:
+    if not chain_spec_list and specs is None:
         return None
-    spec_path = Path(chain_spec_list)
+    if specs is None:
+        specs = load_chain_specs(Path(chain_spec_list))
     if l1_chain:
-        address = resolve_event_address_from_chain_spec(spec_path, l1_chain, l1_contract_fork)
+        address = resolve_event_address_from_specs(specs, l1_chain, l1_contract_fork)
         if address:
             return address
     if l2_chain:
-        return resolve_event_address_from_chain_spec(spec_path, l2_chain, l1_contract_fork)
+        return resolve_event_address_from_specs(specs, l2_chain, l1_contract_fork)
     return None
 
 
@@ -308,17 +326,21 @@ def main() -> int:
     l2_rpc = config.get("l2_rpc")
     l1_chain_id = config.get("l1_chain_id")
     l2_chain_id = config.get("l2_chain_id")
-    event_address = event_address_from_config(config)
+    specs = None
+    if chain_spec_list:
+        specs = load_chain_specs(Path(chain_spec_list))
+    event_address = event_address_from_config(config, specs)
     if chain_spec_list and (l1_chain or l2_chain):
-        spec_path = Path(chain_spec_list)
+        if specs is None:
+            specs = load_chain_specs(Path(chain_spec_list))
         if l1_chain and not l1_rpc:
-            l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
+            l1_rpc = resolve_rpc_from_specs(specs, l1_chain)
         if l2_chain and not l2_rpc:
-            l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
+            l2_rpc = resolve_rpc_from_specs(specs, l2_chain)
         if l1_chain and not l1_chain_id:
-            l1_chain_id = resolve_chain_id_from_chain_spec(spec_path, l1_chain)
+            l1_chain_id = resolve_chain_id_from_specs(specs, l1_chain)
         if l2_chain and not l2_chain_id:
-            l2_chain_id = resolve_chain_id_from_chain_spec(spec_path, l2_chain)
+            l2_chain_id = resolve_chain_id_from_specs(specs, l2_chain)
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")

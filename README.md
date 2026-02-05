@@ -278,6 +278,7 @@ returns an "image not uploaded" error.
 - [API Documentation](docs/API.md)
 - [Migration Guide](docs/MIGRATION.md)
 - [Shasta Regression Tool](docs/plans/2026-02-04-shasta-regression-tool.md)
+- [Regression Setup](script/regression/README.md)
 
 ## License
 

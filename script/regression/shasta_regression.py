@@ -159,23 +159,30 @@ def discover_latest_proposals_from_blocks(blocks: Iterable[Dict], count: int) ->
     return list(reversed(proposals))
 
 
-def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Dict:
-    response = requests.post(
-        rpc_url,
-        json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()
+def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[Dict]:
+    try:
+        response = requests.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
 
 
 def get_l2_block(rpc_url: str, block_number: int, timeout: int) -> Optional[Dict]:
     payload = rpc_call(rpc_url, "eth_getBlockByNumber", [hex(block_number), False], timeout)
+    if not payload:
+        return None
     return payload.get("result")
 
 
 def get_latest_l2_block_number(rpc_url: str, timeout: int) -> int:
     payload = rpc_call(rpc_url, "eth_blockNumber", [], timeout)
+    if not payload:
+        return 0
     return int(payload.get("result", "0x0"), 16)
 
 

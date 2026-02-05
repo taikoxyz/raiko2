@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -278,3 +279,12 @@ class TestChainSpecCache(unittest.TestCase):
             {"name": "l2", "rpc": "http://l2"},
         ]
         self.assertEqual(resolve_rpc_from_specs(specs, "l2"), "http://l2")
+
+
+class TestRpcCall(unittest.TestCase):
+    def test_rpc_call_handles_request_error(self):
+        from shasta_regression import rpc_call
+
+        with mock.patch("shasta_regression.requests.post") as post:
+            post.side_effect = Exception("boom")
+            self.assertIsNone(rpc_call("http://rpc", "eth_blockNumber", [], 1))

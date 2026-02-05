@@ -284,8 +284,41 @@ def build_preflight_cmd(
     ]
 
 
-def run_guest_launcher(guest_bin: str, input_path: Path) -> subprocess.CompletedProcess:
-    cmd = [guest_bin, "--input", str(input_path), "--mode", "execute"]
+def build_guest_launcher_cmd(
+    guest_bin: str,
+    input_path: Path,
+    mode: str,
+    proof_mode: str,
+    output_path: Optional[Path],
+) -> List[str]:
+    cmd = [
+        guest_bin,
+        "--input",
+        str(input_path),
+        "--mode",
+        mode,
+        "--proof-mode",
+        proof_mode,
+    ]
+    if output_path:
+        cmd.extend(["--output", str(output_path)])
+    return cmd
+
+
+def run_guest_launcher(
+    guest_bin: str,
+    input_path: Path,
+    mode: str,
+    proof_mode: str,
+    output_path: Optional[Path],
+) -> subprocess.CompletedProcess:
+    cmd = build_guest_launcher_cmd(
+        guest_bin=guest_bin,
+        input_path=input_path,
+        mode=mode,
+        proof_mode=proof_mode,
+        output_path=output_path,
+    )
     return run_command(cmd)
 
 
@@ -294,7 +327,15 @@ def run_aggregation(
     proof_files: Iterable[Path],
     out_path: Path,
 ) -> subprocess.CompletedProcess:
-    cmd = [guest_bin, "--aggregate", *[str(p) for p in proof_files], "--output", str(out_path)]
+    cmd = [
+        guest_bin,
+        "--aggregate",
+        *[str(p) for p in proof_files],
+        "--mode",
+        "prove",
+        "--output",
+        str(out_path),
+    ]
     return run_command(cmd)
 
 
@@ -539,6 +580,14 @@ def main() -> int:
         "errors": {},
     }
 
+    guest_mode = "execute"
+    proof_mode = "plonk"
+    if args.aggregate and args.aggregate > 0:
+        if guest_mode != "prove":
+            logger.warning("Aggregation requested; switching guest-launcher to prove mode.")
+        guest_mode = "prove"
+        proof_mode = "compressed"
+
     for idx, proposal_id in enumerate(selected, start=1):
         logger.info(format_progress(idx, len(selected), "preflight", proposal_id))
         paths = output_paths(out_dir, proposal_id)
@@ -558,7 +607,13 @@ def main() -> int:
             continue
 
         logger.info(format_progress(idx, len(selected), "guest-launcher", proposal_id))
-        guest = run_guest_launcher(args.guest_launcher_bin, paths["input"])
+        guest = run_guest_launcher(
+            args.guest_launcher_bin,
+            paths["input"],
+            guest_mode,
+            proof_mode,
+            paths["proof"] if guest_mode == "prove" else None,
+        )
         if guest.returncode != 0:
             logger.error("guest-launcher failed for %s: %s", proposal_id, guest.stderr)
             summary["failures"].append(proposal_id)

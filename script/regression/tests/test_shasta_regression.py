@@ -273,6 +273,25 @@ class TestPreflightRpc(unittest.TestCase):
         self.assertEqual(preflight_rpc_from_config(cfg), "http://l2")
 
 
+class TestGuestLauncherCommand(unittest.TestCase):
+    def test_build_guest_launcher_command(self):
+        from shasta_regression import build_guest_launcher_cmd
+
+        cmd = build_guest_launcher_cmd(
+            guest_bin="/bin/guest-launcher",
+            input_path=Path("/tmp/input.json"),
+            mode="prove",
+            proof_mode="compressed",
+            output_path=Path("/tmp/proof.json"),
+        )
+        self.assertIn("--mode", cmd)
+        self.assertIn("prove", cmd)
+        self.assertIn("--proof-mode", cmd)
+        self.assertIn("compressed", cmd)
+        self.assertIn("--output", cmd)
+        self.assertIn("/tmp/proof.json", cmd)
+
+
 class TestProgressLogging(unittest.TestCase):
     def test_format_progress(self):
         from shasta_regression import format_progress

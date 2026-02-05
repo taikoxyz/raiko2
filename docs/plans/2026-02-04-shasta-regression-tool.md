@@ -4,7 +4,7 @@
 
 **Goal:** Add a Python regression driver that discovers Shasta proposals, runs preflight + guest-launcher release binaries, and optionally aggregates proofs, writing artifacts to `test/regression/shasta/`.
 
-**Architecture:** A single CLI script (`script/regression/shasta_regression.py`) loads JSON config + CLI overrides, discovers proposal IDs via L1 events/L2 lookup, then runs binaries in sequence. A helper shell script (`script/regression/prepare_regression.sh`) builds the release binaries. Outputs are deterministic per proposal ID.
+**Architecture:** A single CLI script (`script/regression/shasta_regression.py`) loads JSON config + CLI overrides, discovers proposal IDs via L2 extradata scan, then runs binaries in sequence. A helper shell script (`script/regression/prepare_regression.sh`) builds the release binaries. Outputs are deterministic per proposal ID.
 
 **Tech Stack:** Python 3, `requests`, `web3`, `argparse`, `subprocess`, JSON; Rust binaries (`preflight`, `guest-launcher`).
 
@@ -18,15 +18,16 @@
 script/regression/prepare_regression.sh
 ```
 
-### 2) Create config
+### 2) Create config (example)
 
 ```json
 {
-  "l1_rpc": "http://127.0.0.1:8545",
-  "l2_rpc": "http://127.0.0.1:9545",
-  "event_address": "0x0000000000000000000000000000000000000000",
-  "event_abi": "path/to/event_abi.json",
-  "anchor_abi": "path/to/anchor_abi.json",
+  "chain_spec_list": "config/chain_spec_list_default.json",
+  "l1_chain": "taiko_dev_l1",
+  "l2_chain": "taiko_dev",
+  "l1_contract_fork": "SHASTA",
+  "event_abi": "../raiko/script/IInbox.json",
+  "anchor_abi": "../raiko/script/Anchor.json",
   "timeout_sec": 3600,
   "poll_interval_sec": 3
 }

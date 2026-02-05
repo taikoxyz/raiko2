@@ -79,10 +79,6 @@ def resolve_event_address_from_config(config: Dict, specs: Optional[List[Dict]] 
     return None
 
 
-def event_address_from_config(config: Dict) -> Optional[str]:
-    return resolve_event_address_from_config(config)
-
-
 def preflight_rpc_from_config(config: Dict) -> Optional[str]:
     return config.get("l2_rpc") or config.get("l1_rpc")
 
@@ -336,7 +332,7 @@ def main() -> int:
     specs = None
     if chain_spec_list:
         specs = load_chain_specs(Path(chain_spec_list))
-    event_address = event_address_from_config(config, specs)
+    event_address = resolve_event_address_from_config(config, specs)
     if chain_spec_list and (l1_chain or l2_chain):
         if specs is None:
             specs = load_chain_specs(Path(chain_spec_list))

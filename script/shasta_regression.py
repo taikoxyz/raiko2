@@ -33,6 +33,14 @@ def resolve_event_address_from_chain_spec(
     return None
 
 
+def resolve_chain_id_from_chain_spec(spec_path: Path, chain_name: str) -> Optional[int]:
+    data = json.loads(Path(spec_path).read_text())
+    for entry in data:
+        if entry.get("name") == chain_name:
+            return entry.get("chain_id")
+    return None
+
+
 def resolve_event_address_from_config(config: Dict) -> Optional[str]:
     event_address = config.get("event_address")
     if event_address:
@@ -178,30 +186,48 @@ def run_preflight(
     preflight_bin: str,
     out_path: Path,
     proposal_id: int,
-    l1_rpc: str,
-    l2_rpc: str,
-    event_address: str,
-    event_abi: str,
-    anchor_abi: Optional[str],
+    rpc_url: str,
+    l2_chain_id: int,
+    l1_chain_id: int,
+    proof_type: str,
 ) -> subprocess.CompletedProcess:
-    cmd = [
+    cmd = build_preflight_cmd(
+        preflight_bin=preflight_bin,
+        proposal_id=proposal_id,
+        rpc_url=rpc_url,
+        l2_chain_id=l2_chain_id,
+        l1_chain_id=l1_chain_id,
+        output_path=out_path,
+        proof_type=proof_type,
+    )
+    return run_command(cmd)
+
+
+def build_preflight_cmd(
+    *,
+    preflight_bin: str,
+    proposal_id: int,
+    rpc_url: str,
+    l2_chain_id: int,
+    l1_chain_id: int,
+    output_path: Path,
+    proof_type: str,
+) -> List[str]:
+    return [
         preflight_bin,
+        "--rpc-url",
+        rpc_url,
+        "--l2-chain-id",
+        str(l2_chain_id),
+        "--l1-chain-id",
+        str(l1_chain_id),
         "--proposal-id",
         str(proposal_id),
-        "--l1-rpc",
-        l1_rpc,
-        "--l2-rpc",
-        l2_rpc,
-        "--event-address",
-        event_address,
-        "--event-abi",
-        event_abi,
+        "--proof-type",
+        proof_type,
         "--output",
-        str(out_path),
+        str(output_path),
     ]
-    if anchor_abi:
-        cmd.extend(["--anchor-abi", anchor_abi])
-    return run_command(cmd)
 
 
 def run_guest_launcher(guest_bin: str, input_path: Path) -> subprocess.CompletedProcess:
@@ -271,6 +297,8 @@ def main() -> int:
     l2_chain = config.get("l2_chain")
     l1_rpc = config.get("l1_rpc")
     l2_rpc = config.get("l2_rpc")
+    l1_chain_id = config.get("l1_chain_id")
+    l2_chain_id = config.get("l2_chain_id")
     event_address = event_address_from_config(config)
     if chain_spec_list and (l1_chain or l2_chain):
         spec_path = Path(chain_spec_list)
@@ -278,6 +306,10 @@ def main() -> int:
             l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
         if l2_chain and not l2_rpc:
             l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
+        if l1_chain and not l1_chain_id:
+            l1_chain_id = resolve_chain_id_from_chain_spec(spec_path, l1_chain)
+        if l2_chain and not l2_chain_id:
+            l2_chain_id = resolve_chain_id_from_chain_spec(spec_path, l2_chain)
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")
@@ -294,6 +326,11 @@ def main() -> int:
     if not l2_rpc:
         logger.error("Missing l2_rpc in config or chain spec lookup.")
         return 2
+    if not l2_chain_id:
+        logger.error("Missing l2_chain_id in config or chain spec lookup.")
+        return 2
+    if not l1_chain_id:
+        l1_chain_id = 1
     if not event_address:
         logger.error("Missing event_address (resolve from chain spec).")
         return 2
@@ -329,11 +366,10 @@ def main() -> int:
             args.preflight_bin,
             paths["input"],
             proposal_id,
-            l1_rpc,
-            l2_rpc,
-            event_address,
-            event_abi,
-            anchor_abi,
+            l1_rpc or l2_rpc,
+            l2_chain_id,
+            l1_chain_id,
+            args.prove_type,
         )
         if preflight.returncode != 0:
             logger.error("preflight failed for %s: %s", proposal_id, preflight.stderr)

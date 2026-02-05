@@ -229,3 +229,23 @@ class TestEventAddressOverride(unittest.TestCase):
                 "l1_contract_fork": "SHASTA",
             }
             self.assertEqual(event_address_from_config(config), "0xdef")
+
+
+class TestPreflightCommand(unittest.TestCase):
+    def test_build_preflight_command(self):
+        from shasta_regression import build_preflight_cmd
+
+        cmd = build_preflight_cmd(
+            preflight_bin="/bin/preflight",
+            proposal_id=7,
+            rpc_url="http://l1",
+            l2_chain_id=123,
+            l1_chain_id=1,
+            output_path=Path("/tmp/out.json"),
+            proof_type="native",
+        )
+        self.assertIn("--rpc-url", cmd)
+        self.assertIn("--l2-chain-id", cmd)
+        self.assertIn("--l1-chain-id", cmd)
+        self.assertIn("--proposal-id", cmd)
+        self.assertNotIn("--l1-rpc", cmd)

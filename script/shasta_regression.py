@@ -41,15 +41,20 @@ def resolve_event_address_from_config(config: Dict) -> Optional[str]:
     l1_chain = config.get("l1_chain")
     l2_chain = config.get("l2_chain")
     l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
-    if not (chain_spec_list and l1_chain):
+    if not chain_spec_list:
         return None
     spec_path = Path(chain_spec_list)
-    address = resolve_event_address_from_chain_spec(spec_path, l1_chain, l1_contract_fork)
-    if address:
-        return address
+    if l1_chain:
+        address = resolve_event_address_from_chain_spec(spec_path, l1_chain, l1_contract_fork)
+        if address:
+            return address
     if l2_chain:
         return resolve_event_address_from_chain_spec(spec_path, l2_chain, l1_contract_fork)
     return None
+
+
+def event_address_from_config(config: Dict) -> Optional[str]:
+    return resolve_event_address_from_config(config)
 
 
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
@@ -266,14 +271,13 @@ def main() -> int:
     l2_chain = config.get("l2_chain")
     l1_rpc = config.get("l1_rpc")
     l2_rpc = config.get("l2_rpc")
-    event_address = resolve_event_address_from_config(config)
+    event_address = event_address_from_config(config)
     if chain_spec_list and (l1_chain or l2_chain):
         spec_path = Path(chain_spec_list)
         if l1_chain and not l1_rpc:
             l1_rpc = resolve_rpc_from_chain_spec(spec_path, l1_chain)
         if l2_chain and not l2_rpc:
             l2_rpc = resolve_rpc_from_chain_spec(spec_path, l2_chain)
-    event_address = config.get("event_address")
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")

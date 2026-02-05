@@ -208,3 +208,24 @@ class TestEventAddressFallback(unittest.TestCase):
                 "l1_contract_fork": "SHASTA",
             }
             self.assertEqual(resolve_event_address_from_config(config), "0xdef")
+
+
+class TestEventAddressOverride(unittest.TestCase):
+    def test_event_address_from_chain_spec_used(self):
+        from shasta_regression import event_address_from_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {"name": "l2", "l1_contract": {"SHASTA": "0xdef"}},
+                    ]
+                )
+            )
+            config = {
+                "chain_spec_list": str(spec_path),
+                "l2_chain": "l2",
+                "l1_contract_fork": "SHASTA",
+            }
+            self.assertEqual(event_address_from_config(config), "0xdef")

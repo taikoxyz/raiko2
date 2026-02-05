@@ -99,7 +99,11 @@ def check_binaries(preflight: str, guest: str) -> bool:
     return not (Path(preflight).is_file() and Path(guest).is_file())
 
 
-def select_proposals(proposals, range_tuple, count):
+def select_proposals(
+    proposals: List[int],
+    range_tuple: Optional[tuple],
+    count: Optional[int],
+) -> List[int]:
     if range_tuple:
         start, end = range_tuple
         return [p for p in proposals if start <= p <= end]

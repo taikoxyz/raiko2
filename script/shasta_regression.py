@@ -69,6 +69,11 @@ def preflight_rpc_from_config(config: Dict) -> Optional[str]:
     return config.get("l2_rpc") or config.get("l1_rpc")
 
 
+def format_progress(index: int, total: int, stage: str, proposal_id: Optional[int] = None) -> str:
+    suffix = f" proposal={proposal_id}" if proposal_id is not None else ""
+    return f"[{index}/{total}] {stage}{suffix}"
+
+
 def output_paths(out_dir: Path, proposal_id: int) -> dict:
     return {
         "input": Path(out_dir) / f"proposal_{proposal_id}.json",
@@ -327,6 +332,8 @@ def main() -> int:
         logger.error("Missing binaries. Run script/prepare_regression.sh first.")
         return 2
 
+    logger.info("Starting discovery (range=%s, count=%s)", args.range_value, args.count)
+
     preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
     if not preflight_rpc:
         logger.error("Missing l2_rpc in config or chain spec lookup.")
@@ -351,7 +358,9 @@ def main() -> int:
         logger.error("Either --range or --count must be provided.")
         return 2
 
+    logger.info("Discovered %s proposals", len(proposals))
     selected = select_proposals(proposals, range_tuple, args.count)
+    logger.info("Selected %s proposals", len(selected))
     summary = {
         "timestamp": int(time.time()),
         "inputs": {
@@ -365,7 +374,8 @@ def main() -> int:
         "errors": {},
     }
 
-    for proposal_id in selected:
+    for idx, proposal_id in enumerate(selected, start=1):
+        logger.info(format_progress(idx, len(selected), "preflight", proposal_id))
         paths = output_paths(out_dir, proposal_id)
         preflight = run_preflight(
             args.preflight_bin,
@@ -382,6 +392,7 @@ def main() -> int:
             summary["errors"][str(proposal_id)] = preflight.stderr
             continue
 
+        logger.info(format_progress(idx, len(selected), "guest-launcher", proposal_id))
         guest = run_guest_launcher(args.guest_launcher_bin, paths["input"])
         if guest.returncode != 0:
             logger.error("guest-launcher failed for %s: %s", proposal_id, guest.stderr)
@@ -394,13 +405,15 @@ def main() -> int:
     if args.aggregate and args.aggregate > 0:
         proof_files = [output_paths(out_dir, pid)["proof"] for pid in summary["successes"]]
         groups = group_for_aggregation(proof_files, args.aggregate)
-        for idx, group in enumerate(groups):
+        for idx, group in enumerate(groups, start=1):
+            logger.info(format_progress(idx, len(groups), "aggregate"))
             out_path = out_dir / f"aggregation_{idx}.proof.json"
             result = run_aggregation(args.guest_launcher_bin, group, out_path)
             if result.returncode != 0:
                 logger.error("aggregation failed for group %s: %s", idx, result.stderr)
 
     write_summary(out_dir / "run_summary.json", summary)
+    logger.info("Done: %s success, %s failures", len(summary["successes"]), len(summary["failures"]))
     return 0
 
 

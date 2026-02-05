@@ -257,3 +257,13 @@ class TestPreflightRpc(unittest.TestCase):
 
         cfg = {"l1_rpc": "http://l1", "l2_rpc": "http://l2"}
         self.assertEqual(preflight_rpc_from_config(cfg), "http://l2")
+
+
+class TestProgressLogging(unittest.TestCase):
+    def test_format_progress(self):
+        from shasta_regression import format_progress
+
+        msg = format_progress(2, 10, "preflight", proposal_id=42)
+        self.assertIn("2/10", msg)
+        self.assertIn("preflight", msg)
+        self.assertIn("42", msg)

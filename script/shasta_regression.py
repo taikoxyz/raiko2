@@ -39,12 +39,17 @@ def resolve_event_address_from_config(config: Dict) -> Optional[str]:
         return event_address
     chain_spec_list = config.get("chain_spec_list")
     l1_chain = config.get("l1_chain")
+    l2_chain = config.get("l2_chain")
     l1_contract_fork = config.get("l1_contract_fork", "SHASTA")
     if not (chain_spec_list and l1_chain):
         return None
-    return resolve_event_address_from_chain_spec(
-        Path(chain_spec_list), l1_chain, l1_contract_fork
-    )
+    spec_path = Path(chain_spec_list)
+    address = resolve_event_address_from_chain_spec(spec_path, l1_chain, l1_contract_fork)
+    if address:
+        return address
+    if l2_chain:
+        return resolve_event_address_from_chain_spec(spec_path, l2_chain, l1_contract_fork)
+    return None
 
 
 def output_paths(out_dir: Path, proposal_id: int) -> dict:

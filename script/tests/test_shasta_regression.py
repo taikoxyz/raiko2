@@ -185,3 +185,26 @@ class TestConfigValidation(unittest.TestCase):
 
         config = {"l1_chain": "taiko_dev_l1"}
         self.assertIsNone(resolve_event_address_from_config(config))
+
+
+class TestEventAddressFallback(unittest.TestCase):
+    def test_event_address_fallback_to_l2_chain(self):
+        from shasta_regression import resolve_event_address_from_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {"name": "l1", "l1_contract": {}},
+                        {"name": "l2", "l1_contract": {"SHASTA": "0xdef"}},
+                    ]
+                )
+            )
+            config = {
+                "chain_spec_list": str(spec_path),
+                "l1_chain": "l1",
+                "l2_chain": "l2",
+                "l1_contract_fork": "SHASTA",
+            }
+            self.assertEqual(resolve_event_address_from_config(config), "0xdef")

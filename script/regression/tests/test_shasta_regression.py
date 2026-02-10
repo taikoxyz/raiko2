@@ -257,12 +257,15 @@ class TestPreflightCommand(unittest.TestCase):
             l1_chain_id=1,
             output_path=Path("/tmp/out.json"),
             proof_type="native",
+            debug_witness=True,
         )
         self.assertIn("--rpc-url", cmd)
         self.assertIn("--l2-chain-id", cmd)
         self.assertIn("--l1-chain-id", cmd)
         self.assertIn("--proposal-id", cmd)
         self.assertNotIn("--l1-rpc", cmd)
+        self.assertIn("--debug-witness", cmd)
+        self.assertNotIn("true", cmd)
 
 
 class TestPreflightRpc(unittest.TestCase):

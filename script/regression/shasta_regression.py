@@ -244,6 +244,7 @@ def run_preflight(
     l2_chain_id: int,
     l1_chain_id: int,
     proof_type: str,
+    debug_witness: bool,
 ) -> subprocess.CompletedProcess:
     cmd = build_preflight_cmd(
         preflight_bin=preflight_bin,
@@ -253,6 +254,7 @@ def run_preflight(
         l1_chain_id=l1_chain_id,
         output_path=out_path,
         proof_type=proof_type,
+        debug_witness=debug_witness,
     )
     return run_command(cmd)
 
@@ -266,8 +268,9 @@ def build_preflight_cmd(
     l1_chain_id: int,
     output_path: Path,
     proof_type: str,
+    debug_witness: bool,
 ) -> List[str]:
-    return [
+    cmd = [
         preflight_bin,
         "--rpc-url",
         rpc_url,
@@ -282,6 +285,9 @@ def build_preflight_cmd(
         "--output",
         str(output_path),
     ]
+    if debug_witness:
+        cmd.append("--debug-witness")
+    return cmd
 
 
 def build_guest_launcher_cmd(
@@ -359,6 +365,17 @@ def parse_range(value: Optional[str]) -> Optional[tuple]:
         return (int(start), int(end))
     except (ValueError, TypeError):
         return None
+
+
+def parse_boolish(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "t", "yes", "y"}:
+        return True
+    if lowered in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
 
 
 def validate_count_option(count: Optional[int], max_count: int = 5) -> tuple:
@@ -467,6 +484,11 @@ def main() -> int:
         default=None,
         help="Proof backend to use (native or sp1). Defaults to config value or native.",
     )
+    parser.add_argument(
+        "--debug-witness",
+        default=None,
+        help="Enable debug witness in preflight (default true).",
+    )
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--poll-interval", type=int, default=None)
     parser.add_argument(
@@ -516,6 +538,9 @@ def main() -> int:
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")
+    debug_witness = parse_boolish(args.debug_witness)
+    if debug_witness is None:
+        debug_witness = config.get("debug_witness", True)
     proof_type = args.proof_type or config.get("proof_type") or "native"
 
     out_dir = Path(args.out_dir)
@@ -527,10 +552,11 @@ def main() -> int:
         return 2
 
     logger.info(
-        "Starting discovery (range=%s, count=%s, proof_type=%s)",
+        "Starting discovery (range=%s, count=%s, proof_type=%s, debug_witness=%s)",
         args.range_value,
         args.count,
         proof_type,
+        debug_witness,
     )
 
     preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
@@ -592,6 +618,7 @@ def main() -> int:
             "count": args.count,
             "aggregate": args.aggregate,
             "proof_type": proof_type,
+            "debug_witness": debug_witness,
         },
         "successes": [],
         "failures": [],
@@ -620,6 +647,7 @@ def main() -> int:
             l2_chain_id,
             l1_chain_id,
             proof_type,
+            debug_witness,
         )
         if preflight.returncode != 0:
             logger.error("preflight failed for %s: %s", proposal_id, preflight.stderr)

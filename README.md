@@ -277,6 +277,7 @@ returns an "image not uploaded" error.
 
 - [API Documentation](docs/API.md)
 - [Migration Guide](docs/MIGRATION.md)
+- [Regression Guide](script/regression/README.md)
 
 ## License
 

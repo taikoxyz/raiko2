@@ -5776,15 +5776,19 @@ dependencies = [
 name = "guest-launcher"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bincode",
  "clap",
  "raiko2-pipeline",
+ "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
+ "raiko2-prover",
  "serde",
  "serde_json",
  "sp1-sdk",
+ "tokio",
 ]
 
 [[package]]

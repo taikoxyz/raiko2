@@ -24,9 +24,17 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     l1_chain_id: u64,
 
-    /// Proposal ID (block number) to preflight.
+    /// Proposal ID (L1 event id) to preflight.
     #[arg(long)]
     proposal_id: u64,
+
+    /// L2 block range start (inclusive).
+    #[arg(long)]
+    l2_start: u64,
+
+    /// L2 block range end (inclusive).
+    #[arg(long)]
+    l2_end: u64,
 
     /// Proof type to record in the context (risc0 or sp1).
     #[arg(long, default_value = "sp1")]
@@ -64,6 +72,10 @@ async fn main() -> Result<()> {
     let provider =
         NetworkProvider::new(&args.rpc_url)?.with_debug_witness_support(args.debug_witness);
 
+    if args.l2_start > args.l2_end {
+        anyhow::bail!("--l2-start must be <= --l2-end");
+    }
+
     let request = ProofRequest {
         l1_chain_id: args.l1_chain_id,
         l2_chain_id: args.l2_chain_id,
@@ -74,7 +86,14 @@ async fn main() -> Result<()> {
         graffiti: args.graffiti,
     };
 
-    let ctx = ProofContext::new(request, ProverConfig::default());
+    let mut config = ProverConfig::default();
+    config["l2_block_range"] = serde_json::json!({
+        "start": args.l2_start,
+        "end": args.l2_end,
+        "proposal_id": args.proposal_id,
+    });
+
+    let ctx = ProofContext::new(request, config);
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 

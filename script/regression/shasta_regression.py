@@ -240,6 +240,8 @@ def run_preflight(
     preflight_bin: str,
     out_path: Path,
     proposal_id: int,
+    l2_start: int,
+    l2_end: int,
     rpc_url: str,
     l2_chain_id: int,
     l1_chain_id: int,
@@ -249,6 +251,8 @@ def run_preflight(
     cmd = build_preflight_cmd(
         preflight_bin=preflight_bin,
         proposal_id=proposal_id,
+        l2_start=l2_start,
+        l2_end=l2_end,
         rpc_url=rpc_url,
         l2_chain_id=l2_chain_id,
         l1_chain_id=l1_chain_id,
@@ -263,6 +267,8 @@ def build_preflight_cmd(
     *,
     preflight_bin: str,
     proposal_id: int,
+    l2_start: int,
+    l2_end: int,
     rpc_url: str,
     l2_chain_id: int,
     l1_chain_id: int,
@@ -280,6 +286,10 @@ def build_preflight_cmd(
         str(l1_chain_id),
         "--proposal-id",
         str(proposal_id),
+        "--l2-start",
+        str(l2_start),
+        "--l2-end",
+        str(l2_end),
         "--proof-type",
         proof_type,
         "--output",
@@ -365,6 +375,8 @@ def parse_range(value: Optional[str]) -> Optional[tuple]:
         return (int(start), int(end))
     except (ValueError, TypeError):
         return None
+    except ValueError:
+        return None
 
 
 def parse_boolish(value: Optional[str]) -> Optional[bool]:
@@ -444,6 +456,42 @@ def discover_latest_completed_proposals_from_l2(
             break
     proposals.reverse()
     return proposals
+
+
+def derive_block_range_for_proposal(
+    rpc_url: str, proposal_id: int, timeout: int, lookback: int = 1024
+) -> Optional[tuple]:
+    """
+    Derive the contiguous L2 block range for a given proposal_id by scanning backward
+    from the latest block until the first block of the previous proposal_id.
+    This is a best-effort helper; callers should prefer explicit ranges if known.
+    """
+    latest = get_latest_l2_block_number(rpc_url, timeout)
+    start = None
+    end = None
+    scanned = 0
+    current_pid = None
+    for num in range(latest, -1, -1):
+        if scanned > lookback:
+            break
+        block = get_l2_block(rpc_url, num, timeout)
+        scanned += 1
+        if not block:
+            continue
+        pid = extract_proposal_id_from_extradata(block.get("extraData", ""))
+        if pid is None:
+            continue
+        if pid == proposal_id:
+            if end is None:
+                end = num
+            start = num
+            current_pid = pid
+        elif current_pid == proposal_id:
+            # we just stepped into previous proposal
+            break
+    if start is not None and end is not None:
+        return (start, end)
+    return None
 
 
 def setup_logger(log_path: Path) -> logging.Logger:
@@ -596,12 +644,14 @@ def main() -> int:
         )
         summary_range = f"{expanded_start}:{expanded_end}"
         summary_proposals = [start_pid, end_pid]
+        base_range = (expanded_start, expanded_end)
     elif args.count:
         proposals = discover_latest_completed_proposals_from_l2(
             l2_rpc, args.count, timeout
         )
         summary_range = None
         summary_proposals = None
+        base_range = None
     else:
         logger.error("Either --range or --count must be provided.")
         return 2
@@ -639,10 +689,26 @@ def main() -> int:
     for idx, proposal_id in enumerate(selected, start=1):
         logger.info(format_progress(idx, len(selected), "preflight", proposal_id))
         paths = output_paths(out_dir, proposal_id)
+        # Derive L2 block range for this proposal. If a range was specified, reuse it;
+        # otherwise attempt to derive from L2 by scanning backwards.
+        l2_range = None
+        if base_range:
+            l2_range = base_range
+        if l2_range is None:
+            l2_range = derive_block_range_for_proposal(l2_rpc, proposal_id, timeout)
+        if l2_range is None:
+            logger.error("Could not derive L2 block range for proposal %s", proposal_id)
+            summary["failures"].append(proposal_id)
+            summary["errors"][str(proposal_id)] = "missing l2 range"
+            continue
+        l2_start, l2_end = l2_range
+
         preflight = run_preflight(
             args.preflight_bin,
             paths["input"],
             proposal_id,
+            l2_start,
+            l2_end,
             preflight_rpc,
             l2_chain_id,
             l1_chain_id,

@@ -252,6 +252,8 @@ class TestPreflightCommand(unittest.TestCase):
         cmd = build_preflight_cmd(
             preflight_bin="/bin/preflight",
             proposal_id=7,
+            l2_start=100,
+            l2_end=110,
             rpc_url="http://l1",
             l2_chain_id=123,
             l1_chain_id=1,

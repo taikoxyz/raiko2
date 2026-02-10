@@ -173,26 +173,37 @@ impl NetworkProvider {
 
         match witness_strategy(self.witness_mode, self.debug_witness_supported) {
             WitnessStrategy::RemoteOnly => self.fetch_remote_witnesses(block_numbers).await,
-            WitnessStrategy::LocalOnly => {
-                let requests: Vec<_> = block_numbers
-                    .iter()
-                    .enumerate()
-                    .map(|(index, block_number)| (index, *block_number))
-                    .collect();
-                let mut results = vec![None; block_numbers.len()];
-                for (index, witness) in self.build_local_witnesses(&requests).await? {
-                    results[index] = Some(witness);
-                }
-                let mut witnesses = Vec::with_capacity(results.len());
-                for (index, witness) in results.into_iter().enumerate() {
-                    witnesses.push(witness.ok_or_else(|| {
-                        RaikoError::RPC(format!("Missing execution witness at index {index}"))
-                    })?);
-                }
-                Ok(witnesses)
-            }
+            WitnessStrategy::LocalOnly => self.build_local_then_collect(block_numbers).await,
         }
     }
+
+    async fn build_local_then_collect(
+        &self,
+        block_numbers: &[u64],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let requests: Vec<_> = block_numbers
+            .iter()
+            .enumerate()
+            .map(|(index, block_number)| (index, *block_number))
+            .collect();
+        let mut results = vec![None; block_numbers.len()];
+        for (index, witness) in self.build_local_witnesses(&requests).await? {
+            results[index] = Some(witness);
+        }
+        let mut witnesses = Vec::with_capacity(results.len());
+        for (index, witness) in results.into_iter().enumerate() {
+            witnesses.push(witness.ok_or_else(|| {
+                RaikoError::RPC(format!("Missing execution witness at index {index}"))
+            })?);
+        }
+        Ok(witnesses)
+    }
+}
+
+// Reserved for future use if we want to detect unavailable remote witness RPC.
+#[allow(dead_code)]
+const fn is_missing_debug_witness(_err: &RaikoError) -> bool {
+    false
 }
 
 #[cfg(test)]

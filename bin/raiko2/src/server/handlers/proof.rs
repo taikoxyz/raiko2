@@ -32,7 +32,8 @@ pub struct ProofResponse {
 fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> PipelineKey {
     let prover_type = req.prover_type.unwrap_or(state.config.prover.prover_type);
     match prover_type {
-        ProverType::Risc0 | ProverType::AgentRisc0 => PipelineKey::ShastaRisc0,
+        ProverType::Risc0 => PipelineKey::ShastaRisc0,
+        ProverType::AgentRisc0 => PipelineKey::ShastaAgentRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
     }
@@ -78,6 +79,11 @@ pub async fn request_proposal_proof(
 #[cfg(test)]
 mod tests {
     use super::ProposalProofRequest;
+    use super::pipeline_key_from_request;
+    use crate::config::{Config, ProverType};
+    use crate::server::state::{AppState, StaticPipelineFactory};
+    use raiko2_pipeline::PipelineKey;
+    use std::sync::Arc;
 
     #[test]
     fn proposal_proof_request_rejects_unknown_fields() {
@@ -100,6 +106,51 @@ mod tests {
         let raw = r#"{"proposal_id": 1, "prover_type": "bogus"}"#;
         let err = serde_json::from_str::<ProposalProofRequest>(raw).unwrap_err();
         assert!(err.to_string().contains("unknown variant"));
+    }
+
+    fn state_with_default_prover(prover_type: ProverType) -> AppState {
+        let mut config = Config::default();
+        config.prover.prover_type = prover_type;
+        AppState {
+            config: Arc::new(config),
+            pipelines: Arc::new(StaticPipelineFactory::default()),
+        }
+    }
+
+    #[test]
+    fn pipeline_key_from_request_respects_prover_type_override() {
+        let state = state_with_default_prover(ProverType::AgentRisc0);
+
+        let req = ProposalProofRequest {
+            proposal_id: 1,
+            prover_type: Some(ProverType::Risc0),
+        };
+        assert_eq!(
+            pipeline_key_from_request(&state, &req),
+            PipelineKey::ShastaRisc0
+        );
+
+        let req = ProposalProofRequest {
+            proposal_id: 1,
+            prover_type: Some(ProverType::AgentRisc0),
+        };
+        assert_eq!(
+            pipeline_key_from_request(&state, &req),
+            PipelineKey::ShastaAgentRisc0
+        );
+    }
+
+    #[test]
+    fn pipeline_key_from_request_falls_back_to_server_default() {
+        let state = state_with_default_prover(ProverType::AgentRisc0);
+        let req = ProposalProofRequest {
+            proposal_id: 1,
+            prover_type: None,
+        };
+        assert_eq!(
+            pipeline_key_from_request(&state, &req),
+            PipelineKey::ShastaAgentRisc0
+        );
     }
 }
 

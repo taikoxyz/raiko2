@@ -8,6 +8,7 @@ use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
 use raiko2_primitives::{ProofContext, ProofRequest, ProverConfig};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_provider::NetworkProvider;
+use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -97,7 +98,14 @@ async fn main() -> Result<()> {
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 
+    let start = Instant::now();
     let guest_input = pipeline.build_guest_input(&ctx).await?.output;
+    eprintln!(
+        "preflight: proposal_id={} blocks={} elapsed_ms={}",
+        args.proposal_id,
+        guest_input.witnesses.len(),
+        start.elapsed().as_millis()
+    );
     write_json(&args.output, &guest_input, args.pretty)?;
     Ok(())
 }

@@ -233,6 +233,8 @@ def discover_latest_proposals_from_l2(
 
 
 def run_command(cmd: List[str]) -> subprocess.CompletedProcess:
+    logger = logging.getLogger("shasta_regression")
+    logger.info(f"Start running CMD: {' '.join(cmd)}")
     return subprocess.run(cmd, check=False, text=True, capture_output=True)
 
 
@@ -426,70 +428,139 @@ def expand_range_to_proposal_boundaries(
     return expanded_start, expanded_end, start_pid, end_pid
 
 
+MAX_SCAN_DEFAULT = 5000
+
+
 def discover_latest_completed_proposals_from_l2(
     rpc_url: str,
     count: int,
     timeout: int,
-    max_scan: int = 5000,
+    max_scan: int = MAX_SCAN_DEFAULT,
 ) -> List[int]:
     latest = get_latest_l2_block_number(rpc_url, timeout)
-    current_pid = proposal_id_for_block(rpc_url, latest, timeout)
+
+    def pid_at(num: int) -> Optional[int]:
+        return proposal_id_for_block(rpc_url, num, timeout)
+
+    current_pid = pid_at(latest)
+    if current_pid is None:
+        return []
+
+    # Find first block of current proposal via binary search within lookback.
+    low, high = max(0, latest - max_scan), latest
+    while low < high:
+        mid = (low + high) // 2
+        pid = pid_at(mid)
+        if pid == current_pid:
+            high = mid
+        else:
+            low = mid + 1
+    boundary = low
+
     proposals: List[int] = []
-    last_seen: Optional[int] = None
-    scanned = 0
-    for num in range(latest, -1, -1):
-        block = get_l2_block(rpc_url, num, timeout)
-        scanned += 1
-        if scanned > max_scan:
-            break
-        if not block:
+    cursor = boundary - 1
+
+    while cursor >= 0 and len(proposals) < count and (boundary - cursor) <= max_scan:
+        pid = pid_at(cursor)
+        if pid is None:
+            cursor -= 1
             continue
-        pid = extract_proposal_id_from_extradata(block.get("extraData", ""))
-        if pid is None or pid == current_pid:
-            continue
-        if pid != last_seen:
-            proposals.append(pid)
-            last_seen = pid
-        if len(proposals) >= count:
-            break
+        # Lower bound for this pid
+        low, high = max(0, cursor - max_scan), cursor
+        while low < high:
+            mid = (low + high) // 2
+            mid_pid = pid_at(mid)
+            if mid_pid == pid:
+                high = mid
+            else:
+                low = mid + 1
+        start_pid_block = low
+        # Upper bound for this pid
+        low, high = cursor, min(latest, cursor + (boundary - start_pid_block))
+        while low < high:
+            mid = (low + high + 1) // 2
+            mid_pid = pid_at(mid)
+            if mid_pid == pid:
+                low = mid
+            else:
+                high = mid - 1
+        end_pid_block = low
+
+        proposals.append(pid)
+        cursor = start_pid_block - 1
+
     proposals.reverse()
     return proposals
 
 
 def derive_block_range_for_proposal(
-    rpc_url: str, proposal_id: int, timeout: int, lookback: int = 1024
+    rpc_url: str, proposal_id: int, timeout: int, lookback: int, step: int = 128
 ) -> Optional[tuple]:
     """
-    Derive the contiguous L2 block range for a given proposal_id by scanning backward
-    from the latest block until the first block of the previous proposal_id.
-    This is a best-effort helper; callers should prefer explicit ranges if known.
+    Derive the contiguous L2 block range for a proposal via stepped + binary search:
+    1) Locate a block with the target proposal by stepping back from the tip, halving step when we pass it.
+    2) Binary search downward to find the lower boundary.
+    3) Binary search upward to find the upper boundary.
     """
+    logger = logging.getLogger("shasta_regression")
     latest = get_latest_l2_block_number(rpc_url, timeout)
-    start = None
-    end = None
-    scanned = 0
-    current_pid = None
-    for num in range(latest, -1, -1):
-        if scanned > lookback:
-            break
+
+    logger.info(f"latest proposal is {latest}")
+    def pid_at(num: int) -> Optional[int]:
         block = get_l2_block(rpc_url, num, timeout)
-        scanned += 1
         if not block:
-            continue
-        pid = extract_proposal_id_from_extradata(block.get("extraData", ""))
-        if pid is None:
-            continue
+            return None
+        return extract_proposal_id_from_extradata(block.get("extraData", ""))
+
+    scanned = 0
+
+    # 1) Locate a block with target proposal_id using stepping with halving step when we overshoot.
+    pos = latest
+    s = step
+    found = None
+    last_pid = None
+    while pos >= 0 and scanned <= lookback:
+        pid = pid_at(pos)
+        scanned += 1
         if pid == proposal_id:
-            if end is None:
-                end = num
-            start = num
-            current_pid = pid
-        elif current_pid == proposal_id:
-            # we just stepped into previous proposal
+            found = pos
             break
-    if start is not None and end is not None:
-        return (start, end)
-    return None
+        if pid is not None and last_pid is not None and last_pid > proposal_id and pid < proposal_id:
+            s = max(1, s // 2)
+        last_pid = pid
+        pos = max(0, pos - s)
+    if found is None:
+        return None
+
+    # 2) Binary search lower boundary [low, found]
+    low, high = max(0, found - lookback), found
+    while low < high:
+        mid = (low + high) // 2
+        pid = pid_at(mid)
+        scanned += 1
+        if pid == proposal_id:
+            high = mid
+        else:
+            low = mid + 1
+        if scanned > lookback:
+            return None
+    start = low
+
+    # 3) Binary search upper boundary [found, found+lookback]
+    low, high = found, min(latest, found + lookback)
+    while low < high:
+        mid = (low + high + 1) // 2
+        pid = pid_at(mid)
+        scanned += 1
+        if pid == proposal_id:
+            low = mid
+        else:
+            high = mid - 1
+        if scanned > lookback:
+            return None
+    end = low
+    logger.info(f"found blocks for proposal {proposal_id}, start: {start}, end: {end}")
+    return (start, end)
 
 
 def setup_logger(log_path: Path) -> logging.Logger:
@@ -645,7 +716,7 @@ def main() -> int:
         base_range = (expanded_start, expanded_end)
     elif args.count:
         proposals = discover_latest_completed_proposals_from_l2(
-            l2_rpc, args.count, timeout
+            l2_rpc, args.count, timeout, MAX_SCAN_DEFAULT
         )
         summary_range = None
         summary_proposals = None
@@ -693,7 +764,9 @@ def main() -> int:
         if base_range:
             l2_range = base_range
         if l2_range is None:
-            l2_range = derive_block_range_for_proposal(l2_rpc, proposal_id, timeout)
+            l2_range = derive_block_range_for_proposal(
+                l2_rpc, proposal_id, timeout, MAX_SCAN_DEFAULT
+            )
         if l2_range is None:
             logger.error("Could not derive L2 block range for proposal %s", proposal_id)
             summary["failures"].append(proposal_id)

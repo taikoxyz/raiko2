@@ -375,8 +375,6 @@ def parse_range(value: Optional[str]) -> Optional[tuple]:
         return (int(start), int(end))
     except (ValueError, TypeError):
         return None
-    except ValueError:
-        return None
 
 
 def parse_boolish(value: Optional[str]) -> Optional[bool]:

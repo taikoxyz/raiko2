@@ -1,7 +1,5 @@
 # Preflight L2 Range Support — Design & Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Make `preflight` accept an explicit L2 block span (start:end) alongside `proposal_id`, fetch that range, validate it matches the proposal, and embed it into `GuestInput`. This replaces the old assumption that `proposal_id == block number` and aligns with the legacy raiko flow where the block set was verified.
 
 **Architecture:** Extend the CLI to take `--l2-start` / `--l2-end`. Carry these into `ProofRequest`/`ProverConfig`, update provider/pipeline to fetch the supplied block range, and validate the blocks (proposal_id in extradata, contiguous, shared anchor where available). Discovery stays external.

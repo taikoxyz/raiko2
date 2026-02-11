@@ -65,6 +65,8 @@ GET /v1/info
 }
 ```
 
+`supported_provers` is computed from currently registered pipelines and may differ by deployment.
+
 ### Request Proposal Proof
 
 ```http
@@ -74,12 +76,12 @@ Content-Type: application/json
 
 #### Request Body
 
-| Field                | Type     | Required | Description                                        |
-| -------------------- | -------- | -------- | -------------------------------------------------- |
-| `proposal_id`        | `u64`    | Yes      | The proposal ID to prove                           |
-| `l1_inclusion_block` | `u64`    | Yes      | L1 block number where the proposal was included    |
-| `prover_type`        | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config) |
-| `prover`             | `string` | No       | Prover address (hex)                               |
+| Field         | Type     | Required | Description                                                                      |
+| ------------- | -------- | -------- | -------------------------------------------------------------------------------- |
+| `proposal_id` | `u64`    | Yes      | The proposal ID to prove                                                         |
+| `prover_type` | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config)    |
+
+Unknown request fields are rejected.
 
 #### Example Request
 

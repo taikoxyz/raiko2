@@ -24,19 +24,18 @@ pub enum WitnessMode {
 enum WitnessStrategy {
     RemoteOnly,
     LocalOnly,
+    RemoteThenLocal,
 }
 
-fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessStrategy {
+const fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessStrategy {
     match mode {
         WitnessMode::ForceRemote => WitnessStrategy::RemoteOnly,
         WitnessMode::ForceLocal => WitnessStrategy::LocalOnly,
-        WitnessMode::Auto => {
-            if support == Some(true) {
-                WitnessStrategy::RemoteOnly
-            } else {
-                WitnessStrategy::LocalOnly
-            }
-        }
+        WitnessMode::Auto => match support {
+            Some(true) => WitnessStrategy::RemoteOnly,
+            Some(false) => WitnessStrategy::LocalOnly,
+            None => WitnessStrategy::RemoteThenLocal,
+        },
     }
 }
 
@@ -164,20 +163,29 @@ impl NetworkProvider {
         &self,
         block_numbers: &[u64],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        if self.witness_mode == WitnessMode::Auto && self.debug_witness_supported.is_none() {
-            return Err(RaikoError::RPC(
-                "Witness support not specified; set with_debug_witness_support(true|false)"
-                    .to_owned(),
-            ));
-        }
-
         match witness_strategy(self.witness_mode, self.debug_witness_supported) {
             WitnessStrategy::RemoteOnly => self.fetch_remote_witnesses(block_numbers).await,
-            WitnessStrategy::LocalOnly => self.build_local_then_collect(block_numbers).await,
+            WitnessStrategy::LocalOnly => self.fetch_local_witnesses(block_numbers).await,
+            WitnessStrategy::RemoteThenLocal => {
+                match self.fetch_remote_witnesses(block_numbers).await {
+                    Ok(witnesses) => Ok(witnesses),
+                    Err(remote_error) => {
+                        tracing::warn!(
+                            error = %remote_error,
+                            "remote witness fetch failed, falling back to local witness generation"
+                        );
+                        self.fetch_local_witnesses(block_numbers).await.map_err(|local_error| {
+                            RaikoError::RPC(format!(
+                                "Remote witness fetch failed ({remote_error}); local fallback failed ({local_error})"
+                            ))
+                        })
+                    }
+                }
+            }
         }
     }
 
-    async fn build_local_then_collect(
+    async fn fetch_local_witnesses(
         &self,
         block_numbers: &[u64],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
@@ -200,12 +208,6 @@ impl NetworkProvider {
     }
 }
 
-// Reserved for future use if we want to detect unavailable remote witness RPC.
-#[allow(dead_code)]
-const fn is_missing_debug_witness(_err: &RaikoError) -> bool {
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::{WitnessMode, WitnessStrategy, witness_strategy};
@@ -219,6 +221,10 @@ mod tests {
         assert_eq!(
             witness_strategy(WitnessMode::Auto, Some(false)),
             WitnessStrategy::LocalOnly
+        );
+        assert_eq!(
+            witness_strategy(WitnessMode::Auto, None),
+            WitnessStrategy::RemoteThenLocal
         );
     }
 }

@@ -50,18 +50,13 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
-        if matches!(
-            config.prover.prover_type,
-            crate::config::ProverType::AgentRisc0
-        ) {
-            let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
-            agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(PipelineKey::ShastaRisc0, Arc::new(agent_engine));
-        } else {
-            let risc0_engine = build_risc0_engine(&config, scheduler_config.clone()).await?;
-            risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(PipelineKey::ShastaRisc0, Arc::new(risc0_engine));
-        }
+        let risc0_engine = build_risc0_engine(&config, scheduler_config.clone()).await?;
+        risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+        factory.insert(PipelineKey::ShastaRisc0, Arc::new(risc0_engine));
+
+        let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
+        agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+        factory.insert(PipelineKey::ShastaAgentRisc0, Arc::new(agent_engine));
 
         let sp1_engine = build_sp1_engine(&config, scheduler_config.clone()).await?;
         sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
@@ -272,9 +267,9 @@ async fn build_agent_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config)?;
-            let context = setup::build_context(config, "agent");
+            let context = setup::build_context(config, "risc0");
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaRisc0,
+                PipelineKey::ShastaAgentRisc0,
                 AgentProver::new(agent_config),
                 RISC0_SHASTA_BACKEND,
                 provider,
@@ -292,10 +287,10 @@ async fn build_agent_engine(
                 type AgentOutput =
                     EngineOutput<<AgentSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config)?;
-                let context = setup::build_context(config, "agent");
+                let context = setup::build_context(config, "risc0");
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace =
-                    setup::queue_namespace(&config.queue.namespace, PipelineKey::ShastaRisc0);
+                    setup::queue_namespace(&config.queue.namespace, PipelineKey::ShastaAgentRisc0);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, AgentOutput, EngineTaskKey>::connect(
                         &url,
@@ -304,7 +299,7 @@ async fn build_agent_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaRisc0,
+                    PipelineKey::ShastaAgentRisc0,
                     AgentProver::new(agent_config),
                     RISC0_SHASTA_BACKEND,
                     provider,

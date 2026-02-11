@@ -52,6 +52,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Enable tracing subscriber for debug/pretty log output.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
+        )
+        .init();
+
     let args = Args::parse();
 
     let mut metrics = RunMetrics::new(args.metrics);

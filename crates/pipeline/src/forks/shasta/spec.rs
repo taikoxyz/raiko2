@@ -8,6 +8,7 @@ use raiko2_primitives::{
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block;
+use serde_json::Value;
 
 /// Shasta hardfork specification.
 #[derive(Debug)]
@@ -63,7 +64,7 @@ where
         ctx: &ProofContext,
         provider: &P,
     ) -> RaikoResult<GuestInput> {
-        let block_numbers = vec![ctx.request.proposal_id];
+        let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
         let blocks = provider.batch_blocks(&block_numbers).await?;
         let witnesses = provider.batch_witnesses(&block_numbers).await?;
 
@@ -111,11 +112,90 @@ where
             })
             .collect::<Vec<_>>();
 
+        validate_block_range(&witnesses, expected_proposal_id)?;
+
         Ok(GuestInput {
             taiko: manifest,
             witnesses,
         })
     }
+}
+
+fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
+    if let Some(range) = ctx.config.get("l2_block_range") {
+        let start = range.get("start").and_then(Value::as_u64).ok_or_else(|| {
+            RaikoError::InvalidRequestConfig("l2_block_range.start missing".into())
+        })?;
+        let end = range
+            .get("end")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| RaikoError::InvalidRequestConfig("l2_block_range.end missing".into()))?;
+        if start > end {
+            return Err(RaikoError::InvalidRequestConfig(
+                "l2_block_range.start must be <= end".into(),
+            ));
+        }
+        let proposal_id = range
+            .get("proposal_id")
+            .and_then(Value::as_u64)
+            .unwrap_or(ctx.request.proposal_id);
+        let blocks: Vec<u64> = (start..=end).collect();
+        Ok((blocks, proposal_id))
+    } else {
+        Ok((vec![ctx.request.proposal_id], ctx.request.proposal_id))
+    }
+}
+
+fn validate_block_range(
+    witnesses: &[StatelessInput],
+    expected_proposal_id: u64,
+) -> RaikoResult<()> {
+    if witnesses.is_empty() {
+        return Err(RaikoError::Preflight(
+            "GuestInput has no witnesses to validate".to_string(),
+        ));
+    }
+    // Proposal id is stored in extradata bytes[1..7] big-endian in Shasta.
+    for (idx, w) in witnesses.iter().enumerate() {
+        let extradata = &w.block.header.extra_data;
+        if extradata.len() < 7 {
+            return Err(RaikoError::Preflight(format!(
+                "witness {idx} extradata too short ({})",
+                extradata.len()
+            )));
+        }
+        let pid_bytes = &extradata[1..7];
+        let pid = u64::from_be_bytes([
+            0,
+            0,
+            0,
+            pid_bytes[0],
+            pid_bytes[1],
+            pid_bytes[2],
+            pid_bytes[3],
+            pid_bytes[4],
+        ]);
+        let pid = (pid << 8) | u64::from(pid_bytes[5]);
+        if pid != expected_proposal_id {
+            return Err(RaikoError::Preflight(format!(
+                "witness {idx} proposal_id mismatch: expected {expected_proposal_id}, got {pid}"
+            )));
+        }
+    }
+
+    // Blocks must be contiguous.
+    for pair in witnesses.windows(2).enumerate() {
+        let (idx, window) = pair;
+        let prev = window[0].block.header.number;
+        let next = window[1].block.header.number;
+        if next != prev + 1 {
+            return Err(RaikoError::Preflight(format!(
+                "witness blocks not contiguous at index {idx}: {prev} -> {next}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 impl<Pr, Bk, Pv> Validation for ShastaSpec<Pr, Bk, Pv>

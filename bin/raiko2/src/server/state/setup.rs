@@ -47,6 +47,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
     }
 }
 
+#[cfg(not(feature = "tdx"))]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
@@ -58,6 +59,7 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
+#[cfg(not(feature = "tdx"))]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     raiko2_prover::sp1::Sp1Config {
@@ -75,6 +77,7 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     }
 }
 
+#[cfg(not(feature = "tdx"))]
 pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::AgentConfig {
     raiko2_prover::agent::AgentConfig {
         base_url: config.prover.agent.url.clone(),
@@ -85,14 +88,11 @@ pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::Agen
     }
 }
 
-pub(crate) fn tdx_prover_config(
-    config: &Config,
-    proof_type: raiko2_prover::tdx::TdxProofType,
-) -> raiko2_prover::tdx::TdxConfig {
+#[cfg(feature = "tdx")]
+pub(crate) fn tdx_prover_config(config: &Config) -> raiko2_prover::tdx::TdxConfig {
     raiko2_prover::tdx::TdxConfig {
         instance_id: config.prover.tdx.instance_id,
         socket_path: config.prover.tdx.socket_path.clone(),
-        proof_type,
     }
 }
 

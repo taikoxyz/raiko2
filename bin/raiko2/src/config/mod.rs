@@ -229,16 +229,15 @@ mod tests {
             "AGENT-RISC0".parse::<ProverType>().unwrap(),
             ProverType::AgentRisc0
         );
-        assert_eq!("tdx".parse::<ProverType>().unwrap(), ProverType::Tdx);
-        assert_eq!("TDX".parse::<ProverType>().unwrap(), ProverType::Tdx);
-        assert_eq!(
-            "azure-tdx".parse::<ProverType>().unwrap(),
-            ProverType::AzureTdx
-        );
-        assert_eq!(
-            "AZURE-TDX".parse::<ProverType>().unwrap(),
-            ProverType::AzureTdx
-        );
+        #[cfg(feature = "tdx")]
+        {
+            assert_eq!("tdx".parse::<ProverType>().unwrap(), ProverType::Tdx);
+            assert_eq!("TDX".parse::<ProverType>().unwrap(), ProverType::Tdx);
+        }
+        #[cfg(not(feature = "tdx"))]
+        {
+            assert!("tdx".parse::<ProverType>().is_err());
+        }
         assert!("invalid".parse::<ProverType>().is_err());
     }
 

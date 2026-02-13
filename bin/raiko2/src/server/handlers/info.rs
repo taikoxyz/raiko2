@@ -12,19 +12,19 @@ pub struct InfoResponse {
     pub supported_provers: Vec<&'static str>,
 }
 
-const PROVER_PIPELINE_BINDINGS: [(PipelineKey, &str); 6] = [
-    (PipelineKey::ShastaRisc0, "risc0"),
-    (PipelineKey::ShastaSp1, "sp1"),
-    (PipelineKey::ShastaNative, "native"),
-    (PipelineKey::ShastaAgentRisc0, "agent-risc0"),
-    (PipelineKey::ShastaTdx, "tdx"),
-    (PipelineKey::ShastaAzureTdx, "azure-tdx"),
-];
-
 fn supported_provers(state: &AppState) -> Vec<&'static str> {
-    PROVER_PIPELINE_BINDINGS
-        .into_iter()
-        .filter_map(|(key, prover)| state.pipelines.get(key).map(|_| prover))
+    let bindings: &[(PipelineKey, &str)] = &[
+        (PipelineKey::ShastaRisc0, "risc0"),
+        (PipelineKey::ShastaSp1, "sp1"),
+        (PipelineKey::ShastaNative, "native"),
+        (PipelineKey::ShastaAgentRisc0, "agent-risc0"),
+        #[cfg(feature = "tdx")]
+        (PipelineKey::ShastaTdx, "tdx"),
+    ];
+
+    bindings
+        .iter()
+        .filter_map(|(key, prover)| state.pipelines.get(*key).map(|_| *prover))
         .collect()
 }
 

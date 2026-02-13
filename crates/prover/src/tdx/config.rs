@@ -9,8 +9,6 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
-use crate::tdx::types::TdxProofType;
-
 /// Persistent bootstrap data written after the first attestation quote.
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -125,34 +123,5 @@ pub fn write_bootstrap(
         metadata,
     };
     fs::write(&path, serde_json::to_string_pretty(&data)?)?;
-    Ok(())
-}
-
-/// Read the issuer type from bootstrap data and map it to a `TdxProofType`.
-///
-/// # Errors
-///
-/// Returns an error if bootstrap data cannot be read or the issuer type is unknown.
-pub fn get_issuer_type() -> Result<TdxProofType> {
-    let bootstrap = read_bootstrap()?;
-    match bootstrap.issuer_type.as_str() {
-        "tdx" | "simulator" => Ok(TdxProofType::Tdx),
-        "azure" => Ok(TdxProofType::AzureTdx),
-        other => Err(anyhow!("Unknown issuer type: {other}")),
-    }
-}
-
-/// Validate that the bootstrap issuer type matches the expected proof type.
-///
-/// # Errors
-///
-/// Returns an error if the issuer type does not match.
-pub fn validate_issuer_type(expected: TdxProofType) -> Result<()> {
-    let actual = get_issuer_type()?;
-    if actual != expected {
-        return Err(anyhow!(
-            "Bootstrap issuer type '{actual}' does not match expected '{expected}'"
-        ));
-    }
     Ok(())
 }

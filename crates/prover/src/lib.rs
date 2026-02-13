@@ -22,10 +22,14 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
+#[cfg(not(feature = "tdx"))]
 pub mod agent;
 pub mod native;
+#[cfg(not(feature = "tdx"))]
 pub mod risc0;
+#[cfg(not(feature = "tdx"))]
 pub mod sp1;
+#[cfg(feature = "tdx")]
 pub mod tdx;
 
 use alloy_primitives::Bytes;

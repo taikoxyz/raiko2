@@ -26,7 +26,7 @@ pub mod signature;
 pub mod types;
 
 use raiko2_primitives_shasta::instance::shasta_aggregation_output_from_proof_carry_data_vec;
-pub use types::{TdxConfig, TdxProofType, TdxResponse};
+pub use types::{TdxConfig, TdxResponse};
 
 use alloy_primitives::{Bytes, Uint};
 use raiko2_pipeline::ProverBackend;
@@ -109,10 +109,6 @@ where
         // Auto-bootstrap on first call
         self.ensure_bootstrapped().await?;
 
-        // Validate issuer type matches expected proof type
-        config::validate_issuer_type(self.config.proof_type)
-            .map_err(|e| RaikoError::Guest(format!("TDX issuer mismatch: {e}")))?;
-
         let input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
 
@@ -176,9 +172,6 @@ where
 
         // Auto-bootstrap on first call
         self.ensure_bootstrapped().await?;
-
-        config::validate_issuer_type(self.config.proof_type)
-            .map_err(|e| RaikoError::Guest(format!("TDX issuer mismatch: {e}")))?;
 
         let aggregation_input = parse_shasta_aggregation_input(config)?;
         validate_shasta_aggregation_lengths(&aggregation_input)?;

@@ -49,7 +49,7 @@ lto = true
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
-raiko2-prover = { path = "./crates/prover" }
+raiko2-prover = { path = "./crates/prover", default-features = false }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }

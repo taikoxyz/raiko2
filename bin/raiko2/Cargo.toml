@@ -48,8 +48,10 @@ anyhow.workspace = true
 dotenvy = "0.15"
 
 [features]
-default = []
+default = ["zkvm"]
+zkvm = ["raiko2-prover/zkvm"]
 redis-queue = ["raiko2-queue/redis"]
+tdx = ["raiko2-prover/tdx"]
 
 [dev-dependencies]
 tower.workspace = true

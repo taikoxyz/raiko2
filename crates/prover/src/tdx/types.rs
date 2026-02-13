@@ -4,26 +4,6 @@ use alloy_primitives::B256;
 use raiko2_primitives::Proof;
 use serde::{Deserialize, Serialize};
 
-/// TDX proof type (determines expected attestation issuer).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TdxProofType {
-    /// Standard TDX or simulator issuer.
-    #[default]
-    Tdx,
-    /// Azure TDX issuer.
-    AzureTdx,
-}
-
-impl std::fmt::Display for TdxProofType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TdxProofType::Tdx => write!(f, "tdx"),
-            TdxProofType::AzureTdx => write!(f, "azure-tdx"),
-        }
-    }
-}
-
 /// TDX prover configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TdxConfig {
@@ -32,9 +12,6 @@ pub struct TdxConfig {
     /// Path to the TDX attestation service Unix socket.
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
-    /// Expected attestation issuer type.
-    #[serde(default)]
-    pub proof_type: TdxProofType,
 }
 
 fn default_socket_path() -> String {
@@ -46,7 +23,6 @@ impl Default for TdxConfig {
         Self {
             instance_id: 0,
             socket_path: default_socket_path(),
-            proof_type: TdxProofType::default(),
         }
     }
 }

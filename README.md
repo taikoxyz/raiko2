@@ -1,6 +1,6 @@
 # Raiko V2
 
-Raiko V2 is a zkVM prover for Taiko, built on top of [alethia-reth](https://github.com/taikoxyz/alethia-reth).
+Raiko V2 is a multi-backend prover for Taiko, built on top of [alethia-reth](https://github.com/taikoxyz/alethia-reth). It supports zkVM backends (RISC0, SP1) and TEE-based attestation (TDX).
 
 ## Quickstart
 
@@ -17,8 +17,22 @@ environment variables override values from the file.
 - Split into focused crates: `primitives`, `protocol`, `pipeline`, `provider`, `engine`, `queue`, `stateless`, `prover`
 - Built on Taiko's `alethia-reth`
 - Shasta protocol support (Based Contestable Rollup)
-- Prover backends: RISC0, SP1, and `agent-risc0`
+- Prover backends: RISC0, SP1, `agent-risc0`, and TDX
 - Native mode: runs locally and outputs public inputs (no zk proof)
+- Feature-gated builds: `zkvm` (default) for RISC0/SP1/agent-risc0, `tdx` for TDX attestation
+
+## Feature flags
+
+The `raiko2` binary supports two mutually exclusive feature sets:
+
+| Feature | Default | Enables | Use case |
+| ------- | ------- | ------- | -------- |
+| `zkvm`  | ✅      | RISC0, SP1, agent-risc0 provers | Standard zkVM proving |
+| `tdx`   | ❌      | TDX TEE attestation prover | Intel TDX environments |
+
+
+> **Note:** `zkvm` and `tdx` are mutually exclusive. Enabling `tdx` disables RISC0/SP1
+> compilation entirely, producing a smaller binary suitable for TEE deployments.
 
 ## Project structure
 
@@ -42,7 +56,7 @@ raiko2/
 │   ├── engine/                # Execution engine
 │   ├── queue/                 # Queue + scheduler backends
 │   ├── stateless/             # Stateless validation
-│   ├── prover/                # Prover backends (risc0, sp1, agent)
+│   ├── prover/                # Prover backends (risc0, sp1, agent, tdx)
 │   └── guests/                # Guest ELF assets (compiled outputs)
 ├── config/                    # Chain spec lists and config assets
 ├── docker/                    # Toolchain images
@@ -83,7 +97,7 @@ Key traits and types:
 - `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
 - `Pipeline`: hardfork-agnostic preflight + validation flow.
 - `Engine`: schedules pipeline stages and prover work.
-- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent-risc0).
+- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent-risc0 / TDX).
 
 High-level view:
 
@@ -98,7 +112,7 @@ flowchart LR
   PL --> VA["Validation"]
   VA --> GI["GuestInput"]
   W --> EN["Encode"]
-  W --> PR["Prover (RISC0/SP1)"]
+  W --> PR["Prover (RISC0/SP1/TDX)"]
   PR --> PO["Proof"]
   PO --> AG["Aggregation Proof"]
   HF["PipelineSpec"] -.-> PF
@@ -149,7 +163,11 @@ sequenceDiagram
 ## Build
 
 ```bash
+# Default (zkVM provers: RISC0, SP1, agent-risc0)
 cargo build --release -p raiko2
+
+# TDX only (for Intel TDX environments)
+cargo build --release -p raiko2 --no-default-features --features tdx
 ```
 
 ## Test
@@ -244,7 +262,7 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 ## Run
 
 ```bash
-# Start the prover server
+# Start the prover server (zkVM)
 cp config.example.toml config.toml
 ./target/release/raiko2 --config config.toml
 
@@ -253,6 +271,28 @@ RAIKO2_L1_RPC=http://localhost:8545 \
 RAIKO2_L2_RPC=http://localhost:9545 \
 ./target/release/raiko2
 ```
+
+### TDX mode
+
+When built with `--features tdx`:
+
+```bash
+./target/release/raiko2 --config config.toml
+```
+
+TDX configuration in `config.toml`:
+
+```toml
+[prover]
+prover_type = "tdx"
+
+[prover.tdx]
+instance_id = 0
+socket_path = "/var/tdxs.sock"
+```
+
+The TDX prover communicates with the TDX device via the socket at `socket_path`.
+`instance_id` identifies the prover instance for proof routing.
 
 ## Agent prover
 

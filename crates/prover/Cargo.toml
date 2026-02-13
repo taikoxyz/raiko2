@@ -23,6 +23,10 @@ tokio.workspace = true
 hex.workspace = true
 secp256k1.workspace = true
 
+dirs.workspace = true
+rand.workspace = true
+anyhow.workspace = true
+
 # Alloy types
 alloy-primitives.workspace = true
 

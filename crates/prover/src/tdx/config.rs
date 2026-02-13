@@ -1,0 +1,158 @@
+//! TDX key management and bootstrap configuration.
+//!
+//! Manages the TDX prover's private key and bootstrap data on disk.
+//! - Private key: `~/.config/raiko2/tdx/secrets/priv.key`
+//! - Bootstrap data: `~/.config/raiko2/tdx/bootstrap.json`
+
+use alloy_primitives::Address;
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
+
+use crate::tdx::types::TdxProofType;
+
+/// Persistent bootstrap data written after the first attestation quote.
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapData {
+    pub issuer_type: String,
+    pub public_key: String,
+    pub quote: String,
+    pub nonce: String,
+    pub metadata: serde_json::Value,
+}
+
+/// Return the TDX config directory, creating it if necessary.
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined or the directory
+/// cannot be created.
+pub fn config_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Failed to get home directory"))?;
+    let dir = home.join(".config").join("raiko2").join("tdx");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Check whether the bootstrap files exist (key + `bootstrap.json`).
+///
+/// # Errors
+///
+/// Returns an error if the config directory cannot be resolved.
+pub fn bootstrap_exists() -> Result<bool> {
+    let dir = config_dir()?;
+    Ok(dir.join("bootstrap.json").exists() && dir.join("secrets").join("priv.key").exists())
+}
+
+/// Generate a new secp256k1 private key and save it to disk.
+///
+/// # Errors
+///
+/// Returns an error if the key file cannot be written.
+pub fn generate_private_key() -> Result<secp256k1::SecretKey> {
+    let secp = secp256k1::Secp256k1::new();
+    let (secret_key, _) = secp.generate_keypair(&mut rand::thread_rng());
+    save_private_key(&secret_key)?;
+    Ok(secret_key)
+}
+
+/// Save a private key to disk with restricted permissions (0600).
+fn save_private_key(key: &secp256k1::SecretKey) -> Result<()> {
+    let dir = config_dir()?;
+    let secrets_dir = dir.join("secrets");
+    fs::create_dir_all(&secrets_dir)?;
+
+    let key_file = secrets_dir.join("priv.key");
+    fs::write(&key_file, key.secret_bytes())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&key_file)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&key_file, perms)?;
+    }
+
+    Ok(())
+}
+
+/// Load the private key from disk.
+///
+/// # Errors
+///
+/// Returns an error if the key file cannot be read or contains invalid data.
+pub fn load_private_key() -> Result<secp256k1::SecretKey> {
+    let dir = config_dir()?;
+    let key_file = dir.join("secrets").join("priv.key");
+    let key_bytes = fs::read(&key_file)
+        .with_context(|| format!("Failed to read private key from {}", key_file.display()))?;
+    secp256k1::SecretKey::from_slice(&key_bytes).map_err(|e| anyhow!("Invalid private key: {e}"))
+}
+
+/// Read bootstrap data from disk.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or contains invalid JSON.
+pub fn read_bootstrap() -> Result<BootstrapData> {
+    let dir = config_dir()?;
+    let path = dir.join("bootstrap.json");
+    let raw = fs::read_to_string(&path)?;
+    serde_json::from_str(&raw).map_err(|e| anyhow!("Failed to parse bootstrap data: {e}"))
+}
+
+/// Write bootstrap data to disk.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written.
+pub fn write_bootstrap(
+    issuer_type: &str,
+    quote: &[u8],
+    public_key: &Address,
+    nonce: &[u8],
+    metadata: serde_json::Value,
+) -> Result<()> {
+    let dir = config_dir()?;
+    let path = dir.join("bootstrap.json");
+
+    let data = BootstrapData {
+        issuer_type: issuer_type.to_string(),
+        public_key: public_key.to_string(),
+        quote: hex::encode(quote),
+        nonce: hex::encode(nonce),
+        metadata,
+    };
+    fs::write(&path, serde_json::to_string_pretty(&data)?)?;
+    Ok(())
+}
+
+/// Read the issuer type from bootstrap data and map it to a `TdxProofType`.
+///
+/// # Errors
+///
+/// Returns an error if bootstrap data cannot be read or the issuer type is unknown.
+pub fn get_issuer_type() -> Result<TdxProofType> {
+    let bootstrap = read_bootstrap()?;
+    match bootstrap.issuer_type.as_str() {
+        "tdx" | "simulator" => Ok(TdxProofType::Tdx),
+        "azure" => Ok(TdxProofType::AzureTdx),
+        other => Err(anyhow!("Unknown issuer type: {other}")),
+    }
+}
+
+/// Validate that the bootstrap issuer type matches the expected proof type.
+///
+/// # Errors
+///
+/// Returns an error if the issuer type does not match.
+pub fn validate_issuer_type(expected: TdxProofType) -> Result<()> {
+    let actual = get_issuer_type()?;
+    if actual != expected {
+        return Err(anyhow!(
+            "Bootstrap issuer type '{actual}' does not match expected '{expected}'"
+        ));
+    }
+    Ok(())
+}

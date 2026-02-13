@@ -10,6 +10,9 @@ pub enum ProverType {
     Native,
     #[serde(rename = "agent-risc0", alias = "agentrisc0")]
     AgentRisc0,
+    Tdx,
+    #[serde(rename = "azure-tdx", alias = "azuretdx")]
+    AzureTdx,
 }
 
 impl std::str::FromStr for ProverType {
@@ -21,6 +24,8 @@ impl std::str::FromStr for ProverType {
             "sp1" => Ok(ProverType::Sp1),
             "native" => Ok(ProverType::Native),
             "agent-risc0" | "agentrisc0" => Ok(ProverType::AgentRisc0),
+            "tdx" => Ok(ProverType::Tdx),
+            "azure-tdx" | "azuretdx" => Ok(ProverType::AzureTdx),
             _ => Err(format!("Unknown prover type: {s}")),
         }
     }
@@ -39,6 +44,9 @@ pub struct ProverConfig {
     /// Agent-specific configuration.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// TDX-specific configuration.
+    #[serde(default)]
+    pub tdx: TdxConfig,
 }
 
 /// RISC0 configuration.
@@ -91,6 +99,30 @@ impl Default for AgentConfig {
             poll_interval_ms: 1_000,
             timeout_ms: 300_000,
             prover_type: "boundless".to_string(),
+        }
+    }
+}
+
+/// TDX prover configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TdxConfig {
+    /// On-chain verifier instance ID.
+    #[serde(default)]
+    pub instance_id: u32,
+    /// Path to the TDX attestation service Unix socket.
+    #[serde(default = "default_tdx_socket_path")]
+    pub socket_path: String,
+}
+
+fn default_tdx_socket_path() -> String {
+    "/var/tdxs.sock".to_string()
+}
+
+impl Default for TdxConfig {
+    fn default() -> Self {
+        Self {
+            instance_id: 0,
+            socket_path: default_tdx_socket_path(),
         }
     }
 }

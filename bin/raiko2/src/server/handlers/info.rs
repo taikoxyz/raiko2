@@ -12,11 +12,13 @@ pub struct InfoResponse {
     pub supported_provers: Vec<&'static str>,
 }
 
-const PROVER_PIPELINE_BINDINGS: [(PipelineKey, &str); 4] = [
+const PROVER_PIPELINE_BINDINGS: [(PipelineKey, &str); 6] = [
     (PipelineKey::ShastaRisc0, "risc0"),
     (PipelineKey::ShastaSp1, "sp1"),
     (PipelineKey::ShastaNative, "native"),
     (PipelineKey::ShastaAgentRisc0, "agent-risc0"),
+    (PipelineKey::ShastaTdx, "tdx"),
+    (PipelineKey::ShastaAzureTdx, "azure-tdx"),
 ];
 
 fn supported_provers(state: &AppState) -> Vec<&'static str> {

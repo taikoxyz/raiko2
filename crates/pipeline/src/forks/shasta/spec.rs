@@ -18,6 +18,7 @@ pub struct ShastaSpec<Pr, Bk, Pv> {
     provider: Pv,
     manifest_builder: ShastaManifestBuilder,
     pipeline_key: PipelineKey,
+    skip_validation: bool,
 }
 
 impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
@@ -29,6 +30,27 @@ impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
             provider,
             manifest_builder: ShastaManifestBuilder::new(),
             pipeline_key,
+            skip_validation: false,
+        }
+    }
+
+    /// Create a Shasta spec that skips block re-execution validation.
+    ///
+    /// Use this for trusted execution environments (TDX) where the host
+    /// environment is already attested.
+    pub const fn new_trusted(
+        pipeline_key: PipelineKey,
+        prover: Pr,
+        backend: Bk,
+        provider: Pv,
+    ) -> Self {
+        Self {
+            prover,
+            backend,
+            provider,
+            manifest_builder: ShastaManifestBuilder::new(),
+            pipeline_key,
+            skip_validation: true,
         }
     }
 
@@ -46,6 +68,7 @@ impl<Pr, Bk, Pv> ShastaSpec<Pr, Bk, Pv> {
             provider,
             manifest_builder,
             pipeline_key,
+            skip_validation: false,
         }
     }
 }
@@ -207,6 +230,10 @@ where
     type Input = GuestInput;
 
     fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
+        if self.skip_validation {
+            return Ok(());
+        }
+
         let Some(first_input) = input.witnesses.first() else {
             return Err(RaikoError::Preflight(
                 "GuestInput has no witnesses to validate".to_string(),

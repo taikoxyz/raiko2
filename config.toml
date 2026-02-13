@@ -1,0 +1,20 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+l1_rpc = "https://ethereum-rpc.publicnode.com" # or your own L1 node
+l2_rpc = "https://rpc.mainnet.taiko.xyz"       # or your own Taiko node
+l1_chain_id = 1
+l2_chain_id = 167000
+
+[prover]
+prover_type = "native" # or "azure-tdx" on Azure VMs
+
+[prover.tdx]
+instance_id = 0                # your on-chain verifier instance ID
+socket_path = "/var/tdxs.sock" # default TDX attestation socket
+
+[queue]
+backend = "memory"
+workers = 1

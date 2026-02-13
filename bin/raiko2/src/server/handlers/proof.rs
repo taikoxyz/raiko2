@@ -36,6 +36,8 @@ fn pipeline_key_from_request(state: &AppState, req: &ProposalProofRequest) -> Pi
         ProverType::AgentRisc0 => PipelineKey::ShastaAgentRisc0,
         ProverType::Sp1 => PipelineKey::ShastaSp1,
         ProverType::Native => PipelineKey::ShastaNative,
+        ProverType::Tdx => PipelineKey::ShastaTdx,
+        ProverType::AzureTdx => PipelineKey::ShastaAzureTdx,
     }
 }
 

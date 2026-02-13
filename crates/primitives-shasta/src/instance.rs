@@ -145,11 +145,24 @@ pub fn shasta_zk_aggregation_public_input_from_proof_carry_data_vec(
     proof_carry_data_vec: &[ProofCarryData],
     prover_address: Address,
 ) -> Option<B256> {
+    let aggregation_hash =
+        shasta_aggregation_output_from_proof_carry_data_vec(proof_carry_data_vec, prover_address)?;
+    Some(shasta_zk_aggregation_output(sub_image_id, aggregation_hash))
+}
+
+#[must_use]
+pub fn shasta_aggregation_output_from_proof_carry_data_vec(
+    proof_carry_data_vec: &[ProofCarryData],
+    sgx_instance: Address,
+) -> Option<B256> {
     let commitment = build_shasta_commitment_from_proof_carry_data_vec(proof_carry_data_vec)?;
     let first = proof_carry_data_vec.first()?;
-    let aggregation_hash =
-        shasta_aggregation_output(&commitment, first.chain_id, first.verifier, prover_address);
-    Some(shasta_zk_aggregation_output(sub_image_id, aggregation_hash))
+    Some(shasta_aggregation_output(
+        &commitment,
+        first.chain_id,
+        first.verifier,
+        sgx_instance,
+    ))
 }
 
 #[must_use]

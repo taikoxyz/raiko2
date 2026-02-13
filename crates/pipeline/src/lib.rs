@@ -39,6 +39,8 @@ pub enum PipelineKey {
     ShastaSp1,
     ShastaNative,
     ShastaAgentRisc0,
+    ShastaTdx,
+    ShastaAzureTdx,
 }
 
 impl PipelineKey {
@@ -49,6 +51,8 @@ impl PipelineKey {
             PipelineKey::ShastaSp1 => "shasta-sp1",
             PipelineKey::ShastaNative => "shasta-native",
             PipelineKey::ShastaAgentRisc0 => "shasta-agent-risc0",
+            PipelineKey::ShastaTdx => "shasta-tdx",
+            PipelineKey::ShastaAzureTdx => "shasta-azure-tdx",
         }
     }
 }

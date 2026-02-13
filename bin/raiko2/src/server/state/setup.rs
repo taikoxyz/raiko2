@@ -85,6 +85,17 @@ pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::Agen
     }
 }
 
+pub(crate) fn tdx_prover_config(
+    config: &Config,
+    proof_type: raiko2_prover::tdx::TdxProofType,
+) -> raiko2_prover::tdx::TdxConfig {
+    raiko2_prover::tdx::TdxConfig {
+        instance_id: config.prover.tdx.instance_id,
+        socket_path: config.prover.tdx.socket_path.clone(),
+        proof_type,
+    }
+}
+
 #[cfg(feature = "redis-queue")]
 use raiko2_pipeline::PipelineKey;
 

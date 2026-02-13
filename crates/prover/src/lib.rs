@@ -26,6 +26,7 @@ pub mod agent;
 pub mod native;
 pub mod risc0;
 pub mod sp1;
+pub mod tdx;
 
 use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;

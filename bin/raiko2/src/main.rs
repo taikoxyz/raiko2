@@ -25,7 +25,7 @@ mod server;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::cli::Cli;
@@ -48,6 +48,7 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = Config::load(&cli)?;
     info!("Loaded configuration: {:?}", config.server);
+    debug!("Full configuration: {:#?}", config);
 
     // Run the server
     run_server(config).await?;

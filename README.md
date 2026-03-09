@@ -254,6 +254,45 @@ RAIKO2_L2_RPC=http://localhost:9545 \
 ./target/release/raiko2
 ```
 
+## Docker
+
+`raiko2` ships a Docker deployment path that matches the existing Docker-based operator flow, but
+excludes all SGX-specific setup.
+
+The Docker path uses:
+
+- the root [`Dockerfile`](./Dockerfile) to build the `raiko2` binary
+- [`docker/docker-compose.yml`](./docker/docker-compose.yml) for runtime orchestration
+- [`docker/config.compose.toml`](./docker/config.compose.toml) for the base config file mounted into
+  the container
+- [`docker/.env.sample`](./docker/.env.sample) as the operator-facing environment template
+
+Quickstart:
+
+```bash
+cp docker/.env.sample docker/.env
+$EDITOR docker/.env
+
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
+```
+
+The default compose stack starts a single `raiko2` container on port `8080` and uses the in-process
+memory queue.
+
+Health checks:
+
+- liveness/readiness: `GET /ready`
+- basic status: `GET /health`
+
+The default image is built without optional queue features. If you later want Redis-backed queueing,
+rebuild with `BIN_FEATURES=--features redis-queue` and provide the corresponding runtime settings.
+
+To switch prover backends, change `RAIKO2_PROVER` in `docker/.env`:
+
+- `native`
+- `risc0`
+- `sp1`
+
 ## Agent prover
 
 To use `raiko-agent`, set the prover type to `agent-risc0` and configure the agent endpoint:

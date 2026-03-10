@@ -93,6 +93,18 @@ where
     /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes>;
 
+    /// Update request-scoped prover config derived from the validated guest input.
+    ///
+    /// Backends that need extra request metadata, such as `ProofCarryData`, should populate it
+    /// here so `prove_encoded` and `aggregate` can read a canonical config shape.
+    fn prepare_config_for_input(
+        &self,
+        _input: &Self::GuestInput,
+        _config: &mut ProverConfig,
+    ) -> RaikoResult<()> {
+        Ok(())
+    }
+
     /// Generate a proof for the given input.
     async fn prove_encoded(
         &self,

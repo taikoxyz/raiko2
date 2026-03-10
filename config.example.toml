@@ -36,6 +36,7 @@ prover_type = "risc0"
 [prover.risc0]
 bonsai = true
 snark = true
+mock = false
 
 [prover.sp1]
 network = true
@@ -43,6 +44,7 @@ plonk = true
 
 # Used only when prover_type = "agent-risc0".
 [prover.agent]
+# Base URL only. The client appends `/proof` and `/status/{request_id}`.
 url = "http://localhost:9999"
 # api_key = "optional-api-key"
 poll_interval_ms = 1000

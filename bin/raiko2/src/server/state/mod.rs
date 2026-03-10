@@ -45,6 +45,7 @@ impl AppState {
     /// Create new application state.
     pub async fn new(config: Config) -> Result<Self> {
         let scheduler_config = setup::scheduler_config(&config);
+        let agent_scheduler_config = setup::agent_scheduler_config(&config);
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
 
@@ -54,7 +55,7 @@ impl AppState {
         risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
         factory.insert(PipelineKey::ShastaRisc0, Arc::new(risc0_engine));
 
-        let agent_engine = build_agent_engine(&config, scheduler_config.clone()).await?;
+        let agent_engine = build_agent_engine(&config, agent_scheduler_config).await?;
         agent_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
         factory.insert(PipelineKey::ShastaAgentRisc0, Arc::new(agent_engine));
 
@@ -93,7 +94,7 @@ async fn build_risc0_engine(
             Engine::with_store_and_scheduler_config(
                 spec,
                 context,
-                MemoryStore::new(),
+                MemoryStore::with_lease(scheduler_config.lease_duration),
                 scheduler_config,
             )
         }
@@ -111,7 +112,7 @@ async fn build_risc0_engine(
                     raiko2_queue::RedisStore::<EngineTask, Risc0Output, EngineTaskKey>::connect(
                         &url,
                         &namespace,
-                        Duration::from_secs(60),
+                        scheduler_config.lease_duration,
                     )
                     .await?;
                 let spec = ShastaSpec::new(
@@ -155,7 +156,7 @@ async fn build_sp1_engine(
             Engine::with_store_and_scheduler_config(
                 spec,
                 context,
-                MemoryStore::new(),
+                MemoryStore::with_lease(scheduler_config.lease_duration),
                 scheduler_config,
             )
         }
@@ -173,7 +174,7 @@ async fn build_sp1_engine(
                     raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
                         &url,
                         &namespace,
-                        Duration::from_secs(60),
+                        scheduler_config.lease_duration,
                     )
                     .await?;
                 let spec = ShastaSpec::new(
@@ -215,7 +216,7 @@ async fn build_native_engine(
             Engine::with_store_and_scheduler_config(
                 spec,
                 context,
-                MemoryStore::new(),
+                MemoryStore::with_lease(scheduler_config.lease_duration),
                 scheduler_config,
             )
         }
@@ -233,7 +234,7 @@ async fn build_native_engine(
                     raiko2_queue::RedisStore::<EngineTask, NativeOutput, EngineTaskKey>::connect(
                         &url,
                         &namespace,
-                        Duration::from_secs(60),
+                        scheduler_config.lease_duration,
                     )
                     .await?;
                 let spec = ShastaSpec::new(
@@ -277,7 +278,7 @@ async fn build_agent_engine(
             Engine::with_store_and_scheduler_config(
                 spec,
                 context,
-                MemoryStore::new(),
+                MemoryStore::with_lease(scheduler_config.lease_duration),
                 scheduler_config,
             )
         }
@@ -295,7 +296,7 @@ async fn build_agent_engine(
                     raiko2_queue::RedisStore::<EngineTask, AgentOutput, EngineTaskKey>::connect(
                         &url,
                         &namespace,
-                        Duration::from_secs(60),
+                        scheduler_config.lease_duration,
                     )
                     .await?;
                 let spec = ShastaSpec::new(

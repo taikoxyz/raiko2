@@ -21,16 +21,16 @@ pub struct Cli {
     pub l2_rpc: Option<String>,
 
     /// Server host address
-    #[arg(long, env = "RAIKO2_HOST", default_value = "0.0.0.0")]
-    pub host: String,
+    #[arg(long, env = "RAIKO2_HOST")]
+    pub host: Option<String>,
 
     /// Server port
-    #[arg(long, env = "RAIKO2_PORT", default_value = "8080")]
-    pub port: u16,
+    #[arg(long, env = "RAIKO2_PORT")]
+    pub port: Option<u16>,
 
     /// Prover type (risc0, sp1, native)
-    #[arg(long, env = "RAIKO2_PROVER", default_value = "risc0")]
-    pub prover: String,
+    #[arg(long, env = "RAIKO2_PROVER")]
+    pub prover: Option<String>,
 
     /// Enable verbose logging
     #[arg(short, long)]
@@ -41,12 +41,12 @@ pub struct Cli {
     pub json_logs: bool,
 
     /// L1 chain ID
-    #[arg(long, env = "RAIKO2_L1_CHAIN_ID", default_value = "1")]
-    pub l1_chain_id: u64,
+    #[arg(long, env = "RAIKO2_L1_CHAIN_ID")]
+    pub l1_chain_id: Option<u64>,
 
     /// L2 chain ID
-    #[arg(long, env = "RAIKO2_L2_CHAIN_ID", default_value = "167000")]
-    pub l2_chain_id: u64,
+    #[arg(long, env = "RAIKO2_L2_CHAIN_ID")]
+    pub l2_chain_id: Option<u64>,
 
     /// RPC request timeout in milliseconds
     #[arg(long, env = "RAIKO2_RPC_TIMEOUT_MS")]

@@ -122,6 +122,15 @@ where
 }
 
 fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
+    if let Some(range) = ctx.request.l2_block_range {
+        if !range.is_valid() {
+            return Err(RaikoError::InvalidRequestConfig(
+                "request l2_block_range.start must be <= end".into(),
+            ));
+        }
+        return Ok(((range.start..=range.end).collect(), ctx.request.proposal_id));
+    }
+
     if let Some(range) = ctx.config.get("l2_block_range") {
         let start = range.get("start").and_then(Value::as_u64).ok_or_else(|| {
             RaikoError::InvalidRequestConfig("l2_block_range.start missing".into())

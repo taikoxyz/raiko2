@@ -10,7 +10,7 @@ pub use types::{ProverMode, RecursionMode, Sp1Config, Sp1Response};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
 use sp1_sdk::{HashableKey, ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin};
 use tracing::info;
 
@@ -49,6 +49,15 @@ where
 
     fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
         GuestInputCodec::encode(self, input, config)
+    }
+
+    fn prepare_config_for_input(
+        &self,
+        input: &Self::GuestInput,
+        config: &mut ProverConfig,
+    ) -> RaikoResult<()> {
+        config["proof_carry_data"] = serde_json::to_value(build_proof_carry_data(input))?;
+        Ok(())
     }
 
     async fn prove_encoded(

@@ -46,6 +46,8 @@ pub struct ProverConfig {
 pub struct Risc0Config {
     pub bonsai: bool,
     pub snark: bool,
+    #[serde(default)]
+    pub mock: bool,
 }
 
 impl Default for Risc0Config {
@@ -53,6 +55,7 @@ impl Default for Risc0Config {
         Self {
             bonsai: true,
             snark: true,
+            mock: false,
         }
     }
 }

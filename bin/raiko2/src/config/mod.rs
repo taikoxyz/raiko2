@@ -36,8 +36,12 @@ impl Config {
         };
 
         // Override with CLI arguments
-        config.server.host.clone_from(&cli.host);
-        config.server.port = cli.port;
+        if let Some(host) = &cli.host {
+            config.server.host.clone_from(host);
+        }
+        if let Some(port) = cli.port {
+            config.server.port = port;
+        }
 
         if let Some(l1_rpc) = &cli.l1_rpc {
             config.rpc.l1_rpc.clone_from(l1_rpc);
@@ -45,8 +49,12 @@ impl Config {
         if let Some(l2_rpc) = &cli.l2_rpc {
             config.rpc.l2_rpc.clone_from(l2_rpc);
         }
-        config.rpc.l1_chain_id = cli.l1_chain_id;
-        config.rpc.l2_chain_id = cli.l2_chain_id;
+        if let Some(l1_chain_id) = cli.l1_chain_id {
+            config.rpc.l1_chain_id = l1_chain_id;
+        }
+        if let Some(l2_chain_id) = cli.l2_chain_id {
+            config.rpc.l2_chain_id = l2_chain_id;
+        }
         if let Some(timeout_ms) = cli.rpc_timeout_ms {
             config.rpc.client.timeout_ms = timeout_ms;
         }
@@ -63,7 +71,9 @@ impl Config {
             config.rpc.client.retry.compute_units_per_second = cu_per_second;
         }
 
-        config.prover.prover_type = cli.prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+        if let Some(prover) = &cli.prover {
+            config.prover.prover_type = prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+        }
 
         if let Some(queue_backend) = &cli.queue_backend {
             config.queue.backend = queue_backend
@@ -236,6 +246,42 @@ mod tests {
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_file_values_are_not_overridden_by_cli_defaults() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com"
+l2_rpc = "http://34.71.217.85:8545"
+l1_chain_id = 560048
+l2_chain_id = 167013
+
+[prover]
+prover_type = "native"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.port, 9090);
+        assert_eq!(config.rpc.l1_chain_id, 560048);
+        assert_eq!(config.rpc.l2_chain_id, 167013);
+        assert_eq!(config.prover.prover_type, ProverType::Native);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

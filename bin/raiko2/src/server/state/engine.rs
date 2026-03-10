@@ -1,4 +1,4 @@
-use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey};
+use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_queue::{TaskState, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
@@ -13,7 +13,11 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait EngineHandle: Send + Sync {
     fn submit_proposal_proof(
         &self,
-        proposal_id: u64,
+        request: ProposalTaskRequest,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
+    fn submit_aggregation_proof(
+        &self,
+        proof_tasks: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
@@ -28,37 +32,43 @@ fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineSt
             status: ProofStatus::Pending,
             proof: None,
             error: None,
+            extra_data: None,
         },
         TaskState::Retrying { error, .. } => EngineStatusView {
             status: ProofStatus::Pending,
             proof: None,
             error: Some(error),
+            extra_data: None,
         },
         TaskState::Running { .. } => EngineStatusView {
             status: ProofStatus::Proving,
             proof: None,
             error: None,
+            extra_data: None,
         },
         TaskState::Succeeded { output } => {
-            let proof = match output {
-                EngineOutput::Proof(proof) => proof.output.proof,
-                _ => None,
+            let (proof, extra_data) = match output {
+                EngineOutput::Proof(proof) => (proof.output.proof, proof.output.extra_data),
+                _ => (None, None),
             };
             EngineStatusView {
                 status: ProofStatus::Completed,
                 proof,
                 error: None,
+                extra_data,
             }
         }
         TaskState::Failed { error, .. } => EngineStatusView {
             status: ProofStatus::Failed,
             proof: None,
             error: Some(error),
+            extra_data: None,
         },
         TaskState::Cancelled => EngineStatusView {
             status: ProofStatus::Cancelled,
             proof: None,
             error: None,
+            extra_data: None,
         },
     }
 }
@@ -72,9 +82,16 @@ where
 {
     fn submit_proposal_proof(
         &self,
-        proposal_id: u64,
+        request: ProposalTaskRequest,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move { self.submit_proposal_proof(proposal_id).await })
+        Box::pin(async move { self.submit_proposal_proof(request).await })
+    }
+
+    fn submit_aggregation_proof(
+        &self,
+        proof_tasks: Vec<EngineTaskId>,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+        Box::pin(async move { self.submit_aggregation_proof(proof_tasks).await })
     }
 
     fn get_status(
@@ -89,5 +106,58 @@ where
 
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_task;
+    use crate::server::state::types::ProofStatus;
+    use raiko2_engine::tasks::EngineOutput;
+    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
+    use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
+    use raiko2_primitives::Proof;
+    use raiko2_primitives_shasta::GuestInput;
+    use raiko2_queue::{Priority, TaskState, TaskView};
+    use serde_json::json;
+
+    #[test]
+    fn summarize_task_keeps_extra_data_for_completed_proof() {
+        let proof = Proof {
+            proof: Some("0xdeadbeef".to_string()),
+            extra_data: Some(json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "total_cycles": 42
+            })),
+            ..Proof::default()
+        };
+        let output: EngineOutput<GuestInput> = EngineOutput::Proof(Box::new(
+            PipelineStageResult::new(PipelineStage::Prove, proof),
+        ));
+        let task = TaskView {
+            id: EngineTaskId::new(EngineTaskKey::Proposal {
+                pipeline: PipelineKey::ShastaRisc0,
+                request: ProposalTaskRequest {
+                    proposal_id: 1,
+                    l2_block_range: None,
+                },
+                stage: ProposalStage::Prove,
+            }),
+            state: TaskState::Succeeded { output },
+            priority: Priority::Medium,
+        };
+
+        let summary = summarize_task(task);
+        assert!(matches!(summary.status, ProofStatus::Completed));
+        assert_eq!(summary.proof.as_deref(), Some("0xdeadbeef"));
+        assert_eq!(
+            summary.extra_data,
+            Some(json!({
+                "zkvm": "risc0",
+                "mode": "mock",
+                "total_cycles": 42
+            }))
+        );
     }
 }

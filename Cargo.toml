@@ -61,7 +61,7 @@ raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
 
 # zkVM
-risc0-zkvm = "3.0.4"
+risc0-zkvm = { version = "3.0.4", features = ["prove"] }
 sp1-sdk = "5.2.3"
 
 # Alethia reth (main branch)

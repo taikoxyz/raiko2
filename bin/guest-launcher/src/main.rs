@@ -8,12 +8,13 @@ use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::Proof;
+use raiko2_primitives_shasta::build_proof_carry_data;
 use raiko2_primitives_shasta::decode_proof_carry_data;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_primitives_shasta::instance::words_to_bytes_be;
 use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use raiko2_protocol_shasta::shasta::{ProofCarryData, TransitionInputData};
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
 use serde::Serialize;
@@ -245,26 +246,6 @@ fn build_sp1_proof_output(
         extra_data,
         ..Default::default()
     })
-}
-
-fn build_proof_carry_data(input: &GuestInput) -> ProofCarryData {
-    // Chain id must match what the guest expects for the witness' chain spec.
-    // Prefer the witness' chain id (it is what the pipeline executes against), and fall back to
-    // the manifest chain id if the witness list is empty.
-    let chain_id = input
-        .witnesses
-        .first()
-        .map(|w| w.chain_spec.chain_id)
-        .filter(|&id| id != 0)
-        .unwrap_or(input.taiko.chain_spec.chain_id);
-    ProofCarryData {
-        chain_id,
-        verifier: Address::default(),
-        transition_input: TransitionInputData {
-            proposal_id: input.taiko.proposal_id,
-            ..Default::default()
-        },
-    }
 }
 
 fn run_sp1_proposal(

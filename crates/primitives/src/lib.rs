@@ -17,7 +17,7 @@ pub mod proof;
 pub(crate) mod proof_type;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
-pub use context::{ProofContext, ProofRequest};
+pub use context::{L2BlockRange, ProofContext, ProofRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, StatelessInput};
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};

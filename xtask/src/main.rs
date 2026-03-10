@@ -1,5 +1,6 @@
 mod bench_guest;
 mod build_guest;
+mod release_image;
 mod util;
 
 use anyhow::Result;
@@ -19,6 +20,9 @@ enum Cmd {
 
     /// Run guest benchmarks following the PR #9 workflow.
     BenchGuest(Box<bench_guest::BenchGuestArgs>),
+
+    /// Build guest ELFs, build/push the runtime image, and print the rollout command.
+    ReleaseImage(release_image::ReleaseImageArgs),
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -35,5 +39,6 @@ fn main() -> Result<()> {
     match args.cmd {
         Cmd::BuildGuest(args) => build_guest::run(&root, args),
         Cmd::BenchGuest(args) => bench_guest::run(&root, *args),
+        Cmd::ReleaseImage(args) => release_image::run(&root, args),
     }
 }

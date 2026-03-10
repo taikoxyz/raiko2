@@ -208,6 +208,30 @@ Without `just`:
 cargo run -r -p xtask -- build-guest all
 ```
 
+## Release image
+
+Use the `xtask` release entrypoint for runtime images. It is the canonical flow for image releases:
+
+1. rebuild the guest ELF assets for the selected backend
+2. build the runtime image
+3. push the image
+4. print the exact `kubectl set image` and `kubectl rollout status` commands
+
+Release images should not be built via ad-hoc `docker build` because the Dockerfile packages the
+existing `crates/guests/elf` artifacts and does not rebuild guest sources on its own.
+
+```bash
+just release-image risc0 tolba-20260310-1013
+
+# Equivalent xtask command:
+cargo run -r -p xtask -- release-image risc0 \
+  --tag tolba-20260310-1013 \
+  --repository us-docker.pkg.dev/evmchain/images/raiko2 \
+  --namespace tolba-raiko2-host \
+  --deployment raiko2 \
+  --container raiko2
+```
+
 ## Guest benchmarking
 
 The `bench-guest` task measures guest execution costs (cycles + wall time):

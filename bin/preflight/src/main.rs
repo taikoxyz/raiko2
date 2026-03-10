@@ -81,6 +81,10 @@ async fn main() -> Result<()> {
         l1_chain_id: args.l1_chain_id,
         l2_chain_id: args.l2_chain_id,
         proposal_id: args.proposal_id,
+        l2_block_range: Some(raiko2_primitives::L2BlockRange {
+            start: args.l2_start,
+            end: args.l2_end,
+        }),
         proof_type: args.proof_type,
         blob_proof_type: None,
         prover: args.prover,

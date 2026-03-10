@@ -18,7 +18,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock rust-toolchain ./
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY bin ./bin
 COPY xtask ./xtask

@@ -121,6 +121,7 @@ fn native_fixture_engine() -> NativeFixtureEngine {
             l1_chain_id: 1,
             l2_chain_id: 167_001,
             proposal_id: 0,
+            l2_block_range: None,
             proof_type: "native".to_string(),
             blob_proof_type: None,
             prover: None,

@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
+    GuestInput, ShastaZkAggregationGuestInput, build_proof_carry_data, encode_proof_carry_data,
     instance::{
         ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
@@ -43,6 +43,15 @@ where
 
     fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
         GuestInputCodec::encode(self, input, config)
+    }
+
+    fn prepare_config_for_input(
+        &self,
+        input: &Self::GuestInput,
+        config: &mut ProverConfig,
+    ) -> RaikoResult<()> {
+        config["proof_carry_data"] = serde_json::to_value(build_proof_carry_data(input))?;
+        Ok(())
     }
 
     async fn prove_encoded(

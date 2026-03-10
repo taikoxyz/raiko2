@@ -1,8 +1,14 @@
 use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineKey, PipelineStageResult};
-use raiko2_primitives::Proof;
+use raiko2_primitives::{L2BlockRange, Proof};
 use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalTaskRequest {
+    pub proposal_id: u64,
+    pub l2_block_range: Option<L2BlockRange>,
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalStage {
@@ -16,7 +22,7 @@ pub enum ProposalStage {
 pub enum EngineTaskKey {
     Proposal {
         pipeline: PipelineKey,
-        proposal_id: u64,
+        request: ProposalTaskRequest,
         stage: ProposalStage,
     },
     Aggregate {
@@ -40,18 +46,18 @@ pub type EngineTaskId = TaskId<EngineTaskKey>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineTask {
     Preflight {
-        proposal_id: u64,
+        request: ProposalTaskRequest,
     },
     Validate {
-        proposal_id: u64,
+        request: ProposalTaskRequest,
         preflight_task: EngineTaskId,
     },
     Encode {
-        proposal_id: u64,
+        request: ProposalTaskRequest,
         input_task: EngineTaskId,
     },
     ProveProposal {
-        proposal_id: u64,
+        request: ProposalTaskRequest,
         input_task: EngineTaskId,
     },
     Aggregate {
@@ -83,14 +89,21 @@ mod tests {
 
     fn proposal_task_id(
         pipeline: PipelineKey,
-        proposal_id: u64,
+        request: ProposalTaskRequest,
         stage: ProposalStage,
     ) -> EngineTaskId {
         TaskId::new(EngineTaskKey::Proposal {
             pipeline,
-            proposal_id,
+            request,
             stage,
         })
+    }
+
+    fn proposal_request(proposal_id: u64) -> ProposalTaskRequest {
+        ProposalTaskRequest {
+            proposal_id,
+            l2_block_range: None,
+        }
     }
 
     #[tokio::test]
@@ -100,14 +113,18 @@ mod tests {
 
         let a1 = sched
             .submit(
-                proposal_task_id(PipelineKey::ShastaNative, 1, ProposalStage::Prove),
+                proposal_task_id(
+                    PipelineKey::ShastaNative,
+                    proposal_request(1),
+                    ProposalStage::Prove,
+                ),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveProposal {
-                        proposal_id: 1,
+                        request: proposal_request(1),
                         input_task: proposal_task_id(
                             PipelineKey::ShastaNative,
-                            1,
+                            proposal_request(1),
                             ProposalStage::Encode,
                         ),
                     },
@@ -117,14 +134,18 @@ mod tests {
             .await?;
         let a2 = sched
             .submit(
-                proposal_task_id(PipelineKey::ShastaNative, 2, ProposalStage::Prove),
+                proposal_task_id(
+                    PipelineKey::ShastaNative,
+                    proposal_request(2),
+                    ProposalStage::Prove,
+                ),
                 NewTask {
                     priority: Priority::Medium,
                     payload: EngineTask::ProveProposal {
-                        proposal_id: 2,
+                        request: proposal_request(2),
                         input_task: proposal_task_id(
                             PipelineKey::ShastaNative,
-                            2,
+                            proposal_request(2),
                             ProposalStage::Encode,
                         ),
                     },

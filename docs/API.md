@@ -76,10 +76,13 @@ Content-Type: application/json
 
 #### Request Body
 
-| Field         | Type     | Required | Description                                                                      |
-| ------------- | -------- | -------- | -------------------------------------------------------------------------------- |
-| `proposal_id` | `u64`    | Yes      | The proposal ID to prove                                                         |
-| `prover_type` | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config)    |
+| Field            | Type     | Required | Description                                                                                   |
+| ---------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
+| `proposal_id`    | `u64`    | Yes      | The proposal ID to prove                                                                      |
+| `prover_type`    | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config)                 |
+| `l2_block_range` | `object` | No       | Explicit L2 block span used during preflight when proposal discovery happens outside `raiko2` |
+
+If `l2_block_range` is present, `start` must be less than or equal to `end`.
 
 Unknown request fields are rejected.
 
@@ -88,7 +91,11 @@ Unknown request fields are rejected.
 ```json
 {
   "proposal_id": 12345,
-  "prover_type": "agent-risc0"
+  "prover_type": "agent-risc0",
+  "l2_block_range": {
+    "start": 100,
+    "end": 102
+  }
 }
 ```
 
@@ -111,6 +118,42 @@ The `proof_id` is an opaque URL-safe base64 string. Treat it as an opaque identi
 | 400  | Invalid request parameters |
 | 500  | Internal server error      |
 
+### Request Aggregation Proof
+
+```http
+POST /v1/proof/aggregation
+Content-Type: application/json
+```
+
+#### Request Body
+
+| Field         | Type       | Required | Description                                                                 |
+| ------------- | ---------- | -------- | --------------------------------------------------------------------------- |
+| `proof_ids`   | `string[]` | Yes      | At least two completed proposal proof ids returned by `/v1/proof/proposal` |
+| `prover_type` | `string`   | No       | Optional prover type hint. Must match the pipeline encoded by `proof_ids`   |
+
+Unknown request fields are rejected.
+
+#### Example Request
+
+```json
+{
+  "proof_ids": ["<proof-id-1>", "<proof-id-2>"],
+  "prover_type": "agent-risc0"
+}
+```
+
+#### Response
+
+```json
+{
+  "id": "<proof_id>",
+  "status": "pending"
+}
+```
+
+Aggregation reuses the same status and cancel endpoints as proposal proofs.
+
 ### Get Proof Status
 
 ```http
@@ -130,9 +173,27 @@ GET /v1/proof/{proof_id}
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "completed",
   "proof": "0x...",
-  "error": null
+  "error": null,
+  "extra_data": {
+    "zkvm": "risc0",
+    "mode": "mock",
+    "fake_receipt": true,
+    "image_id": "0x...",
+    "input_hash": "0x...",
+    "journal_bytes": 96,
+    "exit_code": "Halted(0)",
+    "total_cycles": 123456,
+    "segment_count": 2,
+    "segments": [
+      { "index": 0, "po2": 20, "cycles": 65432 },
+      { "index": 1, "po2": 19, "cycles": 58024 }
+    ]
+  }
 }
 ```
+
+`extra_data` is optional. For local `risc0` mock runs it contains zkVM execution metadata, including
+the total cycle count and per-segment cycle breakdown.
 
 #### Proof Status Values
 
@@ -167,13 +228,13 @@ Note: the status reflects the task state after the cancel attempt.
 
 | Variable                              | Default   | Description                                  |
 | ------------------------------------- | --------- | -------------------------------------------- |
-| `RAIKO2_HOST`                         | `0.0.0.0` | Server bind address                          |
-| `RAIKO2_PORT`                         | `8080`    | Server port                                  |
+| `RAIKO2_HOST`                         | -         | Server bind address override                 |
+| `RAIKO2_PORT`                         | -         | Server port override                         |
 | `RAIKO2_L1_RPC`                       | -         | L1 RPC endpoint URL                          |
 | `RAIKO2_L2_RPC`                       | -         | L2 RPC endpoint URL                          |
-| `RAIKO2_PROVER`                       | `risc0`   | Default prover type                          |
-| `RAIKO2_L1_CHAIN_ID`                  | `1`       | L1 chain ID                                  |
-| `RAIKO2_L2_CHAIN_ID`                  | `167000`  | L2 chain ID (Taiko Mainnet)                  |
+| `RAIKO2_PROVER`                       | -         | Default prover type override                 |
+| `RAIKO2_L1_CHAIN_ID`                  | -         | L1 chain ID override                         |
+| `RAIKO2_L2_CHAIN_ID`                  | -         | L2 chain ID override                         |
 | `RAIKO2_RPC_TIMEOUT_MS`               | `10000`   | RPC request timeout (ms)                     |
 | `RAIKO2_RPC_CONCURRENCY_LIMIT`        | `32`      | RPC concurrency limit                        |
 | `RAIKO2_RPC_RETRY_MAX_ATTEMPTS`       | `3`       | RPC retry max attempts (0 disables retry)    |
@@ -220,6 +281,7 @@ prover_type = "risc0"
 [prover.risc0]
 bonsai = true
 snark = true
+mock = false
 
 [prover.sp1]
 network = true
@@ -245,6 +307,12 @@ fixed_delay_ms = 1000
 base_delay_ms = 1000
 max_delay_ms = 30000
 ```
+
+`prover.agent.url` is the agent base URL only. The client appends `/proof` and `/status/{request_id}` automatically.
+
+`prover.risc0.mock = true` enables RISC Zero dev mode for local smoke tests. In that mode the
+guest still executes and produces a real journal, but the receipt is fake and must never be used
+for production or external verification.
 
 ## CLI Usage
 
@@ -312,7 +380,7 @@ curl http://localhost:8080/v1/info
 # Request proof
 curl -X POST http://localhost:8080/v1/proof/proposal \
   -H "Content-Type: application/json" \
-  -d '{"proposal_id": 12345, "prover_type": "risc0"}'
+  -d '{"proposal_id": 12345, "prover_type": "risc0", "l2_block_range": {"start": 100, "end": 102}}'
 
 # Get proof status
 curl http://localhost:8080/v1/proof/<proof_id>
@@ -331,7 +399,8 @@ response = requests.post(
     "http://localhost:8080/v1/proof/proposal",
     json={
         "proposal_id": 12345,
-        "prover_type": "risc0"
+        "prover_type": "risc0",
+        "l2_block_range": {"start": 100, "end": 102},
     }
 )
 proof_id = response.json()["id"]

@@ -321,7 +321,39 @@ where
         };
 
         let payload = lease.payload.clone();
+        let renew_scheduler = self.inner.scheduler.clone();
+        let renew_lease = lease.clone();
+        let renew_period = self
+            .inner
+            .scheduler
+            .config()
+            .lease_duration
+            .checked_div(2)
+            .unwrap_or_else(|| Duration::from_secs(1))
+            .max(Duration::from_secs(1));
+        let renew_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(renew_period);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match renew_scheduler.renew_lease(&renew_lease).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(err) => {
+                        tracing::warn!(
+                            worker = %renew_lease.worker,
+                            task = ?renew_lease.id,
+                            error = %err,
+                            "failed to renew task lease"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
         let result = self.execute(payload.clone()).await;
+        renew_task.abort();
         if let Err(err) = &result {
             tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
         }

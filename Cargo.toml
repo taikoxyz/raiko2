@@ -71,7 +71,7 @@ alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch 
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
 
-# Reth (v1.10.2 - same as alethia-reth main)
+# Reth (v1.10.2 - aligned with the current raiko2 compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v1.10.2" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }
 reth-stateless = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.2" }

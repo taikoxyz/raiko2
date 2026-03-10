@@ -6,6 +6,7 @@ pub struct NewTask<P> {
     pub payload: P,
 }
 
+#[derive(Clone)]
 pub struct TaskLease<P, Id> {
     pub id: TaskId<Id>,
     pub payload: P,

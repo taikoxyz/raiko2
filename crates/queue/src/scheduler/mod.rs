@@ -19,6 +19,17 @@ pub struct Scheduler<P, O: Clone, Id> {
     _phantom: core::marker::PhantomData<fn(P, O)>,
 }
 
+impl<P, O: Clone, Id> Clone for Scheduler<P, O, Id> {
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            notify: Arc::clone(&self.notify),
+            config: self.config.clone(),
+            _phantom: core::marker::PhantomData,
+        }
+    }
+}
+
 /// Maximum number of tasks to promote/requeue per maintenance tick.
 ///
 /// This bounds the amount of work done in a single tick so that a periodic
@@ -68,6 +79,11 @@ where
     #[must_use]
     pub fn notifier(&self) -> Arc<Notify> {
         self.notify.clone()
+    }
+
+    #[must_use]
+    pub const fn config(&self) -> &SchedulerConfig {
+        &self.config
     }
 }
 
@@ -240,6 +256,15 @@ where
         self.notify.notify_one();
 
         Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn renew_lease(&self, lease: &TaskLease<P, Id>) -> Result<bool, TaskStoreError> {
+        self.store
+            .renew_lease(&lease.id, &lease.worker, lease.attempt)
+            .await
     }
 
     /// # Errors
@@ -554,6 +579,28 @@ mod tests {
             Ok(Some((payload.clone(), record.priority, attempt)))
         }
 
+        async fn renew_lease(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+        ) -> StoreResult<bool> {
+            let mut guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get_mut(id) else {
+                return Ok(false);
+            };
+
+            let TaskState::Running {
+                worker: current_worker,
+                attempt: current_attempt,
+            } = &record.state
+            else {
+                return Ok(false);
+            };
+
+            Ok(current_worker == worker && *current_attempt == attempt)
+        }
+
         async fn put_payload(&self, id: &TestTaskId, payload: P) -> StoreResult<()> {
             let mut guard = self.inner.lock().await;
             if let Some(record) = guard.tasks.get_mut(id) {
@@ -649,6 +696,15 @@ mod tests {
 
         async fn put_payload(&self, id: &TestTaskId, payload: P) -> crate::StoreResult<()> {
             self.inner.put_payload(id, payload).await
+        }
+
+        async fn renew_lease(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+        ) -> crate::StoreResult<bool> {
+            self.inner.renew_lease(id, worker, attempt).await
         }
 
         async fn schedule(&self, id: TestTaskId, not_before_ms: u64) -> crate::StoreResult<()> {

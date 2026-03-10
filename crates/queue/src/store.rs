@@ -82,6 +82,12 @@ where
         id: &TaskId<Id>,
         worker: &str,
     ) -> StoreResult<Option<(P, Priority, u32)>>;
+    async fn renew_lease(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+    ) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
@@ -313,6 +319,35 @@ where
         }
 
         Ok(())
+    }
+
+    async fn renew_lease(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(false);
+        };
+
+        let TaskState::Running {
+            worker: current_worker,
+            attempt: current_attempt,
+        } = &record.state
+        else {
+            return Ok(false);
+        };
+
+        if current_worker != worker || *current_attempt != attempt {
+            return Ok(false);
+        }
+
+        let lease_ms =
+            u64::try_from(self.lease.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+        record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
+        Ok(true)
     }
 
     async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()> {

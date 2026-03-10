@@ -653,6 +653,61 @@ return {payload, priority, attempt}
         Ok(())
     }
 
+    async fn renew_lease(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+    ) -> StoreResult<bool> {
+        let task_key = self.task_key(id)?;
+        let running_key = self.running_key();
+        let encoded = self.encode_id(id)?;
+        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
+        let lease_until_ms = now_millis().saturating_add(lease_ms);
+
+        let script = redis::Script::new(
+            r#"
+local state = redis.call('HGET', KEYS[1], ARGV[1])
+if state ~= ARGV[2] then
+  return 0
+end
+
+local current_worker = redis.call('HGET', KEYS[1], ARGV[3])
+if current_worker ~= ARGV[4] then
+  return 0
+end
+
+local current_attempt = redis.call('HGET', KEYS[1], ARGV[5])
+if not current_attempt or tonumber(current_attempt) ~= tonumber(ARGV[6]) then
+  return 0
+end
+
+redis.call('HSET', KEYS[1], ARGV[7], ARGV[8])
+redis.call('ZADD', KEYS[2], ARGV[8], ARGV[9])
+return 1
+"#,
+        );
+
+        let mut conn = self.conn.lock().await;
+        let renewed: i64 = script
+            .key(task_key)
+            .key(running_key)
+            .arg(FIELD_STATE)
+            .arg(STATE_RUNNING)
+            .arg(FIELD_WORKER)
+            .arg(worker)
+            .arg(FIELD_ATTEMPT)
+            .arg(attempt as i64)
+            .arg(FIELD_LEASE_UNTIL_MS)
+            .arg(lease_until_ms as i64)
+            .arg(encoded)
+            .invoke_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+
+        Ok(renewed == 1)
+    }
+
     async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()> {
         let key = self.scheduled_key();
         let encoded = self.encode_id(&id)?;

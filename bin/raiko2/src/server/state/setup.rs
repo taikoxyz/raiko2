@@ -29,6 +29,18 @@ pub(crate) fn build_provider(config: &Config) -> Result<NetworkProvider> {
 
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
+    let attempts = u64::from(config.rpc.client.retry.max_attempts.max(1));
+    let timeout_ms = config.rpc.client.timeout_ms;
+    let backoff_ms = config
+        .rpc
+        .client
+        .retry
+        .initial_backoff_ms
+        .saturating_mul(attempts.saturating_sub(1));
+    let lease_ms = timeout_ms
+        .saturating_mul(attempts)
+        .saturating_add(backoff_ms)
+        .saturating_add(30_000);
     let retry_policy = match config.queue.retry.strategy {
         RetryStrategy::None => RetryPolicy::None,
         RetryStrategy::Fixed => RetryPolicy::Fixed {
@@ -43,7 +55,10 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
     };
 
     SchedulerConfig {
-        lease_duration: Duration::from_secs(60),
+        // Preflight and local witness generation can run longer than a single RPC timeout,
+        // especially when provider retries are enabled. Keep the lease aligned with the
+        // effective RPC wait window so maintenance does not requeue the same long-running task.
+        lease_duration: Duration::from_millis(lease_ms.max(60_000)),
         retry: retry_policy,
     }
 }
@@ -114,7 +129,7 @@ pub(crate) fn queue_namespace(base: &str, key: PipelineKey) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::agent_scheduler_config;
+    use super::{agent_scheduler_config, scheduler_config};
     use crate::config::Config;
     use std::time::Duration;
 
@@ -135,6 +150,27 @@ mod tests {
         config.prover.agent.poll_interval_ms = 1_000;
 
         let scheduler = agent_scheduler_config(&config);
+        assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn scheduler_lease_covers_rpc_timeout_window() {
+        let mut config = Config::default();
+        config.rpc.client.timeout_ms = 60_000;
+        config.rpc.client.retry.max_attempts = 3;
+        config.rpc.client.retry.initial_backoff_ms = 500;
+
+        let scheduler = scheduler_config(&config);
+        assert_eq!(scheduler.lease_duration, Duration::from_millis(211_000));
+    }
+
+    #[test]
+    fn scheduler_lease_has_one_minute_floor() {
+        let mut config = Config::default();
+        config.rpc.client.timeout_ms = 5_000;
+        config.rpc.client.retry.max_attempts = 0;
+
+        let scheduler = scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
     }
 }

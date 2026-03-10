@@ -7,7 +7,7 @@ ENV HOME=/root
 ENV PATH="${HOME}/.cargo/bin:${HOME}/.risc0/bin:${PATH}"
 
 # Keep in sync with Cargo.toml's risc0-zkvm version.
-ARG RISC0_VERSION=3.0.4
+ARG RISC0_VERSION=3.0.3
 # Toolchain versions for rzup (SemVer).
 ARG RISC0_RUST_VERSION=1.85.0
 ARG RISC0_CPP_VERSION=2024.1.5

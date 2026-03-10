@@ -3,7 +3,9 @@
 pub mod aggregation;
 pub mod types;
 
-use crate::agent::types::{AsyncProofRequestData, AsyncProofResponse, StatusResponse};
+use crate::agent::types::{
+    AsyncProofRequestData, AsyncProofResponse, Raiko2InputEncodingConfig, StatusResponse,
+};
 use alloy_primitives::Bytes;
 use alloy_primitives::hex::encode_prefixed;
 use raiko2_pipeline::ProverBackend;
@@ -15,6 +17,8 @@ use raiko2_primitives_shasta::GuestInput;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
+
+use crate::parse_proof_carry_data;
 
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
@@ -125,15 +129,19 @@ where
     async fn prove_encoded(
         &self,
         input: Bytes,
-        _config: &ProverConfig,
+        config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
+        let proof_carry_data = parse_proof_carry_data(config);
         let request = AsyncProofRequestData::new(
             &self.client.config.prover_type,
             "batch",
             input.to_vec(),
             Vec::new(),
-        );
+        )
+        .with_raiko2_input_encoding(Raiko2InputEncodingConfig::risc0_shasta_batch(
+            &proof_carry_data,
+        )?)?;
         let proof_data = self.submit_and_wait(&request).await?;
         decode_risc0_proof(&proof_data)
     }

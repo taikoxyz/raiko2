@@ -1,10 +1,12 @@
 #![allow(missing_docs)]
 
+use alloy_primitives::{Address, B256};
 use httpmock::Method::GET;
 use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::Proof;
+use raiko2_protocol_shasta::shasta::{ProofCarryData, ShastaTransitionInput, TransitionInputData};
 use raiko2_prover::Prover;
 use raiko2_prover::agent::{AgentConfig, AgentProver};
 use serde_json::json;
@@ -117,6 +119,65 @@ async fn agent_submit_proposal_returns_failed_status_error() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("boom"));
+}
+
+#[tokio::test]
+async fn agent_submit_proposal_sends_raiko2_input_encoding_config() {
+    let server = MockServer::start();
+
+    let proof_bytes = proof_response_bytes();
+    let _submit = server.mock(|when, then| {
+        when.method(POST)
+            .path("/proof")
+            .body_contains("\"raiko2_input_encoding\"")
+            .body_contains("\"kind\":\"risc0_shasta_batch_v1\"")
+            .body_contains("\"proof_carry_data\":\"0x");
+        then.status(200).json_body(json!({
+            "request_id": "req_cfg",
+            "prover_type": "boundless",
+            "status": "preparing",
+            "message": "ok"
+        }));
+    });
+
+    let _status = server.mock(|when, then| {
+        when.method(GET).path("/status/req_cfg");
+        then.status(200).json_body(json!({
+            "request_id": "req_cfg",
+            "prover_type": "boundless",
+            "status": "fulfilled",
+            "status_message": "done",
+            "proof_data": proof_bytes
+        }));
+    });
+
+    let carry = ProofCarryData {
+        chain_id: 167_013,
+        verifier: Address::repeat_byte(0x11),
+        transition_input: TransitionInputData {
+            proposal_id: 7,
+            proposal_hash: B256::repeat_byte(0x22),
+            parent_proposal_hash: B256::repeat_byte(0x33),
+            parent_block_hash: B256::repeat_byte(0x44),
+            actual_prover: Address::repeat_byte(0x55),
+            transition: ShastaTransitionInput {
+                proposer: Address::repeat_byte(0x66),
+                timestamp: 123,
+            },
+            checkpoint: Default::default(),
+        },
+    };
+    let config = json!({
+        "proof_carry_data": carry,
+    });
+
+    let prover = prover_for(&server);
+    let proof: Proof = prover
+        .prove_encoded(vec![1, 2, 3].into(), &config, &TestBackend)
+        .await
+        .unwrap();
+
+    assert_eq!(proof.proof.as_deref(), Some("0xaabb"));
 }
 
 #[tokio::test]

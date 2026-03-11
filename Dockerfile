@@ -6,6 +6,7 @@ FROM rust:1.93.0-bookworm AS builder
 ARG BIN_FEATURES=""
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -25,7 +26,7 @@ COPY xtask ./xtask
 COPY config ./config
 COPY config.example.toml ./
 
-RUN cargo build --release -p raiko2 ${BIN_FEATURES}
+RUN cargo +1.93.0 build --release -p raiko2 ${BIN_FEATURES}
 
 FROM debian:bookworm-slim AS runtime
 

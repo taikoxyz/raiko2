@@ -13,7 +13,6 @@ use raiko2_primitives_shasta::{
     verify_proposal_mode_blob_usage, GuestInput, ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_stateless::validate_block;
 use std::sync::Arc;
 
@@ -35,35 +34,30 @@ impl TaikoRuntime {
 
 pub fn prove_shasta_proposal(
     guest_input: &GuestInput,
-    proof_carry_data: &ProofCarryData,
 ) -> Result<(B256, B256)> {
     verify_proposal_mode_blob_usage(guest_input)
         .context("proposal mode blob usage verification failed")?;
 
-    prove_shasta_proposal_with_validator(
-        guest_input,
-        proof_carry_data,
-        |stateless_input, runtime| {
-            validate_block(
-                stateless_input.block.clone(),
-                &stateless_input.witness,
-                stateless_input.accounts.clone(),
-                &runtime.chain_spec,
-                &runtime.evm_config,
-            )
-            .map_err(|e| anyhow::anyhow!(e))
-        },
-    )
+    prove_shasta_proposal_with_validator(guest_input, |stateless_input, runtime| {
+        validate_block(
+            stateless_input.block.clone(),
+            &stateless_input.witness,
+            stateless_input.accounts.clone(),
+            &runtime.chain_spec,
+            &runtime.evm_config,
+        )
+        .map_err(|e| anyhow::anyhow!(e))
+    })
 }
 
 pub fn prove_shasta_proposal_with_validator<V>(
     guest_input: &GuestInput,
-    proof_carry_data: &ProofCarryData,
     mut validate_block: V,
 ) -> Result<(B256, B256)>
 where
     V: FnMut(&StatelessInput, &TaikoRuntime) -> Result<B256>,
 {
+    let proof_carry_data = &guest_input.proof_carry_data;
     ensure!(
         !guest_input.witnesses.is_empty(),
         "GuestInput must contain at least one witness"
@@ -225,14 +219,6 @@ mod tests {
         input.block.header.parent_hash = B256::from([9u8; 32]);
         input.block.header.state_root = B256::from([1u8; 32]);
 
-        let guest_input = GuestInput {
-            witnesses: vec![input.clone()],
-            taiko: TaikoManifest {
-                proposal_id: 42,
-                ..Default::default()
-            },
-        };
-
         let proof_carry_data = ProofCarryData {
             chain_id: 167000,
             verifier: Address::from([0x11; 20]),
@@ -246,13 +232,20 @@ mod tests {
                 ..Default::default()
             },
         };
+        let guest_input = GuestInput {
+            witnesses: vec![input.clone()],
+            taiko: TaikoManifest {
+                proposal_id: 42,
+                ..Default::default()
+            },
+            proof_carry_data: proof_carry_data.clone(),
+        };
 
-        let (instance_hash, subproof_input_hash) = prove_shasta_proposal_with_validator(
-            &guest_input,
-            &proof_carry_data,
-            |stateless_input, _runtime| Ok(stateless_input.block.header.hash_slow()),
-        )
-        .expect("proposal proving should succeed");
+        let (instance_hash, subproof_input_hash) =
+            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            })
+            .expect("proposal proving should succeed");
 
         let transition = ShastaTransition {
             parent_hash: input.block.header.parent_hash,
@@ -300,24 +293,22 @@ mod tests {
         };
         second.block.header.parent_hash = B256::from([2u8; 32]);
 
+        let proof_carry_data = ProofCarryData {
+            chain_id: 167000,
+            ..Default::default()
+        };
         let guest_input = GuestInput {
             witnesses: vec![first, second],
             taiko: TaikoManifest {
                 proposal_id: 42,
                 ..Default::default()
             },
+            proof_carry_data,
         };
 
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167000,
-            ..Default::default()
-        };
-
-        let err = prove_shasta_proposal_with_validator(
-            &guest_input,
-            &proof_carry_data,
-            |stateless_input, _runtime| Ok(stateless_input.block.header.hash_slow()),
-        )
+        let err = prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+            Ok(stateless_input.block.header.hash_slow())
+        })
         .expect_err("expected parent-hash mismatch to fail");
 
         assert!(err.to_string().contains("must link to previous block hash"));
@@ -336,24 +327,22 @@ mod tests {
             ..Default::default()
         };
 
+        let proof_carry_data = ProofCarryData {
+            chain_id: 167001,
+            ..Default::default()
+        };
         let guest_input = GuestInput {
             witnesses: vec![input],
             taiko: TaikoManifest {
                 proposal_id: 1,
                 ..Default::default()
             },
+            proof_carry_data,
         };
 
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167001,
-            ..Default::default()
-        };
-
-        let err = prove_shasta_proposal_with_validator(
-            &guest_input,
-            &proof_carry_data,
-            |_stateless_input, _runtime| Ok(B256::ZERO),
-        )
+        let err = prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+            Ok(B256::ZERO)
+        })
         .expect_err("expected chain_id mismatch to fail");
 
         assert!(err
@@ -376,22 +365,22 @@ mod tests {
             ..Default::default()
         };
 
-        let guest_input = GuestInput {
-            witnesses: vec![input],
-            ..Default::default()
-        };
-
         let proof_carry_data = ProofCarryData {
             chain_id: 1,
             ..Default::default()
         };
+        let guest_input = GuestInput {
+            witnesses: vec![input],
+            proof_carry_data,
+            ..Default::default()
+        };
 
-        assert!(prove_shasta_proposal_with_validator(
-            &guest_input,
-            &proof_carry_data,
-            |_stateless_input, _runtime| Ok(B256::ZERO),
-        )
-        .is_err());
+        assert!(
+            prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+                Ok(B256::ZERO)
+            })
+            .is_err()
+        );
     }
 
     #[test]

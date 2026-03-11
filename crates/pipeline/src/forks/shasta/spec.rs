@@ -114,10 +114,13 @@ where
 
         validate_block_range(&witnesses, expected_proposal_id)?;
 
-        Ok(GuestInput {
+        let mut input = GuestInput {
             taiko: manifest,
             witnesses,
-        })
+            proof_carry_data: Default::default(),
+        };
+        input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input);
+        Ok(input)
     }
 }
 

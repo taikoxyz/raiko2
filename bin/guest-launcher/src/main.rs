@@ -8,7 +8,6 @@ use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::Proof;
-use raiko2_primitives_shasta::build_proof_carry_data;
 use raiko2_primitives_shasta::decode_proof_carry_data;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_primitives_shasta::instance::words_to_bytes_be;
@@ -141,11 +140,10 @@ fn read_input(path: &PathBuf) -> Result<GuestInput> {
 fn run_proposal(args: Args) -> Result<()> {
     let input_path = args.input.clone().context("missing --input")?;
     let input = read_input(&input_path)?;
-    let proof_carry_data = build_proof_carry_data(&input);
 
     match args.proof_type {
-        ProofType::Sp1 => run_sp1_proposal(args, input_path, input, proof_carry_data),
-        ProofType::Native => run_native_proposal(args, input_path, input, proof_carry_data),
+        ProofType::Sp1 => run_sp1_proposal(args, input_path, input),
+        ProofType::Native => run_native_proposal(args, input_path, input),
     }
 }
 
@@ -248,18 +246,9 @@ fn build_sp1_proof_output(
     })
 }
 
-fn run_sp1_proposal(
-    args: Args,
-    input_path: PathBuf,
-    input: GuestInput,
-    proof_carry_data: ProofCarryData,
-) -> Result<()> {
+fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
     let mut stdin = SP1Stdin::new();
-    // IMPORTANT: pass GuestInput as raw bincode bytes.
-    // This avoids host/guest schema/config mismatches in SP1's typed IO for complex structs.
-    let guest_input_bytes = bincode::serialize(&input).context("bincode serialize GuestInput")?;
-    stdin.write_vec(guest_input_bytes);
-    stdin.write(&proof_carry_data);
+    stdin.write(&input);
 
     let elf = SP1_SHASTA_BACKEND
         .elf(ProofStage::Proposal)
@@ -306,7 +295,7 @@ fn run_sp1_proposal(
             println!("public_values: {}", report.public_values);
 
             if let Some(path) = &args.output {
-                let output = build_sp1_proof_output(&proof, &vk, Some(&proof_carry_data))?;
+                let output = build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
                 write_proof_json(path, &output)?;
             }
         }
@@ -320,12 +309,7 @@ fn run_sp1_proposal(
     Ok(())
 }
 
-fn run_native_proposal(
-    args: Args,
-    input_path: PathBuf,
-    input: GuestInput,
-    proof_carry_data: ProofCarryData,
-) -> Result<()> {
+fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
     if args.mode == Mode::Execute {
         anyhow::bail!("native backend does not support --mode execute");
     }
@@ -333,7 +317,6 @@ fn run_native_proposal(
         .output
         .as_ref()
         .context("missing --output for native prove")?;
-    let config = json!({ "proof_carry_data": proof_carry_data });
 
     let backend = NativeBackend;
     let prover = NativeProver;
@@ -341,7 +324,7 @@ fn run_native_proposal(
 
     let start = Instant::now();
     let proof = rt
-        .block_on(prover.prove(input, &config, &backend))
+        .block_on(prover.prove(input, &serde_json::Value::Null, &backend))
         .context("native prove failed")?;
     let wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 

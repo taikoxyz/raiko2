@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    GuestInput, ShastaZkAggregationGuestInput, build_proof_carry_data, encode_proof_carry_data,
+    GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
     instance::{
         ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
@@ -12,10 +12,9 @@ use raiko2_primitives_shasta::{
         words_to_bytes_le,
     },
 };
-use raiko2_protocol_shasta::shasta::ProofCarryData;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
-use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input};
+use crate::{GuestInputCodec, parse_shasta_aggregation_input};
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
@@ -45,19 +44,10 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
-    fn prepare_config_for_input(
-        &self,
-        input: &Self::GuestInput,
-        config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        config["proof_carry_data"] = serde_json::to_value(build_proof_carry_data(input))?;
-        Ok(())
-    }
-
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
         let input: GuestInput = bincode::deserialize(input.as_ref())
@@ -68,7 +58,7 @@ where
             ));
         }
 
-        let proof_carry_data: ProofCarryData = parse_proof_carry_data(config);
+        let proof_carry_data = input.proof_carry_data.clone();
 
         let first = input.witnesses.first().ok_or_else(|| {
             RaikoError::Guest("GuestInput must contain at least one witness".to_string())

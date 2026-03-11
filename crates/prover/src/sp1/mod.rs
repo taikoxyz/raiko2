@@ -10,14 +10,11 @@ pub use types::{ProverMode, RecursionMode, Sp1Config, Sp1Response};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+use raiko2_primitives_shasta::GuestInput;
 use sp1_sdk::{HashableKey, ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin};
 use tracing::info;
 
-use crate::{
-    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
-    validate_shasta_aggregation_lengths,
-};
+use crate::{GuestInputCodec, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
 
 /// SP1 Prover for Shasta proposal proofs.
 pub struct Sp1Prover {
@@ -51,37 +48,20 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
-    fn prepare_config_for_input(
-        &self,
-        input: &Self::GuestInput,
-        config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        config["proof_carry_data"] = serde_json::to_value(build_proof_carry_data(input))?;
-        Ok(())
-    }
-
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!("Starting SP1 proposal proof generation...");
 
-        // Extract ProofCarryData from config if available
-        let proof_carry_data = parse_proof_carry_data(config);
-
         // Prepare stdin for SP1 guest program
-        // The guest reads:
-        // 1. GuestInput via read_vec() + bincode deserialize
-        // 2. ProofCarryData via read()
+        // The guest reads a single GuestInput via typed IO.
         let mut stdin = SP1Stdin::new();
-
-        // GuestInput bytes for read_vec()
-        stdin.write_slice(input.as_ref());
-
-        // Write ProofCarryData (for sp1_zkvm::io::read())
-        stdin.write(&proof_carry_data);
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
+        stdin.write(&guest_input);
 
         // Create prover client
         let client = ProverClient::from_env();

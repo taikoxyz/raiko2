@@ -10,17 +10,14 @@ pub use types::{Risc0Config, Risc0ExecutionMetadata, Risc0Response};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
     default_executor, default_prover,
 };
 use tracing::info;
 
-use crate::{
-    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
-    validate_shasta_aggregation_lengths,
-};
+use crate::{GuestInputCodec, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
 
 /// RISC0 Prover for Shasta proposal proofs.
 pub struct Risc0Prover {
@@ -100,41 +97,24 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
-    fn prepare_config_for_input(
-        &self,
-        input: &Self::GuestInput,
-        config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        config["proof_carry_data"] = serde_json::to_value(build_proof_carry_data(input))?;
-        Ok(())
-    }
-
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         let input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         info!("Starting RISC0 proposal proof generation...");
 
-        // Extract ProofCarryData from config if available
-        let proof_carry_data = parse_proof_carry_data(config);
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         let prover_config = self.config.clone();
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
-            // Build the executor environment with both inputs
-            // The guest reads:
-            // 1. GuestInput via env::read()
-            // 2. ProofCarryData via env::read()
             let env = ExecutorEnv::builder()
                 .write(&input)
                 .map_err(|e| RaikoError::Guest(format!("Failed to write input: {e}")))?
-                .write(&proof_carry_data)
-                .map_err(|e| RaikoError::Guest(format!("Failed to write proof_carry_data: {e}")))?
                 .build()
                 .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
 

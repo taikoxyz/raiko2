@@ -13,6 +13,9 @@ pub struct GuestInput {
     pub witnesses: Vec<StatelessInput>,
     /// The Taiko manifest.
     pub taiko: TaikoManifest,
+    /// Carry data required by proposal proof verification.
+    #[serde(default)]
+    pub proof_carry_data: ProofCarryData,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

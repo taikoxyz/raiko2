@@ -31,8 +31,6 @@ use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::ShastaZkAggregationGuestInput;
-use raiko2_protocol_shasta::shasta::ProofCarryData;
-use serde_json::Value;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
@@ -40,14 +38,6 @@ pub trait GuestInputCodec<I>: Send + Sync {
     ///
     /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
-}
-
-fn config_value(config: &ProverConfig, key: &str) -> Value {
-    config.get(key).cloned().unwrap_or(Value::Null)
-}
-
-pub(crate) fn parse_proof_carry_data(config: &ProverConfig) -> ProofCarryData {
-    serde_json::from_value(config_value(config, "proof_carry_data")).unwrap_or_default()
 }
 
 pub(crate) fn parse_shasta_aggregation_input(

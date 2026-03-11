@@ -1250,6 +1250,61 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn resubmit_failed_task_requeues_same_id() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+
+        let id = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "first",
+                },
+                vec![],
+            )
+            .await?;
+
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
+        assert_eq!(lease.id, id);
+        sched.complete(lease, Err("boom".to_string())).await?;
+
+        assert!(matches!(
+            sched
+                .get(id.clone())
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view"))?
+                .state,
+            TaskState::Failed { .. }
+        ));
+
+        let id2 = sched
+            .submit(
+                id.clone(),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "second",
+                },
+                vec![],
+            )
+            .await?;
+        assert_eq!(id2, id);
+
+        let lease2 = sched
+            .next_ready("w2")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected requeued lease"))?;
+        assert_eq!(lease2.id, id);
+        assert_eq!(lease2.priority, Priority::High);
+        assert_eq!(lease2.payload, "second");
+        assert_eq!(lease2.attempt, 1);
+        Ok(())
+    }
+
     #[test]
     fn exponential_retry_delay_saturates_without_shift_overflow() {
         let policy = RetryPolicy::Exponential {

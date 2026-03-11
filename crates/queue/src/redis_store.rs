@@ -126,7 +126,19 @@ where
         let mut conn = self.conn.lock().await;
         let inserted: i64 = redis::Script::new(
             r#"
-if redis.call('EXISTS', KEYS[1]) == 1 then
+local exists = redis.call('EXISTS', KEYS[1])
+if exists == 1 then
+  local state = redis.call('HGET', KEYS[1], ARGV[3])
+  if state == 'failed' or state == 'cancelled' then
+    redis.call('HSET', KEYS[1],
+      ARGV[1], ARGV[2],
+      ARGV[3], ARGV[4],
+      ARGV[5], ARGV[6],
+      ARGV[7], ARGV[8],
+      ARGV[9], ARGV[10])
+    redis.call('HDEL', KEYS[1], ARGV[11], ARGV[12], ARGV[13], ARGV[14], ARGV[15])
+    return 1
+  end
   return 0
 end
 
@@ -150,6 +162,11 @@ return 1
         .arg(payload)
         .arg(FIELD_ATTEMPT)
         .arg(0i64)
+        .arg(FIELD_OUTPUT)
+        .arg(FIELD_ERROR)
+        .arg(FIELD_NEXT_READY_AT_MS)
+        .arg(FIELD_WORKER)
+        .arg(FIELD_LEASE_UNTIL_MS)
         .invoke_async(&mut *conn)
         .await
         .map_err(TaskStoreError::backend)?;
@@ -653,12 +670,7 @@ return {payload, priority, attempt}
         Ok(())
     }
 
-    async fn renew_lease(
-        &self,
-        id: &TaskId<Id>,
-        worker: &str,
-        attempt: u32,
-    ) -> StoreResult<bool> {
+    async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool> {
         let task_key = self.task_key(id)?;
         let running_key = self.running_key();
         let encoded = self.encode_id(id)?;

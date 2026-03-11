@@ -82,12 +82,7 @@ where
         id: &TaskId<Id>,
         worker: &str,
     ) -> StoreResult<Option<(P, Priority, u32)>>;
-    async fn renew_lease(
-        &self,
-        id: &TaskId<Id>,
-        worker: &str,
-        attempt: u32,
-    ) -> StoreResult<bool>;
+    async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
@@ -176,6 +171,22 @@ where
         deps: Vec<TaskId<Id>>,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
+        let should_reset = matches!(
+            g.tasks.get(&id).map(|record| &record.state),
+            Some(TaskState::Failed { .. } | TaskState::Cancelled)
+        );
+        if should_reset {
+            let remaining = deps.len();
+            g.remaining.insert(id.clone(), remaining);
+            if let Some(existing) = g.tasks.get_mut(&id) {
+                existing.payload = Some(payload);
+                existing.priority = prio;
+                existing.attempt = 0;
+                existing.lease_until_ms = None;
+                existing.state = TaskState::pending(remaining);
+            }
+            return Ok(true);
+        }
         if g.tasks.contains_key(&id) {
             return Ok(false);
         }
@@ -321,12 +332,7 @@ where
         Ok(())
     }
 
-    async fn renew_lease(
-        &self,
-        id: &TaskId<Id>,
-        worker: &str,
-        attempt: u32,
-    ) -> StoreResult<bool> {
+    async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
         let Some(record) = g.tasks.get_mut(id) else {
             return Ok(false);

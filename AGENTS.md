@@ -1,26 +1,89 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Purpose
 
-Reusable crates live in `crates/` (notably `engine`, `pipeline`, `prover`, `provider`, `primitives`, `stateless`, `protocol`, `queue`, and `guests`). Standalone zkVM guest programs live in `guests/` (with `common/`, `risc0/`, `sp1/`) and are excluded from the workspace. Automation lives in `xtask/` (invoked via `just`), helper scripts are in `script/`, and auxiliary binaries are under `bin/` (`raiko2`, `rpc-proxy`). Docs and additional guides live in `docs/`. Keep new modules scoped to the appropriate crate to avoid cross-crate cycles.
+Use this file as the agent-facing execution guide for this repository. Keep it focused on task routing,
+verification, and safety rails. Treat `README.md` as the source of truth for architecture and operator
+workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 
-## Build, Test, and Development Commands
+## Source Of Truth
 
-- Guest builds: `just build-guest <risc0|sp1|all>` (uses docker + cargo risczero/prove via xtask).
-- Always run `cargo fmt --all`, `cargo clippy --workspace -- -D warnings`, and `cargo nextest run --workspace`.
+- Use `README.md` for project layout, build/run examples, guest build details, and prover workflow.
+- Use `docs/API.md` for request/response contracts, config keys, and environment variables.
+- Use `config.example.toml` as the canonical config shape.
+- Do not copy long command walkthroughs into this file. Add only agent-critical rules and stable entrypoints.
 
-## Coding Style & Naming Conventions
+## Repository Layout
 
-The workspace targets Rust 2024 with four-space indentation. Module and crate names use `snake_case`; types and traits use `UpperCamelCase`. Run `cargo fmt --all` to format and `cargo clippy -D warnings` to catch regressions. Favor focused crates and avoid leaking backend-specific code into shared layers.
+- `crates/`: reusable workspace crates. Keep shared types and business rules here.
+- `bin/raiko2`: main server binary, CLI, config loading, and HTTP handlers.
+- `bin/preflight`: standalone preflight CLI for building `GuestInput`.
+- `bin/guest-launcher`: local guest runner and benchmark/proof helper.
+- `bin/rpc-proxy`: RPC proxy and witness/debug support.
+- `bin/witness-check`: witness inspection and validation helpers.
+- `xtask/`: automation entrypoints, including guest build orchestration.
+- `guests/`: standalone guest program sources for `risc0` and `sp1`; not part of the workspace.
+- `crates/guests/elf`: built guest ELF assets consumed by the host. Never hand-edit generated ELF files.
 
-## Testing Guidelines
+## Change Routing
 
-Place unit tests beside the implementation with `#[cfg(test)]`. Use deterministic data; prefer `rstest` or `proptest` when variation is needed. Name tests after the behavior they assert (`fn verifies_signature_with_valid_key`). Run backend-specific suites via `TARGET=<sp1|risc0|sgx> make test` and ensure integration coverage with `make integration` before merges.
+- Put shared domain types, enums, proof payloads, and validation invariants in `crates/primitives*` or
+  `crates/protocol*`, not in binaries.
+- Put fork-specific preflight, validation, manifest selection, and pipeline wiring in `crates/pipeline`.
+- Put prover-backend implementations and proof encoding/aggregation logic in `crates/prover`.
+- Put provider/RPC/witness fetching logic in `crates/provider`.
+- Put queueing, scheduling, and orchestration logic in `crates/engine` or `crates/queue`.
+- Limit `bin/*` changes to CLI, config, wiring, and surface-specific behavior.
+- Do not reintroduce legacy paths or concepts from old docs such as `host/`, `lib/`, `core/`, `taskdb/`,
+  or `reqpool/` unless the code in this repo actually adds them.
 
-## Commit & Pull Request Guidelines
+## Stable Command Entry Points
 
-Follow Conventional Commits (`feat:`, `fix:`, `chore:`). Each PR should link relevant issues (e.g., `#123`), describe changes, list build/test steps (`make fmt clippy test`), and note doc or metrics updates. Include screenshots or logs when touching developer tooling or dashboards.
+- Main server: `cargo run -r -p raiko2 -- --config config.toml`
+- Config path override: `RAIKO2_CONFIG=/path/to/config.toml`
+- Workspace checks:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace -- -D warnings`
+  - `cargo nextest run --workspace`
+- Guest builds:
+  - `just build-guest risc0`
+  - `just build-guest sp1`
+  - `just build-guest all`
+- Direct xtask fallback: `cargo run -r -p xtask -- build-guest <backend>`
+- Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
-## Security & Configuration Tips
+## Verification Policy
 
-Store secrets in `.env`; local overrides live outside version control. Use performance toggles such as `CPU_OPT=1`, `MOCK=1`, `RISC0_DEV_MODE=1`, and `SP1_PROVER=mock` when profiling or running prover hosts. Rebuild after changing SGX or prover configs to refresh generated artifacts.
+Run the smallest set of checks that proves the change safely, then scale up when the impact widens.
+
+- Docs-only changes:
+  - No Rust checks required unless commands or paths were changed; verify those facts against the repo.
+- Single-crate internal Rust changes:
+  - Run focused tests for the touched package when practical, plus any relevant targeted command.
+- Shared types, config, workspace wiring, or cross-crate behavior changes:
+  - Run `cargo clippy --workspace -- -D warnings`
+  - Run `cargo nextest run --workspace`
+- Formatting-sensitive Rust changes:
+  - Run `cargo fmt --all`
+- Guest, prover backend, `xtask`, or ELF contract changes:
+  - Run the relevant `just build-guest <backend>` command in addition to Rust checks.
+- If a change touches request/response or config semantics, verify `README.md`, `docs/API.md`, and
+  `config.example.toml` still match.
+
+## Workflow Rules
+
+- Follow Conventional Commits.
+- In PRs and handoff notes, report the exact commands you ran and whether they passed.
+- Prefer `gh` for GitHub operations.
+- Keep changes on the single primary codepath; do not leave duplicate implementations behind.
+- Fail fast on invalid inputs and keep one source of truth for business rules.
+
+## Safety Rails
+
+- Keep guest sources under `guests/` and host/workspace code under `crates/` and `bin/`.
+- Do not hand-edit generated artifacts under `crates/guests/elf`.
+- Do not assume SGX support, old build scripts, or deprecated binaries exist unless you verified them in
+  the current tree.
+- When changing prover backends or proof formats, check both proposal and aggregation paths.
+- When changing config loading, preserve the documented precedence: config file first, then environment
+  variables and CLI flags override it.

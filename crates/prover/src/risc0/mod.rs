@@ -103,8 +103,6 @@ where
         _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let input: GuestInput = bincode::deserialize(input.as_ref())
-            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         info!("Starting RISC0 proposal proof generation...");
 
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
@@ -113,8 +111,7 @@ where
 
         tokio::task::spawn_blocking(move || {
             let env = ExecutorEnv::builder()
-                .write(&input)
-                .map_err(|e| RaikoError::Guest(format!("Failed to write input: {e}")))?
+                .write_frame(input.as_ref())
                 .build()
                 .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
 
@@ -318,5 +315,50 @@ where
         })
         .await
         .map_err(|e| RaikoError::Guest(format!("RISC0 aggregation proof task join failed: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Risc0Config, Risc0Prover};
+    use crate::Prover;
+    use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
+    use raiko2_primitives::ProverConfig;
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+
+    fn fixture_guest_input() -> GuestInput {
+        let mut input: GuestInput = serde_json::from_str(include_str!("../../../../test.json"))
+            .expect("parse test.json as GuestInput");
+        input.proof_carry_data = build_proof_carry_data(&input);
+        input
+    }
+
+    #[tokio::test]
+    async fn risc0_mock_proposal_proves_from_fixture_with_framed_input() {
+        let prover = Risc0Prover::new(Risc0Config {
+            bonsai: false,
+            snark: false,
+            mock: true,
+            profile: false,
+            execution_po2: 20,
+            verify: true,
+        });
+
+        let proof = prover
+            .prove(
+                fixture_guest_input(),
+                &ProverConfig::default(),
+                &RISC0_SHASTA_BACKEND,
+            )
+            .await
+            .expect("risc0 mock proposal proof should succeed");
+
+        assert!(proof.proof.is_some(), "proof journal should be present");
+        assert!(proof.quote.is_some(), "receipt JSON should be present");
+
+        let extra_data = proof.extra_data.expect("mock metadata should be present");
+        assert_eq!(extra_data["zkvm"], "risc0");
+        assert_eq!(extra_data["mode"], "mock");
+        assert_eq!(extra_data["fake_receipt"], true);
     }
 }

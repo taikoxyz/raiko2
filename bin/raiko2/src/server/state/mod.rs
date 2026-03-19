@@ -7,7 +7,7 @@ mod setup;
 mod types;
 
 pub use factory::{PipelineFactory, StaticPipelineFactory};
-pub use types::ProofStatus;
+pub use types::{EngineStatusView, ProofStatus};
 
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::Result;

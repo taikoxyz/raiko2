@@ -426,6 +426,45 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
 }
 
 #[tokio::test]
+async fn e2e_task_status_turns_proving_after_preflight_progress() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine.clone());
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "native",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = res["data"]["task_id"]
+        .as_str()
+        .expect("response task_id")
+        .to_string();
+
+    let ran = engine.run_one("e2e-worker").await.expect("run one task");
+    assert!(ran, "expected preflight task to run");
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["status"], "proving");
+    assert_eq!(res["data"]["current_index"], 0);
+    assert_eq!(res["data"]["proposals"][0]["status"], "proving");
+}
+
+#[tokio::test]
 async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Risc0;

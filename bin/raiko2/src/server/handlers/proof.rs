@@ -415,6 +415,67 @@ fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
     .collect()
 }
 
+fn summarize_proposal_task_state(
+    stages: &[Option<super::super::state::EngineStatusView>],
+) -> super::super::state::EngineStatusView {
+    let mut saw_progress = false;
+    let mut pending_error = None;
+
+    for stage in stages {
+        let Some(stage) = stage else {
+            continue;
+        };
+
+        match stage.status {
+            ProofStatus::Failed => return stage.clone(),
+            ProofStatus::Cancelled => return stage.clone(),
+            ProofStatus::Completed => {
+                if stage.proof.is_some() {
+                    return stage.clone();
+                }
+                saw_progress = true;
+            }
+            ProofStatus::Proving => {
+                return super::super::state::EngineStatusView {
+                    status: ProofStatus::Proving,
+                    proof: None,
+                    error: stage.error.clone(),
+                    extra_data: None,
+                };
+            }
+            ProofStatus::Pending => {
+                if pending_error.is_none() {
+                    pending_error = stage.error.clone();
+                }
+                if saw_progress {
+                    return super::super::state::EngineStatusView {
+                        status: ProofStatus::Proving,
+                        proof: None,
+                        error: pending_error,
+                        extra_data: None,
+                    };
+                }
+            }
+        }
+    }
+
+    if saw_progress {
+        super::super::state::EngineStatusView {
+            status: ProofStatus::Proving,
+            proof: None,
+            error: pending_error,
+            extra_data: None,
+        }
+    } else {
+        super::super::state::EngineStatusView {
+            status: ProofStatus::Pending,
+            proof: None,
+            error: pending_error,
+            extra_data: None,
+        }
+    }
+}
+
 async fn register_batch_task(
     state: &AppState,
     public_task_id: &str,
@@ -719,23 +780,27 @@ pub async fn get_task(
     for (index, proposal) in metadata.proposals.iter().enumerate() {
         let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
             .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
-        let status = engine
-            .get_status(task_id)
-            .await
-            .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?;
+        let stage_ids = proposal_task_chain_ids(&task_id);
+        let mut stage_statuses = Vec::with_capacity(stage_ids.len());
+        for stage_id in stage_ids {
+            let status = engine
+                .get_status(stage_id)
+                .await
+                .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?;
+            stage_statuses.push(status);
+        }
+        let status = summarize_proposal_task_state(&stage_statuses);
         proposals.push(HoodiProposalStatus {
             index,
             proposal_id: proposal.proposal_id,
             task_id: proposal.task_id.clone(),
-            status: status
-                .as_ref()
-                .map_or(ProofStatus::Pending, |status| status.status.clone()),
+            status: status.status.clone(),
             l1_inclusion_block_number: proposal.l1_inclusion_block_number,
             l2_block_numbers: proposal.l2_block_numbers.clone(),
             last_anchor_block_number: proposal.last_anchor_block_number,
-            proof: status.as_ref().and_then(|status| status.proof.clone()),
-            error: status.as_ref().and_then(|status| status.error.clone()),
-            extra_data: status.as_ref().and_then(|status| status.extra_data.clone()),
+            proof: status.proof,
+            error: status.error,
+            extra_data: status.extra_data,
         });
     }
 

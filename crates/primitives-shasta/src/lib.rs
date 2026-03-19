@@ -13,5 +13,5 @@ pub use blob::verify_proposal_mode_blob_usage;
 pub use input::{GuestInput, ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput};
 pub use proof::{
     build_proof_carry_data, decode_proof_carry_data, decode_proof_carry_data_opt,
-    encode_proof_carry_data,
+    encode_proof_carry_data, proof_carry_from_proof,
 };

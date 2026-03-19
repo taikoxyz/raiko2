@@ -2,7 +2,7 @@
 
 mod health;
 mod ready;
-mod v1;
+mod v3;
 
 use axum::Router;
 
@@ -13,5 +13,5 @@ pub fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(health::routes())
         .merge(ready::routes())
-        .merge(v1::routes())
+        .merge(v3::routes())
 }

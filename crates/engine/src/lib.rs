@@ -16,15 +16,19 @@ pub mod tasks;
 pub mod worker;
 
 pub use tasks::{
-    EncodedGuestInput, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
+    AggregationSource, AggregationTaskRequest, EncodedGuestInput, EngineTaskId, EngineTaskKey,
+    ProposalStage, ProposalTaskRequest,
 };
 
+use alloy_primitives::Address;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::worker::WorkerConfig;
+use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
-use raiko2_primitives::{AggregationGuestInput, L2BlockRange, ProofContext};
+use raiko2_primitives::{AggregationGuestInput, L2BlockRange, Proof, ProofContext};
+use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, proof_carry_from_proof};
 use raiko2_prover::Prover;
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -51,6 +55,31 @@ where
     spec: S,
     scheduler: Scheduler<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>,
     context: ProofContext,
+    observer: Option<Arc<dyn EngineObserver>>,
+}
+
+#[derive(Clone, Debug)]
+pub enum EngineTaskSuccess {
+    GuestInput { stage: PipelineStage },
+    EncodedInput { stage: PipelineStage },
+    Proof { stage: PipelineStage, proof: Proof },
+}
+
+#[async_trait]
+pub trait EngineObserver: Send + Sync {
+    async fn on_task_started(&self, _id: &EngineTaskId, _task: &EngineTask, _worker: &str) {}
+
+    async fn on_task_succeeded(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _success: &EngineTaskSuccess,
+    ) {
+    }
+
+    async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {}
+
+    async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
 }
 
 impl<S> Clone for Engine<S>
@@ -117,11 +146,26 @@ where
         Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
             + 'static,
     {
+        Self::with_store_scheduler_config_and_observer(spec, context, store, scheduler_config, None)
+    }
+
+    pub fn with_store_scheduler_config_and_observer<Store>(
+        spec: S,
+        context: ProofContext,
+        store: Store,
+        scheduler_config: SchedulerConfig,
+        observer: Option<Arc<dyn EngineObserver>>,
+    ) -> Self
+    where
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
+            + 'static,
+    {
         Self {
             inner: Arc::new(Inner {
                 spec,
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 context,
+                observer,
             }),
         }
     }
@@ -130,9 +174,13 @@ where
         let mut ctx = self.inner.context.clone();
         ctx.request.proposal_id = request.proposal_id;
         ctx.request.l2_block_range = request.l2_block_range;
+        ctx.request.blob_proof_type = request.blob_proof_type.clone();
+        ctx.request.prover = request.prover.clone();
+        ctx.request.graffiti = request.graffiti.clone();
         if let Some(range) = request.l2_block_range {
             Self::set_l2_block_range(&mut ctx.config, request.proposal_id, range);
         }
+        Self::set_request_metadata(&mut ctx.config, request);
         ctx
     }
 
@@ -152,6 +200,38 @@ where
         }
     }
 
+    fn set_request_metadata(config: &mut serde_json::Value, request: &ProposalTaskRequest) {
+        if !config.is_object() {
+            *config = serde_json::json!({});
+        }
+        if let Some(config) = config.as_object_mut() {
+            config.insert(
+                "shasta_l1_inclusion_block_number".to_string(),
+                serde_json::json!(request.l1_inclusion_block_number),
+            );
+            config.insert(
+                "shasta_last_anchor_block_number".to_string(),
+                serde_json::json!(request.last_anchor_block_number),
+            );
+        }
+
+        let Some(raw) = &request.prover_args_json else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return;
+        };
+        let Some(parsed) = parsed.as_object() else {
+            return;
+        };
+        let Some(config) = config.as_object_mut() else {
+            return;
+        };
+        for (key, value) in parsed {
+            config.insert(key.clone(), value.clone());
+        }
+    }
+
     fn proposal_task_id(&self, request: ProposalTaskRequest, stage: ProposalStage) -> EngineTaskId {
         EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: self.inner.spec.pipeline_key(),
@@ -160,10 +240,10 @@ where
         })
     }
 
-    fn aggregate_task_id(&self, proposal_ids: &[u64]) -> EngineTaskId {
+    fn aggregate_task_id(&self, request: AggregationTaskRequest) -> EngineTaskId {
         EngineTaskId::new(EngineTaskKey::Aggregate {
             pipeline: self.inner.spec.pipeline_key(),
-            proposal_ids: proposal_ids.to_vec(),
+            request,
         })
     }
 
@@ -173,6 +253,18 @@ where
     pub async fn submit_proposal_proof(
         &self,
         request: ProposalTaskRequest,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        self.submit_proposal_proof_with_dependencies(request, Vec::new())
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue required tasks.
+    pub async fn submit_proposal_proof_with_dependencies(
+        &self,
+        request: ProposalTaskRequest,
+        dependencies: Vec<EngineTaskId>,
     ) -> Result<EngineTaskId, TaskStoreError> {
         let preflight_id = self.proposal_task_id(request.clone(), ProposalStage::Preflight);
         let preflight_task = self
@@ -186,7 +278,7 @@ where
                         request: request.clone(),
                     },
                 },
-                vec![],
+                dependencies,
             )
             .await?;
 
@@ -263,7 +355,7 @@ where
                     request,
                     stage: ProposalStage::Prove,
                 } if *pipeline == self.inner.spec.pipeline_key() => {
-                    proposal_ids.push(request.proposal_id)
+                    proposal_ids.push(request.proposal_id);
                 }
                 EngineTaskKey::Proposal { stage, .. } => {
                     return Err(TaskStoreError::corrupt_msg(format!(
@@ -278,7 +370,54 @@ where
             }
         }
 
-        let aggregate_id = self.aggregate_task_id(&proposal_ids);
+        let request = AggregationTaskRequest {
+            request_id: proposal_ids
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("-"),
+            proposal_ids,
+        };
+        self.submit_aggregation_proof_from_tasks(request, proof_tasks)
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
+    /// task id does not point to a proposal prove stage in this pipeline.
+    pub async fn submit_aggregation_proof_from_tasks(
+        &self,
+        request: AggregationTaskRequest,
+        proof_tasks: Vec<EngineTaskId>,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        if proof_tasks.len() < 2 {
+            return Err(TaskStoreError::corrupt_msg(
+                "aggregation requires at least 2 proof tasks",
+            ));
+        }
+
+        for proof_task in &proof_tasks {
+            match &proof_task.0 {
+                EngineTaskKey::Proposal {
+                    pipeline,
+                    stage: ProposalStage::Prove,
+                    ..
+                } if *pipeline == self.inner.spec.pipeline_key() => {}
+                EngineTaskKey::Proposal { stage, .. } => {
+                    return Err(TaskStoreError::corrupt_msg(format!(
+                        "aggregation input must reference proposal prove tasks, got {stage:?}"
+                    )));
+                }
+                EngineTaskKey::Aggregate { .. } => {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "aggregation input cannot reference an aggregate task",
+                    ));
+                }
+            }
+        }
+
+        let aggregate_id = self.aggregate_task_id(request.clone());
         self.inner
             .scheduler
             .submit(
@@ -286,11 +425,43 @@ where
                 NewTask {
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {
-                        proposal_ids,
-                        proof_tasks: proof_tasks.clone(),
+                        request,
+                        source: AggregationSource::ProofTasks(proof_tasks.clone()),
                     },
                 },
                 proof_tasks,
+            )
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot enqueue the aggregation task or if the proof set
+    /// is invalid.
+    pub async fn submit_aggregation_proof_from_proofs(
+        &self,
+        request: AggregationTaskRequest,
+        proofs: Vec<Proof>,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        if proofs.len() < 2 {
+            return Err(TaskStoreError::corrupt_msg(
+                "aggregation requires at least 2 proofs",
+            ));
+        }
+
+        let aggregate_id = self.aggregate_task_id(request.clone());
+        self.inner
+            .scheduler
+            .submit(
+                aggregate_id,
+                NewTask {
+                    priority: Priority::High,
+                    payload: EngineTask::Aggregate {
+                        request,
+                        source: AggregationSource::Proofs(proofs),
+                    },
+                },
+                Vec::new(),
             )
             .await
     }
@@ -309,7 +480,11 @@ where
     ///
     /// Returns an error if the task store cannot cancel the task.
     pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
-        self.inner.scheduler.cancel(id).await
+        self.inner.scheduler.cancel(id.clone()).await?;
+        if let Some(observer) = &self.inner.observer {
+            observer.on_task_cancelled(&id).await;
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -352,12 +527,30 @@ where
             }
         });
 
+        if let Some(observer) = &self.inner.observer {
+            observer.on_task_started(&lease.id, &payload, worker).await;
+        }
+
         let result = self.execute(payload.clone()).await;
         renew_task.abort();
         if let Err(err) = &result {
             tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
         }
+        let success = result.as_ref().ok().map(task_success_from_output);
+        let error = result.as_ref().err().cloned();
+        let completed_id = lease.id.clone();
         self.inner.scheduler.complete(lease, result).await?;
+        if let Some(observer) = &self.inner.observer {
+            if let Some(success) = success.as_ref() {
+                observer
+                    .on_task_succeeded(&completed_id, &payload, success)
+                    .await;
+            } else if let Some(error) = error.as_deref() {
+                observer
+                    .on_task_failed(&completed_id, &payload, error)
+                    .await;
+            }
+        }
         Ok(true)
     }
 
@@ -484,6 +677,48 @@ where
         }
     }
 
+    fn build_aggregation_config(&self, proofs: &[Proof]) -> Result<serde_json::Value, String> {
+        if matches!(
+            self.inner.spec.pipeline_key(),
+            raiko2_pipeline::PipelineKey::ShastaRisc0Boundless
+        ) {
+            return Ok(self.inner.context.config.clone());
+        }
+        let image_id = aggregation_image_id_words(proofs)?;
+        let mut block_inputs = Vec::with_capacity(proofs.len());
+        let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
+
+        for (index, proof) in proofs.iter().enumerate() {
+            let input = proof
+                .input
+                .ok_or_else(|| format!("proof {index} missing input"))?;
+            let carry = proof_carry_from_proof(proof)
+                .map_err(|err| format!("proof {index} invalid shasta carry data: {err}"))?
+                .ok_or_else(|| format!("proof {index} missing shasta carry data"))?;
+            block_inputs.push(input);
+            proof_carry_data_vec.push(carry);
+        }
+
+        let mut config = self.inner.context.config.clone();
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        let Some(config_obj) = config.as_object_mut() else {
+            return Err("failed to build aggregation config object".to_string());
+        };
+        config_obj.insert(
+            "shasta_zk_aggregation_input".to_string(),
+            serde_json::to_value(ShastaZkAggregationGuestInput {
+                image_id,
+                block_inputs,
+                proof_carry_data_vec,
+                prover_address: Address::ZERO,
+            })
+            .map_err(|err| format!("failed to serialize aggregation input: {err}"))?,
+        );
+        Ok(config)
+    }
+
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
             EngineTask::Preflight { request } => {
@@ -562,22 +797,25 @@ where
                     proof,
                 ))))
             }
-            EngineTask::Aggregate {
-                proposal_ids: _,
-                proof_tasks,
-            } => {
-                let mut proofs = Vec::with_capacity(proof_tasks.len());
-                for proof_task in proof_tasks {
-                    proofs.push(self.get_proof(proof_task).await?);
-                }
-
+            EngineTask::Aggregate { request: _, source } => {
+                let proofs = match source {
+                    AggregationSource::ProofTasks(proof_tasks) => {
+                        let mut proofs = Vec::with_capacity(proof_tasks.len());
+                        for proof_task in proof_tasks {
+                            proofs.push(self.get_proof(proof_task).await?);
+                        }
+                        proofs
+                    }
+                    AggregationSource::Proofs(proofs) => proofs,
+                };
+                let config = self.build_aggregation_config(&proofs)?;
                 let proof = self
                     .inner
                     .spec
                     .prover()
                     .aggregate(
                         AggregationGuestInput { proofs },
-                        &self.inner.context.config,
+                        &config,
                         self.inner.spec.backend(),
                     )
                     .await
@@ -588,6 +826,52 @@ where
                 ))))
             }
         }
+    }
+}
+
+fn aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], String> {
+    let mut image_id = None;
+    for (index, proof) in proofs.iter().enumerate() {
+        let Some(uuid) = proof.uuid.as_deref() else {
+            continue;
+        };
+        let words = parse_image_id_words(uuid)
+            .map_err(|err| format!("proof {index} invalid uuid/image id: {err}"))?;
+        match image_id {
+            Some(existing) if existing != words => {
+                return Err("proofs do not share the same image id".to_string());
+            }
+            Some(_) => {}
+            None => image_id = Some(words),
+        }
+    }
+
+    Ok(image_id.unwrap_or([0; 8]))
+}
+
+fn parse_image_id_words(raw: &str) -> Result<[u32; 8], String> {
+    let bytes = alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+
+    let mut words = [0u32; 8];
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        words[index] = u32::from_be_bytes(word);
+    }
+    Ok(words)
+}
+
+fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {
+    match output {
+        EngineOutput::GuestInput(input) => EngineTaskSuccess::GuestInput { stage: input.stage },
+        EngineOutput::EncodedInput(input) => EngineTaskSuccess::EncodedInput { stage: input.stage },
+        EngineOutput::Proof(proof) => EngineTaskSuccess::Proof {
+            stage: proof.stage,
+            proof: proof.output.clone(),
+        },
     }
 }
 
@@ -637,8 +921,8 @@ mod tests {
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
-    use crate::Engine;
-    use crate::tasks::{EngineOutput, ProposalTaskRequest};
+    use crate::tasks::{AggregationTaskRequest, EngineOutput, ProposalTaskRequest};
+    use crate::{Engine, EngineTaskId, EngineTaskKey, ProposalStage};
 
     struct MockProver;
 
@@ -833,7 +1117,7 @@ mod tests {
         async fn batch_witnesses(
             &self,
             _blocks: &[u64],
-        ) -> RaikoResult<Vec<reth_stateless::ExecutionWitness>> {
+        ) -> RaikoResult<Vec<raiko2_primitives::ExecutionWitness>> {
             Ok(vec![])
         }
     }
@@ -846,6 +1130,12 @@ mod tests {
         ProposalTaskRequest {
             proposal_id,
             l2_block_range: None,
+            l1_inclusion_block_number: 0,
+            last_anchor_block_number: 0,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_args_json: None,
         }
     }
 
@@ -905,7 +1195,7 @@ mod tests {
             .await?;
 
         let view = engine
-            .get(aggregate_id)
+            .get(aggregate_id.clone())
             .await?
             .ok_or_else(|| std::io::Error::other("expected aggregate task view"))?;
         assert!(matches!(view.state, TaskState::Pending { .. }));
@@ -913,7 +1203,10 @@ mod tests {
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
                 pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
-                proposal_ids: vec![1, 2],
+                request: AggregationTaskRequest {
+                    request_id: "1-2".to_string(),
+                    proposal_ids: vec![1, 2],
+                },
             })
         );
         Ok(())
@@ -948,6 +1241,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("proposal prove tasks"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_proposal_proof_with_dependencies_delays_next_preflight()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let first_prove = engine.submit_proposal_proof(proposal_request(1)).await?;
+        let second_request = proposal_request(2);
+        let second_preflight =
+            engine.proposal_task_id(second_request.clone(), ProposalStage::Preflight);
+        engine
+            .submit_proposal_proof_with_dependencies(second_request, vec![first_prove])
+            .await?;
+
+        let ready = engine
+            .inner
+            .scheduler
+            .next_ready("w1")
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected ready task"))?;
+        assert_eq!(
+            ready.id,
+            engine.proposal_task_id(proposal_request(1), ProposalStage::Preflight)
+        );
+
+        let second_view = engine
+            .get(second_preflight)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected second task view"))?;
+        assert!(matches!(second_view.state, TaskState::Pending { .. }));
         Ok(())
     }
 

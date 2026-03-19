@@ -275,6 +275,12 @@ pub(crate) fn new_protocol_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ShastaRawAggregationGuestInput;
+    use alloy_primitives::{Address, address, b256};
+    use raiko2_primitives::RawProof;
+    use raiko2_protocol_shasta::shasta::{
+        Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData,
+    };
 
     #[test]
     fn test_instance_hash() {
@@ -289,5 +295,201 @@ mod tests {
         let blob_hashes = vec![B256::default()];
         let hash = calculate_txs_hash(tx_list_hash, &blob_hashes);
         assert_ne!(hash, B256::default());
+    }
+
+    fn sample_checkpoint(block_number: u64, block_hash: B256, state_root: B256) -> Checkpoint {
+        Checkpoint {
+            blockNumber: Uint::from(block_number),
+            blockHash: block_hash,
+            stateRoot: state_root,
+        }
+    }
+
+    fn sample_carry(
+        proposal_id: u64,
+        proposal_hash: B256,
+        parent_proposal_hash: B256,
+        parent_block_hash: B256,
+        checkpoint: Checkpoint,
+    ) -> ProofCarryData {
+        ProofCarryData {
+            chain_id: 167_000,
+            verifier: address!("00000000000000000000000000000000000000aa"),
+            transition_input: TransitionInputData {
+                proposal_id,
+                proposal_hash,
+                parent_proposal_hash,
+                parent_block_hash,
+                actual_prover: address!("00000000000000000000000000000000000000bb"),
+                transition: ShastaTransitionInput {
+                    proposer: address!("00000000000000000000000000000000000000cc"),
+                    timestamp: 100 + proposal_id,
+                },
+                checkpoint,
+            },
+        }
+    }
+
+    fn sample_carry_sequence() -> Vec<ProofCarryData> {
+        let first_hash = b256!("1111111111111111111111111111111111111111111111111111111111111111");
+        let second_hash = b256!("2222222222222222222222222222222222222222222222222222222222222222");
+        let parent_block_hash =
+            b256!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let checkpoint0 = sample_checkpoint(
+            10,
+            b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+        );
+        let checkpoint1 = sample_checkpoint(
+            11,
+            b256!("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+            b256!("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        );
+
+        vec![
+            sample_carry(
+                1,
+                first_hash,
+                B256::ZERO,
+                parent_block_hash,
+                checkpoint0.clone(),
+            ),
+            sample_carry(
+                2,
+                second_hash,
+                first_hash,
+                checkpoint0.blockHash,
+                checkpoint1,
+            ),
+        ]
+    }
+
+    fn sample_raw_proofs() -> Vec<RawProof> {
+        vec![
+            RawProof {
+                proof: vec![0u8],
+                input: B256::ZERO,
+            },
+            RawProof {
+                proof: vec![1u8],
+                input: B256::ZERO,
+            },
+        ]
+    }
+
+    #[test]
+    fn validate_shasta_aggregate_proof_carry_data_accepts_contiguous_sequence() {
+        let input = ShastaRawAggregationGuestInput {
+            proofs: sample_raw_proofs(),
+            proof_carry_data_vec: sample_carry_sequence(),
+        };
+
+        assert!(validate_shasta_aggregate_proof_carry_data(&input));
+    }
+
+    #[test]
+    fn validate_shasta_aggregate_proof_carry_data_rejects_mismatched_lengths() {
+        let input = ShastaRawAggregationGuestInput {
+            proofs: sample_raw_proofs(),
+            proof_carry_data_vec: vec![],
+        };
+
+        assert!(!validate_shasta_aggregate_proof_carry_data(&input));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_mismatched_actual_prover() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1].transition_input.actual_prover = Address::from([0x22; 20]);
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_non_sequential_ids() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1].transition_input.proposal_id += 1;
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_broken_proposal_hash_chain() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1]
+            .transition_input
+            .parent_proposal_hash =
+            b256!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_chain_id_mismatch() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1].chain_id += 1;
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_verifier_mismatch() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1].verifier = Address::from([0x33; 20]);
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_broken_parent_block_hash_chain() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[1].transition_input.parent_block_hash =
+            b256!("9999999999999999999999999999999999999999999999999999999999999999");
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn build_shasta_commitment_uses_first_and_last_entries() {
+        let proof_carry_data_vec = sample_carry_sequence();
+        let first = proof_carry_data_vec.first().expect("first entry");
+        let last = proof_carry_data_vec.last().expect("last entry");
+
+        let commitment = build_shasta_commitment_from_proof_carry_data_vec(&proof_carry_data_vec)
+            .expect("commitment should build");
+
+        assert_eq!(
+            commitment.firstProposalId.to::<u64>(),
+            first.transition_input.proposal_id
+        );
+        assert_eq!(
+            commitment.firstProposalParentBlockHash,
+            first.transition_input.parent_block_hash
+        );
+        assert_eq!(
+            commitment.lastProposalHash,
+            last.transition_input.proposal_hash
+        );
+        assert_eq!(
+            commitment.actualProver,
+            first.transition_input.actual_prover
+        );
+        assert_eq!(
+            commitment.endBlockNumber.to::<u64>(),
+            last.transition_input.checkpoint.blockNumber.to::<u64>()
+        );
+        assert_eq!(
+            commitment.endStateRoot,
+            last.transition_input.checkpoint.stateRoot
+        );
+        assert_eq!(commitment.transitions.len(), proof_carry_data_vec.len());
+        assert_eq!(
+            commitment.transitions[0].blockHash,
+            first.transition_input.checkpoint.blockHash
+        );
+        assert_eq!(
+            commitment.transitions[1].blockHash,
+            last.transition_input.checkpoint.blockHash
+        );
     }
 }

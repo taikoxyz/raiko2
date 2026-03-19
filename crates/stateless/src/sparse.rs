@@ -4,14 +4,14 @@ use alloy_primitives::{
     map::{AddressMap, B256Map},
 };
 use alloy_trie::EMPTY_ROOT_HASH;
+use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
-use reth_stateless::{ExecutionWitness, StatelessTrie, validation::StatelessValidationError};
 use reth_trie_common::HashedPostState;
 use risc0_ethereum_trie::CachedTrie;
 use std::{cell::RefCell, collections::hash_map::Entry, marker::PhantomData};
 
-use crate::trie::StatelessTrieExt;
+use crate::trie::{StatelessTrie, StatelessTrieExt};
 
 /// Zero-overhead helper for tries that only contain RLP encoded data.
 #[derive(Debug, Clone, Default)]

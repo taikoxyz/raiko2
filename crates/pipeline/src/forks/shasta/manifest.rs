@@ -41,7 +41,10 @@ impl ShastaManifestBuilder {
                 .unwrap_or_default(),
             parent_transition_hash: None,
             checkpoint: None,
-            last_anchor_block_number: None,
+            last_anchor_block_number: ctx
+                .config
+                .get("shasta_last_anchor_block_number")
+                .and_then(Value::as_u64),
         }
     }
 

@@ -8,12 +8,15 @@ use std::path::Path;
 mod prover;
 mod queue;
 mod rpc;
+mod runtime;
 mod server;
 mod validation;
 
-pub use prover::{ProverConfig, ProverType};
+pub use prover::{GuestSystem, PipelineRoute, ProverConfig, RunnerKind};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
-pub use rpc::RpcConfig;
+#[allow(unused_imports)]
+pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
+pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
 
 /// Full application configuration.
@@ -22,6 +25,8 @@ pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
     pub prover: ProverConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
 }
@@ -45,14 +50,30 @@ impl Config {
 
         if let Some(l1_rpc) = &cli.l1_rpc {
             config.rpc.l1_rpc.clone_from(l1_rpc);
+            if config.rpc.pairs.len() == 1 {
+                config.rpc.pairs[0].l1_rpc = Some(l1_rpc.clone());
+            }
         }
         if let Some(l2_rpc) = &cli.l2_rpc {
             config.rpc.l2_rpc.clone_from(l2_rpc);
+            if config.rpc.pairs.len() == 1 {
+                config.rpc.pairs[0].l2_rpc = Some(l2_rpc.clone());
+            }
         }
         if let Some(l1_chain_id) = cli.l1_chain_id {
+            if !config.rpc.pairs.is_empty() {
+                anyhow::bail!(
+                    "--l1-chain-id cannot override rpc.pairs; choose the L1 network in config instead"
+                );
+            }
             config.rpc.l1_chain_id = l1_chain_id;
         }
         if let Some(l2_chain_id) = cli.l2_chain_id {
+            if !config.rpc.pairs.is_empty() {
+                anyhow::bail!(
+                    "--l2-chain-id cannot override rpc.pairs; choose the L2 network in config instead"
+                );
+            }
             config.rpc.l2_chain_id = l2_chain_id;
         }
         if let Some(timeout_ms) = cli.rpc_timeout_ms {
@@ -71,8 +92,10 @@ impl Config {
             config.rpc.client.retry.compute_units_per_second = cu_per_second;
         }
 
-        if let Some(prover) = &cli.prover {
-            config.prover.prover_type = prover.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+        if let Some(route) = &cli.prover {
+            let route: PipelineRoute = route.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            config.prover.guest_system = route.guest_system;
+            config.prover.runner = route.runner;
         }
 
         if let Some(queue_backend) = &cli.queue_backend {
@@ -129,6 +152,12 @@ impl Config {
             .validate()
             .context("Server configuration error")?;
         self.rpc.validate().context("RPC configuration error")?;
+        self.prover
+            .validate()
+            .context("Prover configuration error")?;
+        self.runtime
+            .validate()
+            .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
         Ok(())
     }
@@ -224,28 +253,54 @@ mod tests {
     }
 
     #[test]
-    fn test_prover_type_from_str() {
-        assert_eq!("risc0".parse::<ProverType>().unwrap(), ProverType::Risc0);
-        assert_eq!("RISC0".parse::<ProverType>().unwrap(), ProverType::Risc0);
-        assert_eq!("sp1".parse::<ProverType>().unwrap(), ProverType::Sp1);
-        assert_eq!("SP1".parse::<ProverType>().unwrap(), ProverType::Sp1);
-        assert_eq!("native".parse::<ProverType>().unwrap(), ProverType::Native);
-        assert_eq!("NATIVE".parse::<ProverType>().unwrap(), ProverType::Native);
+    fn test_pipeline_route_from_str() {
         assert_eq!(
-            "agent-risc0".parse::<ProverType>().unwrap(),
-            ProverType::AgentRisc0
+            "risc0/local".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local)
         );
         assert_eq!(
-            "AGENT-RISC0".parse::<ProverType>().unwrap(),
-            ProverType::AgentRisc0
+            "RISC0/BOUNDLESS".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
         );
-        assert!("invalid".parse::<ProverType>().is_err());
+        assert_eq!(
+            "sp1/local".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
+        );
+        assert_eq!(
+            "native/local".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+        );
+        assert!("invalid".parse::<PipelineRoute>().is_err());
     }
 
     #[test]
     fn test_config_default_validates() {
         let config = Config::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_boundless_route_requires_signer_key() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Boundless;
+        config.prover.boundless.signer_key.clear();
+
+        let err = config.prover.validate().expect_err("missing signer key");
+        assert!(err.to_string().contains("signer_key"));
+    }
+
+    #[test]
+    fn test_boundless_route_requires_rpc_url() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Boundless;
+        config.prover.boundless.rpc_url.clear();
+        config.prover.boundless.signer_key =
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string();
+
+        let err = config.prover.validate().expect_err("missing rpc url");
+        assert!(err.to_string().contains("rpc_url"));
     }
 
     #[test]
@@ -262,7 +317,8 @@ l1_chain_id = 560048
 l2_chain_id = 167013
 
 [prover]
-prover_type = "native"
+guest_system = "native"
+runner = "local"
 
 [queue]
 backend = "memory"
@@ -279,7 +335,10 @@ maintenance_interval_ms = 200
         assert_eq!(config.server.port, 9090);
         assert_eq!(config.rpc.l1_chain_id, 560048);
         assert_eq!(config.rpc.l2_chain_id, 167013);
-        assert_eq!(config.prover.prover_type, ProverType::Native);
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -298,7 +357,8 @@ l1_chain_id = 1
 l2_chain_id = 167000
 
 [prover]
-prover_type = "risc0"
+guest_system = "risc0"
+runner = "local"
 
 [queue]
 backend = "memory"
@@ -342,7 +402,8 @@ l1_chain_id = 1
 l2_chain_id = 167000
 
 [prover]
-prover_type = "risc0"
+guest_system = "risc0"
+runner = "local"
 
 [queue]
 backend = "memory"

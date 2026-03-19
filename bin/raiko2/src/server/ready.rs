@@ -80,19 +80,22 @@ pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
 }
 
 async fn check_reth(config: &Config) -> Result<()> {
-    let rpc_client = build_rpc_client(&config.rpc.l2_rpc, &config.rpc.provider_client_config())
-        .context("failed to build RPC client")?;
-    let provider = ProviderBuilder::new().connect_client(rpc_client);
-    let chain_id = provider
-        .get_chain_id()
-        .await
-        .context("eth_chainId failed")?;
-    if chain_id != config.rpc.l2_chain_id {
-        bail!(
-            "l2 chain_id mismatch: expected {}, got {}",
-            config.rpc.l2_chain_id,
-            chain_id
-        );
+    for pair in config.rpc.resolved_pairs()? {
+        let rpc_client = build_rpc_client(&pair.l2_rpc, &config.rpc.provider_client_config())
+            .with_context(|| format!("failed to build RPC client for {}", pair.key))?;
+        let provider = ProviderBuilder::new().connect_client(rpc_client);
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .with_context(|| format!("eth_chainId failed for {}", pair.key))?;
+        if chain_id != pair.l2_chain_id() {
+            bail!(
+                "l2 chain_id mismatch for {}: expected {}, got {}",
+                pair.key,
+                pair.l2_chain_id(),
+                chain_id
+            );
+        }
     }
     Ok(())
 }

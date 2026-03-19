@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 pub struct ProposalTaskRequest {
     pub proposal_id: u64,
     pub l2_block_range: Option<L2BlockRange>,
+    pub l1_inclusion_block_number: u64,
+    pub last_anchor_block_number: u64,
+    pub blob_proof_type: Option<String>,
+    pub prover: Option<String>,
+    pub graffiti: Option<String>,
+    pub prover_args_json: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +25,18 @@ pub enum ProposalStage {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregationTaskRequest {
+    pub request_id: String,
+    pub proposal_ids: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AggregationSource {
+    ProofTasks(Vec<EngineTaskId>),
+    Proofs(Vec<Proof>),
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineTaskKey {
     Proposal {
         pipeline: PipelineKey,
@@ -27,7 +45,7 @@ pub enum EngineTaskKey {
     },
     Aggregate {
         pipeline: PipelineKey,
-        proposal_ids: Vec<u64>,
+        request: AggregationTaskRequest,
     },
 }
 
@@ -61,8 +79,8 @@ pub enum EngineTask {
         input_task: EngineTaskId,
     },
     Aggregate {
-        proposal_ids: Vec<u64>,
-        proof_tasks: Vec<EngineTaskId>,
+        request: AggregationTaskRequest,
+        source: AggregationSource,
     },
 }
 
@@ -103,6 +121,12 @@ mod tests {
         ProposalTaskRequest {
             proposal_id,
             l2_block_range: None,
+            l1_inclusion_block_number: 0,
+            last_anchor_block_number: 0,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_args_json: None,
         }
     }
 
@@ -157,13 +181,19 @@ mod tests {
             .submit(
                 TaskId::new(EngineTaskKey::Aggregate {
                     pipeline: PipelineKey::ShastaNative,
-                    proposal_ids: vec![1, 2],
+                    request: AggregationTaskRequest {
+                        request_id: "agg-1".to_string(),
+                        proposal_ids: vec![1, 2],
+                    },
                 }),
                 NewTask {
                     priority: Priority::High,
                     payload: EngineTask::Aggregate {
-                        proposal_ids: vec![1, 2],
-                        proof_tasks: vec![a1.clone(), a2.clone()],
+                        request: AggregationTaskRequest {
+                            request_id: "agg-1".to_string(),
+                            proposal_ids: vec![1, 2],
+                        },
+                        source: AggregationSource::ProofTasks(vec![a1.clone(), a2.clone()]),
                     },
                 },
                 vec![a1, a2],

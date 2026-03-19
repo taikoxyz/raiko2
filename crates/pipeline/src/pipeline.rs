@@ -163,7 +163,7 @@ mod tests {
         async fn batch_witnesses(
             &self,
             _blocks: &[u64],
-        ) -> RaikoResult<Vec<reth_stateless::ExecutionWitness>> {
+        ) -> RaikoResult<Vec<raiko2_primitives::ExecutionWitness>> {
             Ok(vec![])
         }
     }

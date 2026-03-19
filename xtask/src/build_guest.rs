@@ -1,10 +1,12 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
+use risc0_binfmt::ProgramBinary;
+use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::Deserialize;
 
 use crate::Backend;
@@ -12,8 +14,11 @@ use crate::util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
 const DEFAULT_SP1_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend=\"custom\"";
-const DEFAULT_RISC0_TOOLCHAIN_IMAGE: &str = "ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest";
-const DEFAULT_SP1_TOOLCHAIN_IMAGE: &str = "ghcr.io/taikoxyz/raiko2/sp1-toolchain:latest";
+const DEFAULT_RISC0_TOOLCHAIN_IMAGE: &str = "raiko2-risc0-toolchain:local";
+const DEFAULT_SP1_TOOLCHAIN_IMAGE: &str = "raiko2-sp1-toolchain:local";
+const DEFAULT_RISC0_CC: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-gcc";
+const DEFAULT_RISC0_CXX: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-g++";
+const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-ar";
 
 #[derive(Args)]
 pub(crate) struct BuildGuestArgs {
@@ -133,6 +138,9 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     let toolchain_image = env::var("RISC0_TOOLCHAIN_IMAGE")
         .unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string());
     let toolchain_image = toolchain_image.trim();
+    if toolchain_image == DEFAULT_RISC0_TOOLCHAIN_IMAGE {
+        ensure_local_risc0_toolchain_image(root, toolchain_image)?;
+    }
     if !toolchain_image.is_empty()
         && !toolchain_image.eq_ignore_ascii_case("local")
         && !toolchain_image.eq_ignore_ascii_case("none")
@@ -140,9 +148,6 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
         return build_risc0_with_toolchain_image(root, bench, toolchain_image);
     }
     util::ensure_cargo_risczero()?;
-
-    let risc0_docker_tag =
-        env::var("RISC0_DOCKER_CONTAINER_TAG").unwrap_or_else(|_| "r0.1.91.1".to_string());
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
     if profile != "release" {
@@ -163,15 +168,23 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
         cmd.arg("--features").arg("bench");
     }
 
-    let target_root = util::target_root(root);
+    let target_root = util::target_root(root).join("risc0");
     cmd.env("CARGO_TARGET_DIR", &target_root);
 
+    let risc0_docker_tag = env::var("RISC0_DOCKER_CONTAINER_TAG")
+        .ok()
+        .and_then(non_empty);
     let rustflags =
         env::var("RISC0_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_RISC0_RUSTFLAGS.to_string());
     cmd.env("CARGO_TARGET_RISCV32IM_RISC0_ZKVM_ELF_RUSTFLAGS", rustflags);
     cmd.env("RISC0_FEATURE_bigint2", "1");
-    cmd.env("RISC0_DOCKER_CONTAINER_TAG", &risc0_docker_tag);
-    println!("[INFO] RISC0 docker tag: {risc0_docker_tag}");
+    cmd.env("CC_riscv32im_risc0_zkvm_elf", DEFAULT_RISC0_CC);
+    cmd.env("CXX_riscv32im_risc0_zkvm_elf", DEFAULT_RISC0_CXX);
+    cmd.env("AR_riscv32im_risc0_zkvm_elf", DEFAULT_RISC0_AR);
+    if let Some(tag) = risc0_docker_tag.as_deref() {
+        cmd.env("RISC0_DOCKER_CONTAINER_TAG", tag);
+        println!("[INFO] RISC0 docker tag override: {tag}");
+    }
 
     if let Ok(cc) = env::var("RISC0_GUEST_CC")
         && !cc.is_empty()
@@ -217,8 +230,9 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         println!("[WARN] VERBOSE=1 is ignored by cargo risczero build");
     }
 
-    let risc0_docker_tag =
-        env::var("RISC0_DOCKER_CONTAINER_TAG").unwrap_or_else(|_| "r0.1.91.1".to_string());
+    let risc0_docker_tag = env::var("RISC0_DOCKER_CONTAINER_TAG")
+        .ok()
+        .and_then(non_empty);
     let rustflags =
         env::var("RISC0_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_RISC0_RUSTFLAGS.to_string());
 
@@ -229,35 +243,18 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         .map(|rel| PathBuf::from("/work").join(rel))
         .unwrap_or_else(|_| PathBuf::from("/work/guests/risc0/Cargo.toml"));
 
-    let target_root = util::target_root(root);
+    let target_root = util::target_root(root).join("risc0");
     let (container_target_dir, extra_mount) = match target_root.strip_prefix(root).ok() {
         Some(rel) => (PathBuf::from("/work").join(rel), None),
         None => (PathBuf::from("/target"), Some(target_root.clone())),
     };
 
     let mut cmd = Command::new("docker");
-    cmd.arg("run").arg("--rm");
+    cmd.arg("run").arg("--rm").arg("--entrypoint").arg("");
     cmd.arg("-v")
         .arg(format!("{}:/work", root.display()))
         .arg("-w")
-        .arg("/work")
-        .arg("-v")
-        .arg("/var/run/docker.sock:/var/run/docker.sock");
-    if let Some(docker_path) = util::find_executable("docker") {
-        cmd.arg("-v")
-            .arg(format!("{}:/usr/bin/docker", docker_path.display()));
-    } else {
-        println!(
-            "[WARN] docker not found in PATH; cargo risczero may fail inside the toolchain image"
-        );
-    }
-    let buildx_path = util::find_docker_buildx_plugin().ok_or_else(|| {
-        anyhow!("docker-buildx plugin not found. Install buildx or set RISC0_TOOLCHAIN_IMAGE=none")
-    })?;
-    cmd.arg("-v").arg(format!(
-        "{}:/root/.docker/cli-plugins/docker-buildx",
-        buildx_path.display()
-    ));
+        .arg("/work");
 
     if let Some(volume) = util::docker_cargo_cache_volume(root, "risc0")? {
         println!("[INFO] Using docker cargo cache volume: {volume}");
@@ -282,13 +279,18 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
             "CARGO_TARGET_RISCV32IM_RISC0_ZKVM_ELF_RUSTFLAGS={rustflags}"
         ))
         .arg("-e")
-        .arg(format!("RISC0_DOCKER_CONTAINER_TAG={risc0_docker_tag}"))
-        .arg("-e")
         .arg("RISC0_FEATURE_bigint2=1")
         .arg("-e")
-        .arg("DOCKER_BUILDKIT=1")
+        .arg(format!("CC_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_CC}"))
         .arg("-e")
-        .arg("DOCKER_CLI_PLUGIN_EXTRA_DIRS=/root/.docker/cli-plugins");
+        .arg(format!("CXX_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_CXX}"))
+        .arg("-e")
+        .arg(format!("AR_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_AR}"));
+    if let Some(tag) = risc0_docker_tag.as_deref() {
+        cmd.arg("-e")
+            .arg(format!("RISC0_DOCKER_CONTAINER_TAG={tag}"));
+        println!("[INFO] RISC0 docker tag override: {tag}");
+    }
 
     if let Ok(cc) = env::var("RISC0_GUEST_CC")
         && !cc.is_empty()
@@ -313,10 +315,18 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     cmd.arg(image)
         .arg("cargo")
-        .arg("risczero")
+        .arg("+risc0")
         .arg("build")
+        .arg("--release")
+        .arg("--ignore-rust-version")
+        .arg("--locked")
+        .arg("--target")
+        .arg("riscv32im-risc0-zkvm-elf")
         .arg("--manifest-path")
         .arg(&container_manifest_path);
+    if bench {
+        cmd.arg("--features").arg("bench");
+    }
 
     println!("[INFO] Building RISC0 guest package (toolchain image)...");
     util::run(cmd)?;
@@ -330,6 +340,7 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
     let output_dir = root.join("crates/guests/elf");
     fs::create_dir_all(&output_dir)?;
 
+    let release_dir = target_root.join("riscv32im-risc0-zkvm-elf/release");
     let target_dir = target_root.join("riscv32im-risc0-zkvm-elf/docker");
     let legacy_dir = target_root
         .join("riscv-guest/riscv32im-risc0-zkvm-elf/docker")
@@ -342,6 +353,9 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
     for bin in &manifest.bin {
         let elf_name = format!("{}.elf", bin.name.replace('-', "_"));
         let candidates = [
+            release_dir.join(&bin.name),
+            release_dir.join(format!("{}.elf", bin.name)),
+            release_dir.join(format!("{}.bin", bin.name)),
             target_dir.join(format!("{}.bin", bin.name)),
             target_dir.join(&bin.name),
             target_dir.join(format!("{}.elf", bin.name)),
@@ -353,8 +367,8 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
         let mut copied = false;
         for candidate in candidates.iter() {
             if candidate.exists() {
-                fs::copy(candidate, output_dir.join(&elf_name))
-                    .with_context(|| format!("copy {candidate:?} -> {elf_name}"))?;
+                export_risc0_binary(candidate, &output_dir.join(&elf_name))
+                    .with_context(|| format!("export {candidate:?} -> {elf_name}"))?;
                 println!("[INFO] Exported {elf_name}");
                 copied = true;
                 break;
@@ -363,8 +377,8 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
 
         if !copied {
             println!(
-                "[WARN] Missing ELF for {} (checked {:?} and {:?})",
-                bin.name, target_dir, legacy_dir
+                "[WARN] Missing ELF for {} (checked {:?}, {:?}, and {:?})",
+                bin.name, release_dir, target_dir, legacy_dir
             );
         }
     }
@@ -372,13 +386,27 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
     Ok(())
 }
 
+fn export_risc0_binary(source: &Path, destination: &Path) -> Result<()> {
+    let bytes = fs::read(source).with_context(|| format!("read {source:?}"))?;
+    let output = if ProgramBinary::decode(&bytes).is_ok() {
+        bytes
+    } else {
+        ProgramBinary::new(&bytes, V1COMPAT_ELF).encode()
+    };
+    fs::write(destination, output).with_context(|| format!("write {destination:?}"))
+}
+
 fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<()> {
     println!("[INFO] Building SP1 guest programs...");
     util::ensure_docker()?;
 
+    let sp1_tag = resolve_sp1_docker_tag(root, sp1_docker_tag);
     let toolchain_image =
         env::var("SP1_TOOLCHAIN_IMAGE").unwrap_or_else(|_| DEFAULT_SP1_TOOLCHAIN_IMAGE.to_string());
     let toolchain_image = toolchain_image.trim();
+    if toolchain_image == DEFAULT_SP1_TOOLCHAIN_IMAGE {
+        ensure_local_sp1_toolchain_image(root, toolchain_image, &sp1_tag)?;
+    }
     if !toolchain_image.is_empty()
         && !toolchain_image.eq_ignore_ascii_case("local")
         && !toolchain_image.eq_ignore_ascii_case("none")
@@ -397,7 +425,6 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     let output_dir = root.join("crates/guests/elf");
     fs::create_dir_all(&output_dir)?;
 
-    let sp1_tag = resolve_sp1_docker_tag(root, sp1_docker_tag);
     println!("[INFO] SP1 docker tag: {sp1_tag}");
 
     if manifest.bin.is_empty() {
@@ -414,7 +441,8 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
             .arg("build")
             .arg("--docker")
             .arg("--tag")
-            .arg(&sp1_tag);
+            .arg(&sp1_tag)
+            .arg("--ignore-rust-version");
         if bench {
             cmd.arg("--features").arg("bench");
         }
@@ -431,7 +459,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
         let rustflags =
             env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
         cmd.env(
-            "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
+            "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
             rustflags,
         );
 
@@ -531,17 +559,17 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         ))
         .arg("-e")
         .arg(format!(
-            "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
+            "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
         ));
 
     // Ensure crates with C/C++ sources (e.g. `c-kzg`, `blst`) cross-compile for the guest target.
     // Prefer the RISC-V bare-metal GCC toolchain: it provides a proper sysroot with standard headers.
     cmd.arg("-e")
-        .arg("CC_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
+        .arg("CC_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
     cmd.arg("-e")
-        .arg("CXX_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
+        .arg("CXX_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
     cmd.arg("-e")
-        .arg("AR_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
+        .arg("AR_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
 
     if let Ok(cc) = env::var("SP1_GUEST_CC")
         && !cc.is_empty()
@@ -558,6 +586,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     for bin in &manifest.bin {
         let elf_name = format!("{}.elf", bin.name.replace('-', "_"));
         script.push_str("cargo prove build ");
+        script.push_str("--ignore-rust-version ");
         if bench {
             script.push_str("--features bench ");
         }
@@ -596,6 +625,65 @@ fn update_image_ids(root: &Path, backend: &str) -> Result<()> {
     cmd.arg(backend);
     util::run(cmd)?;
     Ok(())
+}
+
+fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {
+    let mut inspect = Command::new("docker");
+    inspect
+        .arg("image")
+        .arg("inspect")
+        .arg(image)
+        .arg("--format")
+        .arg("{{index .Config.Labels \"org.opencontainers.image.version\"}}");
+    inspect.stderr(Stdio::null());
+    if let Ok(output) = inspect.output()
+        && output.status.success()
+    {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version == sp1_tag {
+            return Ok(());
+        }
+        println!(
+            "[INFO] Rebuilding local SP1 toolchain image: found version {version}, expected {sp1_tag}"
+        );
+    }
+
+    println!("[INFO] Building local SP1 toolchain image: {image}");
+    let mut build = Command::new("docker");
+    build
+        .arg("build")
+        .arg("-f")
+        .arg(root.join("docker/sp1-toolchain/Dockerfile"))
+        .arg("-t")
+        .arg(image)
+        .arg("--build-arg")
+        .arg(format!("SP1_DOCKER_TAG={sp1_tag}"))
+        .arg(root.join("docker/sp1-toolchain"));
+    util::run(build)
+}
+
+fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
+    let mut inspect = Command::new("docker");
+    inspect
+        .arg("image")
+        .arg("inspect")
+        .arg(image)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if inspect.status().is_ok_and(|status| status.success()) {
+        return Ok(());
+    }
+
+    println!("[INFO] Building local RISC0 toolchain image: {image}");
+    let mut build = Command::new("docker");
+    build
+        .arg("build")
+        .arg("-f")
+        .arg(root.join("docker/risc0-toolchain/Dockerfile"))
+        .arg("-t")
+        .arg(image)
+        .arg(root.join("docker/risc0-toolchain"));
+    util::run(build)
 }
 
 fn read_manifest(path: &Path) -> Result<CargoManifest> {

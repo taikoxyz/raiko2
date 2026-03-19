@@ -1,7 +1,6 @@
 use alloy::{eips::BlockNumberOrTag, providers::Provider as AlloyProvider};
 use futures::{StreamExt, stream};
-use raiko2_primitives::{RaikoError, RaikoResult};
-use reth_stateless::ExecutionWitness;
+use raiko2_primitives::{ExecutionWitness, RaikoError, RaikoResult};
 use std::sync::Arc;
 
 use crate::on_the_spot_witness::execution_witness;

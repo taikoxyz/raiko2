@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use raiko2_primitives::proof::{AggregationInput, VerifierArtifact};
 use raiko2_primitives::{RaikoError, RaikoResult};
 use risc0_zkvm::{Digest, Receipt as ZkvmReceipt};
@@ -12,11 +10,12 @@ struct BoundlessAggregationGuestInput {
     receipts: Vec<ZkvmReceipt>,
 }
 
-/// Build the boundless aggregation input for a risc0 aggregation proof.
+/// Build the RISC0 aggregation input expected by the Boundless aggregation guest.
 ///
 /// # Errors
-/// Returns an error if any receipt artifact is missing or invalid, if the
-/// expected image id is malformed, or if serialization fails.
+///
+/// Returns an error if a receipt artifact is missing or invalid, if the expected image id is not
+/// valid hex, or if serialization fails.
 pub fn build_risc0_aggregation_input(agg: &AggregationInput) -> RaikoResult<Vec<u8>> {
     let receipts = agg
         .proofs
@@ -30,7 +29,6 @@ pub fn build_risc0_aggregation_input(agg: &AggregationInput) -> RaikoResult<Vec<
     };
 
     let input = BoundlessAggregationGuestInput { image_id, receipts };
-
     bincode::serialize(&input)
         .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to encode input: {e}")))
 }

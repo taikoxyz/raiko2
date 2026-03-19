@@ -25,7 +25,6 @@ reth-ethereum-primitives.workspace = true
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-primitives-traits.workspace = true
-reth-stateless.workspace = true
 reqwest.workspace = true
 revm.workspace = true
 risc0-ethereum-trie = { workspace = true, features = ["orphan"] }

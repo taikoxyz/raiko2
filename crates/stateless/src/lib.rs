@@ -13,6 +13,8 @@ mod trie;
 mod validation;
 mod witness_db;
 
+pub use crate::trie::StatelessTrie;
+pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::validate_block;
 
 #[cfg(test)]

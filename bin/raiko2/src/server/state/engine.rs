@@ -1,4 +1,6 @@
-use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest};
+use raiko2_engine::{
+    AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest,
+};
 use raiko2_queue::{TaskState, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
@@ -11,13 +13,20 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Engine abstraction used by the HTTP server.
 pub trait EngineHandle: Send + Sync {
-    fn submit_proposal_proof(
+    fn submit_proposal_proof_with_dependencies(
         &self,
         request: ProposalTaskRequest,
+        dependencies: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
-    fn submit_aggregation_proof(
+    fn submit_aggregation_proof_from_tasks(
         &self,
+        request: AggregationTaskRequest,
         proof_tasks: Vec<EngineTaskId>,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
+    fn submit_aggregation_proof_from_proofs(
+        &self,
+        request: AggregationTaskRequest,
+        proofs: Vec<raiko2_primitives::Proof>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
@@ -80,18 +89,37 @@ where
     S::Backend: raiko2_pipeline::ProverBackend + 'static,
     S::Provider: raiko2_provider::Provider + 'static,
 {
-    fn submit_proposal_proof(
+    fn submit_proposal_proof_with_dependencies(
         &self,
         request: ProposalTaskRequest,
+        dependencies: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move { self.submit_proposal_proof(request).await })
+        Box::pin(async move {
+            self.submit_proposal_proof_with_dependencies(request, dependencies)
+                .await
+        })
     }
 
-    fn submit_aggregation_proof(
+    fn submit_aggregation_proof_from_tasks(
         &self,
+        request: AggregationTaskRequest,
         proof_tasks: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move { self.submit_aggregation_proof(proof_tasks).await })
+        Box::pin(async move {
+            self.submit_aggregation_proof_from_tasks(request, proof_tasks)
+                .await
+        })
+    }
+
+    fn submit_aggregation_proof_from_proofs(
+        &self,
+        request: AggregationTaskRequest,
+        proofs: Vec<raiko2_primitives::Proof>,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+        Box::pin(async move {
+            self.submit_aggregation_proof_from_proofs(request, proofs)
+                .await
+        })
     }
 
     fn get_status(
@@ -141,6 +169,12 @@ mod tests {
                 request: ProposalTaskRequest {
                     proposal_id: 1,
                     l2_block_range: None,
+                    l1_inclusion_block_number: 0,
+                    last_anchor_block_number: 0,
+                    blob_proof_type: None,
+                    prover: None,
+                    graffiti: None,
+                    prover_args_json: None,
                 },
                 stage: ProposalStage::Prove,
             }),

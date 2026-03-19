@@ -38,17 +38,17 @@ pub enum PipelineKey {
     ShastaRisc0,
     ShastaSp1,
     ShastaNative,
-    ShastaAgentRisc0,
+    ShastaRisc0Boundless,
 }
 
 impl PipelineKey {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            PipelineKey::ShastaRisc0 => "shasta-risc0",
-            PipelineKey::ShastaSp1 => "shasta-sp1",
-            PipelineKey::ShastaNative => "shasta-native",
-            PipelineKey::ShastaAgentRisc0 => "shasta-agent-risc0",
+            PipelineKey::ShastaRisc0 => "shasta-risc0-local",
+            PipelineKey::ShastaSp1 => "shasta-sp1-local",
+            PipelineKey::ShastaNative => "shasta-native-local",
+            PipelineKey::ShastaRisc0Boundless => "shasta-risc0-boundless",
         }
     }
 }

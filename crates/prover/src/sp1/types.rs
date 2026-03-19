@@ -80,6 +80,8 @@ pub struct Sp1Response {
     /// Verifying key for verification
     #[serde(skip)]
     pub vkey: Option<SP1VerifyingKey>,
+    /// Additional fork/backend metadata.
+    pub extra_data: Option<serde_json::Value>,
 }
 
 impl From<Sp1Response> for Proof {
@@ -101,7 +103,7 @@ impl From<Sp1Response> for Proof {
             input: Some(value.input),
             uuid: value.vkey_hash,
             kzg_proof: None,
-            extra_data: None,
+            extra_data: value.extra_data,
         }
     }
 }

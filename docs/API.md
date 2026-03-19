@@ -1,413 +1,207 @@
-# Raiko V2 API Documentation
+# Raiko2 API
 
 ## Overview
 
-Raiko V2 provides a REST API for requesting and managing zkVM proofs for Taiko's Shasta hardfork.
+Raiko2 exposes a hoodi-compatible v3 API for Shasta batch proof requests and aggregation.
+The public API surface is:
 
-## Base URL
+- `POST /v3/proof/batch/shasta`
+- `POST /v3/proof/aggregate`
+- `GET /v3/tasks/{id}`
+- `POST /v3/tasks/{id}/cancel`
+- `GET /health`
+- `GET /ready`
 
-```
-http://localhost:8080
-```
+`/v1/...` routes are removed.
 
-## Authentication
-
-Currently no authentication is required. Production deployments should add authentication.
-
-## Endpoints
-
-### Health Check
+## Health
 
 ```http
 GET /health
 ```
 
-#### Response
-
-```json
-{
-  "status": "ok",
-  "version": "0.1.0"
-}
-```
-
-### Readiness Check
+## Ready
 
 ```http
 GET /ready
 ```
 
-#### Response
+Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`.
+
+## Submit Shasta Batch Proof
+
+```http
+POST /v3/proof/batch/shasta
+Content-Type: application/json
+```
+
+### Request
+
+```json
+{
+  "proposals": [
+    {
+      "proposal_id": 42,
+      "l1_inclusion_block_number": 100,
+      "l2_block_numbers": [42, 43, 44],
+      "last_anchor_block_number": 41
+    }
+  ],
+  "aggregate": true,
+  "proof_type": "zk_any",
+  "network": "taiko_hoodi",
+  "l1_network": "hoodi",
+  "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "prover": "0x0000000000000000000000000000000000000000",
+  "blob_proof_type": "kzg_versioned_hash"
+}
+```
+
+### Rules
+
+- `proposals` must not be empty.
+- `proposal.l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
+- `proposal.checkpoint` is not supported in this version.
+- `proof_type` mapping:
+  - `native -> native/local`
+  - `sp1 -> sp1/local`
+  - `risc0 -> risc0/<server default runner>`
+  - `zk_any -> risc0/<server default runner>`
+  - `sgx -> 400`
+- `network` and `l1_network` must match an explicitly configured allowed pair.
+- flattened `prover_args` are accepted, but they must not override route/spec selection keys such as
+  `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
+
+### Response
 
 ```json
 {
   "status": "ok",
-  "reth": { "ok": true },
-  "queue": { "ok": true }
-}
-```
-
-If dependencies are unavailable, returns HTTP 503 with error details per subsystem.
-
-### Server Info
-
-```http
-GET /v1/info
-```
-
-#### Response
-
-```json
-{
-  "version": "0.1.0",
-  "prover": "Risc0",
-  "supported_provers": ["risc0", "sp1", "native", "agent-risc0"]
-}
-```
-
-`supported_provers` is computed from currently registered pipelines and may differ by deployment.
-
-### Request Proposal Proof
-
-```http
-POST /v1/proof/proposal
-Content-Type: application/json
-```
-
-#### Request Body
-
-| Field            | Type     | Required | Description                                                                                   |
-| ---------------- | -------- | -------- | --------------------------------------------------------------------------------------------- |
-| `proposal_id`    | `u64`    | Yes      | The proposal ID to prove                                                                      |
-| `prover_type`    | `string` | No       | Prover type: "risc0", "sp1", "native", or "agent-risc0" (defaults to config)                 |
-| `l2_block_range` | `object` | No       | Explicit L2 block span used during preflight when proposal discovery happens outside `raiko2` |
-
-If `l2_block_range` is present, `start` must be less than or equal to `end`.
-
-Unknown request fields are rejected.
-
-#### Example Request
-
-```json
-{
-  "proposal_id": 12345,
-  "prover_type": "agent-risc0",
-  "l2_block_range": {
-    "start": 100,
-    "end": 102
+  "proof_type": "zk_any",
+  "data": {
+    "status": "registered",
+    "task_id": "task_..."
   }
 }
 ```
 
-#### Response
-
-```json
-{
-  "id": "<proof_id>",
-  "status": "pending"
-}
-```
-
-The `proof_id` is an opaque URL-safe base64 string. Treat it as an opaque identifier.
-
-#### Status Codes
-
-| Code | Description                |
-| ---- | -------------------------- |
-| 200  | Proof request accepted     |
-| 400  | Invalid request parameters |
-| 500  | Internal server error      |
-
-### Request Aggregation Proof
+## Submit Aggregate Proof
 
 ```http
-POST /v1/proof/aggregation
+POST /v3/proof/aggregate
 Content-Type: application/json
 ```
 
-#### Request Body
-
-| Field         | Type       | Required | Description                                                                 |
-| ------------- | ---------- | -------- | --------------------------------------------------------------------------- |
-| `proof_ids`   | `string[]` | Yes      | At least two completed proposal proof ids returned by `/v1/proof/proposal` |
-| `prover_type` | `string`   | No       | Optional prover type hint. Must match the pipeline encoded by `proof_ids`   |
-
-Unknown request fields are rejected.
-
-#### Example Request
+### Request
 
 ```json
 {
-  "proof_ids": ["<proof-id-1>", "<proof-id-2>"],
-  "prover_type": "agent-risc0"
-}
-```
-
-#### Response
-
-```json
-{
-  "id": "<proof_id>",
-  "status": "pending"
-}
-```
-
-Aggregation reuses the same status and cancel endpoints as proposal proofs.
-
-### Get Proof Status
-
-```http
-GET /v1/proof/{proof_id}
-```
-
-#### Path Parameters
-
-| Parameter  | Type     | Description                                  |
-| ---------- | -------- | -------------------------------------------- |
-| `proof_id` | `string` | The proof ID returned from the proposal request (opaque URL-safe base64) |
-
-#### Response
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",
-  "proof": "0x...",
-  "error": null,
-  "extra_data": {
-    "zkvm": "risc0",
-    "mode": "mock",
-    "fake_receipt": true,
-    "image_id": "0x...",
-    "input_hash": "0x...",
-    "journal_bytes": 96,
-    "exit_code": "Halted(0)",
-    "total_cycles": 123456,
-    "segment_count": 2,
-    "segments": [
-      { "index": 0, "po2": 20, "cycles": 65432 },
-      { "index": 1, "po2": 19, "cycles": 58024 }
-    ]
-  }
-}
-```
-
-`extra_data` is optional. For local `risc0` mock runs it contains zkVM execution metadata, including
-the total cycle count and per-segment cycle breakdown.
-
-#### Proof Status Values
-
-| Status      | Description                                     |
-| ----------- | ----------------------------------------------- |
-| `pending`   | Proof request received, waiting to be processed |
-| `proving`   | Proof generation in progress                    |
-| `completed` | Proof successfully generated                    |
-| `failed`    | Proof generation failed                         |
-| `cancelled` | Proof request was cancelled                     |
-
-### Cancel Proof
-
-```http
-POST /v1/proof/{proof_id}/cancel
-```
-
-#### Response
-
-```json
-{
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "cancelled"
-}
-```
-
-Note: the status reflects the task state after the cancel attempt.
-
-## Configuration
-
-### Environment Variables
-
-| Variable                              | Default   | Description                                  |
-| ------------------------------------- | --------- | -------------------------------------------- |
-| `RAIKO2_HOST`                         | -         | Server bind address override                 |
-| `RAIKO2_PORT`                         | -         | Server port override                         |
-| `RAIKO2_L1_RPC`                       | -         | L1 RPC endpoint URL                          |
-| `RAIKO2_L2_RPC`                       | -         | L2 RPC endpoint URL                          |
-| `RAIKO2_PROVER`                       | -         | Default prover type override                 |
-| `RAIKO2_L1_CHAIN_ID`                  | -         | L1 chain ID override                         |
-| `RAIKO2_L2_CHAIN_ID`                  | -         | L2 chain ID override                         |
-| `RAIKO2_RPC_TIMEOUT_MS`               | `10000`   | RPC request timeout (ms)                     |
-| `RAIKO2_RPC_CONCURRENCY_LIMIT`        | `32`      | RPC concurrency limit                        |
-| `RAIKO2_RPC_RETRY_MAX_ATTEMPTS`       | `3`       | RPC retry max attempts (0 disables retry)    |
-| `RAIKO2_RPC_RETRY_INITIAL_BACKOFF_MS` | `500`     | RPC retry initial backoff (ms)               |
-| `RAIKO2_RPC_RETRY_CU_PER_SECOND`      | `1000`    | RPC retry CU budget per second               |
-| `RAIKO2_CONFIG`                       | -         | Path to config file                          |
-| `RAIKO2_QUEUE_BACKEND`                | -         | Queue backend (memory, redis)                |
-| `RAIKO2_REDIS_URL`                    | -         | Redis URL (required for redis)               |
-| `RAIKO2_QUEUE_NAMESPACE`              | -         | Redis key namespace                          |
-| `RAIKO2_QUEUE_WORKERS`                | -         | Worker count                                 |
-| `RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS`| -         | Scheduler maintenance interval (ms)          |
-| `RAIKO2_QUEUE_RETRY_STRATEGY`         | -         | none, fixed, exponential                     |
-| `RAIKO2_QUEUE_RETRY_MAX_ATTEMPTS`     | -         | Max retry attempts                           |
-| `RAIKO2_QUEUE_RETRY_FIXED_DELAY_MS`   | -         | Fixed retry delay (ms)                       |
-| `RAIKO2_QUEUE_RETRY_BASE_DELAY_MS`    | -         | Exponential base delay (ms)                  |
-| `RAIKO2_QUEUE_RETRY_MAX_DELAY_MS`     | -         | Exponential max delay (ms)                   |
-| `RUST_LOG`                            | `info`    | Log level                                    |
-
-### Config File (TOML)
-
-```toml
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-l1_rpc = "https://ethereum-rpc.example.com"
-l2_rpc = "https://taiko-rpc.example.com"
-l1_chain_id = 1
-l2_chain_id = 167000
-
-[rpc.client]
-timeout_ms = 10000
-concurrency_limit = 32
-
-[rpc.client.retry]
-max_attempts = 3
-initial_backoff_ms = 500
-compute_units_per_second = 1000
-
-[prover]
-prover_type = "risc0"
-
-[prover.risc0]
-bonsai = true
-snark = true
-mock = false
-
-[prover.sp1]
-network = true
-plonk = true
-
-[prover.agent]
-url = "http://localhost:9999"
-api_key = "optional-api-key"
-poll_interval_ms = 1000
-timeout_ms = 300000
-prover_type = "boundless"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-
-[queue.retry]
-strategy = "exponential"
-max_attempts = 3
-fixed_delay_ms = 1000
-base_delay_ms = 1000
-max_delay_ms = 30000
-```
-
-`prover.agent.url` is the agent base URL only. The client appends `/proof` and `/status/{request_id}` automatically.
-
-`prover.risc0.mock = true` enables RISC Zero dev mode for local smoke tests. In that mode the
-guest still executes and produces a real journal, but the receipt is fake and must never be used
-for production or external verification.
-
-## CLI Usage
-
-```bash
-# Start with default settings
-raiko2
-
-# Start with custom port
-raiko2 --port 9090
-
-# Start with config file
-raiko2 --config /etc/raiko/config.toml
-
-# Start with environment overrides
-RAIKO2_L1_RPC=https://... RAIKO2_L2_RPC=https://... raiko2
-
-# Enable verbose logging
-raiko2 --verbose
-
-# Output JSON logs
-raiko2 --json-logs
-
-# Select memory queue backend (default behavior)
-raiko2 --queue-backend memory
-
-# Select Redis queue backend (requires build with --features redis-queue)
-raiko2 --queue-backend redis --redis-url redis://localhost:6379/ --queue-namespace raiko2:queue
-```
-
-## Error Responses
-
-All error responses follow this format:
-
-```json
-{
-  "error": "Proposal ID 12345 not found on L1"
-}
-```
-
-## Docker
-
-```bash
-# Build image
-docker build -f Dockerfile.raiko2 -t raiko2:latest .
-
-# Run container
-docker run -d \
-  -p 8080:8080 \
-  -e RAIKO2_L1_RPC=https://... \
-  -e RAIKO2_L2_RPC=https://... \
-  raiko2:latest
-```
-
-## Examples
-
-### cURL
-
-```bash
-# Health check
-curl http://localhost:8080/health
-
-# Server info
-curl http://localhost:8080/v1/info
-
-# Request proof
-curl -X POST http://localhost:8080/v1/proof/proposal \
-  -H "Content-Type: application/json" \
-  -d '{"proposal_id": 12345, "prover_type": "risc0", "l2_block_range": {"start": 100, "end": 102}}'
-
-# Get proof status
-curl http://localhost:8080/v1/proof/<proof_id>
-
-# Cancel proof
-curl -X POST http://localhost:8080/v1/proof/<proof_id>/cancel
-```
-
-### Python
-
-```python
-import requests
-
-# Request proof
-response = requests.post(
-    "http://localhost:8080/v1/proof/proposal",
-    json={
-        "proposal_id": 12345,
-        "prover_type": "risc0",
-        "l2_block_range": {"start": 100, "end": 102},
+  "proofs": [
+    {
+      "proof": "0x...",
+      "input": "0x...",
+      "quote": "...",
+      "uuid": "0x...",
+      "extra_data": {
+        "shasta": {
+          "proof_carry_data": {}
+        }
+      }
     }
-)
-proof_id = response.json()["id"]
-
-# Poll for completion
-while True:
-    status = requests.get(f"http://localhost:8080/v1/proof/{proof_id}").json()
-    if status["status"] in ["completed", "failed"]:
-        break
+  ],
+  "proof_type": "risc0",
+  "network": "taiko_hoodi",
+  "l1_network": "hoodi"
+}
 ```
+
+### Rules
+
+- `proofs` must contain at least two entries.
+- Only canonical `Proof` objects are accepted.
+- Required metadata depends on the selected route:
+  - `native`: `input` + `extra_data`
+  - `sp1`: `input` + `uuid` + `extra_data`
+  - `risc0/local`: `input` + `uuid` + `quote` + `extra_data`
+  - `risc0/boundless`: `quote`
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "proof_type": "risc0",
+  "data": {
+    "status": "registered",
+    "task_id": "task_..."
+  }
+}
+```
+
+## Query Task
+
+```http
+GET /v3/tasks/{id}
+```
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "proof_type": "zk_any",
+  "data": {
+    "task_id": "task_...",
+    "status": "proving",
+    "network": "taiko_hoodi",
+    "l1_network": "hoodi",
+    "current_index": 1,
+    "proposals": [
+      {
+        "index": 0,
+        "proposal_id": 42,
+        "task_id": "...",
+        "status": "completed",
+        "l1_inclusion_block_number": 100,
+        "l2_block_numbers": [42, 43, 44],
+        "last_anchor_block_number": 41,
+        "proof": "0x..."
+      }
+    ],
+    "aggregate": {
+      "task_id": "...",
+      "status": "pending"
+    }
+  }
+}
+```
+
+`current_index` points at the first unfinished proposal. When proposal proving is done and an
+aggregate task exists, it becomes `proposals.len()`.
+
+## Cancel Task
+
+```http
+POST /v3/tasks/{id}/cancel
+```
+
+Cancelling a batch root cascades to every proposal stage task and to the optional aggregate task.
+
+## Error Envelope
+
+All API errors use the hoodi-style envelope:
+
+```json
+{
+  "status": "error",
+  "error": "bad_request",
+  "message": "..."
+}
+```
+
+## Configuration Notes
+
+- `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
+- Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
+- Legacy single-pair `rpc.l1_rpc` / `rpc.l2_rpc` / `rpc.l1_chain_id` / `rpc.l2_chain_id` remains
+  as a fallback only when `rpc.pairs` is empty.

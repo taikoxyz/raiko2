@@ -18,7 +18,8 @@ pub use values::{
 #[cfg(test)]
 mod test {
     use crate::shasta::{
-        BlobSlice, Commitment, Derivation, DerivationSource, Proposal, Transition,
+        BlobSlice, Checkpoint, Commitment, Derivation, DerivationSource, ProofCarryData, Proposal,
+        ShastaTransitionInput, Transition, TransitionInputData,
     };
     use alloy_primitives::{Address, B256, Uint, address, b256, hex};
 
@@ -229,5 +230,106 @@ mod test {
             hex::encode(commitment_hash),
             "0c3dabe1a7ef25499f0ae9d63ac7146563c77319a1ed49023d15291a0dd99665"
         );
+    }
+
+    #[test]
+    fn test_hash_shasta_transition_input_binds_continuity_fields() {
+        let mut base = TransitionInputData {
+            proposal_id: 42,
+            proposal_hash: b256!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            parent_proposal_hash: b256!(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ),
+            parent_block_hash: b256!(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            actual_prover: address!("1111111111111111111111111111111111111111"),
+            transition: ShastaTransitionInput {
+                proposer: address!("2222222222222222222222222222222222222222"),
+                timestamp: 123,
+            },
+            checkpoint: Checkpoint {
+                blockNumber: Uint::from(7u64),
+                blockHash: b256!(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                ),
+                stateRoot: b256!(
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                ),
+            },
+        };
+
+        let hash = hash_shasta_transition_input(&base);
+
+        base.parent_block_hash =
+            b256!("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        assert_ne!(hash, hash_shasta_transition_input(&base));
+
+        base.parent_block_hash =
+            b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        base.parent_proposal_hash =
+            b256!("9999999999999999999999999999999999999999999999999999999999999999");
+        assert_ne!(hash, hash_shasta_transition_input(&base));
+
+        base.parent_proposal_hash =
+            b256!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        base.checkpoint.blockHash =
+            b256!("1212121212121212121212121212121212121212121212121212121212121212");
+        assert_ne!(hash, hash_shasta_transition_input(&base));
+    }
+
+    #[test]
+    fn test_hash_shasta_subproof_input_domain_separates_chain_and_verifier() {
+        let transition_input = TransitionInputData {
+            proposal_id: 42,
+            proposal_hash: b256!(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            parent_proposal_hash: b256!(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ),
+            parent_block_hash: b256!(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            ),
+            actual_prover: address!("1111111111111111111111111111111111111111"),
+            transition: ShastaTransitionInput {
+                proposer: address!("2222222222222222222222222222222222222222"),
+                timestamp: 123,
+            },
+            checkpoint: Checkpoint {
+                blockNumber: Uint::from(7u64),
+                blockHash: b256!(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                ),
+                stateRoot: b256!(
+                    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                ),
+            },
+        };
+
+        let base = ProofCarryData {
+            chain_id: 167_000,
+            verifier: address!("00f9f60C79e38c08b785eE4F1a849900693C6630"),
+            transition_input: transition_input.clone(),
+        };
+
+        let hash = hash_shasta_subproof_input(&base);
+
+        let mut diff_chain = base.clone();
+        diff_chain.chain_id = 167_001;
+        assert_ne!(hash, hash_shasta_subproof_input(&diff_chain));
+
+        let mut diff_verifier = base.clone();
+        diff_verifier.verifier = address!("1111111111111111111111111111111111111111");
+        assert_ne!(hash, hash_shasta_subproof_input(&diff_verifier));
+
+        let mut diff_transition = base;
+        diff_transition.transition_input = TransitionInputData {
+            proposal_id: transition_input.proposal_id + 1,
+            ..transition_input
+        };
+        assert_ne!(hash, hash_shasta_subproof_input(&diff_transition));
     }
 }

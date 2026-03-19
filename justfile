@@ -7,6 +7,9 @@ build-guest backend="all" *args:
 build-guest-risc0:
     just build-guest risc0
 
+build-risc0-toolchain-image tag="raiko2-risc0-toolchain:local" *args:
+    docker build -f docker/risc0-toolchain/Dockerfile -t {{tag}} docker/risc0-toolchain {{args}}
+
 build-guest-sp1:
     just build-guest sp1
 
@@ -24,6 +27,11 @@ release-image backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2" 
 
 update-alethia-reth:
     cargo update -p alethia-reth-block
+    cargo update -p alethia-reth-chainspec
+    cargo update -p alethia-reth-consensus
     cargo update -p alethia-reth-block --manifest-path=guests/common/Cargo.toml
+    cargo update -p alethia-reth-chainspec --manifest-path=guests/common/Cargo.toml
     cargo update -p alethia-reth-block --manifest-path=guests/risc0/Cargo.toml
+    cargo update -p alethia-reth-chainspec --manifest-path=guests/risc0/Cargo.toml
     cargo update -p alethia-reth-block --manifest-path=guests/sp1/Cargo.toml
+    cargo update -p alethia-reth-chainspec --manifest-path=guests/sp1/Cargo.toml

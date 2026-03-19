@@ -1,10 +1,10 @@
 //! Provides the [`WitnessDatabase`] type, an implementation of [`reth_revm::Database`]
 //! specifically designed for stateless execution environments.
 
+use crate::trie::StatelessTrie;
 use alloy_primitives::{Address, B256, U256, map::B256Map};
 use reth_errors::ProviderError;
 use reth_revm::{Database, bytecode::Bytecode, state::AccountInfo};
-use reth_stateless::StatelessTrie;
 use std::{collections::btree_map::BTreeMap, format};
 
 /// An EVM database implementation backed by witness data.

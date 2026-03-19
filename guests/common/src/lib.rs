@@ -12,7 +12,7 @@ use raiko2_primitives_shasta::{
     },
     verify_proposal_mode_blob_usage, GuestInput, ShastaZkAggregationGuestInput,
 };
-use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_stateless::validate_block;
 use std::sync::Arc;
 
@@ -86,12 +86,42 @@ where
         first_chain_spec.chain_id,
         proof_carry_data.chain_id
     );
+    ensure!(
+        proof_carry_data.transition_input.proposal_id == guest_input.taiko.proposal_id,
+        "proof_carry_data.proposal_id mismatch: expected {}, got {}",
+        guest_input.taiko.proposal_id,
+        proof_carry_data.transition_input.proposal_id
+    );
+    ensure!(
+        proof_carry_data.transition_input.actual_prover == guest_input.taiko.prover_data.actual_prover,
+        "proof_carry_data.actual_prover mismatch"
+    );
+
+    let proposal = &guest_input.taiko.proposal_event.proposal;
+    let expected_proposal_hash = hash_proposal(proposal);
+    ensure!(
+        proof_carry_data.transition_input.proposal_hash == expected_proposal_hash,
+        "proof_carry_data.proposal_hash mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.parent_proposal_hash == proposal.parentProposalHash,
+        "proof_carry_data.parent_proposal_hash mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.transition.proposer == proposal.proposer,
+        "proof_carry_data.transition.proposer mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.transition.timestamp == proposal.timestamp.to::<u64>(),
+        "proof_carry_data.transition.timestamp mismatch"
+    );
 
     let runtime = TaikoRuntime::from_chain_spec(first_chain_spec)
         .context("Failed to build Taiko runtime from GuestInput chain_spec")?;
 
     let mut blocks = Vec::with_capacity(guest_input.witnesses.len());
     let mut previous_block_hash: Option<B256> = None;
+    let mut previous_block_number: Option<u64> = None;
 
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         if let Some(prev_hash) = previous_block_hash {
@@ -100,16 +130,39 @@ where
                 "block {index} must link to previous block hash"
             );
         }
+        if let Some(previous_number) = previous_block_number {
+            ensure!(
+                previous_number + 1 == stateless_input.block.header.number,
+                "block {index} must increment block number by 1"
+            );
+        }
 
         let validated_hash = validate_block(stateless_input, &runtime)
             .with_context(|| format!("stateless block validation failed at index {index}"))?;
         previous_block_hash = Some(validated_hash);
+        previous_block_number = Some(stateless_input.block.header.number);
 
         blocks.push(stateless_input.block.clone());
     }
 
     let first_block = blocks.first().expect("checked");
     let last_block = blocks.last().expect("checked");
+    ensure!(
+        proof_carry_data.transition_input.parent_block_hash == first_block.header.parent_hash,
+        "proof_carry_data.parent_block_hash mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.checkpoint.blockNumber.to::<u64>() == last_block.header.number,
+        "proof_carry_data.checkpoint.blockNumber mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.checkpoint.blockHash == last_block.header.hash_slow(),
+        "proof_carry_data.checkpoint.blockHash mismatch"
+    );
+    ensure!(
+        proof_carry_data.transition_input.checkpoint.stateRoot == last_block.header.state_root,
+        "proof_carry_data.checkpoint.stateRoot mismatch"
+    );
 
     let transition = ShastaTransition {
         parent_hash: first_block.header.parent_hash,
@@ -190,11 +243,12 @@ mod tests {
     use alloy_primitives::{Address, B256};
     use raiko2_primitives::chain_spec::Eip1559Constants;
     use raiko2_primitives::{ChainSpec, StatelessInput};
+    use raiko2_primitives_shasta::build_proof_carry_data;
     use raiko2_primitives_shasta::instance::{
         ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
     };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-    use raiko2_protocol_shasta::shasta::{ShastaTransitionInput, TransitionInputData};
+    use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_protocol_shasta::TaikoManifest;
     use reth_revm::primitives::hardfork::SpecId;
 
@@ -208,38 +262,38 @@ mod tests {
         )
     }
 
-    #[test]
-    fn prove_shasta_proposal_builds_expected_hashes() {
+    fn guest_input_with_single_block() -> GuestInput {
         let chain_spec = taiko_mainnet_chain_spec();
-
         let mut input = StatelessInput {
             chain_spec,
             ..Default::default()
         };
+        input.block.header.number = 1;
         input.block.header.parent_hash = B256::from([9u8; 32]);
         input.block.header.state_root = B256::from([1u8; 32]);
 
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167000,
-            verifier: Address::from([0x11; 20]),
-            transition_input: TransitionInputData {
-                actual_prover: Address::from([0x22; 20]),
-                transition: ShastaTransitionInput {
-                    proposer: Address::from([0x33; 20]),
-                    designatedProver: Address::ZERO,
-                    timestamp: 123,
-                },
-                ..Default::default()
-            },
-        };
-        let guest_input = GuestInput {
-            witnesses: vec![input.clone()],
+        let mut guest_input = GuestInput {
+            witnesses: vec![input],
             taiko: TaikoManifest {
                 proposal_id: 42,
                 ..Default::default()
             },
-            proof_carry_data: proof_carry_data.clone(),
+            ..Default::default()
         };
+        guest_input.taiko.prover_data.actual_prover = Address::from([0x22; 20]);
+        guest_input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
+        guest_input.taiko.proposal_event.proposal.timestamp =
+            123u64.try_into().expect("timestamp fits in uint48");
+        guest_input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
+        guest_input.proof_carry_data = build_proof_carry_data(&guest_input);
+        guest_input
+    }
+
+    #[test]
+    fn prove_shasta_proposal_builds_expected_hashes() {
+        let guest_input = guest_input_with_single_block();
+        let input = guest_input.witnesses[0].clone();
+        let proof_carry_data = guest_input.proof_carry_data.clone();
 
         let (instance_hash, subproof_input_hash) =
             prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
@@ -276,13 +330,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parent_hash_mismatch() {
-        let chain_spec = taiko_mainnet_chain_spec();
+    fn rejects_empty_witnesses() {
+        let guest_input = GuestInput::default();
+        let err = prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+            Ok(B256::ZERO)
+        })
+        .expect_err("empty witnesses should fail");
+        assert!(err.to_string().contains("must contain at least one witness"));
+    }
 
-        let mut first = StatelessInput {
-            chain_spec: chain_spec.clone(),
-            ..Default::default()
-        };
+    #[test]
+    fn rejects_parent_hash_mismatch() {
+        let mut guest_input = guest_input_with_single_block();
+        let chain_spec = guest_input.witnesses[0].chain_spec.clone();
+
+        let mut first = guest_input.witnesses.remove(0);
         first.block.header.parent_hash = B256::from([1u8; 32]);
 
         let first_hash = first.block.header.hash_slow();
@@ -291,20 +353,10 @@ mod tests {
             chain_spec,
             ..Default::default()
         };
+        second.block.header.number = first.block.header.number + 1;
         second.block.header.parent_hash = B256::from([2u8; 32]);
-
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167000,
-            ..Default::default()
-        };
-        let guest_input = GuestInput {
-            witnesses: vec![first, second],
-            taiko: TaikoManifest {
-                proposal_id: 42,
-                ..Default::default()
-            },
-            proof_carry_data,
-        };
+        guest_input.witnesses = vec![first, second];
+        guest_input.proof_carry_data = build_proof_carry_data(&guest_input);
 
         let err = prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
             Ok(stateless_input.block.header.hash_slow())
@@ -319,26 +371,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_block_number_gap() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut second = guest_input.witnesses[0].clone();
+        second.block.header.number = guest_input.witnesses[0].block.header.number + 2;
+        second.block.header.parent_hash = guest_input.witnesses[0].block.header.hash_slow();
+        guest_input.witnesses.push(second);
+        guest_input.proof_carry_data = build_proof_carry_data(&guest_input);
+
+        let err = prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+            Ok(stateless_input.block.header.hash_slow())
+        })
+        .expect_err("block number gap should fail");
+
+        assert!(err.to_string().contains("must increment block number by 1"));
+    }
+
+    #[test]
+    fn rejects_witness_chain_id_mismatch() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut second = guest_input.witnesses[0].clone();
+        second.block.header.number = guest_input.witnesses[0].block.header.number + 1;
+        second.block.header.parent_hash = guest_input.witnesses[0].block.header.hash_slow();
+        second.chain_spec.chain_id = 167_001;
+        guest_input.witnesses.push(second);
+        guest_input.proof_carry_data = build_proof_carry_data(&guest_input);
+
+        let err = prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+            Ok(stateless_input.block.header.hash_slow())
+        })
+        .expect_err("chain_id mismatch should fail");
+
+        assert!(err.to_string().contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn rejects_carry_checkpoint_mismatch() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.proof_carry_data.transition_input.checkpoint.blockHash = B256::from([0x99; 32]);
+
+        let err = prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+            Ok(stateless_input.block.header.hash_slow())
+        })
+        .expect_err("checkpoint mismatch should fail");
+
+        assert!(err.to_string().contains("checkpoint.blockHash mismatch"));
+    }
+
+    #[test]
     fn rejects_chain_id_mismatch_between_input_and_proof_carry_data() {
-        let chain_spec = taiko_mainnet_chain_spec();
-
-        let input = StatelessInput {
-            chain_spec,
-            ..Default::default()
-        };
-
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167001,
-            ..Default::default()
-        };
-        let guest_input = GuestInput {
-            witnesses: vec![input],
-            taiko: TaikoManifest {
-                proposal_id: 1,
-                ..Default::default()
-            },
-            proof_carry_data,
-        };
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.proof_carry_data.chain_id = 167_001;
 
         let err = prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
             Ok(B256::ZERO)
@@ -385,19 +468,7 @@ mod tests {
 
     #[test]
     fn aggregate_shasta_zk_computes_expected_public_input() {
-        let proof_carry_data = ProofCarryData {
-            chain_id: 167000,
-            verifier: Address::from([0x11; 20]),
-            transition_input: TransitionInputData {
-                actual_prover: Address::from([0x22; 20]),
-                transition: ShastaTransitionInput {
-                    proposer: Address::from([0x33; 20]),
-                    designatedProver: Address::ZERO,
-                    timestamp: 123,
-                },
-                ..Default::default()
-            },
-        };
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
 
         let expected_block_input = hash_shasta_subproof_input(&proof_carry_data);
 
@@ -432,5 +503,58 @@ mod tests {
         let expected = shasta_zk_aggregation_output(image_id_b256, aggregation_hash);
 
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn aggregate_rejects_invalid_proof_carry_sequence() {
+        let first = guest_input_with_single_block().proof_carry_data;
+        let mut second = first.clone();
+        second.transition_input.proposal_id = first.transition_input.proposal_id;
+
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![
+                hash_shasta_subproof_input(&first),
+                hash_shasta_subproof_input(&second),
+            ],
+            proof_carry_data_vec: vec![first, second],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("invalid proof carry sequence should fail");
+        assert!(err.to_string().contains("invalid proof_carry_data_vec"));
+    }
+
+    #[test]
+    fn aggregate_rejects_block_input_mismatch() {
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![B256::from([0xAA; 32])],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| Ok(()))
+            .expect_err("block input mismatch should fail");
+        assert!(err.to_string().contains("block_input mismatch"));
+    }
+
+    #[test]
+    fn aggregate_propagates_verifier_error() {
+        let proof_carry_data = guest_input_with_single_block().proof_carry_data;
+        let input = ShastaZkAggregationGuestInput {
+            image_id: [1u32; 8],
+            block_inputs: vec![hash_shasta_subproof_input(&proof_carry_data)],
+            proof_carry_data_vec: vec![proof_carry_data],
+            prover_address: Address::ZERO,
+        };
+
+        let err = aggregate_shasta_zk_with_verifier(&input, B256::ZERO, |_i, _block_input| {
+            Err(anyhow::anyhow!("boom"))
+        })
+        .expect_err("verifier error should bubble up");
+        assert!(err.to_string().contains("proof verification failed at index 0"));
     }
 }

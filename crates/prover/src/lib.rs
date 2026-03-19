@@ -22,7 +22,7 @@
 //! let sp1_prover = Sp1Prover::new(Default::default());
 //! ```
 
-pub mod agent;
+pub mod boundless;
 pub mod native;
 pub mod risc0;
 pub mod sp1;
@@ -30,7 +30,8 @@ pub mod sp1;
 use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::ShastaZkAggregationGuestInput;
+use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, encode_proof_carry_data};
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
@@ -70,6 +71,36 @@ pub(crate) fn validate_shasta_aggregation_lengths(
     Ok(())
 }
 
+pub(crate) fn parse_shasta_proof_carry_data(
+    config: &ProverConfig,
+) -> Result<ProofCarryData, RaikoError> {
+    serde_json::from_value(
+        config
+            .get("shasta_proof_carry_data")
+            .cloned()
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "Missing 'shasta_proof_carry_data' in config".to_string(),
+                )
+            })?,
+    )
+    .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to parse proof carry data: {e}")))
+}
+
+pub(crate) fn with_shasta_extra_data(
+    carry: &ProofCarryData,
+    namespace: &str,
+    metadata: Option<serde_json::Value>,
+) -> RaikoResult<Option<serde_json::Value>> {
+    let mut extra_data = encode_proof_carry_data(carry)?;
+    if let Some(metadata) = metadata
+        && let Some(root) = extra_data.as_object_mut()
+    {
+        root.insert(namespace.to_string(), metadata);
+    }
+    Ok(Some(extra_data))
+}
+
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
 pub trait Prover<B>: Send + Sync
@@ -87,6 +118,11 @@ where
     ///
     /// Backends that need extra request metadata, such as `ProofCarryData`, should populate it
     /// here so `prove_encoded` and `aggregate` can read a canonical config shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot derive a valid request-scoped configuration from
+    /// the guest input.
     fn prepare_config_for_input(
         &self,
         _input: &Self::GuestInput,

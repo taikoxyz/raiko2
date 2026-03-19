@@ -22,6 +22,7 @@ raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-prover.workspace = true
 raiko2-queue.workspace = true
+raiko2-runtime.workspace = true
 
 alloy.workspace = true
 axum.workspace = true
@@ -43,6 +44,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 anyhow.workspace = true
+async-trait.workspace = true
 
 # Utilities
 dotenvy = "0.15"
@@ -54,9 +56,7 @@ redis-queue = ["raiko2-queue/redis"]
 [dev-dependencies]
 tower.workspace = true
 http-body-util = "0.1"
-async-trait.workspace = true
 raiko2-primitives-shasta.workspace = true
 reth-ethereum-primitives.workspace = true
-reth-stateless.workspace = true
 alloy-primitives.workspace = true
 alloy-trie.workspace = true

@@ -117,7 +117,7 @@ where
         let mut input = GuestInput {
             taiko: manifest,
             witnesses,
-            proof_carry_data: Default::default(),
+            proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
         };
         input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input);
         Ok(input)

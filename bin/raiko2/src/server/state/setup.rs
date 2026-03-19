@@ -1,15 +1,19 @@
-use crate::config::{Config, RetryStrategy};
+use crate::config::{Config, ResolvedNetworkPair, RetryStrategy};
 use anyhow::Result;
 use raiko2_primitives::{ProofContext, ProofRequest};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::time::Duration;
 
-pub(crate) fn build_context(config: &Config, proof_type: &str) -> ProofContext {
-    ProofContext::new(
+pub(crate) fn build_context(
+    config: &Config,
+    pair: &ResolvedNetworkPair,
+    proof_type: &str,
+) -> Result<ProofContext> {
+    let mut context = ProofContext::new(
         ProofRequest {
-            l1_chain_id: config.rpc.l1_chain_id,
-            l2_chain_id: config.rpc.l2_chain_id,
+            l1_chain_id: pair.l1_chain_id(),
+            l2_chain_id: pair.l2_chain_id(),
             proposal_id: 0,
             l2_block_range: None,
             proof_type: proof_type.to_string(),
@@ -18,13 +22,28 @@ pub(crate) fn build_context(config: &Config, proof_type: &str) -> ProofContext {
             graffiti: None,
         },
         raiko2_primitives::ProverConfig::default(),
-    )
+    );
+    context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
+    if !context.config.is_object() {
+        context.config = serde_json::json!({});
+    }
+    if let Some(config_obj) = context.config.as_object_mut() {
+        config_obj.insert("hoodi_network".to_string(), serde_json::json!(pair.network));
+        config_obj.insert(
+            "hoodi_l1_network".to_string(),
+            serde_json::json!(pair.l1_network),
+        );
+    }
+    let _ = config;
+    Ok(context)
 }
 
-pub(crate) fn build_provider(config: &Config) -> Result<NetworkProvider> {
+pub(crate) fn build_provider(
+    config: &Config,
+    pair: &ResolvedNetworkPair,
+) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
-    NetworkProvider::new_with_config(&config.rpc.l2_rpc, &rpc_config)
-        .map_err(|e| anyhow::anyhow!(e))
+    NetworkProvider::new_with_config(&pair.l2_rpc, &rpc_config).map_err(|e| anyhow::anyhow!(e))
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -64,9 +83,9 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-pub(crate) fn agent_scheduler_config(config: &Config) -> SchedulerConfig {
-    let timeout_ms = config.prover.agent.timeout_ms;
-    let poll_interval_ms = config.prover.agent.poll_interval_ms;
+pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
+    let timeout_ms = config.prover.boundless.timeout_ms;
+    let poll_interval_ms = config.prover.boundless.poll_interval_ms;
     let lease_ms = timeout_ms
         .saturating_add(poll_interval_ms)
         .saturating_add(30_000);
@@ -108,13 +127,17 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     }
 }
 
-pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::AgentConfig {
-    raiko2_prover::agent::AgentConfig {
-        base_url: config.prover.agent.url.clone(),
-        prover_type: config.prover.agent.prover_type.clone(),
-        api_key: config.prover.agent.api_key.clone(),
-        poll_interval_ms: config.prover.agent.poll_interval_ms,
-        timeout_ms: config.prover.agent.timeout_ms,
+pub(crate) fn boundless_prover_config(
+    config: &Config,
+) -> raiko2_prover::boundless::BoundlessConfig {
+    raiko2_prover::boundless::BoundlessConfig {
+        offchain: config.prover.boundless.offchain,
+        rpc_url: config.prover.boundless.rpc_url.clone(),
+        signer_key: config.prover.boundless.signer_key.clone(),
+        deployment: config.prover.boundless.deployment.clone(),
+        offer_params: config.prover.boundless.offer_params.clone(),
+        poll_interval_ms: config.prover.boundless.poll_interval_ms,
+        timeout_ms: config.prover.boundless.timeout_ms,
     }
 }
 
@@ -122,34 +145,34 @@ pub(crate) fn agent_prover_config(config: &Config) -> raiko2_prover::agent::Agen
 use raiko2_pipeline::PipelineKey;
 
 #[cfg(feature = "redis-queue")]
-pub(crate) fn queue_namespace(base: &str, key: PipelineKey) -> String {
+pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: PipelineKey) -> String {
     let base = base.trim_end_matches('/');
-    format!("{}/{}", base, key.as_str())
+    format!("{}/{}/{}", base, pair.key, key.as_str())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_scheduler_config, scheduler_config};
+    use super::{boundless_scheduler_config, scheduler_config};
     use crate::config::Config;
     use std::time::Duration;
 
     #[test]
-    fn agent_scheduler_lease_covers_agent_timeout() {
+    fn boundless_scheduler_lease_covers_boundless_timeout() {
         let mut config = Config::default();
-        config.prover.agent.timeout_ms = 300_000;
-        config.prover.agent.poll_interval_ms = 1_000;
+        config.prover.boundless.timeout_ms = 300_000;
+        config.prover.boundless.poll_interval_ms = 1_000;
 
-        let scheduler = agent_scheduler_config(&config);
+        let scheduler = boundless_scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_millis(331_000));
     }
 
     #[test]
-    fn agent_scheduler_lease_has_one_minute_floor() {
+    fn boundless_scheduler_lease_has_one_minute_floor() {
         let mut config = Config::default();
-        config.prover.agent.timeout_ms = 5_000;
-        config.prover.agent.poll_interval_ms = 1_000;
+        config.prover.boundless.timeout_ms = 5_000;
+        config.prover.boundless.poll_interval_ms = 1_000;
 
-        let scheduler = agent_scheduler_config(&config);
+        let scheduler = boundless_scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
     }
 

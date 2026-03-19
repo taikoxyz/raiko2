@@ -77,33 +77,6 @@ pub(crate) fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
-pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for dir in env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-pub(crate) fn find_docker_buildx_plugin() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(home) = env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join(".docker/cli-plugins/docker-buildx"));
-    }
-    candidates.push(PathBuf::from("/usr/lib/docker/cli-plugins/docker-buildx"));
-    candidates.push(PathBuf::from(
-        "/usr/local/lib/docker/cli-plugins/docker-buildx",
-    ));
-    candidates.push(PathBuf::from(
-        "/usr/libexec/docker/cli-plugins/docker-buildx",
-    ));
-
-    candidates.into_iter().find(|candidate| candidate.is_file())
-}
-
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())

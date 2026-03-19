@@ -28,7 +28,7 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PORT")]
     pub port: Option<u16>,
 
-    /// Prover type (risc0, sp1, native)
+    /// Canonical proving route (`<guest_system>/<runner>`)
     #[arg(long, env = "RAIKO2_PROVER")]
     pub prover: Option<String>,
 

@@ -3,7 +3,7 @@
 use raiko2_primitives::proof::{
     AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
 };
-use raiko2_prover::agent::aggregation::build_risc0_aggregation_input;
+use raiko2_prover::boundless::aggregation::build_risc0_aggregation_input;
 use serde_json::json;
 
 mod fixtures;

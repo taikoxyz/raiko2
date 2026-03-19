@@ -12,7 +12,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
     clang \
+    libprotobuf-dev \
     libssl-dev \
+    protobuf-compiler \
     pkg-config \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*

@@ -4,11 +4,10 @@ use alloy::{
 };
 use alloy_chains::NamedChain;
 use alloy_primitives::{Address, map::AddressMap};
-use raiko2_primitives::{RaikoError, RaikoResult};
+use raiko2_primitives::{ExecutionWitness, RaikoError, RaikoResult};
 use reth_chainspec::{HOLESKY, HOODI, MAINNET, SEPOLIA};
 use reth_ethereum_primitives::Block as RethBlock;
 use reth_evm_ethereum::EthEvmConfig;
-use reth_stateless::ExecutionWitness;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 

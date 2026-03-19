@@ -17,7 +17,7 @@ environment variables override values from the file.
 - Split into focused crates: `primitives`, `protocol`, `pipeline`, `provider`, `engine`, `queue`, `stateless`, `prover`
 - Built on Taiko's `alethia-reth`
 - Shasta protocol support (Based Contestable Rollup)
-- Prover backends: RISC0, SP1, and `agent-risc0`
+- Canonical proving routes: `risc0/local`, `risc0/boundless`, `sp1/local`, `native/local`
 - Native mode: runs locally and outputs public inputs (no zk proof)
 
 ## Project structure
@@ -42,7 +42,7 @@ raiko2/
 │   ├── engine/                # Execution engine
 │   ├── queue/                 # Queue + scheduler backends
 │   ├── stateless/             # Stateless validation
-│   ├── prover/                # Prover backends (risc0, sp1, agent)
+│   ├── prover/                # Prover backends (risc0, sp1, boundless runner)
 │   └── guests/                # Guest ELF assets (compiled outputs)
 ├── config/                    # Chain spec lists and config assets
 ├── docker/                    # Toolchain images
@@ -83,7 +83,7 @@ Key traits and types:
 - `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
 - `Pipeline`: hardfork-agnostic preflight + validation flow.
 - `Engine`: schedules pipeline stages and prover work.
-- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / agent-risc0).
+- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / boundless-backed RISC0).
 
 High-level view:
 
@@ -129,8 +129,8 @@ sequenceDiagram
   participant P as Provider
   participant Z as Prover
 
-  C->>API: POST /v1/proof/proposal
-  API->>Q: submit_proposal_proof
+  C->>API: POST /v3/proof/batch/shasta
+  API->>Q: submit_proposal_proof_with_dependencies
   Q->>W: Preflight task
   W->>P: fetch blocks/witnesses/accounts
   W->>Q: store Preflight output
@@ -142,8 +142,8 @@ sequenceDiagram
   W->>Z: prove(EncodedInput)
   Z-->>W: Proof
   W->>Q: store Proof
-  C->>API: GET /v1/proof/{id}
-  API-->>C: status + proof
+  C->>API: GET /v3/tasks/{id}
+  API-->>C: root task status + proof
 ```
 
 ## Build
@@ -171,10 +171,13 @@ ELFs into `crates/guests/elf` for the host to load. Use `just` unless you have a
 
 Prerequisites: `docker` and `just`.
 
-By default, `xtask` uses prebuilt toolchain images, so you don't need local `rzup` / `sp1up` installs:
+By default, `xtask` uses repo-managed local toolchain images:
 
-- RISC0: `RISC0_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/risc0-toolchain:latest`
-- SP1: `SP1_TOOLCHAIN_IMAGE=ghcr.io/taikoxyz/raiko2/sp1-toolchain:latest`
+- RISC0: `RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local`
+- SP1: `SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local`
+
+When a default local image is missing, `xtask` builds it locally from the matching Dockerfile.
+The SP1 image uses the upstream version derived from `guests/sp1/Cargo.lock`.
 
 Docker builds reuse a persistent Cargo download cache by default:
 
@@ -200,6 +203,13 @@ To build the SP1 toolchain image locally:
 ```bash
 docker build -f docker/sp1-toolchain/Dockerfile -t raiko2-sp1-toolchain:local docker/sp1-toolchain
 SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local just build-guest sp1
+```
+
+To build the RISC0 toolchain image locally:
+
+```bash
+docker build -f docker/risc0-toolchain/Dockerfile -t raiko2-risc0-toolchain:local docker/risc0-toolchain
+RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local just build-guest risc0
 ```
 
 Without `just`:
@@ -311,30 +321,59 @@ Health checks:
 The default image is built without optional queue features. If you later want Redis-backed queueing,
 rebuild with `BIN_FEATURES=--features redis-queue` and provide the corresponding runtime settings.
 
-To switch prover backends, change `RAIKO2_PROVER` in `docker/.env`:
+To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 
-- `native`
-- `risc0`
-- `sp1`
+- `native/local`
+- `risc0/local`
+- `risc0/boundless`
+- `sp1/local`
 
-## Agent prover
+## Boundless runner
 
-To use `raiko-agent`, set the prover type to `agent-risc0` and configure the agent endpoint:
+To use the boundless-backed RISC0 route, configure `guest_system = "risc0"` and
+`runner = "boundless"`:
 
 ```toml
 [prover]
-prover_type = "agent-risc0"
+guest_system = "risc0"
+runner = "boundless"
 
-[prover.agent]
-url = "http://localhost:9999"
-api_key = "optional-api-key"
-poll_interval_ms = 1000
-timeout_ms = 300000
-prover_type = "boundless"
+[prover.boundless]
+offchain = true
+rpc_url = "https://base-rpc.publicnode.com"
+signer_key = "0xYOUR_PRIVATE_KEY"
+poll_interval_ms = 10000
+timeout_ms = 3600000
+
+[prover.boundless.deployment]
+deployment_type = "base"
+
+[prover.boundless.deployment.overrides]
+order_stream_url = "https://base-mainnet.boundless.network"
+
+[prover.boundless.offer_params.batch]
+ramp_up_start_sec = 2
+ramp_up_period_blocks = 60
+lock_timeout_ms_per_mcycle = 150
+timeout_ms_per_mcycle = 310
+max_price_per_mcycle = "0.000000085"
+min_price_per_mcycle = "0.000000005"
+lock_collateral = "20"
+
+[prover.boundless.offer_params.aggregation]
+ramp_up_start_sec = 2
+ramp_up_period_blocks = 60
+lock_timeout_ms_per_mcycle = 1500
+timeout_ms_per_mcycle = 3000
+max_price_per_mcycle = "0.00000006"
+min_price_per_mcycle = "0.000000006"
+lock_collateral = "20"
 ```
 
-The agent handles ELF uploads. raiko2 uploads new ELFs when they change and retries if the agent
-returns an "image not uploaded" error.
+The boundless route is now fully in-process. `raiko2` uploads guest ELFs itself, submits market
+requests directly, and records task/runtime state under `./data/runtime` by default. Task
+workdirs, runtime state, and reusable image references are managed there, while `guests/risc0`
+and `guests/sp1` remain separate Cargo workspaces.
 
 ## Documentation
 

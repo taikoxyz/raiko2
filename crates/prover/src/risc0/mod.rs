@@ -17,7 +17,10 @@ use risc0_zkvm::{
 };
 use tracing::info;
 
-use crate::{GuestInputCodec, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths};
+use crate::{
+    GuestInputCodec, parse_shasta_aggregation_input, parse_shasta_proof_carry_data,
+    validate_shasta_aggregation_lengths, with_shasta_extra_data,
+};
 
 /// RISC0 Prover for Shasta proposal proofs.
 pub struct Risc0Prover {
@@ -97,16 +100,41 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
+    fn prepare_config_for_input(
+        &self,
+        input: &Self::GuestInput,
+        config: &mut ProverConfig,
+    ) -> RaikoResult<()> {
+        if !config.is_object() {
+            *config = serde_json::json!({});
+        }
+        let Some(config) = config.as_object_mut() else {
+            return Err(RaikoError::InvalidRequestConfig(
+                "prover config must be a JSON object".to_string(),
+            ));
+        };
+        config.insert(
+            "shasta_proof_carry_data".to_string(),
+            serde_json::to_value(&input.proof_carry_data).map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to serialize proof carry data: {e}"
+                ))
+            })?,
+        );
+        Ok(())
+    }
+
     async fn prove_encoded(
         &self,
         input: Bytes,
-        _config: &ProverConfig,
+        config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!("Starting RISC0 proposal proof generation...");
 
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         let prover_config = self.config.clone();
+        let proof_carry_data = parse_shasta_proof_carry_data(config)?;
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
@@ -191,7 +219,7 @@ where
                     receipt: receipt_json,
                     image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                     input: input_hash,
-                    extra_data,
+                    extra_data: with_shasta_extra_data(&proof_carry_data, "risc0", extra_data)?,
                 }
                 .into(),
             )

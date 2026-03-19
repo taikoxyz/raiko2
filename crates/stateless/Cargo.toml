@@ -13,9 +13,9 @@ alloy-rlp.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-trie.workspace = true
+raiko2-primitives.workspace = true
 
 # Reth
-reth-stateless.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-consensus.workspace = true

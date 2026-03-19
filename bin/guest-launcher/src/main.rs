@@ -2,12 +2,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy_primitives::{B256, hex};
+use alloy_primitives::{Address, B256, hex};
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::Proof;
+use raiko2_primitives_shasta::build_proof_carry_data;
 use raiko2_primitives_shasta::decode_proof_carry_data;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_primitives_shasta::instance::words_to_bytes_be;
@@ -17,13 +18,11 @@ use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
 use serde::Serialize;
-use serde_json::json;
-use sp1_sdk::network::Address;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    HashableKey, ProverClient, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
+    Elf, HashableKey, ProveRequest as _, Prover as _, ProverClient, ProvingKey as _, SP1Proof,
+    SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
 };
-use tokio::runtime::Runtime;
 
 #[derive(Parser)]
 #[command(name = "guest-launcher")]
@@ -118,7 +117,8 @@ impl From<ProofMode> for SP1ProofMode {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Enable SP1 runtime logs (includes guest `println!` output).
     // Use `RUST_LOG=info` (or `debug`) when running this binary to see them.
     setup_logger();
@@ -126,28 +126,31 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if !args.aggregate.is_empty() {
-        return run_aggregation(args);
+        return run_aggregation(args).await;
     }
-    run_proposal(args)
+    run_proposal(args).await
 }
 
 fn read_input(path: &PathBuf) -> Result<GuestInput> {
     let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let input: GuestInput = serde_json::from_str(&contents).context("parse input JSON")?;
+    let mut input: GuestInput = serde_json::from_str(&contents).context("parse input JSON")?;
+    if input.proof_carry_data == ProofCarryData::default() && !input.witnesses.is_empty() {
+        input.proof_carry_data = build_proof_carry_data(&input);
+    }
     Ok(input)
 }
 
-fn run_proposal(args: Args) -> Result<()> {
+async fn run_proposal(args: Args) -> Result<()> {
     let input_path = args.input.clone().context("missing --input")?;
     let input = read_input(&input_path)?;
 
     match args.proof_type {
-        ProofType::Sp1 => run_sp1_proposal(args, input_path, input),
-        ProofType::Native => run_native_proposal(args, input_path, input),
+        ProofType::Sp1 => run_sp1_proposal(args, input_path, input).await,
+        ProofType::Native => run_native_proposal(args, input_path, input).await,
     }
 }
 
-fn run_aggregation(args: Args) -> Result<()> {
+async fn run_aggregation(args: Args) -> Result<()> {
     if args.proof_type != ProofType::Sp1 {
         anyhow::bail!("aggregation is supported only for --proof-type sp1");
     }
@@ -168,15 +171,21 @@ fn run_aggregation(args: Args) -> Result<()> {
     let mut stdin = SP1Stdin::new();
     stdin.write(&aggregation_input);
 
-    let proposal_elf = SP1_SHASTA_BACKEND
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")?;
-    let prover = ProverClient::from_env();
-    let (_, proposal_vk) = prover.setup(proposal_elf);
+    let proposal_elf = Elf::from(
+        SP1_SHASTA_BACKEND
+            .elf(ProofStage::Proposal)
+            .context("load SP1 proposal ELF")?,
+    );
+    let prover = ProverClient::from_env().await;
+    let proposal_pk = prover
+        .setup(proposal_elf)
+        .await
+        .context("setup SP1 proposal key")?;
+    let proposal_vk = proposal_pk.verifying_key().clone();
 
     for proof in sp1_proofs {
         match proof.proof {
-            sp1_sdk::SP1Proof::Compressed(reduce_proof) => {
+            SP1Proof::Compressed(reduce_proof) => {
                 stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
             }
             _ => {
@@ -185,15 +194,20 @@ fn run_aggregation(args: Args) -> Result<()> {
         }
     }
 
-    let elf = SP1_SHASTA_BACKEND
-        .elf(ProofStage::Aggregation)
-        .context("load SP1 aggregation ELF")?;
-    let (pk, vk) = prover.setup(elf);
+    let elf = Elf::from(
+        SP1_SHASTA_BACKEND
+            .elf(ProofStage::Aggregation)
+            .context("load SP1 aggregation ELF")?,
+    );
+    let pk = prover
+        .setup(elf)
+        .await
+        .context("setup SP1 aggregation key")?;
     let start = Instant::now();
     let proof = prover
-        .prove(&pk, &stdin)
+        .prove(&pk, stdin)
         .mode(args.proof_mode.into())
-        .run()
+        .await
         .context("prove failed")?;
     let report = BenchReport {
         stage: "aggregation",
@@ -205,7 +219,7 @@ fn run_aggregation(args: Args) -> Result<()> {
         cycle_tracker: Vec::new(),
     };
 
-    let output = build_sp1_proof_output(&proof, &vk, None)?;
+    let output = build_sp1_proof_output(&proof, pk.verifying_key(), None)?;
     write_proof_json(output_path, &output)?;
 
     println!("public_values: {}", report.public_values);
@@ -240,21 +254,23 @@ fn build_sp1_proof_output(
     Ok(Proof {
         proof: Some(hex::encode_prefixed(&proof_bytes)),
         input: Some(input_hash),
-        uuid: Some(vk.bytes32()),
+        uuid: Some(vk.bytes32().to_string()),
         extra_data,
         ..Default::default()
     })
 }
 
-fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
+async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
 
-    let elf = SP1_SHASTA_BACKEND
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")?;
+    let elf = Elf::from(
+        SP1_SHASTA_BACKEND
+            .elf(ProofStage::Proposal)
+            .context("load SP1 proposal ELF")?,
+    );
 
-    let prover = ProverClient::from_env();
+    let prover = ProverClient::from_env().await;
 
     let mut report = BenchReport {
         stage: "proposal",
@@ -269,7 +285,8 @@ fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Resul
     match args.mode {
         Mode::Execute => {
             let start = Instant::now();
-            let (public_values, execution_report) = prover.execute(elf, &stdin).run()?;
+            let (public_values, execution_report) =
+                prover.execute(elf, stdin).await.context("execute failed")?;
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = public_values.raw();
 
@@ -283,19 +300,23 @@ fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Resul
             }
         }
         Mode::Prove => {
-            let (pk, vk) = prover.setup(elf);
+            let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
             let start = Instant::now();
             let proof = prover
-                .prove(&pk, &stdin)
+                .prove(&pk, stdin)
                 .mode(args.proof_mode.into())
-                .run()
+                .await
                 .context("prove failed")?;
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = proof.public_values.raw();
             println!("public_values: {}", report.public_values);
 
             if let Some(path) = &args.output {
-                let output = build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
+                let output = build_sp1_proof_output(
+                    &proof,
+                    pk.verifying_key(),
+                    Some(&input.proof_carry_data),
+                )?;
                 write_proof_json(path, &output)?;
             }
         }
@@ -309,7 +330,7 @@ fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Resul
     Ok(())
 }
 
-fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
+async fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
     if args.mode == Mode::Execute {
         anyhow::bail!("native backend does not support --mode execute");
     }
@@ -320,11 +341,11 @@ fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Re
 
     let backend = NativeBackend;
     let prover = NativeProver;
-    let rt = Runtime::new().context("create tokio runtime")?;
 
     let start = Instant::now();
-    let proof = rt
-        .block_on(prover.prove(input, &serde_json::Value::Null, &backend))
+    let proof = prover
+        .prove(input, &serde_json::Value::Null, &backend)
+        .await
         .context("native prove failed")?;
     let wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 

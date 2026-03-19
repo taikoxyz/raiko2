@@ -19,12 +19,12 @@ async-trait = { workspace = true }
 blst = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 itertools = { workspace = true }
+raiko2-primitives.workspace = true
 reqwest = { version = "0.12.20", features = ["json"] }
 reth-chainspec = { workspace = true }
 reth-evm = { workspace = true }
 reth-evm-ethereum = { workspace = true }
 reth-primitives-traits = { workspace = true }
-reth-stateless = { workspace = true }
 revm = { workspace = true, features = ["c-kzg"] }
 risc0-ethereum-trie = { workspace = true, features = ["orphan"] }
 serde = { workspace = true }

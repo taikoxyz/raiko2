@@ -1,6 +1,6 @@
 //! Error types for raiko2.
 
-use reth_stateless::validation::StatelessValidationError;
+use crate::StatelessValidationError;
 use std::io;
 
 /// Main error type for Raiko operations.

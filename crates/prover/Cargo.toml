@@ -22,12 +22,16 @@ reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
 secp256k1.workspace = true
+url.workspace = true
 
 # Alloy types
 alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
 
 # RISC0 dependencies (optional)
 risc0-zkvm.workspace = true
+risc0-ethereum-contracts-boundless.workspace = true
+boundless-market.workspace = true
 
 # SP1 dependencies (optional)
 sp1-sdk.workspace = true

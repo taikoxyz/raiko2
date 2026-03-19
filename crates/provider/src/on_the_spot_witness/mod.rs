@@ -21,9 +21,9 @@ use alloy::{
     providers::Provider,
 };
 use anyhow::{Context, Result};
+use raiko2_primitives::ExecutionWitness;
 use reth_evm::{ConfigureEvm, execute::Executor};
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives};
-use reth_stateless::ExecutionWitness;
 use std::collections::HashSet;
 use tracing::{Span, debug};
 

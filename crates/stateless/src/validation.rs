@@ -7,13 +7,13 @@ use alethia_reth_consensus::validation::{
 use alloy_consensus::{BlockHeader, Header, TrieAccount};
 use alloy_primitives::{B256, map::AddressMap};
 use alloy_rlp::Decodable;
+use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_consensus_common::validation::validate_block_pre_execution;
 use reth_ethereum_consensus::validate_block_post_execution;
 use reth_ethereum_primitives::Block;
 use reth_evm::{ConfigureEvm, execute::Executor};
 use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
-use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -248,9 +248,9 @@ mod tests {
     use alethia_reth_chainspec::TAIKO_DEVNET;
     use alloy_consensus::{Header, proofs};
     use alloy_primitives::Bytes;
+    use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
     use reth_consensus::ConsensusError;
     use reth_ethereum_primitives::{Block, BlockBody};
-    use reth_stateless::{ExecutionWitness, validation::StatelessValidationError};
 
     fn empty_shanghai_body() -> BlockBody {
         BlockBody {

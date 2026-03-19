@@ -145,8 +145,10 @@ where
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let encoded = self.encode(&input, config)?;
-        self.prove_encoded(encoded, config, backend).await
+        let mut request_config = config.clone();
+        self.prepare_config_for_input(&input, &mut request_config)?;
+        let encoded = self.encode(&input, &request_config)?;
+        self.prove_encoded(encoded, &request_config, backend).await
     }
 
     /// Generate an aggregation proof.

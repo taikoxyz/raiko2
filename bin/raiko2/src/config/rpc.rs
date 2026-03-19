@@ -68,12 +68,12 @@ pub struct ResolvedNetworkPair {
 
 impl ResolvedNetworkPair {
     #[must_use]
-    pub fn l1_chain_id(&self) -> u64 {
+    pub const fn l1_chain_id(&self) -> u64 {
         self.l1_spec.chain_id()
     }
 
     #[must_use]
-    pub fn l2_chain_id(&self) -> u64 {
+    pub const fn l2_chain_id(&self) -> u64 {
         self.l2_spec.chain_id()
     }
 }

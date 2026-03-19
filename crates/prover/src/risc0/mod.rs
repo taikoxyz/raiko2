@@ -385,8 +385,15 @@ mod tests {
         assert!(proof.quote.is_some(), "receipt JSON should be present");
 
         let extra_data = proof.extra_data.expect("mock metadata should be present");
-        assert_eq!(extra_data["zkvm"], "risc0");
-        assert_eq!(extra_data["mode"], "mock");
-        assert_eq!(extra_data["fake_receipt"], true);
+        assert!(
+            extra_data
+                .get("shasta")
+                .and_then(|value| value.get("proof_carry_data"))
+                .is_some(),
+            "proof carry data should be preserved under the shasta namespace"
+        );
+        assert_eq!(extra_data["risc0"]["zkvm"], "risc0");
+        assert_eq!(extra_data["risc0"]["mode"], "mock");
+        assert_eq!(extra_data["risc0"]["fake_receipt"], true);
     }
 }

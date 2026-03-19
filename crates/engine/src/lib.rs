@@ -174,9 +174,11 @@ where
         let mut ctx = self.inner.context.clone();
         ctx.request.proposal_id = request.proposal_id;
         ctx.request.l2_block_range = request.l2_block_range;
-        ctx.request.blob_proof_type = request.blob_proof_type.clone();
-        ctx.request.prover = request.prover.clone();
-        ctx.request.graffiti = request.graffiti.clone();
+        ctx.request
+            .blob_proof_type
+            .clone_from(&request.blob_proof_type);
+        ctx.request.prover.clone_from(&request.prover);
+        ctx.request.graffiti.clone_from(&request.graffiti);
         if let Some(range) = request.l2_block_range {
             Self::set_l2_block_range(&mut ctx.config, request.proposal_id, range);
         }
@@ -719,6 +721,40 @@ where
         Ok(config)
     }
 
+    async fn prove_proposal(
+        &self,
+        request: ProposalTaskRequest,
+        input_task: EngineTaskId,
+    ) -> Result<EngineOutput<S::GuestInput>, String> {
+        // Keep dependency output until downstream completes.
+        let encoded = self.get_encoded_input(input_task).await?;
+        let validated_input = self
+            .get_guest_input(
+                self.proposal_task_id(request.clone(), ProposalStage::Validation),
+                PipelineStage::Validation,
+                "validated input",
+            )
+            .await?;
+        let mut ctx = self.context_for_proposal(&request);
+        self.inner
+            .spec
+            .prover()
+            .prepare_config_for_input(&validated_input, &mut ctx.config)
+            .map_err(|e| e.to_string())?;
+
+        let proof = self
+            .inner
+            .spec
+            .prover()
+            .prove_encoded(encoded, &ctx.config, self.inner.spec.backend())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+            PipelineStage::Prove,
+            proof,
+        ))))
+    }
+
     async fn execute(&self, task: EngineTask) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
             EngineTask::Preflight { request } => {
@@ -768,35 +804,7 @@ where
             EngineTask::ProveProposal {
                 request,
                 input_task,
-            } => {
-                // Keep dependency output until downstream completes.
-                let encoded = self.get_encoded_input(input_task).await?;
-                let validated_input = self
-                    .get_guest_input(
-                        self.proposal_task_id(request.clone(), ProposalStage::Validation),
-                        PipelineStage::Validation,
-                        "validated input",
-                    )
-                    .await?;
-                let mut ctx = self.context_for_proposal(&request);
-                self.inner
-                    .spec
-                    .prover()
-                    .prepare_config_for_input(&validated_input, &mut ctx.config)
-                    .map_err(|e| e.to_string())?;
-
-                let proof = self
-                    .inner
-                    .spec
-                    .prover()
-                    .prove_encoded(encoded, &ctx.config, self.inner.spec.backend())
-                    .await
-                    .map_err(|e| e.to_string())?;
-                Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
-                    PipelineStage::Prove,
-                    proof,
-                ))))
-            }
+            } => self.prove_proposal(request, input_task).await,
             EngineTask::Aggregate { request: _, source } => {
                 let proofs = match source {
                     AggregationSource::ProofTasks(proof_tasks) => {

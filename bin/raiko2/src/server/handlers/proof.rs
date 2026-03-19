@@ -48,7 +48,7 @@ pub(crate) enum HoodiProofType {
 }
 
 impl HoodiProofType {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::Sp1 => "sp1",
@@ -184,6 +184,13 @@ pub(crate) struct HoodiAggregateStatus {
 struct RouteSelection {
     route: PipelineRoute,
     pipeline_key: PipelineKey,
+}
+
+struct RootTaskState {
+    status: ProofStatus,
+    proof: Option<String>,
+    error: Option<String>,
+    current_index: Option<usize>,
 }
 
 fn default_risc0_runner(state: &AppState) -> RunnerKind {
@@ -408,6 +415,114 @@ fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
     .collect()
 }
 
+async fn register_batch_task(
+    state: &AppState,
+    public_task_id: &str,
+    selection: &RouteSelection,
+    req: &ShastaProofRequest,
+    pair: &ResolvedNetworkPair,
+    proposal_tasks: &[HoodiProposalTask],
+    aggregate_task_id: Option<String>,
+) -> Result<(), ApiError> {
+    let metadata = HoodiTaskMetadata {
+        network_pair: pair.key.clone(),
+        network: req.network.clone(),
+        l1_network: req.l1_network.clone(),
+        proof_type: req.proof_type.as_str().to_string(),
+        aggregate_requested: req.aggregate,
+        proposals: proposal_tasks.to_vec(),
+        aggregate_task_id: aggregate_task_id.clone(),
+    };
+    let proposal_id = proposal_tasks.first().map(|task| task.proposal_id);
+    let proof_ids = proposal_tasks
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect();
+
+    state
+        .runtime
+        .register_task(TaskRegistration {
+            task_id: public_task_id.to_string(),
+            pipeline_key: selection.pipeline_key.as_str().to_string(),
+            route: selection.route.to_string(),
+            guest_system: selection.route.guest_system.to_string(),
+            runner: selection.route.runner.to_string(),
+            task_kind: "hoodi_batch".to_string(),
+            proposal_id,
+            proof_ids,
+            metadata: serde_json::to_value(metadata).map_err(|err| {
+                ApiError::internal(format!("failed to serialize metadata: {err}"))
+            })?,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+fn prepare_aggregate_task(
+    public_task_id: &str,
+    proposal_tasks: &[HoodiProposalTask],
+) -> Result<(AggregationTaskRequest, Vec<EngineTaskId>), ApiError> {
+    let request = AggregationTaskRequest {
+        request_id: public_task_id.to_string(),
+        proposal_ids: proposal_tasks.iter().map(|task| task.proposal_id).collect(),
+    };
+    let proof_tasks = proposal_tasks
+        .iter()
+        .map(|task| {
+            decode_task_id::<EngineTaskKey>(&task.task_id).map_err(|err| {
+                ApiError::internal(format!("failed to decode generated task id: {err}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((request, proof_tasks))
+}
+
+fn resolve_root_task_state(
+    runner_status: RuntimeRunnerStatus,
+    proposals: &[HoodiProposalStatus],
+    aggregate: Option<&HoodiAggregateStatus>,
+) -> RootTaskState {
+    let computed_root_status = summarize_root_status(proposals, aggregate);
+    let status = if matches!(runner_status, RuntimeRunnerStatus::Cancelled)
+        && !matches!(computed_root_status, ProofStatus::Completed)
+    {
+        ProofStatus::Cancelled
+    } else {
+        computed_root_status
+    };
+    let proof = aggregate
+        .and_then(|aggregate| aggregate.proof.clone())
+        .or_else(|| {
+            (proposals.len() == 1)
+                .then(|| {
+                    proposals
+                        .first()
+                        .and_then(|proposal| proposal.proof.clone())
+                })
+                .flatten()
+        });
+    let error = aggregate
+        .and_then(|aggregate| aggregate.error.clone())
+        .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()));
+    let current_index = proposals
+        .iter()
+        .position(|proposal| !matches!(proposal.status, ProofStatus::Completed))
+        .or_else(|| {
+            aggregate
+                .filter(|aggregate| !matches!(aggregate.status, ProofStatus::Completed))
+                .map(|_| proposals.len())
+        });
+
+    RootTaskState {
+        status,
+        proof,
+        error,
+        current_index,
+    }
+}
+
 pub async fn request_batch_shasta_proof(
     State(state): State<AppState>,
     req: Result<Json<ShastaProofRequest>, JsonRejection>,
@@ -472,18 +587,7 @@ pub async fn request_batch_shasta_proof(
     }
 
     let aggregate_task_id = if req.aggregate {
-        let request = AggregationTaskRequest {
-            request_id: public_task_id.clone(),
-            proposal_ids: proposal_tasks.iter().map(|task| task.proposal_id).collect(),
-        };
-        let proof_tasks = proposal_tasks
-            .iter()
-            .map(|task| {
-                decode_task_id::<EngineTaskKey>(&task.task_id).map_err(|err| {
-                    ApiError::internal(format!("failed to decode generated task id: {err}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let (request, proof_tasks) = prepare_aggregate_task(&public_task_id, &proposal_tasks)?;
         let task_id = engine
             .submit_aggregation_proof_from_tasks(request, proof_tasks)
             .await
@@ -498,36 +602,16 @@ pub async fn request_batch_shasta_proof(
         None
     };
 
-    let metadata = HoodiTaskMetadata {
-        network_pair: pair.key.clone(),
-        network: req.network.clone(),
-        l1_network: req.l1_network.clone(),
-        proof_type: req.proof_type.as_str().to_string(),
-        aggregate_requested: req.aggregate,
-        proposals: proposal_tasks.clone(),
-        aggregate_task_id: aggregate_task_id.clone(),
-    };
-
-    state
-        .runtime
-        .register_task(TaskRegistration {
-            task_id: public_task_id.clone(),
-            pipeline_key: selection.pipeline_key.as_str().to_string(),
-            route: selection.route.to_string(),
-            guest_system: selection.route.guest_system.to_string(),
-            runner: selection.route.runner.to_string(),
-            task_kind: "hoodi_batch".to_string(),
-            proposal_id: proposal_tasks.first().map(|task| task.proposal_id),
-            proof_ids: proposal_tasks
-                .iter()
-                .map(|task| task.task_id.clone())
-                .collect(),
-            metadata: serde_json::to_value(metadata).map_err(|err| {
-                ApiError::internal(format!("failed to serialize metadata: {err}"))
-            })?,
-        })
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))?;
+    register_batch_task(
+        &state,
+        &public_task_id,
+        &selection,
+        &req,
+        &pair,
+        &proposal_tasks,
+        aggregate_task_id.clone(),
+    )
+    .await?;
 
     Ok(Json(HoodiSuccess {
         status: "ok",
@@ -645,8 +729,7 @@ pub async fn get_task(
             task_id: proposal.task_id.clone(),
             status: status
                 .as_ref()
-                .map(|status| status.status.clone())
-                .unwrap_or(ProofStatus::Pending),
+                .map_or(ProofStatus::Pending, |status| status.status.clone()),
             l1_inclusion_block_number: proposal.l1_inclusion_block_number,
             l2_block_numbers: proposal.l2_block_numbers.clone(),
             last_anchor_block_number: proposal.last_anchor_block_number,
@@ -667,8 +750,7 @@ pub async fn get_task(
             task_id: metadata.aggregate_task_id.clone().expect("checked"),
             status: status
                 .as_ref()
-                .map(|status| status.status.clone())
-                .unwrap_or(ProofStatus::Pending),
+                .map_or(ProofStatus::Pending, |status| status.status.clone()),
             proof: status.as_ref().and_then(|status| status.proof.clone()),
             error: status.as_ref().and_then(|status| status.error.clone()),
             extra_data: status.as_ref().and_then(|status| status.extra_data.clone()),
@@ -677,42 +759,14 @@ pub async fn get_task(
         None
     };
 
-    let computed_root_status = summarize_root_status(&proposals, aggregate.as_ref());
-    let root_status = if matches!(record.runner_status, RuntimeRunnerStatus::Cancelled)
-        && !matches!(computed_root_status, ProofStatus::Completed)
-    {
-        ProofStatus::Cancelled
-    } else {
-        computed_root_status
-    };
-    let root_proof = if let Some(aggregate) = aggregate.as_ref() {
-        aggregate.proof.clone()
-    } else if proposals.len() == 1 {
-        proposals[0].proof.clone()
-    } else {
-        None
-    };
-    let root_error = aggregate
-        .as_ref()
-        .and_then(|aggregate| aggregate.error.clone())
-        .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()));
-
-    let current_index = proposals
-        .iter()
-        .position(|proposal| !matches!(proposal.status, ProofStatus::Completed))
-        .or_else(|| {
-            aggregate
-                .as_ref()
-                .filter(|aggregate| !matches!(aggregate.status, ProofStatus::Completed))
-                .map(|_| proposals.len())
-        });
+    let root_state = resolve_root_task_state(record.runner_status, &proposals, aggregate.as_ref());
 
     state
         .runtime
         .sync_status(
             &id,
-            runtime_status_from_proof_status(&root_status),
-            root_error.clone(),
+            runtime_status_from_proof_status(&root_state.status),
+            root_state.error.clone(),
             None,
         )
         .await
@@ -723,14 +777,14 @@ pub async fn get_task(
         proof_type: metadata.proof_type,
         data: HoodiTaskData {
             task_id: id,
-            status: root_status,
+            status: root_state.status,
             network: metadata.network,
             l1_network: metadata.l1_network,
-            current_index,
+            current_index: root_state.current_index,
             proposals,
             aggregate,
-            proof: root_proof,
-            error: root_error,
+            proof: root_state.proof,
+            error: root_state.error,
         },
     }))
 }
@@ -783,25 +837,19 @@ fn summarize_root_status(
     aggregate: Option<&HoodiAggregateStatus>,
 ) -> ProofStatus {
     if proposals.is_empty() {
-        return aggregate
-            .map(|aggregate| aggregate.status.clone())
-            .unwrap_or(ProofStatus::Pending);
+        return aggregate.map_or(ProofStatus::Pending, |aggregate| aggregate.status.clone());
     }
     if proposals
         .iter()
         .any(|proposal| matches!(proposal.status, ProofStatus::Failed))
-        || aggregate
-            .map(|aggregate| matches!(aggregate.status, ProofStatus::Failed))
-            .unwrap_or(false)
+        || aggregate.is_some_and(|aggregate| matches!(aggregate.status, ProofStatus::Failed))
     {
         return ProofStatus::Failed;
     }
     if proposals
         .iter()
         .any(|proposal| matches!(proposal.status, ProofStatus::Proving))
-        || aggregate
-            .map(|aggregate| matches!(aggregate.status, ProofStatus::Proving))
-            .unwrap_or(false)
+        || aggregate.is_some_and(|aggregate| matches!(aggregate.status, ProofStatus::Proving))
     {
         return ProofStatus::Proving;
     }
@@ -809,9 +857,7 @@ fn summarize_root_status(
         .iter()
         .all(|proposal| matches!(proposal.status, ProofStatus::Completed))
     {
-        return aggregate
-            .map(|aggregate| aggregate.status.clone())
-            .unwrap_or(ProofStatus::Completed);
+        return aggregate.map_or(ProofStatus::Completed, |aggregate| aggregate.status.clone());
     }
     if proposals
         .iter()
@@ -822,7 +868,7 @@ fn summarize_root_status(
     ProofStatus::Pending
 }
 
-fn runtime_status_from_proof_status(status: &ProofStatus) -> RuntimeRunnerStatus {
+const fn runtime_status_from_proof_status(status: &ProofStatus) -> RuntimeRunnerStatus {
     match status {
         ProofStatus::Pending | ProofStatus::Proving => RuntimeRunnerStatus::Running,
         ProofStatus::Completed => RuntimeRunnerStatus::Completed,

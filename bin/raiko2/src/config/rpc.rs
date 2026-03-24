@@ -80,6 +80,7 @@ impl ResolvedNetworkPair {
 
 /// RPC configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RpcConfig {
     pub l1_rpc: String,
     pub l2_rpc: String,

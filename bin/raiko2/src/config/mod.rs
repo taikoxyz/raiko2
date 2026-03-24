@@ -344,6 +344,45 @@ maintenance_interval_ms = 200
     }
 
     #[test]
+    fn test_pairs_only_config_loads_without_legacy_rpc_fields() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l1_rpc, "http://34.46.244.179:8545");
+        assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
+        assert_eq!(pair.l1_chain_id(), 560048);
+        assert_eq!(pair.l2_chain_id(), 167013);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_queue_backend_cli_overrides_config_file() {
         let config_toml = r#"
 [server]

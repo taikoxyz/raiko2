@@ -20,6 +20,9 @@ use tracing::info;
 use super::super::state::{AppState, ProofStatus};
 use super::errors::ApiError;
 use crate::config::{GuestSystem, PipelineRoute, ResolvedNetworkPair, RunnerKind};
+use crate::server::task_metadata::{
+    HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata, HoodiTaskRuntimeMetadata,
+};
 
 static PUBLIC_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -103,26 +106,6 @@ pub struct AggregateProofRequest {
     pub prover_args: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HoodiTaskMetadata {
-    network_pair: String,
-    network: String,
-    l1_network: String,
-    proof_type: String,
-    aggregate_requested: bool,
-    proposals: Vec<HoodiProposalTask>,
-    aggregate_task_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HoodiProposalTask {
-    proposal_id: u64,
-    l1_inclusion_block_number: u64,
-    l2_block_numbers: Vec<u64>,
-    last_anchor_block_number: u64,
-    task_id: String,
-}
-
 #[derive(Serialize)]
 pub(crate) struct HoodiSuccess<T> {
     status: &'static str,
@@ -139,9 +122,11 @@ pub(crate) struct RegistrationData {
 #[derive(Serialize)]
 pub(crate) struct HoodiTaskData {
     task_id: String,
+    route: String,
     status: ProofStatus,
     network: String,
     l1_network: String,
+    runtime: HoodiRootRuntimeView,
     current_index: Option<usize>,
     proposals: Vec<HoodiProposalStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,6 +151,8 @@ pub(crate) struct HoodiProposalStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<HoodiTaskRuntimeView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     extra_data: Option<Value>,
 }
 
@@ -178,7 +165,36 @@ pub(crate) struct HoodiAggregateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<HoodiTaskRuntimeView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     extra_data: Option<Value>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HoodiRootRuntimeView {
+    runner_status: RuntimeRunnerStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_event: Option<String>,
+    updated_at: i64,
+    engine_state_present: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HoodiTaskRuntimeView {
+    updated_at: i64,
+    engine_state_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_tx_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deployment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offchain: Option<bool>,
 }
 
 struct RouteSelection {
@@ -427,8 +443,7 @@ fn summarize_proposal_task_state(
         };
 
         match stage.status {
-            ProofStatus::Failed => return stage.clone(),
-            ProofStatus::Cancelled => return stage.clone(),
+            ProofStatus::Failed | ProofStatus::Cancelled => return stage.clone(),
             ProofStatus::Completed => {
                 if stage.proof.is_some() {
                     return stage.clone();
@@ -445,7 +460,7 @@ fn summarize_proposal_task_state(
             }
             ProofStatus::Pending => {
                 if pending_error.is_none() {
-                    pending_error = stage.error.clone();
+                    pending_error.clone_from(&stage.error);
                 }
                 if saw_progress {
                     return super::super::state::EngineStatusView {
@@ -493,6 +508,7 @@ async fn register_batch_task(
         aggregate_requested: req.aggregate,
         proposals: proposal_tasks.to_vec(),
         aggregate_task_id: aggregate_task_id.clone(),
+        runtime: HoodiRuntimeMetadata::default(),
     };
     let proposal_id = proposal_tasks.first().map(|task| task.proposal_id);
     let proof_ids = proposal_tasks
@@ -544,14 +560,27 @@ fn resolve_root_task_state(
     runner_status: RuntimeRunnerStatus,
     proposals: &[HoodiProposalStatus],
     aggregate: Option<&HoodiAggregateStatus>,
+    runtime_has_progress: bool,
+    runtime_error: Option<&str>,
 ) -> RootTaskState {
     let computed_root_status = summarize_root_status(proposals, aggregate);
-    let status = if matches!(runner_status, RuntimeRunnerStatus::Cancelled)
-        && !matches!(computed_root_status, ProofStatus::Completed)
-    {
-        ProofStatus::Cancelled
-    } else {
-        computed_root_status
+    let status = match computed_root_status {
+        ProofStatus::Pending => match runner_status {
+            RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
+            RuntimeRunnerStatus::Failed => ProofStatus::Failed,
+            RuntimeRunnerStatus::Completed => ProofStatus::Completed,
+            RuntimeRunnerStatus::Running if runtime_has_progress => ProofStatus::Proving,
+            RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
+        },
+        status => {
+            if matches!(runner_status, RuntimeRunnerStatus::Cancelled)
+                && !matches!(status, ProofStatus::Completed)
+            {
+                ProofStatus::Cancelled
+            } else {
+                status
+            }
+        }
     };
     let proof = aggregate
         .and_then(|aggregate| aggregate.proof.clone())
@@ -566,7 +595,12 @@ fn resolve_root_task_state(
         });
     let error = aggregate
         .and_then(|aggregate| aggregate.error.clone())
-        .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()));
+        .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()))
+        .or_else(|| {
+            matches!(status, ProofStatus::Failed)
+                .then_some(runtime_error.map(str::to_string))
+                .flatten()
+        });
     let current_index = proposals
         .iter()
         .position(|proposal| !matches!(proposal.status, ProofStatus::Completed))
@@ -581,6 +615,87 @@ fn resolve_root_task_state(
         proof,
         error,
         current_index,
+    }
+}
+
+fn fallback_status_without_engine(
+    status: super::super::state::EngineStatusView,
+    runner_status: RuntimeRunnerStatus,
+    has_runtime_progress: bool,
+    runtime_error: Option<&str>,
+) -> super::super::state::EngineStatusView {
+    if !matches!(status.status, ProofStatus::Pending) {
+        return status;
+    }
+
+    let next_status = match runner_status {
+        RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
+        RuntimeRunnerStatus::Failed => ProofStatus::Failed,
+        RuntimeRunnerStatus::Completed => ProofStatus::Completed,
+        RuntimeRunnerStatus::Running if has_runtime_progress => ProofStatus::Proving,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
+    };
+    let error = next_status
+        .error_message(runtime_error)
+        .map(str::to_string)
+        .or(status.error);
+    super::super::state::EngineStatusView {
+        status: next_status,
+        proof: None,
+        error,
+        extra_data: None,
+    }
+}
+
+fn root_runtime_view(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &HoodiTaskMetadata,
+    engine_state_present: bool,
+) -> HoodiRootRuntimeView {
+    HoodiRootRuntimeView {
+        runner_status: record.runner_status,
+        active_stage: metadata.runtime.active_stage.clone(),
+        last_event: metadata.runtime.last_event.clone(),
+        updated_at: record.updated_at,
+        engine_state_present,
+    }
+}
+
+fn task_runtime_view(
+    runtime: Option<&HoodiTaskRuntimeMetadata>,
+    engine_state_present: bool,
+    fallback_updated_at: i64,
+) -> Option<HoodiTaskRuntimeView> {
+    if engine_state_present && runtime.is_none() {
+        return None;
+    }
+    let runtime = runtime.cloned().unwrap_or_default();
+    Some(HoodiTaskRuntimeView {
+        updated_at: if runtime.updated_at == 0 {
+            fallback_updated_at
+        } else {
+            runtime.updated_at
+        },
+        engine_state_present,
+        provider_request_id: runtime.provider_request_id,
+        remote_tx_hash: runtime.remote_tx_hash,
+        image_ref: runtime.image_ref,
+        deployment: runtime.deployment,
+        offchain: runtime.offchain,
+    })
+}
+
+trait ProofStatusExt {
+    fn error_message<'a>(&self, runtime_error: Option<&'a str>) -> Option<&'a str>;
+}
+
+impl ProofStatusExt for ProofStatus {
+    fn error_message<'a>(&self, runtime_error: Option<&'a str>) -> Option<&'a str> {
+        if matches!(self, ProofStatus::Failed) {
+            runtime_error
+        } else {
+            None
+        }
     }
 }
 
@@ -726,6 +841,7 @@ pub async fn request_aggregation_proof(
         aggregate_requested: true,
         proposals: Vec::new(),
         aggregate_task_id: Some(aggregate_task_id),
+        runtime: HoodiRuntimeMetadata::default(),
     };
 
     state
@@ -756,6 +872,7 @@ pub async fn request_aggregation_proof(
     }))
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -777,6 +894,7 @@ pub async fn get_task(
         })?;
 
     let mut proposals = Vec::with_capacity(metadata.proposals.len());
+    let mut root_engine_state_present = false;
     for (index, proposal) in metadata.proposals.iter().enumerate() {
         let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
             .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
@@ -789,7 +907,15 @@ pub async fn get_task(
                 .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?;
             stage_statuses.push(status);
         }
-        let status = summarize_proposal_task_state(&stage_statuses);
+        let engine_state_present = stage_statuses.iter().any(Option::is_some);
+        root_engine_state_present |= engine_state_present;
+        let runtime = metadata.proposal_runtime(&proposal.task_id);
+        let status = fallback_status_without_engine(
+            summarize_proposal_task_state(&stage_statuses),
+            record.runner_status,
+            runtime.is_some() || metadata.has_runtime_progress(),
+            record.error.as_deref(),
+        );
         proposals.push(HoodiProposalStatus {
             index,
             proposal_id: proposal.proposal_id,
@@ -800,6 +926,7 @@ pub async fn get_task(
             last_anchor_block_number: proposal.last_anchor_block_number,
             proof: status.proof,
             error: status.error,
+            runtime: task_runtime_view(runtime, engine_state_present, record.updated_at),
             extra_data: status.extra_data,
         });
     }
@@ -811,20 +938,45 @@ pub async fn get_task(
         let status = engine.get_status(task_id).await.map_err(|err| {
             ApiError::internal(format!("failed to read aggregation status: {err}"))
         })?;
+        let engine_state_present = status.is_some();
+        root_engine_state_present |= engine_state_present;
+        let status = fallback_status_without_engine(
+            status.map_or(
+                super::super::state::EngineStatusView {
+                    status: ProofStatus::Pending,
+                    proof: None,
+                    error: None,
+                    extra_data: None,
+                },
+                |status| status,
+            ),
+            record.runner_status,
+            metadata.aggregate_runtime().is_some() || metadata.has_runtime_progress(),
+            record.error.as_deref(),
+        );
         Some(HoodiAggregateStatus {
             task_id: metadata.aggregate_task_id.clone().expect("checked"),
-            status: status
-                .as_ref()
-                .map_or(ProofStatus::Pending, |status| status.status.clone()),
-            proof: status.as_ref().and_then(|status| status.proof.clone()),
-            error: status.as_ref().and_then(|status| status.error.clone()),
-            extra_data: status.as_ref().and_then(|status| status.extra_data.clone()),
+            status: status.status.clone(),
+            proof: status.proof,
+            error: status.error,
+            runtime: task_runtime_view(
+                metadata.aggregate_runtime(),
+                engine_state_present,
+                record.updated_at,
+            ),
+            extra_data: status.extra_data,
         })
     } else {
         None
     };
 
-    let root_state = resolve_root_task_state(record.runner_status, &proposals, aggregate.as_ref());
+    let root_state = resolve_root_task_state(
+        record.runner_status,
+        &proposals,
+        aggregate.as_ref(),
+        metadata.has_runtime_progress(),
+        record.error.as_deref(),
+    );
 
     state
         .runtime
@@ -836,15 +988,22 @@ pub async fn get_task(
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to sync runtime status: {err}")))?;
+    let route = record.route.clone();
+    let network = metadata.network.clone();
+    let l1_network = metadata.l1_network.clone();
+    let runtime = root_runtime_view(&record, &metadata, root_engine_state_present);
+    let proof_type = metadata.proof_type.clone();
 
     Ok(Json(HoodiSuccess {
         status: "ok",
-        proof_type: metadata.proof_type,
+        proof_type,
         data: HoodiTaskData {
             task_id: id,
+            route,
             status: root_state.status,
-            network: metadata.network,
-            l1_network: metadata.l1_network,
+            network,
+            l1_network,
+            runtime,
             current_index: root_state.current_index,
             proposals,
             aggregate,

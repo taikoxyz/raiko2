@@ -13,19 +13,19 @@ use axum::{
     routing::post,
 };
 use http_body_util::BodyExt;
-use raiko2_engine::Engine;
+use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, ShastaSpec},
 };
 use raiko2_primitives::{ProofContext, ProofRequest, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+use raiko2_prover::BoundlessSubmissionProgress;
 use raiko2_prover::native::NativeProver;
 use raiko2_prover::risc0::{Risc0Config, Risc0Prover};
 use raiko2_provider::Provider;
-use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig};
-use raiko2_runtime::RunnerStatus;
-use raiko2_runtime::RuntimeManager;
+use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig, encode_task_id};
+use raiko2_runtime::{RunnerStatus, RuntimeManager, TaskRegistration};
 use serde_json::{Value, json};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +34,7 @@ use tower::ServiceExt;
 
 use super::app;
 use super::state::{AppState, StaticPipelineFactory};
+use super::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata};
 use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
 
 type NativeFixtureSpec = ShastaSpec<NativeProver, NativeBackend, FixtureProvider>;
@@ -459,9 +460,139 @@ async fn e2e_task_status_turns_proving_after_preflight_progress() {
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "native/local");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["current_index"], 0);
     assert_eq!(res["data"]["proposals"][0]["status"], "proving");
+    assert!(
+        res["data"]["proposals"][0].get("runtime").is_none(),
+        "unexpected per-proposal runtime while engine state is present: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaNative,
+        engine,
+    );
+    let app = app::build_router(state.clone());
+
+    let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+        pipeline: PipelineKey::ShastaNative,
+        request: ProposalTaskRequest {
+            proposal_id: 3,
+            l2_block_range: None,
+            l1_inclusion_block_number: 1,
+            last_anchor_block_number: 0,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_args_json: None,
+        },
+        stage: ProposalStage::Prove,
+    });
+    let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
+    let mut metadata = HoodiTaskMetadata {
+        network_pair: "taiko_dev/ethereum".to_string(),
+        network: "taiko_dev".to_string(),
+        l1_network: "ethereum".to_string(),
+        proof_type: "native".to_string(),
+        aggregate_requested: false,
+        proposals: vec![HoodiProposalTask {
+            proposal_id: 3,
+            l1_inclusion_block_number: 1,
+            l2_block_numbers: vec![3],
+            last_anchor_block_number: 0,
+            task_id: encoded_task_id.clone(),
+        }],
+        aggregate_task_id: None,
+        runtime: HoodiRuntimeMetadata {
+            active_stage: Some("prove".to_string()),
+            last_event: Some("submission_registered".to_string()),
+            ..Default::default()
+        },
+    };
+    let updated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs() as i64;
+    metadata.upsert_proposal_runtime(
+        &encoded_task_id,
+        &BoundlessSubmissionProgress {
+            provider_request_id: "0x1234".to_string(),
+            remote_tx_hash: Some("0xabcd".to_string()),
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: true,
+        },
+        updated_at,
+    );
+
+    state
+        .runtime
+        .register_task(TaskRegistration {
+            task_id: "task_runtime_fallback".to_string(),
+            pipeline_key: PipelineKey::ShastaNative.as_str().to_string(),
+            route: "native/local".to_string(),
+            guest_system: "native".to_string(),
+            runner: "local".to_string(),
+            task_kind: "hoodi_batch".to_string(),
+            proposal_id: Some(3),
+            proof_ids: vec![encoded_task_id.clone()],
+            metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+        })
+        .await
+        .expect("register task");
+
+    let mut record = state
+        .runtime
+        .get_task("task_runtime_fallback")
+        .await
+        .expect("read task")
+        .expect("task exists");
+    record.runner_status = RunnerStatus::Running;
+    record.updated_at = updated_at;
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let (status, res) = get_json(&app, "/v3/tasks/task_runtime_fallback").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "native/local");
+    assert_eq!(res["data"]["status"], "proving");
+    assert_eq!(res["data"]["runtime"]["runner_status"], "running");
+    assert_eq!(res["data"]["runtime"]["active_stage"], "prove");
+    assert_eq!(
+        res["data"]["runtime"]["last_event"],
+        "submission_registered"
+    );
+    assert_eq!(res["data"]["runtime"]["engine_state_present"], false);
+    assert_eq!(res["data"]["proposals"][0]["status"], "proving");
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["provider_request_id"],
+        "0x1234"
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["remote_tx_hash"],
+        "0xabcd"
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["image_ref"],
+        "0ximage"
+    );
+    assert_eq!(res["data"]["proposals"][0]["runtime"]["deployment"], "base");
+    assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], true);
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["engine_state_present"],
+        false
+    );
 }
 
 #[tokio::test]

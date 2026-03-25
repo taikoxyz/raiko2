@@ -7,6 +7,7 @@ mod ready;
 mod routes;
 mod run;
 mod state;
+mod task_metadata;
 
 pub use run::run_server;
 pub use state::AppState;

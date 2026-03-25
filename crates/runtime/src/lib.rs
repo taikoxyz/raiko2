@@ -257,6 +257,65 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if the task record cannot be loaded.
+    pub async fn find_task_by_engine_task_id(
+        &self,
+        engine_task_id: &str,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let conn = self.connection().await?;
+        let engine_task_id = engine_task_id.to_string();
+        let row = conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    r"
+                    SELECT
+                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                        remote_tx_hash, proof_path, error, metadata_json, updated_at
+                    FROM runtime_tasks
+                    WHERE task_id = ?1
+                        OR EXISTS (
+                            SELECT 1
+                            FROM json_each(runtime_tasks.proof_ids_json)
+                            WHERE json_each.value = ?1
+                        )
+                        OR json_extract(metadata_json, '$.aggregate_task_id') = ?1
+                    LIMIT 1
+                    ",
+                )?;
+                let mut rows = stmt.query(params![engine_task_id])?;
+                let Some(row) = rows.next()? else {
+                    return Ok(None);
+                };
+                let proof_ids_json: String = row.get(7)?;
+                let metadata_json: String = row.get(15)?;
+                Ok(Some(RuntimeTaskRecord {
+                    task_id: row.get(0)?,
+                    pipeline_key: row.get(1)?,
+                    route: row.get(2)?,
+                    guest_system: row.get(3)?,
+                    runner: row.get(4)?,
+                    task_kind: row.get(5)?,
+                    proposal_id: row.get(6)?,
+                    proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
+                    runner_status: RunnerStatus::from_db(row.get::<_, String>(8)?.as_str()),
+                    task_dir: row.get(9)?,
+                    image_ref: row.get(10)?,
+                    provider_request_id: row.get(11)?,
+                    remote_tx_hash: row.get(12)?,
+                    proof_path: row.get(13)?,
+                    error: row.get(14)?,
+                    metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
+                    updated_at: row.get(16)?,
+                }))
+            })
+            .await
+            .context("failed to query runtime task by engine task id")?;
+        Ok(row)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the task record cannot be updated.
     pub async fn sync_status(
         &self,
@@ -385,6 +444,48 @@ mod tests {
         assert_eq!(task.runner_status, RunnerStatus::Allocated);
         assert_eq!(task.proposal_id, Some(7));
         assert!(Path::new(&task.task_dir).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_finds_task_by_engine_task_id() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "raiko2-runtime-engine-lookup-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task-public".to_string(),
+                pipeline_key: "shasta-risc0-boundless".to_string(),
+                route: "risc0/boundless".to_string(),
+                guest_system: "risc0".to_string(),
+                runner: "boundless".to_string(),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(7),
+                proof_ids: vec!["proposal-proof-task".to_string()],
+                metadata: serde_json::json!({
+                    "aggregate_task_id": "aggregate-proof-task",
+                }),
+            })
+            .await?;
+
+        let proposal = runtime
+            .find_task_by_engine_task_id("proposal-proof-task")
+            .await?
+            .expect("proposal proof lookup");
+        assert_eq!(proposal.task_id, "task-public");
+
+        let aggregate = runtime
+            .find_task_by_engine_task_id("aggregate-proof-task")
+            .await?
+            .expect("aggregate proof lookup");
+        assert_eq!(aggregate.task_id, "task-public");
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

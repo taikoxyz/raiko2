@@ -4,12 +4,15 @@ use raiko2_engine::{
     EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
     tasks::EngineTask,
 };
+use raiko2_prover::{BoundlessSubmissionProgress, ProverProgress};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, RuntimeManager, RuntimeTaskRecord};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::server::task_metadata::HoodiTaskMetadata;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
@@ -46,15 +49,16 @@ impl RuntimeObserver {
 
     async fn update_root_record<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
     where
-        F: FnOnce(&mut RuntimeTaskRecord) -> Result<()>,
+        F: FnOnce(&mut RuntimeTaskRecord, i64) -> Result<()>,
     {
         let root_id = Self::root_task_id(id);
         let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
-        let Some(mut record) = self.runtime.get_task(&root_id).await? else {
+        let Some(mut record) = self.runtime.find_task_by_engine_task_id(&root_id).await? else {
             return Ok(());
         };
-        mutator(&mut record)?;
-        record.updated_at = now_ts();
+        let updated_at = now_ts();
+        mutator(&mut record, updated_at)?;
+        record.updated_at = updated_at;
         self.runtime.upsert_task(&record).await
     }
 }
@@ -64,22 +68,61 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
         if let Err(err) = self
-            .update_root_record(id, |record| {
+            .update_root_record(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Running;
                 record.error = None;
-                merge_metadata(
-                    record,
-                    json!({
-                        "active_stage": stage,
-                        "last_event": "started",
-                        "worker": worker,
-                    }),
-                );
+                update_task_metadata(record, |metadata| {
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some(format!("started:{worker}"));
+                })?;
+                record.updated_at = updated_at;
                 Ok(())
             })
             .await
         {
             tracing::warn!(task = ?id, error = %err, "failed to sync runtime task start");
+        }
+    }
+
+    async fn on_task_progress(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        progress: &ProverProgress,
+    ) {
+        let stage = Self::stage_name(task);
+        let result = self
+            .update_root_record(id, |record, updated_at| {
+                record.runner_status = RunnerStatus::Running;
+                record.error = None;
+                let task_id = encode_task_id(id).context("failed to encode progress task id")?;
+                update_task_metadata(record, |metadata| {
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some("submission_registered".to_string());
+                    match progress {
+                        ProverProgress::BoundlessSubmission(submission) => match task {
+                            EngineTask::ProveProposal { .. } => {
+                                metadata.upsert_proposal_runtime(&task_id, submission, updated_at);
+                            }
+                            EngineTask::Aggregate { .. } => {
+                                metadata.upsert_aggregate_runtime(submission, updated_at);
+                            }
+                            EngineTask::Preflight { .. }
+                            | EngineTask::Validate { .. }
+                            | EngineTask::Encode { .. } => {}
+                        },
+                    }
+                })?;
+                record.updated_at = updated_at;
+                Ok(())
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::warn!(
+                task = ?id,
+                error = %err,
+                "failed to sync runtime task progress"
+            );
         }
     }
 
@@ -92,44 +135,37 @@ impl EngineObserver for RuntimeObserver {
         let stage = Self::stage_name(task);
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                self.update_root_record(id, |record| {
+                self.update_root_record(id, |record, updated_at| {
                     record.runner_status = RunnerStatus::Completed;
                     record.error = None;
                     record.proof_path = Some(write_proof_file(record, proof)?);
-                    if let Some(extra_data) = proof.extra_data.clone() {
-                        merge_metadata(
-                            record,
-                            json!({
-                                "active_stage": stage,
-                                "last_event": "completed",
-                                "proof_extra_data": extra_data,
-                            }),
+                    let task_id = encode_task_id(id).context("failed to encode proof task id")?;
+                    update_task_metadata(record, |metadata| {
+                        metadata.runtime.active_stage = Some(stage.to_string());
+                        metadata.runtime.last_event = Some("completed".to_string());
+                        apply_boundless_runtime_from_extra_data(
+                            metadata,
+                            task,
+                            &task_id,
+                            proof.extra_data.as_ref(),
+                            updated_at,
                         );
-                        apply_boundless_metadata(record, proof.extra_data.as_ref());
-                    } else {
-                        merge_metadata(
-                            record,
-                            json!({
-                                "active_stage": stage,
-                                "last_event": "completed",
-                            }),
-                        );
-                    }
+                    })?;
+                    record.updated_at = updated_at;
                     Ok(())
                 })
                 .await
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
-                self.update_root_record(id, |record| {
+                self.update_root_record(id, |record, updated_at| {
                     record.runner_status = RunnerStatus::Running;
                     record.error = None;
-                    merge_metadata(
-                        record,
-                        json!({
-                            "active_stage": stage_name_from_pipeline_stage(*stage),
-                            "last_event": "stage_completed",
-                        }),
-                    );
+                    update_task_metadata(record, |metadata| {
+                        metadata.runtime.active_stage =
+                            Some(stage_name_from_pipeline_stage(*stage).to_string());
+                        metadata.runtime.last_event = Some("stage_completed".to_string());
+                    })?;
+                    record.updated_at = updated_at;
                     Ok(())
                 })
                 .await
@@ -149,16 +185,14 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
         let stage = Self::stage_name(task);
         if let Err(err) = self
-            .update_root_record(id, |record| {
+            .update_root_record(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Failed;
                 record.error = Some(error.to_string());
-                merge_metadata(
-                    record,
-                    json!({
-                        "active_stage": stage,
-                        "last_event": "failed",
-                    }),
-                );
+                update_task_metadata(record, |metadata| {
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some("failed".to_string());
+                })?;
+                record.updated_at = updated_at;
                 Ok(())
             })
             .await
@@ -169,10 +203,13 @@ impl EngineObserver for RuntimeObserver {
 
     async fn on_task_cancelled(&self, id: &EngineTaskId) {
         if let Err(err) = self
-            .update_root_record(id, |record| {
+            .update_root_record(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Cancelled;
                 record.error = None;
-                merge_metadata(record, json!({"last_event": "cancelled"}));
+                update_task_metadata(record, |metadata| {
+                    metadata.runtime.last_event = Some("cancelled".to_string());
+                })?;
+                record.updated_at = updated_at;
                 Ok(())
             })
             .await
@@ -186,22 +223,16 @@ impl EngineObserver for RuntimeObserver {
     }
 }
 
-fn merge_metadata(record: &mut RuntimeTaskRecord, patch: Value) {
-    let Value::Object(patch) = patch else {
-        return;
-    };
-
-    if !record.metadata.is_object() {
-        record.metadata = Value::Object(Map::new());
-    }
-
-    let metadata = record
-        .metadata
-        .as_object_mut()
-        .expect("metadata forced to object");
-    for (key, value) in patch {
-        metadata.insert(key, value);
-    }
+fn update_task_metadata<F>(record: &mut RuntimeTaskRecord, mutator: F) -> Result<()>
+where
+    F: FnOnce(&mut HoodiTaskMetadata),
+{
+    let mut metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        .context("failed to parse hoodi task metadata")?;
+    mutator(&mut metadata);
+    record.metadata =
+        serde_json::to_value(metadata).context("failed to serialize task metadata")?;
+    Ok(())
 }
 
 fn write_proof_file(
@@ -217,7 +248,13 @@ fn write_proof_file(
     Ok(proof_path.display().to_string())
 }
 
-fn apply_boundless_metadata(record: &mut RuntimeTaskRecord, extra_data: Option<&Value>) {
+fn apply_boundless_runtime_from_extra_data(
+    metadata: &mut HoodiTaskMetadata,
+    task: &EngineTask,
+    task_id: &str,
+    extra_data: Option<&Value>,
+    updated_at: i64,
+) {
     let Some(extra_data) = extra_data else {
         return;
     };
@@ -226,34 +263,50 @@ fn apply_boundless_metadata(record: &mut RuntimeTaskRecord, extra_data: Option<&
         .get("boundless")
         .and_then(Value::as_object)
         .or_else(|| extra_data.as_object());
-
     let Some(root) = root else {
         return;
     };
 
-    if let Some(image_id) = root
-        .get("image_id")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-    {
-        record.image_ref = Some(image_id);
-    }
-
-    if let Some(provider_request_id) = root
+    let Some(provider_request_id) = root
         .get("provider_request_id")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-    {
-        record.provider_request_id = Some(provider_request_id);
-    }
-
-    let tx_hash = root
-        .get("remote_tx_hash")
-        .or_else(|| root.get("tx_hash"))
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let Some(image_ref) = root
+        .get("image_id")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    if tx_hash.is_some() {
-        record.remote_tx_hash = tx_hash;
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let progress = BoundlessSubmissionProgress {
+        provider_request_id,
+        remote_tx_hash: root
+            .get("remote_tx_hash")
+            .or_else(|| root.get("tx_hash"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        image_ref,
+        deployment: root
+            .get("deployment")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        offchain: root
+            .get("offchain")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    };
+    match task {
+        EngineTask::ProveProposal { .. } => {
+            metadata.upsert_proposal_runtime(task_id, &progress, updated_at);
+        }
+        EngineTask::Aggregate { .. } => {
+            metadata.upsert_aggregate_runtime(&progress, updated_at);
+        }
+        EngineTask::Preflight { .. } | EngineTask::Validate { .. } | EngineTask::Encode { .. } => {}
     }
 }
 
@@ -273,4 +326,112 @@ fn now_ts() -> i64 {
         .unwrap_or_default()
         .as_secs()
         .cast_signed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata};
+    use raiko2_engine::ProposalTaskRequest;
+    use raiko2_pipeline::PipelineKey;
+    use raiko2_runtime::TaskRegistration;
+
+    fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    fn proposal_request() -> ProposalTaskRequest {
+        ProposalTaskRequest {
+            proposal_id: 42,
+            l2_block_range: None,
+            l1_inclusion_block_number: 1,
+            last_anchor_block_number: 0,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_args_json: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_records_boundless_submission_metadata_immediately() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer",
+        ))?);
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Boundless,
+            request: proposal_request(),
+            stage: ProposalStage::Prove,
+        });
+        let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public".to_string(),
+                pipeline_key: "shasta-risc0-boundless".to_string(),
+                route: "risc0/boundless".to_string(),
+                guest_system: "risc0".to_string(),
+                runner: "boundless".to_string(),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(42),
+                proof_ids: vec![encoded_task_id.clone()],
+                metadata: serde_json::to_value(HoodiTaskMetadata {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    network: "taiko_dev".to_string(),
+                    l1_network: "ethereum".to_string(),
+                    proof_type: "risc0".to_string(),
+                    aggregate_requested: false,
+                    proposals: vec![HoodiProposalTask {
+                        proposal_id: 42,
+                        l1_inclusion_block_number: 1,
+                        l2_block_numbers: vec![42],
+                        last_anchor_block_number: 0,
+                        task_id: encoded_task_id.clone(),
+                    }],
+                    aggregate_task_id: None,
+                    runtime: HoodiRuntimeMetadata::default(),
+                })?,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_progress(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+                &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+                    provider_request_id: "0x1234".to_string(),
+                    remote_tx_hash: Some("0xabcd".to_string()),
+                    image_ref: "0ximage".to_string(),
+                    deployment: "base".to_string(),
+                    offchain: true,
+                }),
+            )
+            .await;
+
+        let record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task exists");
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        let runtime_entry = metadata
+            .proposal_runtime(&encoded_task_id)
+            .expect("proposal runtime exists");
+        assert_eq!(
+            metadata.runtime.last_event.as_deref(),
+            Some("submission_registered")
+        );
+        assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
+        assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
+        Ok(())
+    }
 }

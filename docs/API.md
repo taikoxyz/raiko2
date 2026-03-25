@@ -152,9 +152,17 @@ GET /v3/tasks/{id}
   "proof_type": "zk_any",
   "data": {
     "task_id": "task_...",
+    "route": "risc0/boundless",
     "status": "proving",
     "network": "taiko_hoodi",
     "l1_network": "hoodi",
+    "runtime": {
+      "runner_status": "running",
+      "active_stage": "prove",
+      "last_event": "submission_registered",
+      "updated_at": 1742836800,
+      "engine_state_present": true
+    },
     "current_index": 1,
     "proposals": [
       {
@@ -165,7 +173,16 @@ GET /v3/tasks/{id}
         "l1_inclusion_block_number": 100,
         "l2_block_numbers": [42, 43, 44],
         "last_anchor_block_number": 41,
-        "proof": "0x..."
+        "proof": "0x...",
+        "runtime": {
+          "updated_at": 1742836800,
+          "engine_state_present": true,
+          "provider_request_id": "0x1234",
+          "remote_tx_hash": "0xabcd",
+          "image_ref": "0ximage",
+          "deployment": "base",
+          "offchain": true
+        }
       }
     ],
     "aggregate": {
@@ -178,6 +195,18 @@ GET /v3/tasks/{id}
 
 `current_index` points at the first unfinished proposal. When proposal proving is done and an
 aggregate task exists, it becomes `proposals.len()`.
+
+### Runtime Semantics
+
+- `data.route` is the canonical resolved route that accepted the request, such as
+  `native/local`, `sp1/local`, `risc0/local`, or `risc0/boundless`.
+- `data.runtime` is the root task runtime view stored in `runtime.sqlite`.
+- `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
+  exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
+  `image_ref`, `deployment`, and `offchain`.
+- `engine_state_present=false` means the HTTP response is serving the last runtime snapshot even
+  though the in-memory engine no longer has a live status object for that stage. This preserves
+  observability after container restarts, but it does not imply task recovery.
 
 ## Cancel Task
 

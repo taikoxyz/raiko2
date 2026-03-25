@@ -31,6 +31,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use url::Url;
 
+use crate::{BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver};
+
 const MILLION_CYCLES: u64 = 1_000_000;
 const STAKE_TOKEN_DECIMALS: u8 = 18;
 
@@ -497,6 +499,7 @@ impl BoundlessProver {
         proof_type: &'static str,
         input: Bytes,
         elf: &[u8],
+        observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let client = self.create_client().await?;
         let program = self.ensure_uploaded(&client, elf_type, elf).await?;
@@ -515,6 +518,22 @@ impl BoundlessProver {
             )
             .await?;
         let submission = self.submit_request(&client, &request).await?;
+        if let Some(observer) = observer {
+            observer
+                .on_progress(&ProverProgress::BoundlessSubmission(
+                    BoundlessSubmissionProgress {
+                        provider_request_id: submission.provider_request_id.clone(),
+                        remote_tx_hash: submission.remote_tx_hash.clone(),
+                        image_ref: alloy_primitives::hex::encode_prefixed(
+                            program.image_id.as_bytes(),
+                        ),
+                        deployment: format!("{:?}", self.config.get_deployment_type())
+                            .to_lowercase(),
+                        offchain: self.config.offchain,
+                    },
+                ))
+                .await;
+        }
         self.poll_until_fulfilled(
             &client,
             &submission,
@@ -558,6 +577,26 @@ where
             "proposal",
             input,
             &elf,
+            None,
+        ))
+        .await
+    }
+
+    async fn prove_encoded_with_observer(
+        &self,
+        input: Bytes,
+        _config: &ProverConfig,
+        backend: &B,
+        observer: Option<Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<Proof> {
+        let elf = backend.elf(ProofStage::Proposal)?.to_vec();
+        Box::pin(self.prove_boundless(
+            ElfType::Batch,
+            &self.config.offer_params.batch,
+            "proposal",
+            input,
+            &elf,
+            observer,
         ))
         .await
     }
@@ -586,6 +625,37 @@ where
             "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
+            None,
+        ))
+        .await
+    }
+
+    async fn aggregate_with_observer(
+        &self,
+        input: AggregationGuestInput,
+        _config: &ProverConfig,
+        backend: &B,
+        observer: Option<Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<Proof> {
+        let proposal_elf = backend.elf(ProofStage::Proposal)?;
+        let proposal_image_id = compute_image_id(proposal_elf)
+            .map_err(|e| RaikoError::Guest(format!("Failed to compute proposal image id: {e}")))?;
+        let agg = AggregationInput {
+            proofs: input.proofs.into_iter().map(proof_to_envelope).collect(),
+            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
+                proposal_image_id.as_bytes(),
+            )),
+            metadata: None,
+        };
+        let aggregation_input = aggregation::build_risc0_aggregation_input(&agg)?;
+        let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
+        Box::pin(self.prove_boundless(
+            ElfType::Aggregation,
+            &self.config.offer_params.aggregation,
+            "aggregation",
+            Bytes::from(aggregation_input),
+            &aggregation_elf,
+            observer,
         ))
         .await
     }

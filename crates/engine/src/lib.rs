@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, L2BlockRange, Proof, ProofContext};
 use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, proof_carry_from_proof};
-use raiko2_prover::Prover;
+use raiko2_prover::{Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskState,
@@ -69,6 +69,14 @@ pub enum EngineTaskSuccess {
 pub trait EngineObserver: Send + Sync {
     async fn on_task_started(&self, _id: &EngineTaskId, _task: &EngineTask, _worker: &str) {}
 
+    async fn on_task_progress(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+        _progress: &ProverProgress,
+    ) {
+    }
+
     async fn on_task_succeeded(
         &self,
         _id: &EngineTaskId,
@@ -80,6 +88,21 @@ pub trait EngineObserver: Send + Sync {
     async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {}
 
     async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
+}
+
+struct EngineProgressObserver {
+    observer: Arc<dyn EngineObserver>,
+    task_id: EngineTaskId,
+    task: EngineTask,
+}
+
+#[async_trait]
+impl ProverProgressObserver for EngineProgressObserver {
+    async fn on_progress(&self, progress: &ProverProgress) {
+        self.observer
+            .on_task_progress(&self.task_id, &self.task, progress)
+            .await;
+    }
 }
 
 impl<S> Clone for Engine<S>
@@ -533,7 +556,7 @@ where
             observer.on_task_started(&lease.id, &payload, worker).await;
         }
 
-        let result = self.execute(payload.clone()).await;
+        let result = self.execute(&lease.id, payload.clone()).await;
         renew_task.abort();
         if let Err(err) = &result {
             tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
@@ -723,9 +746,14 @@ where
 
     async fn prove_proposal(
         &self,
+        task_id: &EngineTaskId,
         request: ProposalTaskRequest,
         input_task: EngineTaskId,
     ) -> Result<EngineOutput<S::GuestInput>, String> {
+        let progress_task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task: input_task.clone(),
+        };
         // Keep dependency output until downstream completes.
         let encoded = self.get_encoded_input(input_task).await?;
         let validated_input = self
@@ -746,7 +774,18 @@ where
             .inner
             .spec
             .prover()
-            .prove_encoded(encoded, &ctx.config, self.inner.spec.backend())
+            .prove_encoded_with_observer(
+                encoded,
+                &ctx.config,
+                self.inner.spec.backend(),
+                self.inner.observer.as_ref().map(|observer| {
+                    Arc::new(EngineProgressObserver {
+                        observer: Arc::clone(observer),
+                        task_id: task_id.clone(),
+                        task: progress_task.clone(),
+                    }) as Arc<dyn ProverProgressObserver>
+                }),
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
@@ -755,7 +794,11 @@ where
         ))))
     }
 
-    async fn execute(&self, task: EngineTask) -> Result<EngineOutput<S::GuestInput>, String> {
+    async fn execute(
+        &self,
+        task_id: &EngineTaskId,
+        task: EngineTask,
+    ) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
             EngineTask::Preflight { request } => {
                 let ctx = self.context_for_proposal(&request);
@@ -804,8 +847,12 @@ where
             EngineTask::ProveProposal {
                 request,
                 input_task,
-            } => self.prove_proposal(request, input_task).await,
-            EngineTask::Aggregate { request: _, source } => {
+            } => self.prove_proposal(task_id, request, input_task).await,
+            EngineTask::Aggregate { request, source } => {
+                let progress_task = EngineTask::Aggregate {
+                    request: request.clone(),
+                    source: source.clone(),
+                };
                 let proofs = match source {
                     AggregationSource::ProofTasks(proof_tasks) => {
                         let mut proofs = Vec::with_capacity(proof_tasks.len());
@@ -821,10 +868,17 @@ where
                     .inner
                     .spec
                     .prover()
-                    .aggregate(
+                    .aggregate_with_observer(
                         AggregationGuestInput { proofs },
                         &config,
                         self.inner.spec.backend(),
+                        self.inner.observer.as_ref().map(|observer| {
+                            Arc::new(EngineProgressObserver {
+                                observer: Arc::clone(observer),
+                                task_id: task_id.clone(),
+                                task: progress_task.clone(),
+                            }) as Arc<dyn ProverProgressObserver>
+                        }),
                     )
                     .await
                     .map_err(|e| e.to_string())?;
@@ -1377,10 +1431,17 @@ mod tests {
 
         // Run the validation task directly via engine.execute to check error
         let result = engine
-            .execute(EngineTask::Validate {
-                request,
-                preflight_task: preflight_id,
-            })
+            .execute(
+                &EngineTaskId::new(EngineTaskKey::Proposal {
+                    pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                    request: request.clone(),
+                    stage: ProposalStage::Validation,
+                }),
+                EngineTask::Validate {
+                    request,
+                    preflight_task: preflight_id,
+                },
+            )
             .await;
 
         assert!(result.is_err());
@@ -1456,10 +1517,17 @@ mod tests {
 
         // Run the encode task directly via engine.execute to check error
         let result = engine
-            .execute(EngineTask::Encode {
-                request,
-                input_task: validation_id,
-            })
+            .execute(
+                &EngineTaskId::new(EngineTaskKey::Proposal {
+                    pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                    request: request.clone(),
+                    stage: ProposalStage::Encode,
+                }),
+                EngineTask::Encode {
+                    request,
+                    input_task: validation_id,
+                },
+            )
             .await;
 
         assert!(result.is_err());

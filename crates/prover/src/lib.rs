@@ -32,6 +32,8 @@ use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, encode_proof_carry_data};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
@@ -39,6 +41,26 @@ pub trait GuestInputCodec<I>: Send + Sync {
     ///
     /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoundlessSubmissionProgress {
+    pub provider_request_id: String,
+    pub remote_tx_hash: Option<String>,
+    pub image_ref: String,
+    pub deployment: String,
+    pub offchain: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProverProgress {
+    BoundlessSubmission(BoundlessSubmissionProgress),
+}
+
+#[async_trait::async_trait]
+pub trait ProverProgressObserver: Send + Sync {
+    async fn on_progress(&self, progress: &ProverProgress);
 }
 
 pub(crate) fn parse_shasta_aggregation_input(
@@ -139,6 +161,17 @@ where
         backend: &B,
     ) -> RaikoResult<Proof>;
 
+    async fn prove_encoded_with_observer(
+        &self,
+        input: Bytes,
+        config: &ProverConfig,
+        backend: &B,
+        observer: Option<Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<Proof> {
+        let _ = observer;
+        self.prove_encoded(input, config, backend).await
+    }
+
     async fn prove(
         &self,
         input: Self::GuestInput,
@@ -158,4 +191,15 @@ where
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof>;
+
+    async fn aggregate_with_observer(
+        &self,
+        input: AggregationGuestInput,
+        config: &ProverConfig,
+        backend: &B,
+        observer: Option<Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<Proof> {
+        let _ = observer;
+        self.aggregate(input, config, backend).await
+    }
 }

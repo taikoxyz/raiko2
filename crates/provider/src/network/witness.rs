@@ -23,7 +23,6 @@ pub enum WitnessMode {
 enum WitnessStrategy {
     RemoteOnly,
     LocalOnly,
-    RemoteThenLocal,
 }
 
 const fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessStrategy {
@@ -31,9 +30,8 @@ const fn witness_strategy(mode: WitnessMode, support: Option<bool>) -> WitnessSt
         WitnessMode::ForceRemote => WitnessStrategy::RemoteOnly,
         WitnessMode::ForceLocal => WitnessStrategy::LocalOnly,
         WitnessMode::Auto => match support {
-            Some(true) => WitnessStrategy::RemoteOnly,
             Some(false) => WitnessStrategy::LocalOnly,
-            None => WitnessStrategy::RemoteThenLocal,
+            Some(true) | None => WitnessStrategy::RemoteOnly,
         },
     }
 }
@@ -165,22 +163,6 @@ impl NetworkProvider {
         match witness_strategy(self.witness_mode, self.debug_witness_supported) {
             WitnessStrategy::RemoteOnly => self.fetch_remote_witnesses(block_numbers).await,
             WitnessStrategy::LocalOnly => self.fetch_local_witnesses(block_numbers).await,
-            WitnessStrategy::RemoteThenLocal => {
-                match self.fetch_remote_witnesses(block_numbers).await {
-                    Ok(witnesses) => Ok(witnesses),
-                    Err(remote_error) => {
-                        tracing::warn!(
-                            error = %remote_error,
-                            "remote witness fetch failed, falling back to local witness generation"
-                        );
-                        self.fetch_local_witnesses(block_numbers).await.map_err(|local_error| {
-                            RaikoError::RPC(format!(
-                                "Remote witness fetch failed ({remote_error}); local fallback failed ({local_error})"
-                            ))
-                        })
-                    }
-                }
-            }
         }
     }
 
@@ -212,7 +194,7 @@ mod tests {
     use super::{WitnessMode, WitnessStrategy, witness_strategy};
 
     #[test]
-    fn witness_strategy_prefers_known_support() {
+    fn witness_strategy_requires_remote_when_support_is_unknown() {
         assert_eq!(
             witness_strategy(WitnessMode::Auto, Some(true)),
             WitnessStrategy::RemoteOnly
@@ -223,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             witness_strategy(WitnessMode::Auto, None),
-            WitnessStrategy::RemoteThenLocal
+            WitnessStrategy::RemoteOnly
         );
     }
 }

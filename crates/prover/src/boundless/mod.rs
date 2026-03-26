@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use alloy_primitives::{
-    B256, Bytes, U256,
+    Bytes, U256,
     utils::{parse_ether, parse_units},
 };
 use alloy_signer_local::PrivateKeySigner;
@@ -31,7 +31,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use url::Url;
 
-use crate::{BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver};
+use crate::{
+    BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver, RISC0_SEAL_PAYLOAD_KIND,
+    decode_hex_payload, parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+};
 
 const MILLION_CYCLES: u64 = 1_000_000;
 const STAKE_TOKEN_DECIMALS: u8 = 18;
@@ -81,7 +84,7 @@ pub struct DeploymentConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoundlessConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub offchain: bool,
     pub rpc_url: String,
     pub signer_key: String,
@@ -97,7 +100,7 @@ pub struct BoundlessConfig {
 impl Default for BoundlessConfig {
     fn default() -> Self {
         Self {
-            offchain: true,
+            offchain: false,
             rpc_url: "https://base-rpc.publicnode.com".to_string(),
             signer_key: String::new(),
             deployment: Some(DeploymentConfig {
@@ -447,8 +450,9 @@ impl BoundlessProver {
                     let journal = fulfillment_data.journal().ok_or_else(|| {
                         RaikoError::Guest("Boundless fulfillment is missing journal".to_string())
                     })?;
+                    let seal = fulfillment.seal.clone();
                     let receipt_json = if proof_type == "proposal" {
-                        match decode_seal(fulfillment.seal, image_id, journal.to_vec()) {
+                        match decode_seal(seal.clone(), image_id, journal.to_vec()) {
                             Ok(ContractReceipt::Base(receipt)) => {
                                 serde_json::to_string(&receipt).ok()
                             }
@@ -457,13 +461,12 @@ impl BoundlessProver {
                     } else {
                         None
                     };
-                    let input_hash = if journal.len() >= 32 {
-                        B256::from_slice(&journal[..32])
-                    } else {
-                        B256::ZERO
+                    let input_hash = match proof_type {
+                        "proposal" => parse_shasta_proposal_input_hash(journal),
+                        _ => parse_shasta_aggregation_input_hash(journal),
                     };
                     return Ok(Proof {
-                        proof: Some(alloy_primitives::hex::encode_prefixed(journal)),
+                        proof: Some(alloy_primitives::hex::encode_prefixed(seal)),
                         input: Some(input_hash),
                         quote: receipt_json,
                         uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
@@ -661,10 +664,6 @@ where
     }
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 const fn default_poll_interval_ms() -> u64 {
     10_000
 }
@@ -746,6 +745,7 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
             value: serde_json::Value::String(receipt),
         });
     }
+    let payload_bytes = decode_hex_payload(proof.proof.as_deref());
 
     ProofEnvelope {
         backend: "risc0".to_string(),
@@ -756,8 +756,8 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
             instance_hash: None,
         },
         payload: ProofPayload {
-            payload_kind: "risc0_journal".to_string(),
-            bytes: Vec::new(),
+            payload_kind: RISC0_SEAL_PAYLOAD_KIND.to_string(),
+            bytes: payload_bytes,
         },
         verifier_artifacts,
         carry_data: None,
@@ -767,7 +767,11 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundlessConfig, BoundlessOfferParams, DeploymentType, validate_offer_params};
+    use super::{
+        BoundlessConfig, BoundlessOfferParams, DeploymentType, proof_to_envelope,
+        validate_offer_params,
+    };
+    use raiko2_primitives::Proof;
 
     fn sample_offer() -> BoundlessOfferParams {
         BoundlessOfferParams {
@@ -785,7 +789,7 @@ mod tests {
     fn default_config_uses_base_deployment() {
         let config = BoundlessConfig::default();
         assert_eq!(config.get_deployment_type(), DeploymentType::Base);
-        assert!(config.offchain);
+        assert!(!config.offchain);
     }
 
     #[test]
@@ -810,5 +814,19 @@ mod tests {
         let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
         assert!(validated.max_price > validated.min_price);
         assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn proof_to_envelope_preserves_risc0_seal_payload() {
+        let envelope = proof_to_envelope(Proof {
+            proof: Some("0x1234".to_string()),
+            quote: Some("{\"receipt\":true}".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.payload.payload_kind, "risc0_seal");
+        assert_eq!(envelope.payload.bytes, vec![0x12, 0x34]);
+        assert_eq!(envelope.verifier_artifacts.len(), 1);
+        assert_eq!(envelope.verifier_artifacts[0].kind, "receipt_json");
     }
 }

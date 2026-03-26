@@ -230,7 +230,7 @@ mod tests {
     const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
 
     fn recover_address(sig_bytes: &[u8; 65], message: B256) -> Address {
-        let rec_id = secp256k1::ecdsa::RecoveryId::try_from((sig_bytes[64] - 27) as i32)
+        let rec_id = secp256k1::ecdsa::RecoveryId::try_from(i32::from(sig_bytes[64] - 27))
             .expect("recovery id");
         let sig = RecoverableSignature::from_compact(&sig_bytes[..64], rec_id)
             .expect("recoverable signature");
@@ -271,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_proposal_proof_matches_shasta_format() {
-        let prover = NativeProver::default();
+        let prover = NativeProver;
         let config = ProverConfig::default();
         let input = minimal_guest_input();
         let proof = prover
@@ -294,10 +294,12 @@ mod tests {
 
     #[tokio::test]
     async fn native_aggregation_proof_signs_pcd_hash() {
-        let prover = NativeProver::default();
+        let prover = NativeProver;
 
-        let mut proof_carry = ProofCarryData::default();
-        proof_carry.chain_id = 1;
+        let proof_carry = ProofCarryData {
+            chain_id: 1,
+            ..ProofCarryData::default()
+        };
         let aggregation_input = ShastaZkAggregationGuestInput {
             image_id: [0u32; 8],
             block_inputs: vec![B256::ZERO],

@@ -241,7 +241,7 @@ impl Default for BoundlessConfig {
 }
 
 const fn default_boundless_offchain() -> bool {
-    true
+    false
 }
 
 const fn default_boundless_poll_interval_ms() -> u64 {

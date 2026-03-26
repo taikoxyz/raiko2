@@ -43,7 +43,7 @@ impl Default for Risc0Config {
 /// RISC0 proof response.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Risc0Response {
-    /// Hex-encoded proof (journal bytes)
+    /// Hex-encoded RISC0 proof payload (seal when available, otherwise journal bytes).
     pub proof: String,
     /// JSON-serialized receipt
     pub receipt: String,

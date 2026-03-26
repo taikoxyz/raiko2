@@ -528,7 +528,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
             remote_tx_hash: Some("0xabcd".to_string()),
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),
-            offchain: true,
+            offchain: false,
         },
         updated_at,
     );
@@ -588,7 +588,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
         "0ximage"
     );
     assert_eq!(res["data"]["proposals"][0]["runtime"]["deployment"], "base");
-    assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], true);
+    assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], false);
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],
         false

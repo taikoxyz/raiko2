@@ -27,11 +27,13 @@ pub mod native;
 pub mod risc0;
 pub mod sp1;
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, encode_proof_carry_data};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
+use risc0_ethereum_contracts_boundless::encode_seal;
+use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -61,6 +63,39 @@ pub enum ProverProgress {
 #[async_trait::async_trait]
 pub trait ProverProgressObserver: Send + Sync {
     async fn on_progress(&self, progress: &ProverProgress);
+}
+
+const B256_BYTES: usize = 32;
+const SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES: usize = B256_BYTES * 2;
+pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
+
+pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> B256 {
+    if public_values.len() >= SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES {
+        B256::from_slice(&public_values[B256_BYTES..SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES])
+    } else {
+        B256::default()
+    }
+}
+
+pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> B256 {
+    if public_values.len() >= B256_BYTES {
+        B256::from_slice(&public_values[..B256_BYTES])
+    } else {
+        B256::default()
+    }
+}
+
+pub(crate) fn encode_risc0_proof_payload(receipt: &Risc0Receipt) -> String {
+    encode_seal(receipt).map_or_else(
+        |_| alloy_primitives::hex::encode_prefixed(&receipt.journal.bytes),
+        alloy_primitives::hex::encode_prefixed,
+    )
+}
+
+pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
+    value
+        .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())
+        .unwrap_or_default()
 }
 
 pub(crate) fn parse_shasta_aggregation_input(
@@ -201,5 +236,34 @@ where
     ) -> RaikoResult<Proof> {
         let _ = observer;
         self.aggregate(input, config, backend).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash};
+    use alloy_primitives::B256;
+
+    #[test]
+    fn parses_shasta_proposal_input_hash_from_second_committed_word() {
+        let instance_hash = B256::repeat_byte(0x11);
+        let subproof_input_hash = B256::repeat_byte(0x22);
+        let public_values = [instance_hash.as_slice(), subproof_input_hash.as_slice()].concat();
+
+        assert_eq!(
+            parse_shasta_proposal_input_hash(&public_values),
+            subproof_input_hash
+        );
+    }
+
+    #[test]
+    fn parses_shasta_aggregation_input_hash_from_first_committed_word() {
+        let agg_input_hash = B256::repeat_byte(0x33);
+        let public_values = agg_input_hash.as_slice().to_vec();
+
+        assert_eq!(
+            parse_shasta_aggregation_input_hash(&public_values),
+            agg_input_hash
+        );
     }
 }

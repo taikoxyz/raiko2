@@ -412,7 +412,7 @@ mod tests {
                     remote_tx_hash: Some("0xabcd".to_string()),
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
-                    offchain: true,
+                    offchain: false,
                 }),
             )
             .await;

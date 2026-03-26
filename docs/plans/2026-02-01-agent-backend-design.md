@@ -37,7 +37,7 @@ Replace the current overloaded `Proof` representation with an explicit, backend-
 - `ProofEnvelope`
   - `backend: ProofBackend` (risc0/sp1/sgx/tdx/etc)
   - `public_inputs: PublicInputs` (e.g., input hash / instance hash)
-  - `payload: ProofPayload` (opaque bytes + `payload_kind` describing the payload within the same backend, e.g., `risc0_journal`, `sp1_proof_bincode`, `tee_quote`)
+  - `payload: ProofPayload` (opaque bytes + `payload_kind` describing the payload within the same backend, e.g., `risc0_seal`, `sp1_proof_bincode`, `tee_quote`)
   - `verifier_artifacts: Vec<VerifierArtifact>` (typed items like receipt JSON, vkey hash, image ID)
   - `carry_data: Option<ProofCarryData>` (serialize/deserialize via a versioned schema)
   - `metadata: Option<serde_json::Value>`

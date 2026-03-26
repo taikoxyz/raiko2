@@ -17,7 +17,7 @@ fn builds_risc0_aggregation_input() {
             instance_hash: None,
         },
         payload: ProofPayload {
-            payload_kind: "risc0_journal".to_string(),
+            payload_kind: "risc0_seal".to_string(),
             bytes: vec![],
         },
         verifier_artifacts: vec![VerifierArtifact {
@@ -47,7 +47,7 @@ fn rejects_invalid_expected_image_id() {
             instance_hash: None,
         },
         payload: ProofPayload {
-            payload_kind: "risc0_journal".to_string(),
+            payload_kind: "risc0_seal".to_string(),
             bytes: vec![],
         },
         verifier_artifacts: vec![VerifierArtifact {

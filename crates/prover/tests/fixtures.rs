@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 #![allow(dead_code)]
+#![allow(clippy::redundant_pub_crate)]
 
 pub(crate) fn risc0_receipt_json() -> String {
     use risc0_zkvm::{Digest, FakeReceipt, Receipt, ReceiptClaim};

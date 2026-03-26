@@ -181,7 +181,7 @@ GET /v3/tasks/{id}
           "remote_tx_hash": "0xabcd",
           "image_ref": "0ximage",
           "deployment": "base",
-          "offchain": true
+          "offchain": false
         }
       }
     ],

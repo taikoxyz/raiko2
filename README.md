@@ -339,7 +339,7 @@ guest_system = "risc0"
 runner = "boundless"
 
 [prover.boundless]
-offchain = true
+offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000

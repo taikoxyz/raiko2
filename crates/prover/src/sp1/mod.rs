@@ -7,7 +7,7 @@ mod types;
 
 pub use types::{ProverMode, RecursionMode, Sp1Config, Sp1Response};
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::Bytes;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
@@ -18,8 +18,8 @@ use sp1_sdk::{
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, parse_shasta_aggregation_input, validate_shasta_aggregation_lengths,
-    with_shasta_extra_data,
+    GuestInputCodec, parse_shasta_aggregation_input, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, validate_shasta_aggregation_lengths, with_shasta_extra_data,
 };
 
 /// SP1 Prover for Shasta proposal proofs.
@@ -131,13 +131,9 @@ where
             info!("SP1 proposal proof verified successfully");
         }
 
-        // Extract public values (instance_hash + subproof_input_hash = 64 bytes)
+        // Proposal public values commit instance_hash first, then subproof_input_hash.
         let public_values = proof.public_values.as_slice();
-        let input_hash = if public_values.len() >= 32 {
-            B256::from_slice(&public_values[..32])
-        } else {
-            B256::default()
-        };
+        let input_hash = parse_shasta_proposal_input_hash(public_values);
 
         // Encode proof
         let proof_bytes = bincode::serialize(&proof)
@@ -253,13 +249,9 @@ where
             info!("SP1 aggregation proof verified successfully");
         }
 
-        // Extract public values (agg_public_input_hash = 32 bytes)
+        // Aggregation public values commit a single agg_public_input_hash.
         let public_values = proof.public_values.as_slice();
-        let agg_input_hash = if public_values.len() >= 32 {
-            B256::from_slice(&public_values[..32])
-        } else {
-            B256::default()
-        };
+        let agg_input_hash = parse_shasta_aggregation_input_hash(public_values);
 
         // Encode proof
         let proof_bytes = bincode::serialize(&proof)

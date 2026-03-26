@@ -18,8 +18,9 @@ use risc0_zkvm::{
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, parse_shasta_aggregation_input, parse_shasta_proof_carry_data,
-    validate_shasta_aggregation_lengths, with_shasta_extra_data,
+    GuestInputCodec, encode_risc0_proof_payload, parse_shasta_aggregation_input,
+    parse_shasta_aggregation_input_hash, parse_shasta_proof_carry_data,
+    parse_shasta_proposal_input_hash, validate_shasta_aggregation_lengths, with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -163,11 +164,7 @@ where
                 })?;
 
                 let journal_bytes = &receipt.journal.bytes;
-                let input_hash = if journal_bytes.len() >= 32 {
-                    B256::from_slice(&journal_bytes[..32])
-                } else {
-                    B256::default()
-                };
+                let input_hash = parse_shasta_proposal_input_hash(journal_bytes);
                 let extra_data = Self::mock_extra_data(
                     &session,
                     image_id,
@@ -200,11 +197,7 @@ where
             }
 
             let journal_bytes = &receipt.journal.bytes;
-            let input_hash = if journal_bytes.len() >= 32 {
-                B256::from_slice(&journal_bytes[..32])
-            } else {
-                B256::default()
-            };
+            let input_hash = parse_shasta_proposal_input_hash(journal_bytes);
 
             info!(
                 "Generated proposal receipt journal: {:?}",
@@ -215,7 +208,7 @@ where
 
             Ok::<Proof, RaikoError>(
                 Risc0Response {
-                    proof: alloy_primitives::hex::encode_prefixed(journal_bytes),
+                    proof: encode_risc0_proof_payload(&receipt),
                     receipt: receipt_json,
                     image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                     input: input_hash,
@@ -285,11 +278,7 @@ where
                 })?;
 
                 let journal_bytes = &receipt.journal.bytes;
-                let agg_input_hash = if journal_bytes.len() >= 32 {
-                    B256::from_slice(&journal_bytes[..32])
-                } else {
-                    B256::default()
-                };
+                let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes);
                 let extra_data = Self::mock_extra_data(
                     &session,
                     image_id,
@@ -322,17 +311,13 @@ where
             }
 
             let journal_bytes = &receipt.journal.bytes;
-            let agg_input_hash = if journal_bytes.len() >= 32 {
-                B256::from_slice(&journal_bytes[..32])
-            } else {
-                B256::default()
-            };
+            let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes);
 
             let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
 
             Ok::<Proof, RaikoError>(
                 Risc0Response {
-                    proof: alloy_primitives::hex::encode_prefixed(journal_bytes),
+                    proof: encode_risc0_proof_payload(&receipt),
                     receipt: receipt_json,
                     image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                     input: agg_input_hash,
@@ -349,10 +334,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Risc0Config, Risc0Prover};
-    use crate::Prover;
+    use crate::{Prover, encode_risc0_proof_payload};
     use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
     use raiko2_primitives::ProverConfig;
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+    use risc0_zkvm::Receipt;
 
     fn fixture_guest_input() -> GuestInput {
         let mut input: GuestInput = serde_json::from_str(include_str!("../../../../test.json"))
@@ -371,18 +358,27 @@ mod tests {
             execution_po2: 20,
             verify: true,
         });
+        let guest_input = fixture_guest_input();
+        let expected_input = hash_shasta_subproof_input(&guest_input.proof_carry_data);
 
         let proof = prover
-            .prove(
-                fixture_guest_input(),
-                &ProverConfig::default(),
-                &RISC0_SHASTA_BACKEND,
-            )
+            .prove(guest_input, &ProverConfig::default(), &RISC0_SHASTA_BACKEND)
             .await
             .expect("risc0 mock proposal proof should succeed");
+        let receipt: Receipt = serde_json::from_str(proof.quote.as_deref().expect("receipt json"))
+            .expect("parse risc0 receipt");
 
-        assert!(proof.proof.is_some(), "proof journal should be present");
+        assert_eq!(
+            proof.proof,
+            Some(encode_risc0_proof_payload(&receipt)),
+            "proof should expose the canonical risc0 payload"
+        );
         assert!(proof.quote.is_some(), "receipt JSON should be present");
+        assert_eq!(
+            proof.input,
+            Some(expected_input),
+            "proposal proof input should be shasta subproof input hash"
+        );
 
         let extra_data = proof.extra_data.expect("mock metadata should be present");
         assert!(

@@ -41,10 +41,6 @@ struct Args {
     #[arg(long)]
     chain_id: Option<u64>,
 
-    /// Whether the RPC supports `debug_executionWitness`.
-    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
-    debug_witness: bool,
-
     /// Print a small timing summary (network fetches + validation).
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     metrics: bool,
@@ -89,8 +85,7 @@ async fn main() -> Result<()> {
         .context("Failed to convert to Taiko chain spec")?;
     let evm_config = alethia_reth_block::config::TaikoEvmConfig::new(taiko_chain_spec.clone());
 
-    let provider =
-        NetworkProvider::new(&args.rpc_url)?.with_debug_witness_support(args.debug_witness);
+    let provider = NetworkProvider::new(&args.rpc_url)?;
 
     let block_numbers = vec![args.block_number];
     let blocks = {

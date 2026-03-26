@@ -19,10 +19,6 @@ const fn default_concurrency_limit() -> usize {
     32
 }
 
-const fn default_local_witness_concurrency_limit() -> usize {
-    32
-}
-
 const fn default_retry_max_attempts() -> u32 {
     3
 }
@@ -56,7 +52,6 @@ impl Default for RpcRetryConfig {
 pub struct RpcClientConfig {
     pub timeout_ms: u64,
     pub concurrency_limit: usize,
-    pub local_witness_concurrency_limit: usize,
     pub retry: RpcRetryConfig,
 }
 
@@ -65,7 +60,6 @@ impl Default for RpcClientConfig {
         Self {
             timeout_ms: default_timeout_ms(),
             concurrency_limit: default_concurrency_limit(),
-            local_witness_concurrency_limit: default_local_witness_concurrency_limit(),
             retry: RpcRetryConfig::default(),
         }
     }

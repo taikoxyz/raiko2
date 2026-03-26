@@ -375,15 +375,9 @@ requests directly, and records task/runtime state under `./data/runtime` by defa
 workdirs, runtime state, and reusable image references are managed there, while `guests/risc0`
 and `guests/sp1` remain separate Cargo workspaces.
 
-If a deployment must avoid remote witness RPCs, set:
-
-```toml
-[rpc.client]
-witness_mode = "local"
-local_witness_concurrency_limit = 32
-```
-
-This forces on-the-spot witness generation against the configured `l2_rpc`.
+`l2_rpc` is expected to be a witness-capable endpoint that supports `debug_executionWitness`.
+If the upstream L2 does not expose that method yet, run the compatibility `zeth-rpc-proxy`
+binary in front of it and point `l2_rpc` at the proxy instead.
 
 ## Documentation
 

@@ -18470,6 +18470,7 @@ dependencies = [
  "clap",
  "itertools 0.14.0",
  "raiko2-primitives",
+ "raiko2-provider",
  "reqwest",
  "reth-chainspec",
  "reth-evm",

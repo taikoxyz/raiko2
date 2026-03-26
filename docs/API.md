@@ -231,12 +231,9 @@ All API errors use the hoodi-style envelope:
 ## Configuration Notes
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
-- `rpc.client.witness_mode` controls how L2 witnesses are fetched:
-  - `auto`: prefer remote `debug_executionWitness`
-  - `remote`: require remote `debug_executionWitness`
-  - `local`: force local witness generation against the configured L2 RPC
-- `rpc.client.local_witness_concurrency_limit` controls how many blocks can run on-the-spot
-  witness generation concurrently when `witness_mode=local`.
+- `rpc.l2_rpc` must point to a witness-capable endpoint that supports `debug_executionWitness`.
+- If the upstream L2 does not expose `debug_executionWitness`, deploy `zeth-rpc-proxy` as a
+  compatibility layer and point `rpc.l2_rpc` at that proxy.
 - Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
 - Legacy single-pair `rpc.l1_rpc` / `rpc.l2_rpc` / `rpc.l1_chain_id` / `rpc.l2_chain_id` remains
   as a fallback only when `rpc.pairs` is empty.

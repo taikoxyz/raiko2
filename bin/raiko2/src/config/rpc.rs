@@ -2,7 +2,6 @@ use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_provider::{
     RpcClientConfig as ProviderRpcClientConfig, RpcRetryConfig as ProviderRpcRetryConfig,
-    WitnessMode as ProviderWitnessMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -12,10 +11,6 @@ const fn default_rpc_timeout_ms() -> u64 {
 }
 
 const fn default_rpc_concurrency_limit() -> usize {
-    32
-}
-
-const fn default_rpc_local_witness_concurrency_limit() -> usize {
     32
 }
 
@@ -117,10 +112,6 @@ pub struct RpcClientConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_rpc_concurrency_limit")]
     pub concurrency_limit: usize,
-    #[serde(default = "default_rpc_local_witness_concurrency_limit")]
-    pub local_witness_concurrency_limit: usize,
-    #[serde(default)]
-    pub witness_mode: RpcWitnessMode,
     #[serde(default)]
     pub retry: RpcRetryConfig,
 }
@@ -130,30 +121,7 @@ impl Default for RpcClientConfig {
         Self {
             timeout_ms: default_rpc_timeout_ms(),
             concurrency_limit: default_rpc_concurrency_limit(),
-            local_witness_concurrency_limit: default_rpc_local_witness_concurrency_limit(),
-            witness_mode: RpcWitnessMode::default(),
             retry: RpcRetryConfig::default(),
-        }
-    }
-}
-
-/// Witness fetching strategy for the L2 RPC client.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RpcWitnessMode {
-    #[default]
-    Auto,
-    Remote,
-    Local,
-}
-
-impl RpcWitnessMode {
-    #[must_use]
-    pub const fn provider_mode(self) -> ProviderWitnessMode {
-        match self {
-            Self::Auto => ProviderWitnessMode::Auto,
-            Self::Remote => ProviderWitnessMode::ForceRemote,
-            Self::Local => ProviderWitnessMode::ForceLocal,
         }
     }
 }
@@ -187,9 +155,6 @@ impl RpcConfig {
         }
         if self.client.concurrency_limit == 0 {
             bail!("rpc client concurrency_limit must be > 0");
-        }
-        if self.client.local_witness_concurrency_limit == 0 {
-            bail!("rpc client local_witness_concurrency_limit must be > 0");
         }
         if self.client.retry.max_attempts != 0 {
             if self.client.retry.initial_backoff_ms == 0 {
@@ -262,7 +227,6 @@ impl RpcConfig {
         ProviderRpcClientConfig {
             timeout_ms: self.client.timeout_ms,
             concurrency_limit: self.client.concurrency_limit,
-            local_witness_concurrency_limit: self.client.local_witness_concurrency_limit,
             retry: ProviderRpcRetryConfig {
                 max_attempts: self.client.retry.max_attempts,
                 initial_backoff_ms: self.client.retry.initial_backoff_ms,

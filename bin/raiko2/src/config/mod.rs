@@ -15,7 +15,7 @@ mod validation;
 pub use prover::{GuestSystem, PipelineRoute, ProverConfig, RunnerKind};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
 #[allow(unused_imports)]
-pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig, RpcWitnessMode};
+pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
 
@@ -81,9 +81,6 @@ impl Config {
         }
         if let Some(concurrency_limit) = cli.rpc_concurrency_limit {
             config.rpc.client.concurrency_limit = concurrency_limit;
-        }
-        if let Some(local_witness_concurrency_limit) = cli.rpc_local_witness_concurrency_limit {
-            config.rpc.client.local_witness_concurrency_limit = local_witness_concurrency_limit;
         }
         if let Some(max_attempts) = cli.rpc_retry_max_attempts {
             config.rpc.client.retry.max_attempts = max_attempts;
@@ -359,8 +356,7 @@ pairs = [
 ]
 
 [rpc.client]
-witness_mode = "local"
-local_witness_concurrency_limit = 24
+concurrency_limit = 24
 
 [prover]
 guest_system = "native"
@@ -385,8 +381,7 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
-        assert_eq!(config.rpc.client.witness_mode, RpcWitnessMode::Local);
-        assert_eq!(config.rpc.client.local_witness_concurrency_limit, 24);
+        assert_eq!(config.rpc.client.concurrency_limit, 24);
 
         let _ = std::fs::remove_file(path);
     }

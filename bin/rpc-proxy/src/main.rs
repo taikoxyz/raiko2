@@ -18,11 +18,7 @@
 
 mod app;
 mod args;
-mod db;
 mod init;
-mod rpc;
-mod trie;
-mod witness;
 
 use clap::Parser;
 

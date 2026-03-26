@@ -21,8 +21,6 @@ pairs = [
 [rpc.client]
 timeout_ms = 10000
 concurrency_limit = 32
-local_witness_concurrency_limit = 32
-witness_mode = "auto" # auto | remote | local
 
 [rpc.client.retry]
 max_attempts = 3

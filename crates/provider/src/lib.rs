@@ -12,7 +12,6 @@ use raiko2_primitives::{ExecutionWitness, RaikoResult};
 use reth_ethereum_primitives::Block;
 
 pub use network::NetworkProvider;
-pub use network::WitnessMode;
 pub use rpc::{RpcClientConfig, RpcRetryConfig};
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.

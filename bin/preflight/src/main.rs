@@ -41,10 +41,6 @@ struct Args {
     #[arg(long, default_value = "sp1")]
     proof_type: String,
 
-    /// Whether the RPC supports debug_executionWitness.
-    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
-    debug_witness: bool,
-
     /// Optional prover address to embed in the manifest.
     #[arg(long)]
     prover: Option<String>,
@@ -70,8 +66,7 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let provider =
-        NetworkProvider::new(&args.rpc_url)?.with_debug_witness_support(args.debug_witness);
+    let provider = NetworkProvider::new(&args.rpc_url)?;
 
     if args.l2_start > args.l2_end {
         anyhow::bail!("--l2-start must be <= --l2-end");

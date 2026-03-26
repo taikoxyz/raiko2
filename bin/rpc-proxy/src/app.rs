@@ -23,6 +23,7 @@ use alloy::{
 };
 use alloy_chains::NamedChain;
 use anyhow::{Context, bail};
+use raiko2_provider::on_the_spot_witness::execution_witness;
 use reqwest::Client;
 use reth_chainspec::{HOLESKY, HOODI, MAINNET, SEPOLIA};
 use reth_evm_ethereum::EthEvmConfig;
@@ -30,8 +31,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, field, info, instrument};
 use tracing_actix_web::TracingLogger;
-
-use crate::witness::execution_witness;
 
 /// This struct holds the application state that we want to share across all handlers.
 pub struct AppState {

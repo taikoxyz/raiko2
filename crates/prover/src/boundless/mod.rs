@@ -287,23 +287,27 @@ impl BoundlessProver {
         Ok((guest_env, guest_env_bytes))
     }
 
-    fn evaluate_guest(guest_env: &GuestEnv, elf: &[u8]) -> RaikoResult<(u32, Vec<u8>)> {
-        let executor_env = guest_env.clone().try_into().map_err(|e| {
-            RaikoError::Guest(format!("Failed to convert boundless guest env: {e}"))
-        })?;
-        let session = local_executor()
-            .execute(executor_env, elf)
-            .map_err(|e| RaikoError::Guest(format!("Boundless dry-run failed: {e}")))?;
-        let mcycles = session
-            .segments
-            .iter()
-            .map(|segment| 1 << segment.po2)
-            .sum::<u64>()
-            .div_ceil(MILLION_CYCLES);
-        Ok((
-            u32::try_from(mcycles).unwrap_or(u32::MAX),
-            session.journal.bytes,
-        ))
+    async fn evaluate_guest(guest_env: GuestEnv, elf: Vec<u8>) -> RaikoResult<(u32, Vec<u8>)> {
+        tokio::task::spawn_blocking(move || {
+            let executor_env = guest_env.try_into().map_err(|e| {
+                RaikoError::Guest(format!("Failed to convert boundless guest env: {e}"))
+            })?;
+            let session = local_executor()
+                .execute(executor_env, &elf)
+                .map_err(|e| RaikoError::Guest(format!("Boundless dry-run failed: {e}")))?;
+            let mcycles = session
+                .segments
+                .iter()
+                .map(|segment| 1 << segment.po2)
+                .sum::<u64>()
+                .div_ceil(MILLION_CYCLES);
+            Ok((
+                u32::try_from(mcycles).unwrap_or(u32::MAX),
+                session.journal.bytes,
+            ))
+        })
+        .await
+        .map_err(|err| RaikoError::Guest(format!("Boundless dry-run task failed: {err}")))?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -507,7 +511,10 @@ impl BoundlessProver {
         let client = self.create_client().await?;
         let program = self.ensure_uploaded(&client, elf_type, elf).await?;
         let (guest_env, guest_env_bytes) = Self::process_input(input.as_ref())?;
-        let (mcycles_count, journal) = Self::evaluate_guest(&guest_env, elf)?;
+        // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
+        // occupy the async runtime threads that serve health/readiness probes.
+        let (mcycles_count, journal) =
+            Self::evaluate_guest(guest_env.clone(), elf.to_vec()).await?;
         let request = self
             .build_request(
                 &client,

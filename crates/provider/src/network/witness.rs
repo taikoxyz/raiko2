@@ -41,7 +41,7 @@ impl NetworkProvider {
         &self,
         requests: &[(usize, u64)],
     ) -> RaikoResult<Vec<(usize, ExecutionWitness)>> {
-        const LOCAL_CONCURRENCY_LIMIT: usize = 4;
+        const LOCAL_CONCURRENCY_LIMIT: usize = 32;
         let chain_id = self
             .provider
             .get_chain_id()

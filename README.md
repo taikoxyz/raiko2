@@ -375,6 +375,15 @@ requests directly, and records task/runtime state under `./data/runtime` by defa
 workdirs, runtime state, and reusable image references are managed there, while `guests/risc0`
 and `guests/sp1` remain separate Cargo workspaces.
 
+If a deployment must avoid remote witness RPCs, set:
+
+```toml
+[rpc.client]
+witness_mode = "local"
+```
+
+This forces on-the-spot witness generation against the configured `l2_rpc`.
+
 ## Documentation
 
 - [API Documentation](docs/API.md)

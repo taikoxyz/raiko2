@@ -231,6 +231,10 @@ All API errors use the hoodi-style envelope:
 ## Configuration Notes
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
+- `rpc.client.witness_mode` controls how L2 witnesses are fetched:
+  - `auto`: prefer remote `debug_executionWitness`
+  - `remote`: require remote `debug_executionWitness`
+  - `local`: force local witness generation against the configured L2 RPC
 - Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
 - Legacy single-pair `rpc.l1_rpc` / `rpc.l2_rpc` / `rpc.l1_chain_id` / `rpc.l2_chain_id` remains
   as a fallback only when `rpc.pairs` is empty.

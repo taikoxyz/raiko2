@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_provider::{
     RpcClientConfig as ProviderRpcClientConfig, RpcRetryConfig as ProviderRpcRetryConfig,
+    WitnessMode as ProviderWitnessMode,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -113,6 +114,8 @@ pub struct RpcClientConfig {
     #[serde(default = "default_rpc_concurrency_limit")]
     pub concurrency_limit: usize,
     #[serde(default)]
+    pub witness_mode: RpcWitnessMode,
+    #[serde(default)]
     pub retry: RpcRetryConfig,
 }
 
@@ -121,7 +124,29 @@ impl Default for RpcClientConfig {
         Self {
             timeout_ms: default_rpc_timeout_ms(),
             concurrency_limit: default_rpc_concurrency_limit(),
+            witness_mode: RpcWitnessMode::default(),
             retry: RpcRetryConfig::default(),
+        }
+    }
+}
+
+/// Witness fetching strategy for the L2 RPC client.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcWitnessMode {
+    #[default]
+    Auto,
+    Remote,
+    Local,
+}
+
+impl RpcWitnessMode {
+    #[must_use]
+    pub const fn provider_mode(self) -> ProviderWitnessMode {
+        match self {
+            Self::Auto => ProviderWitnessMode::Auto,
+            Self::Remote => ProviderWitnessMode::ForceRemote,
+            Self::Local => ProviderWitnessMode::ForceLocal,
         }
     }
 }

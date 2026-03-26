@@ -15,7 +15,7 @@ mod validation;
 pub use prover::{GuestSystem, PipelineRoute, ProverConfig, RunnerKind};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
 #[allow(unused_imports)]
-pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
+pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig, RpcWitnessMode};
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
 
@@ -355,6 +355,9 @@ pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545" },
 ]
 
+[rpc.client]
+witness_mode = "local"
+
 [prover]
 guest_system = "native"
 runner = "local"
@@ -378,6 +381,7 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(config.rpc.client.witness_mode, RpcWitnessMode::Local);
 
         let _ = std::fs::remove_file(path);
     }

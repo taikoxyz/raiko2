@@ -235,6 +235,8 @@ All API errors use the hoodi-style envelope:
   - `auto`: prefer remote `debug_executionWitness`
   - `remote`: require remote `debug_executionWitness`
   - `local`: force local witness generation against the configured L2 RPC
+- `rpc.client.local_witness_concurrency_limit` controls how many blocks can run on-the-spot
+  witness generation concurrently when `witness_mode=local`.
 - Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
 - Legacy single-pair `rpc.l1_rpc` / `rpc.l2_rpc` / `rpc.l1_chain_id` / `rpc.l2_chain_id` remains
   as a fallback only when `rpc.pairs` is empty.

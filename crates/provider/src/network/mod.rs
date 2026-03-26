@@ -33,6 +33,7 @@ pub struct NetworkProvider {
     provider: DynProvider,
     evm_config: Arc<OnceCell<Arc<EthEvmConfig>>>,
     witness_mode: WitnessMode,
+    local_witness_concurrency_limit: usize,
     debug_witness_supported: Option<bool>,
 }
 
@@ -58,6 +59,7 @@ impl NetworkProvider {
             provider,
             evm_config: Arc::new(OnceCell::new()),
             witness_mode: WitnessMode::default(),
+            local_witness_concurrency_limit: config.local_witness_concurrency_limit,
             debug_witness_supported: None,
         })
     }

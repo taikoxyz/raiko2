@@ -41,7 +41,7 @@ impl NetworkProvider {
         &self,
         requests: &[(usize, u64)],
     ) -> RaikoResult<Vec<(usize, ExecutionWitness)>> {
-        const LOCAL_CONCURRENCY_LIMIT: usize = 32;
+        let local_concurrency_limit = self.local_witness_concurrency_limit.max(1);
         let chain_id = self
             .provider
             .get_chain_id()
@@ -76,7 +76,7 @@ impl NetworkProvider {
                     Ok::<(usize, ExecutionWitness), RaikoError>((index, witness))
                 }
             }))
-            .buffer_unordered(LOCAL_CONCURRENCY_LIMIT)
+            .buffer_unordered(local_concurrency_limit)
             .collect::<Vec<_>>()
             .await;
 
@@ -103,7 +103,7 @@ impl NetworkProvider {
                 Ok::<(usize, ExecutionWitness), RaikoError>((index, witness))
             }
         }))
-        .buffer_unordered(LOCAL_CONCURRENCY_LIMIT)
+        .buffer_unordered(local_concurrency_limit)
         .collect::<Vec<_>>()
         .await;
 

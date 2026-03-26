@@ -380,6 +380,7 @@ If a deployment must avoid remote witness RPCs, set:
 ```toml
 [rpc.client]
 witness_mode = "local"
+local_witness_concurrency_limit = 32
 ```
 
 This forces on-the-spot witness generation against the configured `l2_rpc`.

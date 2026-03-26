@@ -56,6 +56,10 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_RPC_CONCURRENCY_LIMIT")]
     pub rpc_concurrency_limit: Option<usize>,
 
+    /// Local witness generation concurrency limit
+    #[arg(long, env = "RAIKO2_RPC_LOCAL_WITNESS_CONCURRENCY_LIMIT")]
+    pub rpc_local_witness_concurrency_limit: Option<usize>,
+
     /// RPC retry max attempts (0 disables retry)
     #[arg(long, env = "RAIKO2_RPC_RETRY_MAX_ATTEMPTS")]
     pub rpc_retry_max_attempts: Option<u32>,

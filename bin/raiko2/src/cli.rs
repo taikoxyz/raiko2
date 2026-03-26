@@ -1,6 +1,6 @@
 //! Command-line interface for Raiko V2.
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Raiko V2 - Taiko zkVM Prover Server
@@ -8,6 +8,9 @@ use std::path::PathBuf;
 #[command(name = "raiko2")]
 #[command(version, about, long_about = None)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to configuration file
     #[arg(short, long, env = "RAIKO2_CONFIG")]
     pub config: Option<PathBuf>,
@@ -107,4 +110,25 @@ pub struct Cli {
     /// Exponential retry maximum delay in milliseconds (when `retry_strategy=exponential`)
     #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_DELAY_MS")]
     pub queue_retry_max_delay_ms: Option<u64>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Run a local fixture-backed HTTP server for manual v3 testing
+    FixtureServer(FixtureServerArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct FixtureServerArgs {
+    /// Fixture server host address
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Fixture server port
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    /// Number of in-process queue workers
+    #[arg(long, default_value_t = 1)]
+    pub workers: usize,
 }

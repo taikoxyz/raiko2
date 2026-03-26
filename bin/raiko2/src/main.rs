@@ -28,9 +28,9 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 use crate::config::Config;
-use crate::server::run_server;
+use crate::server::{run_fixture_server, run_server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,6 +44,11 @@ async fn main() -> Result<()> {
     init_logging(&cli);
 
     info!("Starting Raiko V2 Prover Server");
+
+    if let Some(Command::FixtureServer(args)) = &cli.command {
+        run_fixture_server(args).await?;
+        return Ok(());
+    }
 
     // Load configuration
     let config = Config::load(&cli)?;

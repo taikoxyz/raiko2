@@ -8,6 +8,8 @@ pub(crate) struct HoodiTaskMetadata {
     pub(crate) network: String,
     pub(crate) l1_network: String,
     pub(crate) proof_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_mode: Option<String>,
     pub(crate) aggregate_requested: bool,
     pub(crate) proposals: Vec<HoodiProposalTask>,
     pub(crate) aggregate_task_id: Option<String>,

@@ -7,6 +7,7 @@ mod setup;
 mod types;
 
 pub use factory::{PipelineFactory, StaticPipelineFactory};
+pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
 
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
@@ -22,7 +23,6 @@ use raiko2_prover::{
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::RuntimeManager;
-use runtime_observer::RuntimeObserver;
 use std::sync::Arc;
 use std::time::Duration;
 

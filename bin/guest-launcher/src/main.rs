@@ -20,8 +20,8 @@ use raiko2_prover::native::NativeProver;
 use serde::Serialize;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    Elf, HashableKey, ProveRequest as _, Prover as _, ProverClient, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
+    Elf, ExecutionReport, HashableKey, ProveRequest as _, Prover as _, ProverClient,
+    ProvingKey as _, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
 };
 
 #[derive(Parser)]
@@ -78,6 +78,12 @@ struct BenchCycleEntry {
 }
 
 #[derive(Debug, Serialize)]
+struct BenchCountEntry {
+    label: String,
+    count: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct BenchReport {
     stage: &'static str,
     mode: &'static str,
@@ -85,7 +91,15 @@ struct BenchReport {
     input: String,
     public_values: String,
     wall_time_ms: u64,
+    exit_code: Option<u64>,
+    gas: Option<u64>,
+    total_instruction_count: Option<u64>,
+    total_syscall_count: Option<u64>,
+    touched_memory_addresses: Option<u64>,
     cycle_tracker: Vec<BenchCycleEntry>,
+    invocation_tracker: Vec<BenchCountEntry>,
+    opcode_counts: Vec<BenchCountEntry>,
+    syscall_counts: Vec<BenchCountEntry>,
 }
 
 impl Mode {
@@ -115,6 +129,40 @@ impl From<ProofMode> for SP1ProofMode {
             ProofMode::Plonk => SP1ProofMode::Plonk,
         }
     }
+}
+
+fn count_entries(entries: impl Iterator<Item = (String, u64)>) -> Vec<BenchCountEntry> {
+    let mut entries = entries
+        .filter_map(|(label, count)| (count > 0).then_some(BenchCountEntry { label, count }))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.label.cmp(&right.label));
+    entries
+}
+
+fn apply_execution_metadata(report: &mut BenchReport, execution_report: &ExecutionReport) {
+    report.exit_code = Some(execution_report.exit_code);
+    report.gas = execution_report.gas();
+    report.total_instruction_count = Some(execution_report.total_instruction_count());
+    report.total_syscall_count = Some(execution_report.total_syscall_count());
+    report.touched_memory_addresses = Some(execution_report.touched_memory_addresses);
+    report.invocation_tracker = count_entries(
+        execution_report
+            .invocation_tracker
+            .iter()
+            .map(|(label, count)| (label.clone(), *count)),
+    );
+    report.opcode_counts = count_entries(
+        execution_report
+            .opcode_counts
+            .iter()
+            .map(|(label, count)| (format!("{label:?}"), *count)),
+    );
+    report.syscall_counts = count_entries(
+        execution_report
+            .syscall_counts
+            .iter()
+            .map(|(label, count)| (format!("{label:?}"), *count)),
+    );
 }
 
 #[tokio::main]
@@ -216,7 +264,15 @@ async fn run_aggregation(args: Args) -> Result<()> {
         input: output_path.display().to_string(),
         public_values: proof.public_values.raw(),
         wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        exit_code: None,
+        gas: None,
+        total_instruction_count: None,
+        total_syscall_count: None,
+        touched_memory_addresses: None,
         cycle_tracker: Vec::new(),
+        invocation_tracker: Vec::new(),
+        opcode_counts: Vec::new(),
+        syscall_counts: Vec::new(),
     };
 
     let output = build_sp1_proof_output(&proof, pk.verifying_key(), None)?;
@@ -279,7 +335,15 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
         input: input_path.display().to_string(),
         public_values: String::new(),
         wall_time_ms: 0,
+        exit_code: None,
+        gas: None,
+        total_instruction_count: None,
+        total_syscall_count: None,
+        touched_memory_addresses: None,
         cycle_tracker: Vec::new(),
+        invocation_tracker: Vec::new(),
+        opcode_counts: Vec::new(),
+        syscall_counts: Vec::new(),
     };
 
     match args.mode {
@@ -289,6 +353,7 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
                 prover.execute(elf, stdin).await.context("execute failed")?;
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = public_values.raw();
+            apply_execution_metadata(&mut report, &execution_report);
 
             println!("public_values: {}", report.public_values);
             if !execution_report.cycle_tracker.is_empty() {
@@ -366,7 +431,15 @@ async fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput)
                 .map(|h| format!("{h:#x}"))
                 .unwrap_or_else(String::new),
             wall_time_ms,
+            exit_code: None,
+            gas: None,
+            total_instruction_count: None,
+            total_syscall_count: None,
+            touched_memory_addresses: None,
             cycle_tracker: Vec::new(),
+            invocation_tracker: Vec::new(),
+            opcode_counts: Vec::new(),
+            syscall_counts: Vec::new(),
         };
         let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
         fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;

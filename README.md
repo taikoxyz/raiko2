@@ -12,6 +12,45 @@ cargo run -r -p raiko2 -- --config config.toml
 Configuration is loaded from a TOML file via `--config` (or `RAIKO2_CONFIG`). CLI flags and
 environment variables override values from the file.
 
+## Local fixture-backed v3 testing
+
+For manual HTTP testing without external RPC dependencies, run the fixture server:
+
+```bash
+cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
+```
+
+Then submit a real asynchronous v3 request:
+
+```bash
+curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
+  -H 'content-type: application/json' \
+  -d '{
+    "proposals": [{
+      "proposal_id": 3,
+      "l1_inclusion_block_number": 1,
+      "l2_block_numbers": [3],
+      "last_anchor_block_number": 0
+    }],
+    "aggregate": false,
+    "proof_type": "sp1",
+    "network": "taiko_dev",
+    "l1_network": "ethereum",
+    "sp1": {
+      "mode": "execute"
+    }
+  }'
+```
+
+The server returns a `task_id`. Query it with:
+
+```bash
+curl http://127.0.0.1:8087/v3/tasks/<task_id>
+```
+
+For `sp1.mode=execute`, completion returns `proof = null` and the execution report under
+`proposals[].extra_data.sp1`.
+
 ## Features
 
 - Split into focused crates: `primitives`, `protocol`, `pipeline`, `provider`, `engine`, `queue`, `stateless`, `prover`
@@ -248,7 +287,7 @@ The `bench-guest` task measures guest execution costs (cycles + wall time):
 
 1. (Optional) Run `preflight` to dump a `GuestInput` JSON.
 2. Build SP1 guest ELFs with the `bench` feature enabled (docker).
-3. Run `guest-launcher` and collect a JSON report (cycles + wall time).
+3. Run `guest-launcher` and collect a JSON report (execution metadata + cycles + wall time).
 
 Examples:
 

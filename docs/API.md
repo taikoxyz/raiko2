@@ -51,6 +51,12 @@ Content-Type: application/json
   "proof_type": "zk_any",
   "network": "taiko_hoodi",
   "l1_network": "hoodi",
+  "sp1": {
+    "mode": "prove",
+    "prover": "local",
+    "recursion": "plonk",
+    "verify": true
+  },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "prover": "0x0000000000000000000000000000000000000000",
   "blob_proof_type": "kzg_versioned_hash"
@@ -68,6 +74,15 @@ Content-Type: application/json
   - `risc0 -> risc0/<server default runner>`
   - `zk_any -> risc0/<server default runner>`
   - `sgx -> 400`
+- Optional request-scoped prover config may be passed as flattened keys. For `sp1`, the canonical
+  shape is a nested `sp1` object with:
+  - `mode`: `prove` or `execute`
+  - `prover`: `local`, `mock`, or `network`
+  - `recursion`: `core`, `compressed`, or `plonk`
+  - `verify`: `true` or `false`
+- `sp1.mode=execute` is only valid when `proof_type=sp1`.
+- `sp1.mode=execute` requires `aggregate=false`.
+- `sp1.mode=execute` does not support `sp1.prover=network`.
 - `network` and `l1_network` must match an explicitly configured allowed pair.
 - flattened `prover_args` are accepted, but they must not override route/spec selection keys such as
   `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
@@ -153,6 +168,7 @@ GET /v3/tasks/{id}
   "data": {
     "task_id": "task_...",
     "route": "risc0/boundless",
+    "execution_mode": "prove",
     "status": "proving",
     "network": "taiko_hoodi",
     "l1_network": "hoodi",
@@ -200,10 +216,13 @@ aggregate task exists, it becomes `proposals.len()`.
 
 - `data.route` is the canonical resolved route that accepted the request, such as
   `native/local`, `sp1/local`, `risc0/local`, or `risc0/boundless`.
+- `data.execution_mode` is present for SP1 tasks and distinguishes `prove` from `execute`.
 - `data.runtime` is the root task runtime view stored in `runtime.sqlite`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
   `image_ref`, `deployment`, and `offchain`.
+- When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
+  execute report under `proposals[].extra_data.sp1`.
 - `engine_state_present=false` means the HTTP response is serving the last runtime snapshot even
   though the in-memory engine no longer has a live status object for that stage. This preserves
   observability after container restarts, but it does not imply task recovery.

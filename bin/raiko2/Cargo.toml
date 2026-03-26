@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 # Raiko2 crates
 raiko2-primitives.workspace = true
+raiko2-primitives-shasta.workspace = true
+raiko2-protocol-shasta.workspace = true
 raiko2-engine.workspace = true
 raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
@@ -25,7 +27,10 @@ raiko2-queue.workspace = true
 raiko2-runtime.workspace = true
 
 alloy.workspace = true
+alloy-primitives.workspace = true
+alloy-trie.workspace = true
 axum.workspace = true
+reth-ethereum-primitives.workspace = true
 tower-http.workspace = true
 
 # Async runtime
@@ -56,7 +61,3 @@ redis-queue = ["raiko2-queue/redis"]
 [dev-dependencies]
 tower.workspace = true
 http-body-util = "0.1"
-raiko2-primitives-shasta.workspace = true
-reth-ethereum-primitives.workspace = true
-alloy-primitives.workspace = true
-alloy-trie.workspace = true

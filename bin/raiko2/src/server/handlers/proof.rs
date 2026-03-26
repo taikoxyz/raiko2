@@ -8,6 +8,9 @@ use raiko2_engine::{
 };
 use raiko2_pipeline::PipelineKey;
 use raiko2_primitives::{L2BlockRange, Proof};
+use raiko2_prover::sp1::{
+    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1ConfigOverrides,
+};
 use raiko2_queue::{decode_task_id, encode_task_id};
 use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistration};
 use serde::{Deserialize, Serialize};
@@ -123,6 +126,8 @@ pub(crate) struct RegistrationData {
 pub(crate) struct HoodiTaskData {
     task_id: String,
     route: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_mode: Option<String>,
     status: ProofStatus,
     network: String,
     l1_network: String,
@@ -301,6 +306,17 @@ fn validate_prover_args(prover_args: &BTreeMap<String, Value>) -> Result<Option<
     }
 }
 
+fn parse_sp1_prover_args(
+    prover_args: &BTreeMap<String, Value>,
+) -> Result<Option<Sp1ConfigOverrides>, ApiError> {
+    prover_args
+        .get("sp1")
+        .cloned()
+        .map(serde_json::from_value::<Sp1ConfigOverrides>)
+        .transpose()
+        .map_err(|err| ApiError::bad_request(format!("invalid sp1 prover args: {err}")))
+}
+
 fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> {
     let Some((&start, rest)) = numbers.split_first() else {
         return Err(ApiError::bad_request(
@@ -331,6 +347,26 @@ fn validate_batch_request(req: &ShastaProofRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
+    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
+    if sp1_args.is_some() && !matches!(req.proof_type, HoodiProofType::Sp1) {
+        return Err(ApiError::bad_request(
+            "sp1 prover args require proof_type=sp1",
+        ));
+    }
+    if let Some(sp1_args) = &sp1_args
+        && matches!(sp1_args.mode.as_ref(), Some(Sp1ExecutionMode::Execute))
+    {
+        if req.aggregate {
+            return Err(ApiError::bad_request(
+                "sp1.mode=execute does not support aggregate=true",
+            ));
+        }
+        if matches!(sp1_args.prover.as_ref(), Some(Sp1ProverMode::Network)) {
+            return Err(ApiError::bad_request(
+                "sp1.mode=execute does not support sp1.prover=network",
+            ));
+        }
+    }
     for proposal in &req.proposals {
         if proposal.checkpoint.is_some() {
             return Err(ApiError::bad_request(
@@ -347,6 +383,20 @@ fn validate_aggregate_request(req: &AggregateProofRequest) -> Result<(), ApiErro
     if req.proofs.len() < 2 {
         return Err(ApiError::bad_request(
             "proofs must contain at least 2 entries",
+        ));
+    }
+    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
+    if sp1_args.is_some() && !matches!(req.proof_type, HoodiProofType::Sp1) {
+        return Err(ApiError::bad_request(
+            "sp1 prover args require proof_type=sp1",
+        ));
+    }
+    if sp1_args
+        .as_ref()
+        .is_some_and(|sp1_args| matches!(sp1_args.mode.as_ref(), Some(Sp1ExecutionMode::Execute)))
+    {
+        return Err(ApiError::bad_request(
+            "sp1.mode=execute is not supported for aggregation",
         ));
     }
     let _ = validate_prover_args(&req.prover_args)?;
@@ -445,7 +495,7 @@ fn summarize_proposal_task_state(
         match stage.status {
             ProofStatus::Failed | ProofStatus::Cancelled => return stage.clone(),
             ProofStatus::Completed => {
-                if stage.proof.is_some() {
+                if stage.proof.is_some() || stage.extra_data.is_some() {
                     return stage.clone();
                 }
                 saw_progress = true;
@@ -500,11 +550,20 @@ async fn register_batch_task(
     proposal_tasks: &[HoodiProposalTask],
     aggregate_task_id: Option<String>,
 ) -> Result<(), ApiError> {
+    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
     let metadata = HoodiTaskMetadata {
         network_pair: pair.key.clone(),
         network: req.network.clone(),
         l1_network: req.l1_network.clone(),
         proof_type: req.proof_type.as_str().to_string(),
+        execution_mode: matches!(req.proof_type, HoodiProofType::Sp1).then(|| {
+            sp1_args
+                .as_ref()
+                .and_then(|args| args.mode.clone())
+                .unwrap_or(Sp1ExecutionMode::Prove)
+                .as_str()
+                .to_string()
+        }),
         aggregate_requested: req.aggregate,
         proposals: proposal_tasks.to_vec(),
         aggregate_task_id: aggregate_task_id.clone(),
@@ -838,6 +897,8 @@ pub async fn request_aggregation_proof(
         network: req.network.clone(),
         l1_network: req.l1_network.clone(),
         proof_type: req.proof_type.as_str().to_string(),
+        execution_mode: matches!(req.proof_type, HoodiProofType::Sp1)
+            .then(|| Sp1ExecutionMode::Prove.as_str().to_string()),
         aggregate_requested: true,
         proposals: Vec::new(),
         aggregate_task_id: Some(aggregate_task_id),
@@ -1000,6 +1061,7 @@ pub async fn get_task(
         data: HoodiTaskData {
             task_id: id,
             route,
+            execution_mode: metadata.execution_mode.clone(),
             status: root_state.status,
             network,
             l1_network,

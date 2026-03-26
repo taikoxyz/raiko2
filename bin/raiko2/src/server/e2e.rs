@@ -8,233 +8,27 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::Body,
-    extract::Json,
     http::{Request, StatusCode},
-    routing::post,
 };
 use http_body_util::BodyExt;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
-use raiko2_pipeline::{
-    NativeBackend, PipelineKey, Risc0ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, ShastaSpec},
-};
-use raiko2_primitives::{ProofContext, ProofRequest, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+use raiko2_pipeline::PipelineKey;
 use raiko2_prover::BoundlessSubmissionProgress;
-use raiko2_prover::native::NativeProver;
-use raiko2_prover::risc0::{Risc0Config, Risc0Prover};
-use raiko2_provider::Provider;
-use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig, encode_task_id};
-use raiko2_runtime::{RunnerStatus, RuntimeManager, TaskRegistration};
+use raiko2_queue::encode_task_id;
+use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use super::app;
+use super::fixture::{
+    app_with_engine, app_with_native_fixture_engine, base_config, native_fixture_engine,
+    risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc, unique_runtime_root,
+};
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata};
-use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
-
-type NativeFixtureSpec = ShastaSpec<NativeProver, NativeBackend, FixtureProvider>;
-type NativeFixtureEngine = Engine<NativeFixtureSpec>;
-type Risc0FixtureSpec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, FixtureProvider>;
-type Risc0FixtureEngine = Engine<Risc0FixtureSpec>;
-
-fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "{prefix}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    ))
-}
-
-#[derive(Clone)]
-struct FixtureProvider {
-    input: Arc<GuestInput>,
-}
-
-impl FixtureProvider {
-    fn from_repo_test_json() -> Self {
-        // NOTE: Keep this pinned to the repo's `test.json` so the e2e tests also validate the
-        // real-world fixture used by benchmarks and roundtrip tests.
-        let raw = include_str!("../../../../test.json");
-        let mut input: GuestInput =
-            serde_json::from_str(raw).expect("parse test.json as GuestInput");
-        if input.proof_carry_data == Default::default() && !input.witnesses.is_empty() {
-            input.proof_carry_data = build_proof_carry_data(&input);
-        }
-        Self {
-            input: Arc::new(input),
-        }
-    }
-
-    fn witness_for_block(&self, block_number: u64) -> Option<&raiko2_primitives::StatelessInput> {
-        self.input
-            .witnesses
-            .iter()
-            .find(|w| w.block.header.number == block_number)
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for FixtureProvider {
-    async fn batch_blocks(
-        &self,
-        block_numbers: &[u64],
-    ) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
-        let mut out = Vec::with_capacity(block_numbers.len());
-        for block_number in block_numbers {
-            let witness = self
-                .witness_for_block(*block_number)
-                .ok_or_else(|| RaikoError::RPC(format!("fixture missing block {block_number}")))?;
-            out.push(witness.block.clone());
-        }
-        Ok(out)
-    }
-
-    async fn batch_accounts(
-        &self,
-        block_numbers: &[u64],
-        _accounts: &[Vec<alloy_primitives::Address>],
-    ) -> RaikoResult<Vec<alloy_primitives::map::AddressMap<alloy_trie::TrieAccount>>> {
-        let mut out = Vec::with_capacity(block_numbers.len());
-        for block_number in block_numbers {
-            let witness = self.witness_for_block(*block_number).ok_or_else(|| {
-                RaikoError::RPC(format!("fixture missing accounts for block {block_number}"))
-            })?;
-            out.push(witness.accounts.clone());
-        }
-        Ok(out)
-    }
-
-    async fn batch_witnesses(
-        &self,
-        block_numbers: &[u64],
-    ) -> RaikoResult<Vec<raiko2_primitives::ExecutionWitness>> {
-        let mut out = Vec::with_capacity(block_numbers.len());
-        for block_number in block_numbers {
-            let witness = self.witness_for_block(*block_number).ok_or_else(|| {
-                RaikoError::RPC(format!("fixture missing witness for block {block_number}"))
-            })?;
-            out.push(witness.witness.clone());
-        }
-        Ok(out)
-    }
-}
-
-fn base_config() -> Config {
-    let mut config = Config::default();
-    config.prover.guest_system = GuestSystem::Native;
-    config.prover.runner = RunnerKind::Local;
-    config.rpc.pairs = vec![NetworkPairConfig {
-        network: "taiko_dev".to_string(),
-        l1_network: "ethereum".to_string(),
-        l1_rpc: Some("http://localhost:8545".to_string()),
-        l2_rpc: Some("http://localhost:9545".to_string()),
-    }];
-    config
-}
-
-fn native_fixture_engine() -> NativeFixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaNative,
-        NativeProver,
-        NativeBackend,
-        provider,
-    );
-    let ctx = ProofContext::new(
-        ProofRequest {
-            l1_chain_id: 1,
-            l2_chain_id: 167_001,
-            proposal_id: 0,
-            l2_block_range: None,
-            proof_type: "native".to_string(),
-            blob_proof_type: None,
-            prover: None,
-            graffiti: None,
-        },
-        raiko2_primitives::ProverConfig::default(),
-    );
-    Engine::new(spec, ctx)
-}
-
-fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
-    let spec = ShastaSpec::new(
-        PipelineKey::ShastaRisc0,
-        Risc0Prover::new(Risc0Config {
-            bonsai: false,
-            snark: false,
-            mock: true,
-            profile: false,
-            execution_po2: 20,
-            verify: true,
-        }),
-        RISC0_SHASTA_BACKEND,
-        provider,
-    );
-    let ctx = ProofContext::new(
-        ProofRequest {
-            l1_chain_id: 1,
-            l2_chain_id: 167_001,
-            proposal_id: 0,
-            l2_block_range: None,
-            proof_type: "risc0".to_string(),
-            blob_proof_type: None,
-            prover: None,
-            graffiti: None,
-        },
-        context_config,
-    );
-    Engine::with_store_and_scheduler_config(
-        spec,
-        ctx,
-        MemoryStore::new(),
-        SchedulerConfig {
-            lease_duration: Duration::from_secs(60),
-            retry: RetryPolicy::None,
-        },
-    )
-}
-
-fn app_with_engine<S>(
-    config: Config,
-    network_pair: &str,
-    pipeline_key: PipelineKey,
-    engine: Engine<S>,
-) -> AppState
-where
-    S: raiko2_pipeline::PipelineSpec + Send + Sync + 'static,
-    S::Prover: raiko2_prover::Prover<S::Backend, GuestInput = S::GuestInput> + 'static,
-    S::Backend: raiko2_pipeline::ProverBackend + 'static,
-    S::Provider: raiko2_provider::Provider + 'static,
-{
-    let mut factory = StaticPipelineFactory::default();
-    factory.insert(network_pair.to_string(), pipeline_key, Arc::new(engine));
-    AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime: Arc::new(
-            RuntimeManager::new(unique_runtime_root("raiko2-e2e-runtime"))
-                .expect("runtime manager"),
-        ),
-    }
-}
-
-fn app_with_native_fixture_engine(config: Config, engine: NativeFixtureEngine) -> Router {
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
-        engine,
-    );
-    app::build_router(state)
-}
+use crate::config::{GuestSystem, RunnerKind};
+use raiko2_runtime::RuntimeManager;
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -283,42 +77,6 @@ where
         }
     }
     panic!("engine did not drain after 32 steps");
-}
-
-async fn spawn_chain_id_rpc(
-    chain_id: u64,
-) -> Result<(String, tokio::task::JoinHandle<()>), std::io::Error> {
-    let app = Router::new().route(
-        "/",
-        post(move |Json(req): Json<Value>| async move {
-            let id = req.get("id").cloned().unwrap_or(Value::Null);
-            let method = req
-                .get("method")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if method == "eth_chainId" {
-                Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": format!("0x{:x}", chain_id),
-                }))
-            } else {
-                Json(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32601, "message": format!("method not found: {method}") },
-                }))
-            }
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr().expect("listener local_addr");
-    let url = format!("http://{addr}");
-    let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve mock rpc");
-    });
-    Ok((url, handle))
 }
 
 #[tokio::test]
@@ -389,6 +147,113 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
     assert!(
         res["data"].get("error").is_none(),
         "unexpected error: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sp1_execute_returns_execution_metadata() {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum",
+            "sp1": {
+                "mode": "execute"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = res["data"]["task_id"]
+        .as_str()
+        .expect("response task_id")
+        .to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["execution_mode"], "execute");
+    assert_eq!(res["data"]["status"], "completed");
+    assert!(
+        res["data"]["proof"].is_null() || res["data"].get("proof").is_none(),
+        "unexpected root proof payload: {res}"
+    );
+    assert_eq!(res["data"]["proposals"][0]["status"], "completed");
+    assert!(
+        res["data"]["proposals"][0]["proof"].is_null()
+            || res["data"]["proposals"][0].get("proof").is_none(),
+        "unexpected proposal proof payload: {res}"
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["extra_data"]["sp1"]["mode"],
+        "execute"
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["extra_data"]["sp1"]["zkvm"],
+        "sp1"
+    );
+    assert!(
+        res["data"]["proposals"][0]["extra_data"]["sp1"]["public_values"]
+            .as_str()
+            .is_some(),
+        "missing public values: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sp1_execute_rejects_aggregate_requests() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": true,
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum",
+            "sp1": {
+                "mode": "execute"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res["message"],
+        "sp1.mode=execute does not support aggregate=true"
     );
 }
 
@@ -502,6 +367,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: "native".to_string(),
+        execution_mode: None,
         aggregate_requested: false,
         proposals: vec![HoodiProposalTask {
             proposal_id: 3,

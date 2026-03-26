@@ -124,6 +124,7 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
         } else {
             Some(raiko2_prover::sp1::ProverMode::Local)
         },
+        mode: raiko2_prover::sp1::ExecutionMode::Prove,
         verify: true,
     }
 }

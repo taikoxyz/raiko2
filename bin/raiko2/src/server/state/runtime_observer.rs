@@ -385,6 +385,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: "risc0".to_string(),
+                    execution_mode: None,
                     aggregate_requested: false,
                     proposals: vec![HoodiProposalTask {
                         proposal_id: 42,

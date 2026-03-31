@@ -127,6 +127,9 @@
             "SHASTA": {
                 "Timestamp": 9762068932
             },
+            "UZEN": {
+                "Timestamp": 9999999999
+            },
             "CANCUN": "TBD"
         },
         "eip_1559_constants": {
@@ -169,6 +172,9 @@
             },
             "SHASTA": {
                 "Timestamp": 9762068932
+            },
+            "UZEN": {
+                "Timestamp": 9999999999
             },
             "CANCUN": "TBD"
         },
@@ -245,6 +251,9 @@
             },
             "SHASTA": {
                 "Timestamp": 1770296400
+            },
+            "UZEN": {
+                "Timestamp": 9999999999
             },
             "CANCUN": "TBD"
         },

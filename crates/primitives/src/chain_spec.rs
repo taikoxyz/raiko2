@@ -181,7 +181,7 @@ const fn taiko_fork_to_spec_id(_fork_name: &str) -> SpecId {
 fn parse_spec_id_str(value: &str) -> Result<SpecId, String> {
     match value {
         // Taiko-specific forks - use CANCUN as placeholder
-        "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" => Ok(taiko_fork_to_spec_id(value)),
+        "HEKLA" | "ONTAKE" | "PACAYA" | "SHASTA" | "UZEN" => Ok(taiko_fork_to_spec_id(value)),
         // Standard forks - deserialize normally
         _ => serde_json::from_str(&format!("\"{value}\""))
             .map_err(|_| format!("unknown SpecId variant: {value}")),

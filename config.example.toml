@@ -34,6 +34,10 @@ root = "./data/runtime"
 # Server default route.
 # Supported routes:
 #   risc0/local | risc0/boundless | sp1/local | native/local
+#
+# Uzen pipelines (`/v3/proof/batch/uzen`, `uzen-*` queue namespaces) reuse the same aggregation
+# JSON field `shasta_zk_aggregation_input` and other `shasta_*` prover/manifest keys when the wire
+# format matches Shasta; see `docs/API.md`.
 guest_system = "risc0"
 runner = "local"
 

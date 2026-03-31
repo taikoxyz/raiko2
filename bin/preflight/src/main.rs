@@ -98,6 +98,17 @@ struct Args {
     /// Pretty-print JSON output.
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     pretty: bool,
+
+    /// Pipeline family: `shasta` or `uzen` (same `GuestInput`; affects `PipelineKey` only).
+    #[arg(long, default_value = "shasta")]
+    pipeline: PipelineFamily,
+}
+
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum PipelineFamily {
+    #[default]
+    Shasta,
+    Uzen,
 }
 
 #[tokio::main]
@@ -150,7 +161,11 @@ async fn main() -> Result<()> {
     {
         ctx.l2_chain_spec = l2_chain_spec.to_taiko_chain_spec()?;
     }
-    let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
+    let pipeline_key = match args.pipeline {
+        PipelineFamily::Shasta => PipelineKey::ShastaNative,
+        PipelineFamily::Uzen => PipelineKey::UzenNative,
+    };
+    let spec = ShastaSpec::new(pipeline_key, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 
     let start = Instant::now();

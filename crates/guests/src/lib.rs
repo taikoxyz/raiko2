@@ -15,6 +15,16 @@ pub mod risc0 {
             "/elf/risc0_shasta_aggregation.elf"
         ));
     }
+    pub mod uzen {
+        pub const PROPOSAL_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/elf/risc0_uzen_proposal.elf"
+        ));
+        pub const AGGREGATION_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/elf/risc0_uzen_aggregation.elf"
+        ));
+    }
 }
 
 pub mod sp1 {
@@ -26,6 +36,16 @@ pub mod sp1 {
         pub const AGGREGATION_ELF: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/elf/sp1_shasta_aggregation.elf"
+        ));
+    }
+    pub mod uzen {
+        pub const PROPOSAL_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/elf/sp1_uzen_proposal.elf"
+        ));
+        pub const AGGREGATION_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/elf/sp1_uzen_aggregation.elf"
         ));
     }
 }

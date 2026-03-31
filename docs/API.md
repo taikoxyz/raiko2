@@ -2,7 +2,8 @@
 
 ## Overview
 
-Raiko2 exposes an asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation.
+Raiko2 exposes an asynchronous, Hoodi-compatible v3 API for Shasta and Uzen batch proof requests
+and aggregation.
 
 Proof registration is asynchronous. Successful `POST` requests return a `task_id`, and clients
 poll `GET /v3/tasks/{id}` for progress, runtime metadata, and final proof material.
@@ -14,15 +15,18 @@ Related docs:
 - [Development guide](development.md) for local workflows
 - [Operations guide](operations.md) for runtime and deployment
 - [`config.example.toml`](../config.example.toml) for the canonical config shape
-
 The public API surface is:
 
 - `POST /v3/proof/batch/shasta`
+- `POST /v3/proof/batch/uzen`
 - `POST /v3/proof/aggregate`
+- `POST /v3/proof/aggregate/uzen`
 - `GET /v3/tasks/{id}`
 - `POST /v3/tasks/{id}/cancel`
 - `GET /health`
 - `GET /ready`
+
+**Uzen note:** Uzen uses the same JSON request/response shapes as Shasta and the same aggregation config field `shasta_zk_aggregation_input` (and related `shasta_*` keys in `prover_args`). Pipeline identity is selected only by the HTTP path and the runtime `PipelineKey` string (`uzen-*` vs `shasta-*`), which also isolates Redis queue namespaces.
 
 `/v1/...` routes are removed.
 
@@ -135,6 +139,15 @@ proposal-stage tasks and an optional aggregation task.
 }
 ```
 
+## Submit Uzen Batch Proof
+
+```http
+POST /v3/proof/batch/uzen
+Content-Type: application/json
+```
+
+Same request and response schema as **Submit Shasta Batch Proof**. The server routes work to Uzen guest ELFs and `PipelineKey` values (`uzen-risc0-local`, `uzen-sp1-local`, `uzen-native-local`, `uzen-risc0-boundless`). Aggregation still uses `shasta_zk_aggregation_input` in prover config when the wire format matches Shasta.
+
 ## Submit Aggregate Proof
 
 ```http
@@ -189,6 +202,15 @@ Registers an aggregation task for already-produced canonical proof objects.
   }
 }
 ```
+
+## Submit Uzen Aggregate Proof
+
+```http
+POST /v3/proof/aggregate/uzen
+Content-Type: application/json
+```
+
+Same rules and schema as **Submit Aggregate Proof**, but proofs must come from Uzen proposal pipelines (use the Uzen batch path when generating them).
 
 ## Query Task
 

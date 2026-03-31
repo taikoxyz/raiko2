@@ -25,8 +25,10 @@ use std::time::Duration;
 
 use crate::worker::WorkerConfig;
 use async_trait::async_trait;
-use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
+use alloy_primitives::Address;
+use raiko2_pipeline::{Pipeline, PipelineKey, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
+use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, proof_carry_from_proof};
 use raiko2_prover::{Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -673,6 +675,50 @@ where
         }
     }
 
+    fn build_aggregation_config(&self, proofs: &[Proof]) -> Result<serde_json::Value, String> {
+        // Uzen reuses `ShastaZkAggregationGuestInput` and `shasta_zk_aggregation_input` when the
+        // protocol wire format matches Shasta (see `docs/API.md`).
+        if matches!(
+            self.inner.spec.pipeline_key(),
+            PipelineKey::ShastaRisc0Boundless | PipelineKey::UzenRisc0Boundless
+        ) {
+            return Ok(self.inner.context.config.clone());
+        }
+        let image_id = aggregation_image_id_words(proofs)?;
+        let mut block_inputs = Vec::with_capacity(proofs.len());
+        let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
+
+        for (index, proof) in proofs.iter().enumerate() {
+            let input = proof
+                .input
+                .ok_or_else(|| format!("proof {index} missing input"))?;
+            let carry = proof_carry_from_proof(proof)
+                .map_err(|err| format!("proof {index} invalid shasta carry data: {err}"))?
+                .ok_or_else(|| format!("proof {index} missing shasta carry data"))?;
+            block_inputs.push(input);
+            proof_carry_data_vec.push(carry);
+        }
+
+        let mut config = self.inner.context.config.clone();
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        let Some(config_obj) = config.as_object_mut() else {
+            return Err("failed to build aggregation config object".to_string());
+        };
+        config_obj.insert(
+            "shasta_zk_aggregation_input".to_string(),
+            serde_json::to_value(ShastaZkAggregationGuestInput {
+                image_id,
+                block_inputs,
+                proof_carry_data_vec,
+                prover_address: Address::ZERO,
+            })
+            .map_err(|err| format!("failed to serialize aggregation input: {err}"))?,
+        );
+        Ok(config)
+    }
+
     async fn prove_proposal(
         &self,
         task_id: &EngineTaskId,
@@ -780,13 +826,14 @@ where
                     }
                     AggregationSource::Proofs(proofs) => proofs,
                 };
+                let config = self.build_aggregation_config(&proofs)?;
                 let proof = self
                     .inner
                     .spec
                     .prover()
                     .aggregate_with_observer(
                         AggregationGuestInput { proofs },
-                        &self.inner.context.config,
+                        &config,
                         self.inner.spec.backend(),
                         self.inner.observer.as_ref().map(|observer| {
                             Arc::new(EngineProgressObserver {
@@ -805,6 +852,41 @@ where
             }
         }
     }
+}
+
+fn aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], String> {
+    let mut image_id = None;
+    for (index, proof) in proofs.iter().enumerate() {
+        let Some(uuid) = proof.uuid.as_deref() else {
+            continue;
+        };
+        let words = parse_image_id_words(uuid)
+            .map_err(|err| format!("proof {index} invalid uuid/image id: {err}"))?;
+        match image_id {
+            Some(existing) if existing != words => {
+                return Err("proofs do not share the same image id".to_string());
+            }
+            Some(_) => {}
+            None => image_id = Some(words),
+        }
+    }
+
+    Ok(image_id.unwrap_or([0; 8]))
+}
+
+fn parse_image_id_words(raw: &str) -> Result<[u32; 8], String> {
+    let bytes = alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+
+    let mut words = [0u32; 8];
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        words[index] = u32::from_be_bytes(word);
+    }
+    Ok(words)
 }
 
 fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {

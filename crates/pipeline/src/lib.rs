@@ -39,6 +39,10 @@ pub enum PipelineKey {
     ShastaSp1,
     ShastaNative,
     ShastaRisc0Boundless,
+    UzenRisc0,
+    UzenSp1,
+    UzenNative,
+    UzenRisc0Boundless,
 }
 
 impl PipelineKey {
@@ -49,6 +53,10 @@ impl PipelineKey {
             PipelineKey::ShastaSp1 => "shasta-sp1-local",
             PipelineKey::ShastaNative => "shasta-native-local",
             PipelineKey::ShastaRisc0Boundless => "shasta-risc0-boundless",
+            PipelineKey::UzenRisc0 => "uzen-risc0-local",
+            PipelineKey::UzenSp1 => "uzen-sp1-local",
+            PipelineKey::UzenNative => "uzen-native-local",
+            PipelineKey::UzenRisc0Boundless => "uzen-risc0-boundless",
         }
     }
 }

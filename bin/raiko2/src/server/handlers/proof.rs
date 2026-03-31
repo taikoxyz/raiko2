@@ -314,12 +314,59 @@ fn route_for_proof_type(
     })
 }
 
+fn route_for_uzen_proof_type(
+    state: &AppState,
+    proof_type: HoodiProofType,
+) -> Result<RouteSelection, ApiError> {
+    let route = match proof_type {
+        HoodiProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+        HoodiProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+        HoodiProofType::Risc0 => {
+            PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
+        }
+        HoodiProofType::Sgx => {
+            return Err(ApiError::bad_request("proof_type=sgx is not supported"));
+        }
+    };
+
+    let pipeline_key = match route {
+        PipelineRoute {
+            guest_system: GuestSystem::Risc0,
+            runner: RunnerKind::Local,
+        } => PipelineKey::UzenRisc0,
+        PipelineRoute {
+            guest_system: GuestSystem::Risc0,
+            runner: RunnerKind::Boundless,
+        } => PipelineKey::UzenRisc0Boundless,
+        PipelineRoute {
+            guest_system: GuestSystem::Sp1,
+            runner: RunnerKind::Local,
+        } => PipelineKey::UzenSp1,
+        PipelineRoute {
+            guest_system: GuestSystem::Native,
+            runner: RunnerKind::Local,
+        } => PipelineKey::UzenNative,
+        _ => {
+            return Err(ApiError::bad_request("unsupported proving route"));
+        }
+    };
+
+    Ok(RouteSelection {
+        route,
+        pipeline_key,
+    })
+}
+
 fn parse_pipeline_key(raw: &str) -> Result<PipelineKey, ApiError> {
     match raw {
         "shasta-risc0-local" => Ok(PipelineKey::ShastaRisc0),
         "shasta-risc0-boundless" => Ok(PipelineKey::ShastaRisc0Boundless),
         "shasta-sp1-local" => Ok(PipelineKey::ShastaSp1),
         "shasta-native-local" => Ok(PipelineKey::ShastaNative),
+        "uzen-risc0-local" => Ok(PipelineKey::UzenRisc0),
+        "uzen-risc0-boundless" => Ok(PipelineKey::UzenRisc0Boundless),
+        "uzen-sp1-local" => Ok(PipelineKey::UzenSp1),
+        "uzen-native-local" => Ok(PipelineKey::UzenNative),
         _ => Err(ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("unknown pipeline key '{raw}'"),
@@ -461,21 +508,21 @@ fn validate_aggregate_request(
 fn validate_external_proofs(pipeline_key: PipelineKey, proofs: &[Proof]) -> Result<(), ApiError> {
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
-            PipelineKey::ShastaNative => {
+            PipelineKey::ShastaNative | PipelineKey::UzenNative => {
                 if proof.input.is_none() || proof.extra_data.is_none() {
                     return Err(ApiError::bad_request(format!(
                         "proof {index} is missing native aggregation metadata"
                     )));
                 }
             }
-            PipelineKey::ShastaSp1 => {
+            PipelineKey::ShastaSp1 | PipelineKey::UzenSp1 => {
                 if proof.input.is_none() || proof.extra_data.is_none() || proof.uuid.is_none() {
                     return Err(ApiError::bad_request(format!(
                         "proof {index} is missing SP1 aggregation metadata"
                     )));
                 }
             }
-            PipelineKey::ShastaRisc0 => {
+            PipelineKey::ShastaRisc0 | PipelineKey::UzenRisc0 => {
                 if proof.input.is_none()
                     || proof.extra_data.is_none()
                     || proof.uuid.is_none()
@@ -486,7 +533,7 @@ fn validate_external_proofs(pipeline_key: PipelineKey, proofs: &[Proof]) -> Resu
                     )));
                 }
             }
-            PipelineKey::ShastaRisc0Boundless => {
+            PipelineKey::ShastaRisc0Boundless | PipelineKey::UzenRisc0Boundless => {
                 if proof.quote.is_none() {
                     return Err(ApiError::bad_request(format!(
                         "proof {index} is missing receipt metadata"
@@ -534,6 +581,26 @@ fn resolve_submission_context(
 ) -> Result<SubmissionContext, ApiError> {
     let pair = resolved_pair(state, network, l1_network)?;
     let selection = route_for_proof_type(state, proof_type)?;
+    let proof_type = proof_type
+        .canonical_proof_type()
+        .ok_or_else(|| ApiError::bad_request("proof_type=sgx is not supported"))?;
+    let engine = resolve_engine(state, &pair, &selection)?;
+    Ok(SubmissionContext {
+        pair,
+        selection,
+        engine,
+        proof_type,
+    })
+}
+
+fn resolve_uzen_submission_context(
+    state: &AppState,
+    network: &str,
+    l1_network: &str,
+    proof_type: HoodiProofType,
+) -> Result<SubmissionContext, ApiError> {
+    let pair = resolved_pair(state, network, l1_network)?;
+    let selection = route_for_uzen_proof_type(state, proof_type)?;
     let proof_type = proof_type
         .canonical_proof_type()
         .ok_or_else(|| ApiError::bad_request("proof_type=sgx is not supported"))?;
@@ -1212,6 +1279,64 @@ pub async fn request_batch_shasta_proof(
     Ok(registration_response(req.proof_type, public_task_id))
 }
 
+pub async fn request_batch_uzen_proof(
+    State(state): State<AppState>,
+    req: Result<Json<ShastaProofRequest>, JsonRejection>,
+) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
+    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
+    validate_batch_request(&state, &req)?;
+    let SubmissionContext {
+        pair,
+        selection,
+        engine,
+        proof_type,
+    } = resolve_uzen_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
+    let prover_args_json = validate_prover_args(&req.prover_args)?;
+    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
+    let public_task_id = generate_public_task_id();
+
+    info!(
+        "Received hoodi uzen batch request: task_id={}, proposals={}, aggregate={}, route={}, pair={}",
+        public_task_id,
+        req.proposals.len(),
+        req.aggregate,
+        selection.route,
+        pair.key
+    );
+
+    let proposal_tasks =
+        enqueue_batch_proposals(&engine, &req, prover_args_json.as_deref()).await?;
+
+    let aggregate_task_id = if req.aggregate {
+        Some(enqueue_aggregate_from_tasks(&engine, &public_task_id, &proposal_tasks).await?)
+    } else {
+        None
+    };
+    let metadata = build_task_metadata(
+        &pair,
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type,
+            execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
+            aggregate_requested: req.aggregate,
+            proposals: proposal_tasks.clone(),
+            aggregate_task_id: aggregate_task_id.clone(),
+        },
+    );
+
+    register_batch_task(
+        &state,
+        &public_task_id,
+        &selection,
+        &proposal_tasks,
+        metadata,
+    )
+    .await?;
+
+    Ok(registration_response(req.proof_type, public_task_id))
+}
+
 pub async fn request_aggregation_proof(
     State(state): State<AppState>,
     req: Result<Json<AggregateProofRequest>, JsonRejection>,
@@ -1225,6 +1350,41 @@ pub async fn request_aggregation_proof(
         engine,
         proof_type,
     } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
+    validate_external_proofs(selection.pipeline_key, &req.proofs)?;
+    let public_task_id = generate_public_task_id();
+    let aggregate_task_id =
+        enqueue_aggregate_from_proofs(&engine, &public_task_id, req.proofs.clone()).await?;
+    let metadata = build_task_metadata(
+        &pair,
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type,
+            execution_mode: execution_mode_for_sp1(req.proof_type, None),
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(aggregate_task_id.clone()),
+        },
+    );
+
+    register_aggregate_task(&state, &public_task_id, &selection, metadata).await?;
+
+    Ok(registration_response(req.proof_type, public_task_id))
+}
+
+pub async fn request_aggregation_uzen_proof(
+    State(state): State<AppState>,
+    req: Result<Json<AggregateProofRequest>, JsonRejection>,
+) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
+    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
+    validate_aggregate_request(&state, &req)?;
+    let _ = (&req.graffiti, &req.prover, &req.blob_proof_type);
+    let SubmissionContext {
+        pair,
+        selection,
+        engine,
+        proof_type,
+    } = resolve_uzen_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
     validate_external_proofs(selection.pipeline_key, &req.proofs)?;
     let public_task_id = generate_public_task_id();
     let aggregate_task_id =

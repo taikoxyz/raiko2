@@ -12,6 +12,7 @@ use raiko2_pipeline::{
     NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
     ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND},
+    forks::uzen::RISC0_UZEN_BACKEND,
 };
 use raiko2_primitives::{
     Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
@@ -49,6 +50,13 @@ pub(crate) type Sp1FixtureEngine = Engine<Sp1FixtureSpec>;
 
 const FIXTURE_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
 const FIXTURE_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
+
+fn risc0_backend_for_pipeline(pipeline_key: PipelineKey) -> Risc0ShastaBackend {
+    match pipeline_key {
+        PipelineKey::UzenRisc0 | PipelineKey::UzenRisc0Boundless => RISC0_UZEN_BACKEND,
+        _ => RISC0_SHASTA_BACKEND,
+    }
+}
 
 pub(crate) fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -512,15 +520,21 @@ where
 
 #[cfg(test)]
 pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
-    native_fixture_engine_with_observer(None)
+    native_fixture_engine_with_observer(PipelineKey::ShastaNative, None)
+}
+
+#[cfg(test)]
+pub(crate) fn native_fixture_engine_with_pipeline(pipeline_key: PipelineKey) -> NativeFixtureEngine {
+    native_fixture_engine_with_observer(pipeline_key, None)
 }
 
 fn native_fixture_engine_with_observer(
+    pipeline_key: PipelineKey,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
     let spec = FixtureSpec::new(
-        PipelineKey::ShastaNative,
+        pipeline_key,
         NativeProver,
         NativeBackend,
         provider,
@@ -543,19 +557,29 @@ fn native_fixture_engine_with_observer(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Shasta-only helper; uzen e2e uses `risc0_fixture_engine_with_pipeline`.
 pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0FixtureEngine {
-    risc0_fixture_engine_with_observer(context_config, None)
+    risc0_fixture_engine_with_observer(PipelineKey::ShastaRisc0, context_config, None)
+}
+
+#[cfg(test)]
+pub(crate) fn risc0_fixture_engine_with_pipeline(
+    pipeline_key: PipelineKey,
+    context_config: serde_json::Value,
+) -> Risc0FixtureEngine {
+    risc0_fixture_engine_with_observer(pipeline_key, context_config, None)
 }
 
 fn risc0_fixture_engine_with_observer(
+    pipeline_key: PipelineKey,
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
     let spec = FixtureSpec::new(
-        PipelineKey::ShastaRisc0,
+        pipeline_key,
         FixtureRisc0Prover,
-        RISC0_SHASTA_BACKEND,
+        risc0_backend_for_pipeline(pipeline_key),
         provider,
     );
     let ctx = ProofContext::new(
@@ -643,13 +667,9 @@ where
 pub(crate) fn app_with_native_fixture_engine(
     config: Config,
     engine: NativeFixtureEngine,
+    pipeline_key: PipelineKey,
 ) -> Router {
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
-        engine,
-    );
+    let state = app_with_engine(config, "taiko_dev/ethereum", pipeline_key, engine);
     app::build_router(state)
 }
 
@@ -699,7 +719,8 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
 
     let mut factory = StaticPipelineFactory::default();
 
-    let native_engine = native_fixture_engine_with_observer(Some(Arc::clone(&observer)));
+    let native_engine =
+        native_fixture_engine_with_observer(PipelineKey::ShastaNative, Some(Arc::clone(&observer)));
     native_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),
@@ -707,7 +728,11 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(native_engine),
     );
 
-    let risc0_engine = risc0_fixture_engine_with_observer(json!({}), Some(Arc::clone(&observer)));
+    let risc0_engine = risc0_fixture_engine_with_observer(
+        PipelineKey::ShastaRisc0,
+        json!({}),
+        Some(Arc::clone(&observer)),
+    );
     risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),

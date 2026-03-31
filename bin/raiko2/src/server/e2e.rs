@@ -23,12 +23,43 @@ use tower::ServiceExt;
 use super::app;
 use super::fixture::{
     app_with_engine, app_with_native_fixture_engine, base_config, native_fixture_engine,
-    risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc, unique_runtime_root,
+    native_fixture_engine_with_pipeline, risc0_fixture_engine_with_pipeline, sp1_fixture_engine,
+    spawn_chain_id_rpc, unique_runtime_root,
 };
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata};
 use crate::config::{GuestSystem, RunnerKind};
 use raiko2_runtime::RuntimeManager;
+
+/// Which batch proof route + pipeline namespace the in-process e2e exercises.
+#[derive(Clone, Copy, Debug)]
+enum E2eBatchFamily {
+    Shasta,
+    Uzen,
+}
+
+impl E2eBatchFamily {
+    fn native_pipeline_key(self) -> PipelineKey {
+        match self {
+            E2eBatchFamily::Shasta => PipelineKey::ShastaNative,
+            E2eBatchFamily::Uzen => PipelineKey::UzenNative,
+        }
+    }
+
+    fn risc0_pipeline_key(self) -> PipelineKey {
+        match self {
+            E2eBatchFamily::Shasta => PipelineKey::ShastaRisc0,
+            E2eBatchFamily::Uzen => PipelineKey::UzenRisc0,
+        }
+    }
+
+    fn batch_proof_path(self) -> &'static str {
+        match self {
+            E2eBatchFamily::Shasta => "/v3/proof/batch/shasta",
+            E2eBatchFamily::Uzen => "/v3/proof/batch/uzen",
+        }
+    }
+}
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -112,42 +143,48 @@ async fn e2e_ready_ok_with_matching_chain_id() {
 
 #[tokio::test]
 async fn e2e_proposal_proof_native_completes_from_fixture() {
-    let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    for family in [E2eBatchFamily::Shasta, E2eBatchFamily::Uzen] {
+        let config = base_config();
+        let engine = native_fixture_engine_with_pipeline(family.native_pipeline_key());
+        let app = app_with_native_fixture_engine(
+            config,
+            engine.clone(),
+            family.native_pipeline_key(),
+        );
 
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 3,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [3],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "native",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+        let (status, res) = post_json(
+            &app,
+            family.batch_proof_path(),
+            json!({
+                "proposals": [{
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                }],
+                "aggregate": false,
+                "proof_type": "native",
+                "network": "taiko_dev",
+                "l1_network": "ethereum"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        let id = res["data"]["task_id"]
+            .as_str()
+            .expect("response task_id")
+            .to_string();
 
-    drive_engine_to_idle(&engine).await;
+        drive_engine_to_idle(&engine).await;
 
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "completed");
-    assert!(
-        res["data"].get("error").is_none(),
-        "unexpected error: {res}"
-    );
+        let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        assert_eq!(res["data"]["status"], "completed", "family={family:?}");
+        assert!(
+            res["data"].get("error").is_none(),
+            "unexpected error: {res} family={family:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -230,7 +267,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
 async fn e2e_sp1_execute_rejects_aggregate_requests() {
     let config = base_config();
     let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let app = app_with_native_fixture_engine(config, engine, PipelineKey::ShastaNative);
 
     let (status, res) = post_json(
         &app,
@@ -264,7 +301,7 @@ async fn e2e_sp1_execute_rejects_aggregate_requests() {
 async fn e2e_sp1_network_settings_require_network_prover() {
     let config = base_config();
     let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let app = app_with_native_fixture_engine(config, engine, PipelineKey::ShastaNative);
 
     let (status, res) = post_json(
         &app,
@@ -296,43 +333,49 @@ async fn e2e_sp1_network_settings_require_network_prover() {
 
 #[tokio::test]
 async fn e2e_cancel_marks_task_cancelled_without_workers() {
-    let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    for family in [E2eBatchFamily::Shasta, E2eBatchFamily::Uzen] {
+        let config = base_config();
+        let engine = native_fixture_engine_with_pipeline(family.native_pipeline_key());
+        let app = app_with_native_fixture_engine(
+            config,
+            engine,
+            family.native_pipeline_key(),
+        );
 
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 3,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [3],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "native",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+        let (status, res) = post_json(
+            &app,
+            family.batch_proof_path(),
+            json!({
+                "proposals": [{
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                }],
+                "aggregate": false,
+                "proof_type": "native",
+                "network": "taiko_dev",
+                "l1_network": "ethereum"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        let id = res["data"]["task_id"]
+            .as_str()
+            .expect("response task_id")
+            .to_string();
 
-    let (status, res) = post_json(&app, &format!("/v3/tasks/{id}/cancel"), json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "cancelled");
+        let (status, res) = post_json(&app, &format!("/v3/tasks/{id}/cancel"), json!({})).await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        assert_eq!(res["data"]["status"], "cancelled", "family={family:?}");
+    }
 }
 
 #[tokio::test]
 async fn e2e_task_status_turns_proving_after_preflight_progress() {
     let config = base_config();
     let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let app = app_with_native_fixture_engine(config, engine.clone(), PipelineKey::ShastaNative);
 
     let (status, res) = post_json(
         &app,
@@ -510,69 +553,82 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
 
 #[tokio::test]
 async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
-    let mut config = base_config();
-    config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Local;
+    for family in [E2eBatchFamily::Shasta, E2eBatchFamily::Uzen] {
+        let mut config = base_config();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Local;
 
-    let engine = risc0_fixture_engine(json!({
-        "shasta_data_sources": [{
-            "tx_data_from_calldata": [],
-            "tx_data_from_blob": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
-            "blob_commitments": [],
-            "blob_proofs": [],
-            "is_forced_inclusion": false
-        }]
-    }));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0,
-        engine.clone(),
-    );
-    let app = app::build_router(state.clone());
+        let engine = risc0_fixture_engine_with_pipeline(
+            family.risc0_pipeline_key(),
+            json!({
+                "shasta_data_sources": [{
+                    "tx_data_from_calldata": [],
+                    "tx_data_from_blob": [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]],
+                    "blob_commitments": [],
+                    "blob_proofs": [],
+                    "is_forced_inclusion": false
+                }]
+            }),
+        );
+        let state = app_with_engine(
+            config,
+            "taiko_dev/ethereum",
+            family.risc0_pipeline_key(),
+            engine.clone(),
+        );
+        let app = app::build_router(state.clone());
 
-    let (status, res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 3,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [3],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "risc0",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+        let (status, res) = post_json(
+            &app,
+            family.batch_proof_path(),
+            json!({
+                "proposals": [{
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                }],
+                "aggregate": false,
+                "proof_type": "risc0",
+                "network": "taiko_dev",
+                "l1_network": "ethereum"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        let id = res["data"]["task_id"]
+            .as_str()
+            .expect("response task_id")
+            .to_string();
 
-    drive_engine_to_idle(&engine).await;
+        drive_engine_to_idle(&engine).await;
 
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "failed");
-    let error = res["data"]["error"].as_str().expect("error message");
-    assert!(error.contains("RISC0 proposal mock execution failed"));
-    assert!(error.contains("proposal mode blob usage verification failed"));
-    assert!(
-        res["data"].get("proof").is_none(),
-        "unexpected proof in failure response: {res}"
-    );
+        let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "family={family:?}");
+        assert_eq!(res["data"]["status"], "failed", "family={family:?}");
+        let error = res["data"]["error"].as_str().expect("error message");
+        assert!(error.contains("RISC0 proposal mock execution failed"));
+        assert!(error.contains("proposal mode blob usage verification failed"));
+        assert!(
+            res["data"].get("proof").is_none(),
+            "unexpected proof in failure response: {res} family={family:?}"
+        );
 
-    let runtime_task = state
-        .runtime
-        .get_task(&id)
-        .await
-        .expect("read runtime task")
-        .expect("runtime task exists");
-    assert_eq!(runtime_task.runner_status, RunnerStatus::Failed);
-    assert_eq!(runtime_task.error.as_deref(), Some(error));
+        let runtime_task = state
+            .runtime
+            .get_task(&id)
+            .await
+            .expect("read runtime task")
+            .expect("runtime task exists");
+        assert_eq!(
+            runtime_task.runner_status,
+            RunnerStatus::Failed,
+            "family={family:?}"
+        );
+        assert_eq!(
+            runtime_task.error.as_deref(),
+            Some(error),
+            "family={family:?}"
+        );
+    }
 }

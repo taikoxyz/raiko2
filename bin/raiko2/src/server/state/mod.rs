@@ -17,6 +17,7 @@ use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+    forks::uzen::{RISC0_UZEN_BACKEND, SP1_UZEN_BACKEND},
 };
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
@@ -64,61 +65,73 @@ impl AppState {
         let mut factory = StaticPipelineFactory::default();
 
         for pair in &resolved_pairs {
-            let risc0_engine = build_risc0_engine(
-                &config,
-                pair,
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaRisc0,
-                Arc::new(risc0_engine),
-            );
+            for (risc0_key, risc0_backend, boundless_key, sp1_key, sp1_backend, native_key) in [
+                (
+                    PipelineKey::ShastaRisc0,
+                    RISC0_SHASTA_BACKEND,
+                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaSp1,
+                    SP1_SHASTA_BACKEND,
+                    PipelineKey::ShastaNative,
+                ),
+                (
+                    PipelineKey::UzenRisc0,
+                    RISC0_UZEN_BACKEND,
+                    PipelineKey::UzenRisc0Boundless,
+                    PipelineKey::UzenSp1,
+                    SP1_UZEN_BACKEND,
+                    PipelineKey::UzenNative,
+                ),
+            ] {
+                let risc0_engine = build_risc0_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    risc0_key,
+                    risc0_backend,
+                )
+                .await?;
+                risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(pair.key.clone(), risc0_key, Arc::new(risc0_engine));
 
-            let boundless_engine = build_boundless_engine(
-                &config,
-                pair,
-                boundless_scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            boundless_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaRisc0Boundless,
-                Arc::new(boundless_engine),
-            );
+                let boundless_engine = build_boundless_engine(
+                    &config,
+                    pair,
+                    boundless_scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    boundless_key,
+                    risc0_backend,
+                )
+                .await?;
+                boundless_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(pair.key.clone(), boundless_key, Arc::new(boundless_engine));
 
-            let sp1_engine = build_sp1_engine(
-                &config,
-                pair,
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaSp1,
-                Arc::new(sp1_engine),
-            );
+                let sp1_engine = build_sp1_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    sp1_key,
+                    sp1_backend,
+                )
+                .await?;
+                sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(pair.key.clone(), sp1_key, Arc::new(sp1_engine));
 
-            let native_engine = build_native_engine(
-                &config,
-                pair,
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            native_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaNative,
-                Arc::new(native_engine),
-            );
+                let native_engine = build_native_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    native_key,
+                )
+                .await?;
+                native_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(pair.key.clone(), native_key, Arc::new(native_engine));
+            }
         }
 
         Ok(Self {
@@ -135,6 +148,8 @@ async fn build_risc0_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
+    risc0_backend: Risc0ShastaBackend,
 ) -> Result<Engine<Risc0Spec>> {
     let risc0_config = setup::risc0_prover_config(config);
 
@@ -143,9 +158,9 @@ async fn build_risc0_engine(
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaRisc0,
+                pipeline_key,
                 Risc0Prover::new(risc0_config),
-                RISC0_SHASTA_BACKEND,
+                risc0_backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -164,8 +179,7 @@ async fn build_risc0_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Risc0)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaRisc0);
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Risc0Output, EngineTaskKey>::connect(
                         &url,
@@ -174,9 +188,9 @@ async fn build_risc0_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaRisc0,
+                    pipeline_key,
                     Risc0Prover::new(risc0_config),
-                    RISC0_SHASTA_BACKEND,
+                    risc0_backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -206,6 +220,8 @@ async fn build_sp1_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
+    sp1_backend: Sp1ShastaBackend,
 ) -> Result<Engine<Sp1Spec>> {
     let sp1_config = setup::sp1_prover_config(config);
 
@@ -214,9 +230,9 @@ async fn build_sp1_engine(
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Sp1)?;
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaSp1,
+                pipeline_key,
                 Sp1Prover::new(sp1_config),
-                SP1_SHASTA_BACKEND,
+                sp1_backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -235,8 +251,7 @@ async fn build_sp1_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Sp1)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaSp1);
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, Sp1Output, EngineTaskKey>::connect(
                         &url,
@@ -245,9 +260,9 @@ async fn build_sp1_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaSp1,
+                    pipeline_key,
                     Sp1Prover::new(sp1_config),
-                    SP1_SHASTA_BACKEND,
+                    sp1_backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -277,17 +292,13 @@ async fn build_native_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
 ) -> Result<Engine<NativeSpec>> {
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Native)?;
-            let spec = ShastaSpec::new(
-                PipelineKey::ShastaNative,
-                NativeProver,
-                NativeBackend,
-                provider,
-            );
+            let spec = ShastaSpec::new(pipeline_key, NativeProver, NativeBackend, provider);
             Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
@@ -304,11 +315,7 @@ async fn build_native_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Native)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace = setup::queue_namespace(
-                    &config.queue.namespace,
-                    pair,
-                    PipelineKey::ShastaNative,
-                );
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, NativeOutput, EngineTaskKey>::connect(
                         &url,
@@ -316,12 +323,7 @@ async fn build_native_engine(
                         scheduler_config.lease_duration,
                     )
                     .await?;
-                let spec = ShastaSpec::new(
-                    PipelineKey::ShastaNative,
-                    NativeProver,
-                    NativeBackend,
-                    provider,
-                );
+                let spec = ShastaSpec::new(pipeline_key, NativeProver, NativeBackend, provider);
                 Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,
@@ -349,6 +351,8 @@ async fn build_boundless_engine(
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
+    risc0_backend: Risc0ShastaBackend,
 ) -> Result<Engine<BoundlessSpec>> {
     let agent_config = setup::boundless_prover_config(config);
 
@@ -357,9 +361,9 @@ async fn build_boundless_engine(
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaRisc0Boundless,
+                pipeline_key,
                 BoundlessProver::new(agent_config),
-                RISC0_SHASTA_BACKEND,
+                risc0_backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -378,11 +382,7 @@ async fn build_boundless_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Risc0)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace = setup::queue_namespace(
-                    &config.queue.namespace,
-                    pair,
-                    PipelineKey::ShastaRisc0Boundless,
-                );
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, BoundlessOutput, EngineTaskKey>::connect(
                         &url,
@@ -391,9 +391,9 @@ async fn build_boundless_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaRisc0Boundless,
+                    pipeline_key,
                     BoundlessProver::new(agent_config),
-                    RISC0_SHASTA_BACKEND,
+                    risc0_backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(

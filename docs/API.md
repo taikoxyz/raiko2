@@ -53,9 +53,14 @@ Content-Type: application/json
   "l1_network": "hoodi",
   "sp1": {
     "mode": "prove",
-    "prover": "local",
+    "prover": "network",
     "recursion": "plonk",
-    "verify": true
+    "verify": true,
+    "network_mode": "reserved",
+    "fulfillment_strategy": "reserved",
+    "skip_simulation": true,
+    "cycle_limit": 1000000000000,
+    "timeout_secs": 3600
   },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "prover": "0x0000000000000000000000000000000000000000",
@@ -85,12 +90,23 @@ Content-Type: application/json
   - `prover`: `local`, `mock`, or `network`
   - `recursion`: `core`, `compressed`, or `plonk`
   - `verify`: `true` or `false`
+  - `network_mode`: `reserved` or `mainnet` (network prover only)
+  - `fulfillment_strategy`: `reserved`, `hosted`, or `auction` (network prover only)
+  - `skip_simulation`: `true` or `false` (network prover only)
+  - `cycle_limit`: positive integer (network prover only)
+  - `timeout_secs`: positive integer (network prover only)
 - `sp1.mode=execute` is only valid when `proof_type=sp1`.
 - `sp1.mode=execute` requires `aggregate=false`.
 - `sp1.mode=execute` does not support `sp1.prover=network`.
+- `sp1` network-only settings require `sp1.prover=network`.
+- `sp1.network_mode=mainnet` requires `sp1.fulfillment_strategy=auction`.
+- `sp1.network_mode=reserved` requires `sp1.fulfillment_strategy=reserved` or `hosted`.
 - `network` and `l1_network` must match an explicitly configured allowed pair.
 - flattened `prover_args` are accepted, but they must not override route/spec selection keys such as
   `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
+- `NETWORK_PRIVATE_KEY` must be present in the server environment when `sp1.prover=network` is
+  used. `sp1.rpc_url` is an operator config file setting only; it is not accepted in request
+  overrides.
 
 ### Response
 

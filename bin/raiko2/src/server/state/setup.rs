@@ -114,20 +114,7 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
 
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
-    raiko2_prover::sp1::Sp1Config {
-        recursion: if config.prover.sp1.plonk {
-            raiko2_prover::sp1::RecursionMode::Plonk
-        } else {
-            raiko2_prover::sp1::RecursionMode::Compressed
-        },
-        prover: if config.prover.sp1.network {
-            Some(raiko2_prover::sp1::ProverMode::Network)
-        } else {
-            Some(raiko2_prover::sp1::ProverMode::Local)
-        },
-        mode: raiko2_prover::sp1::ExecutionMode::Prove,
-        verify: true,
-    }
+    config.prover.sp1.clone()
 }
 
 pub(crate) fn boundless_prover_config(

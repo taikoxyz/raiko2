@@ -9,7 +9,8 @@ pub mod rpc;
 use alloy::consensus::Header;
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::{ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
 
@@ -51,6 +52,16 @@ pub trait Provider: Send + Sync {
     ) -> RaikoResult<ShastaEventData> {
         Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
             "provider does not support Shasta proposal event lookup".to_string(),
+        ))
+    }
+
+    async fn shasta_data_sources(
+        &self,
+        _l1_chain_spec: &ChainSpec,
+        _proposal_event: &ShastaEventData,
+    ) -> RaikoResult<Vec<InputDataSource>> {
+        Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
+            "provider does not support canonical Shasta data source lookup".to_string(),
         ))
     }
 }

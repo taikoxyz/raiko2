@@ -6,6 +6,7 @@ mod runtime_observer;
 mod setup;
 mod types;
 
+pub(crate) use engine::EngineHandle;
 pub use factory::{PipelineFactory, StaticPipelineFactory};
 pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};

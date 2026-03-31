@@ -20,6 +20,7 @@ async-trait.workspace = true
 futures.workspace = true
 itertools.workspace = true
 raiko2-primitives.workspace = true
+raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 reth-chainspec.workspace = true
 reth-ethereum-primitives.workspace = true

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use raiko2_pipeline::forks::shasta::ShastaSpec;
 use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
-use raiko2_primitives::{ProofContext, ProofRequest, ProverConfig};
+use raiko2_primitives::{ProofContext, ProofRequest, ProverConfig, SupportedChainSpecs};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_provider::NetworkProvider;
 use std::time::Instant;
@@ -108,7 +108,12 @@ async fn main() -> Result<()> {
     config["shasta_l1_inclusion_block_number"] = serde_json::json!(args.l1_inclusion_block_number);
     config["shasta_last_anchor_block_number"] = serde_json::json!(args.last_anchor_block_number);
 
-    let ctx = ProofContext::new(request, config);
+    let mut ctx = ProofContext::new(request, config);
+    if let Some(l2_chain_spec) =
+        SupportedChainSpecs::default().get_chain_spec_with_chain_id(args.l2_chain_id)
+    {
+        ctx.l2_chain_spec = l2_chain_spec.to_taiko_chain_spec()?;
+    }
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 

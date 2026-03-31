@@ -43,8 +43,16 @@ snark = true
 mock = false
 
 [prover.sp1]
-network = true
-plonk = true
+mode = "prove"
+prover = "network"
+recursion = "plonk"
+verify = true
+network_mode = "reserved"
+fulfillment_strategy = "reserved"
+skip_simulation = true
+cycle_limit = 1000000000000
+timeout_secs = 3600
+# rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.boundless]
 offchain = false

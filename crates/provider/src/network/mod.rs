@@ -5,13 +5,16 @@ use alloy::{
 };
 use alloy_primitives::{Address, map::AddressMap};
 use raiko2_primitives::{ExecutionWitness, RaikoResult};
+use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
+use std::time::Duration;
 
 use crate::Provider;
 use crate::rpc::{RpcClientConfig, build_rpc_client};
 
 mod accounts;
+mod blobs;
 mod blocks;
 mod headers;
 mod witness;
@@ -22,6 +25,7 @@ pub struct NetworkProvider {
     l1_provider: DynProvider,
     l2_client: RpcClient,
     l2_provider: DynProvider,
+    http_client: reqwest::Client,
 }
 
 impl NetworkProvider {
@@ -62,12 +66,21 @@ impl NetworkProvider {
         let l2_provider = ProviderBuilder::new()
             .connect_client(l2_client.clone())
             .erased();
+        let mut http_client_builder = reqwest::Client::builder();
+        if config.timeout_ms > 0 {
+            http_client_builder =
+                http_client_builder.timeout(Duration::from_millis(config.timeout_ms));
+        }
+        let http_client = http_client_builder.build().map_err(|e| {
+            raiko2_primitives::RaikoError::RPC(format!("failed to build HTTP client: {e}"))
+        })?;
 
         Ok(Self {
             _l1_client: l1_client,
             l1_provider,
             l2_client,
             l2_provider,
+            http_client,
         })
     }
 }
@@ -101,6 +114,15 @@ impl Provider for NetworkProvider {
         proposal_id: u64,
     ) -> RaikoResult<ShastaEventData> {
         self.fetch_shasta_proposal_event(l1_contract, l1_inclusion_block_number, proposal_id)
+            .await
+    }
+
+    async fn shasta_data_sources(
+        &self,
+        l1_chain_spec: &raiko2_primitives::ChainSpec,
+        proposal_event: &ShastaEventData,
+    ) -> RaikoResult<Vec<InputDataSource>> {
+        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event)
             .await
     }
 }

@@ -37,7 +37,8 @@ curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
     "network": "taiko_dev",
     "l1_network": "ethereum",
     "sp1": {
-      "mode": "execute"
+      "mode": "execute",
+      "prover": "local"
     }
   }'
 ```
@@ -50,6 +51,9 @@ curl http://127.0.0.1:8087/v3/tasks/<task_id>
 
 For `sp1.mode=execute`, completion returns `proof = null` and the execution report under
 `proposals[].extra_data.sp1`.
+
+For `sp1.mode=prove`, the server can use `sp1.prover = network` and submit the request to the
+Succinct network. `sp1.mode=execute` remains local-only.
 
 ## Features
 

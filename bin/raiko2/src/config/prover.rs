@@ -1,5 +1,8 @@
 use anyhow::{Result, bail};
-use raiko2_prover::boundless::{DeploymentConfig, OfferParamsConfig};
+use raiko2_prover::{
+    boundless::{DeploymentConfig, OfferParamsConfig},
+    sp1::Sp1Config,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -170,6 +173,7 @@ impl ProverConfig {
                 bail!("prover.boundless.signer_key must not be empty");
             }
         }
+        self.sp1.validate().map_err(anyhow::Error::msg)?;
 
         Ok(())
     }
@@ -190,22 +194,6 @@ impl Default for Risc0Config {
             bonsai: true,
             snark: true,
             mock: false,
-        }
-    }
-}
-
-/// SP1 configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Sp1Config {
-    pub network: bool,
-    pub plonk: bool,
-}
-
-impl Default for Sp1Config {
-    fn default() -> Self {
-        Self {
-            network: true,
-            plonk: true,
         }
     }
 }

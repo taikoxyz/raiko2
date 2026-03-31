@@ -19,7 +19,7 @@ use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_prover::{
     GuestInputCodec, Prover,
     native::NativeProver,
-    sp1::{ExecutionMode, RecursionMode, Sp1Config, Sp1ConfigOverrides},
+    sp1::{ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides},
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig};
@@ -280,7 +280,16 @@ impl FixtureSp1Prover {
                 RaikoError::InvalidRequestConfig(format!("Failed to parse 'sp1' prover args: {e}"))
             })?
             .unwrap_or_default();
-        Ok(self.config.merged_with(&overrides))
+        let effective_config = self.config.merged_with(&overrides);
+        if overrides.has_network_overrides() && effective_config.prover != ProverMode::Network {
+            return Err(RaikoError::InvalidRequestConfig(
+                "sp1 network-only settings require sp1.prover=network".to_string(),
+            ));
+        }
+        effective_config
+            .validate()
+            .map_err(RaikoError::InvalidRequestConfig)?;
+        Ok(effective_config)
     }
 }
 
@@ -581,9 +590,10 @@ fn sp1_fixture_engine_with_observer(
         PipelineKey::ShastaSp1,
         FixtureSp1Prover::new(Sp1Config {
             recursion: RecursionMode::Plonk,
-            prover: None,
+            prover: ProverMode::Local,
             mode: ExecutionMode::Prove,
             verify: true,
+            ..Sp1Config::default()
         }),
         SP1_SHASTA_BACKEND,
         provider,

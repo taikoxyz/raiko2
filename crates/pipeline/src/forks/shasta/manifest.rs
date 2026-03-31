@@ -1,6 +1,6 @@
 use crate::ManifestBuilder;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
-use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
+use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol::ManifestChainSpec;
 use raiko2_protocol_shasta::shasta::{
@@ -49,10 +49,18 @@ impl ShastaManifestBuilder {
     }
 
     fn build_chain_spec(ctx: &ProofContext) -> ManifestChainSpec {
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .unwrap_or_else(|| ChainSpec {
+                name: "unknown".to_string(),
+                chain_id: ctx.request.l2_chain_id,
+                is_taiko: true,
+                ..Default::default()
+            });
         ManifestChainSpec {
-            name: ctx.l2_chain_spec.inner.chain.to_string(),
-            chain_id: ctx.l2_chain_spec.inner.chain.id(),
-            is_taiko: true,
+            name: chain_spec.name,
+            chain_id: chain_spec.chain_id,
+            is_taiko: chain_spec.is_taiko,
         }
     }
 

@@ -120,6 +120,13 @@ where
             .taiko_manifest(&manifest_ctx, &blocks)
             .await?;
         hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
+        if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty()
+        {
+            let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
+            manifest.data_sources = provider
+                .shasta_data_sources(&l1_chain_spec, &manifest.proposal_event)
+                .await?;
+        }
 
         let witnesses = blocks
             .into_iter()
@@ -153,6 +160,17 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
             name: "unknown".to_string(),
             chain_id: ctx.request.l2_chain_id,
             ..Default::default()
+        })
+}
+
+fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "unsupported l1_chain_id {} for Shasta preflight",
+                ctx.request.l1_chain_id
+            ))
         })
 }
 
@@ -578,7 +596,8 @@ mod tests {
         ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProverConfig, RaikoError,
         RaikoResult, SupportedChainSpecs,
     };
-    use raiko2_protocol_shasta::shasta::ShastaEventData;
+    use raiko2_protocol::InputDataSource;
+    use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
     use raiko2_provider::Provider;
 
     use crate::{NativeBackend, PipelineKey};
@@ -588,6 +607,7 @@ mod tests {
         block: reth_ethereum_primitives::Block,
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
+        data_sources: Vec<InputDataSource>,
     }
 
     #[async_trait::async_trait]
@@ -633,6 +653,14 @@ mod tests {
             _proposal_id: u64,
         ) -> RaikoResult<ShastaEventData> {
             Ok(self.proposal_event.clone())
+        }
+
+        async fn shasta_data_sources(
+            &self,
+            _l1_chain_spec: &raiko2_primitives::ChainSpec,
+            _proposal_event: &ShastaEventData,
+        ) -> RaikoResult<Vec<InputDataSource>> {
+            Ok(self.data_sources.clone())
         }
     }
 
@@ -703,6 +731,7 @@ mod tests {
         last_anchor_block_number: u64,
     ) -> ProofContext {
         let request = ProofRequest {
+            l1_chain_id: 560_048,
             l2_chain_id: 167_013,
             proposal_id,
             l2_block_range: Some(L2BlockRange { start: 1, end: 1 }),
@@ -735,6 +764,7 @@ mod tests {
             block,
             proposal_event,
             l1_headers: vec![origin_header],
+            data_sources: Vec::new(),
         }
     }
 
@@ -780,5 +810,45 @@ mod tests {
 
         let err = spec.preflight(&ctx, &provider).await.expect_err("reject");
         assert!(err.to_string().contains("did not grow"));
+    }
+
+    #[tokio::test]
+    async fn preflight_hydrates_canonical_shasta_data_sources() {
+        let mut provider = sample_provider();
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: vec![B256::from([0x44; 32])],
+                offset: 0u32.try_into().expect("fits in uint24"),
+                timestamp: 777u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: Vec::new(),
+            tx_data_from_blob: vec![vec![1, 2, 3]],
+            blob_commitments: vec![vec![4; 48]],
+            blob_proofs: vec![vec![5; 48]],
+            is_forced_inclusion: false,
+        }];
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.taiko.data_sources.len(), 1);
+        assert_eq!(
+            input.taiko.data_sources[0].tx_data_from_blob,
+            vec![vec![1, 2, 3]]
+        );
+        assert_eq!(
+            input.taiko.data_sources[0].blob_commitments,
+            vec![vec![4; 48]]
+        );
+        assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
     }
 }

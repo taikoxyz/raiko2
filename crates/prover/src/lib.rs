@@ -26,6 +26,9 @@ pub mod boundless;
 pub mod native;
 pub mod risc0;
 pub mod sp1;
+pub use sp1::{
+    Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
+};
 
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
@@ -36,7 +39,6 @@ use risc0_ethereum_contracts_boundless::encode_seal;
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
     /// # Errors
@@ -60,6 +62,7 @@ pub struct BoundlessSubmissionProgress {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProverProgress {
     BoundlessSubmission(BoundlessSubmissionProgress),
+    Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
 #[async_trait::async_trait]

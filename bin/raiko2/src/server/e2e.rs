@@ -13,7 +13,7 @@ use axum::{
 use http_body_util::BodyExt;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
-use raiko2_prover::BoundlessSubmissionProgress;
+use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
@@ -155,6 +155,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Sp1;
     config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
 
     let engine = sp1_fixture_engine(json!({}));
     let state = app_with_engine(
@@ -180,7 +181,8 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
             "network": "taiko_dev",
             "l1_network": "ethereum",
             "sp1": {
-                "mode": "execute"
+                "mode": "execute",
+                "prover": "local"
             }
         }),
     )
@@ -245,7 +247,8 @@ async fn e2e_sp1_execute_rejects_aggregate_requests() {
             "network": "taiko_dev",
             "l1_network": "ethereum",
             "sp1": {
-                "mode": "execute"
+                "mode": "execute",
+                "prover": "local"
             }
         }),
     )
@@ -254,6 +257,40 @@ async fn e2e_sp1_execute_rejects_aggregate_requests() {
     assert_eq!(
         res["message"],
         "sp1.mode=execute does not support aggregate=true"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sp1_network_settings_require_network_prover() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum",
+            "sp1": {
+                "prover": "local",
+                "network_mode": "mainnet"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res["message"],
+        "sp1 network-only settings require sp1.prover=network"
     );
 }
 

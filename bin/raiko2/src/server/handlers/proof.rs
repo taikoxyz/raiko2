@@ -16,11 +16,14 @@ use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistration};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
-use super::super::state::{AppState, ProofStatus};
+use super::super::state::{AppState, EngineHandle, ProofStatus};
 use super::errors::ApiError;
 use crate::config::{GuestSystem, PipelineRoute, ResolvedNetworkPair, RunnerKind};
 use crate::server::task_metadata::{
@@ -204,6 +207,16 @@ pub(crate) struct HoodiTaskRuntimeView {
     quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_network_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_fulfillment_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_skip_simulation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_cycle_limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sp1_timeout_secs: Option<u64>,
 }
 
 struct RouteSelection {
@@ -216,6 +229,28 @@ struct RootTaskState {
     proof: Option<String>,
     error: Option<String>,
     current_index: Option<usize>,
+}
+
+struct TaskLookup {
+    record: raiko2_runtime::RuntimeTaskRecord,
+    metadata: HoodiTaskMetadata,
+    engine: Arc<dyn EngineHandle>,
+}
+
+struct SubmissionContext {
+    pair: ResolvedNetworkPair,
+    selection: RouteSelection,
+    engine: Arc<dyn EngineHandle>,
+}
+
+struct TaskMetadataParams {
+    network: String,
+    l1_network: String,
+    proof_type: HoodiProofType,
+    execution_mode: Option<String>,
+    aggregate_requested: bool,
+    proposals: Vec<HoodiProposalTask>,
+    aggregate_task_id: Option<String>,
 }
 
 fn default_risc0_runner(state: &AppState) -> RunnerKind {
@@ -347,7 +382,29 @@ fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> 
     })
 }
 
-fn validate_batch_request(req: &ShastaProofRequest) -> Result<(), ApiError> {
+fn validate_sp1_request(
+    base_config: &raiko2_prover::sp1::Sp1Config,
+    overrides: Option<&Sp1ConfigOverrides>,
+    aggregate: bool,
+    execute_aggregate_message: &str,
+) -> Result<(), ApiError> {
+    let overrides = overrides.cloned().unwrap_or_default();
+    let effective_config = base_config.merged_with(&overrides);
+    if overrides.has_network_overrides()
+        && !matches!(effective_config.prover, Sp1ProverMode::Network)
+    {
+        return Err(ApiError::bad_request(
+            "sp1 network-only settings require sp1.prover=network",
+        ));
+    }
+    if aggregate && matches!(effective_config.mode, Sp1ExecutionMode::Execute) {
+        return Err(ApiError::bad_request(execute_aggregate_message));
+    }
+    effective_config.validate().map_err(ApiError::bad_request)?;
+    Ok(())
+}
+
+fn validate_batch_request(state: &AppState, req: &ShastaProofRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
@@ -357,19 +414,13 @@ fn validate_batch_request(req: &ShastaProofRequest) -> Result<(), ApiError> {
             "sp1 prover args require proof_type=sp1",
         ));
     }
-    if let Some(sp1_args) = &sp1_args
-        && matches!(sp1_args.mode.as_ref(), Some(Sp1ExecutionMode::Execute))
-    {
-        if req.aggregate {
-            return Err(ApiError::bad_request(
-                "sp1.mode=execute does not support aggregate=true",
-            ));
-        }
-        if matches!(sp1_args.prover.as_ref(), Some(Sp1ProverMode::Network)) {
-            return Err(ApiError::bad_request(
-                "sp1.mode=execute does not support sp1.prover=network",
-            ));
-        }
+    if matches!(req.proof_type, HoodiProofType::Sp1) {
+        validate_sp1_request(
+            &state.config.prover.sp1,
+            sp1_args.as_ref(),
+            req.aggregate,
+            "sp1.mode=execute does not support aggregate=true",
+        )?;
     }
     for proposal in &req.proposals {
         if proposal.checkpoint.is_some() {
@@ -383,7 +434,10 @@ fn validate_batch_request(req: &ShastaProofRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_aggregate_request(req: &AggregateProofRequest) -> Result<(), ApiError> {
+fn validate_aggregate_request(
+    state: &AppState,
+    req: &AggregateProofRequest,
+) -> Result<(), ApiError> {
     if req.proofs.len() < 2 {
         return Err(ApiError::bad_request(
             "proofs must contain at least 2 entries",
@@ -395,13 +449,13 @@ fn validate_aggregate_request(req: &AggregateProofRequest) -> Result<(), ApiErro
             "sp1 prover args require proof_type=sp1",
         ));
     }
-    if sp1_args
-        .as_ref()
-        .is_some_and(|sp1_args| matches!(sp1_args.mode.as_ref(), Some(Sp1ExecutionMode::Execute)))
-    {
-        return Err(ApiError::bad_request(
+    if matches!(req.proof_type, HoodiProofType::Sp1) {
+        validate_sp1_request(
+            &state.config.prover.sp1,
+            sp1_args.as_ref(),
+            true,
             "sp1.mode=execute is not supported for aggregation",
-        ));
+        )?;
     }
     let _ = validate_prover_args(&req.prover_args)?;
     Ok(())
@@ -457,6 +511,38 @@ fn resolved_pair(
         .rpc
         .resolve_pair(network, l1_network)
         .map_err(|err| ApiError::bad_request(err.to_string()))
+}
+
+fn resolve_engine(
+    state: &AppState,
+    pair: &ResolvedNetworkPair,
+    selection: &RouteSelection,
+) -> Result<Arc<dyn EngineHandle>, ApiError> {
+    state
+        .pipelines
+        .get(&pair.key, selection.pipeline_key)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "pipeline not available: {}",
+                selection.pipeline_key.as_str()
+            ))
+        })
+}
+
+fn resolve_submission_context(
+    state: &AppState,
+    network: &str,
+    l1_network: &str,
+    proof_type: HoodiProofType,
+) -> Result<SubmissionContext, ApiError> {
+    let pair = resolved_pair(state, network, l1_network)?;
+    let selection = route_for_proof_type(state, proof_type)?;
+    let engine = resolve_engine(state, &pair, &selection)?;
+    Ok(SubmissionContext {
+        pair,
+        selection,
+        engine,
+    })
 }
 
 fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
@@ -555,30 +641,104 @@ async fn register_batch_task(
     aggregate_task_id: Option<String>,
 ) -> Result<(), ApiError> {
     let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
-    let metadata = HoodiTaskMetadata {
-        network_pair: pair.key.clone(),
-        network: req.network.clone(),
-        l1_network: req.l1_network.clone(),
-        proof_type: req.proof_type.as_str().to_string(),
-        execution_mode: matches!(req.proof_type, HoodiProofType::Sp1).then(|| {
-            sp1_args
-                .as_ref()
-                .and_then(|args| args.mode.clone())
-                .unwrap_or(Sp1ExecutionMode::Prove)
-                .as_str()
-                .to_string()
-        }),
-        aggregate_requested: req.aggregate,
-        proposals: proposal_tasks.to_vec(),
-        aggregate_task_id: aggregate_task_id.clone(),
-        runtime: HoodiRuntimeMetadata::default(),
-    };
-    let proposal_id = proposal_tasks.first().map(|task| task.proposal_id);
-    let proof_ids = proposal_tasks
-        .iter()
-        .map(|task| task.task_id.clone())
-        .collect();
+    let metadata = build_task_metadata(
+        pair,
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type: req.proof_type,
+            execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
+            aggregate_requested: req.aggregate,
+            proposals: proposal_tasks.to_vec(),
+            aggregate_task_id,
+        },
+    );
+    register_runtime_task(
+        state,
+        public_task_id,
+        selection,
+        "hoodi_batch",
+        proposal_tasks.first().map(|task| task.proposal_id),
+        proposal_tasks
+            .iter()
+            .map(|task| task.task_id.clone())
+            .collect(),
+        metadata,
+    )
+    .await
+}
 
+async fn register_aggregate_task(
+    state: &AppState,
+    public_task_id: &str,
+    selection: &RouteSelection,
+    pair: &ResolvedNetworkPair,
+    req: &AggregateProofRequest,
+    aggregate_task_id: String,
+) -> Result<(), ApiError> {
+    let metadata = build_task_metadata(
+        pair,
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type: req.proof_type,
+            execution_mode: execution_mode_for_sp1(req.proof_type, None),
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(aggregate_task_id),
+        },
+    );
+    register_runtime_task(
+        state,
+        public_task_id,
+        selection,
+        "hoodi_aggregate",
+        None,
+        Vec::new(),
+        metadata,
+    )
+    .await
+}
+
+fn execution_mode_for_sp1(
+    proof_type: HoodiProofType,
+    sp1_args: Option<&Sp1ConfigOverrides>,
+) -> Option<String> {
+    matches!(proof_type, HoodiProofType::Sp1).then(|| {
+        sp1_args
+            .and_then(|args| args.mode)
+            .unwrap_or(Sp1ExecutionMode::Prove)
+            .as_str()
+            .to_string()
+    })
+}
+
+fn build_task_metadata(
+    pair: &ResolvedNetworkPair,
+    params: TaskMetadataParams,
+) -> HoodiTaskMetadata {
+    HoodiTaskMetadata {
+        network_pair: pair.key.clone(),
+        network: params.network,
+        l1_network: params.l1_network,
+        proof_type: params.proof_type.as_str().to_string(),
+        execution_mode: params.execution_mode,
+        aggregate_requested: params.aggregate_requested,
+        proposals: params.proposals,
+        aggregate_task_id: params.aggregate_task_id,
+        runtime: HoodiRuntimeMetadata::default(),
+    }
+}
+
+async fn register_runtime_task(
+    state: &AppState,
+    public_task_id: &str,
+    selection: &RouteSelection,
+    task_kind: &str,
+    proposal_id: Option<u64>,
+    proof_ids: Vec<String>,
+    metadata: HoodiTaskMetadata,
+) -> Result<(), ApiError> {
     state
         .runtime
         .register_task(TaskRegistration {
@@ -587,7 +747,7 @@ async fn register_batch_task(
             route: selection.route.to_string(),
             guest_system: selection.route.guest_system.to_string(),
             runner: selection.route.runner.to_string(),
-            task_kind: "hoodi_batch".to_string(),
+            task_kind: task_kind.to_string(),
             proposal_id,
             proof_ids,
             metadata: serde_json::to_value(metadata).map_err(|err| {
@@ -597,6 +757,104 @@ async fn register_batch_task(
         .await
         .map(|_| ())
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+fn build_proposal_task_request(
+    req: &ShastaProofRequest,
+    proposal: &ShastaProposal,
+    prover_args_json: Option<&str>,
+) -> Result<ProposalTaskRequest, ApiError> {
+    Ok(ProposalTaskRequest {
+        proposal_id: proposal.proposal_id,
+        l2_block_range: Some(validate_l2_block_numbers(&proposal.l2_block_numbers)?),
+        l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+        last_anchor_block_number: proposal.last_anchor_block_number,
+        blob_proof_type: req.blob_proof_type.clone(),
+        prover: req.prover.clone(),
+        graffiti: req.graffiti.clone(),
+        prover_args_json: prover_args_json.map(str::to_string),
+    })
+}
+
+async fn enqueue_batch_proposals(
+    engine: &Arc<dyn EngineHandle>,
+    req: &ShastaProofRequest,
+    prover_args_json: Option<&str>,
+) -> Result<Vec<HoodiProposalTask>, ApiError> {
+    let mut proposal_tasks = Vec::with_capacity(req.proposals.len());
+    let mut previous = None;
+
+    for proposal in &req.proposals {
+        let task_request = build_proposal_task_request(req, proposal, prover_args_json)?;
+        let task_id = engine
+            .submit_proposal_proof_with_dependencies(
+                task_request,
+                previous.iter().cloned().collect(),
+            )
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to enqueue proposal proof: {err}"))
+            })?;
+        let encoded_task_id = encode_task_id(&task_id)
+            .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))?;
+        proposal_tasks.push(HoodiProposalTask {
+            proposal_id: proposal.proposal_id,
+            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+            l2_block_numbers: proposal.l2_block_numbers.clone(),
+            last_anchor_block_number: proposal.last_anchor_block_number,
+            task_id: encoded_task_id,
+        });
+        previous = Some(task_id);
+    }
+
+    Ok(proposal_tasks)
+}
+
+async fn enqueue_aggregate_from_tasks(
+    engine: &Arc<dyn EngineHandle>,
+    public_task_id: &str,
+    proposal_tasks: &[HoodiProposalTask],
+) -> Result<String, ApiError> {
+    let (request, proof_tasks) = prepare_aggregate_task(public_task_id, proposal_tasks)?;
+    let task_id = engine
+        .submit_aggregation_proof_from_tasks(request, proof_tasks)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")))?;
+    encode_task_id(&task_id)
+        .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))
+}
+
+async fn enqueue_aggregate_from_proofs(
+    engine: &Arc<dyn EngineHandle>,
+    public_task_id: &str,
+    proofs: Vec<Proof>,
+) -> Result<String, ApiError> {
+    let task_id = engine
+        .submit_aggregation_proof_from_proofs(
+            AggregationTaskRequest {
+                request_id: public_task_id.to_string(),
+                proposal_ids: Vec::new(),
+            },
+            proofs,
+        )
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")))?;
+    encode_task_id(&task_id)
+        .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))
+}
+
+fn registration_response(
+    proof_type: HoodiProofType,
+    public_task_id: String,
+) -> Json<HoodiSuccess<RegistrationData>> {
+    Json(HoodiSuccess {
+        status: "ok",
+        proof_type: proof_type.as_str().to_string(),
+        data: RegistrationData {
+            status: "registered",
+            task_id: public_task_id,
+        },
+    })
 }
 
 fn prepare_aggregate_task(
@@ -619,6 +877,25 @@ fn prepare_aggregate_task(
     Ok((request, proof_tasks))
 }
 
+const fn runner_status_to_proof_status(
+    runner_status: RuntimeRunnerStatus,
+    has_runtime_progress: bool,
+) -> ProofStatus {
+    match runner_status {
+        RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
+        RuntimeRunnerStatus::Failed => ProofStatus::Failed,
+        RuntimeRunnerStatus::Completed => ProofStatus::Completed,
+        RuntimeRunnerStatus::Running if has_runtime_progress => ProofStatus::Proving,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
+    }
+}
+
+fn failed_runtime_error(status: &ProofStatus, runtime_error: Option<&str>) -> Option<String> {
+    matches!(status, ProofStatus::Failed)
+        .then_some(runtime_error.map(str::to_string))
+        .flatten()
+}
+
 fn resolve_root_task_state(
     runner_status: RuntimeRunnerStatus,
     proposals: &[HoodiProposalStatus],
@@ -628,13 +905,7 @@ fn resolve_root_task_state(
 ) -> RootTaskState {
     let computed_root_status = summarize_root_status(proposals, aggregate);
     let status = match computed_root_status {
-        ProofStatus::Pending => match runner_status {
-            RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
-            RuntimeRunnerStatus::Failed => ProofStatus::Failed,
-            RuntimeRunnerStatus::Completed => ProofStatus::Completed,
-            RuntimeRunnerStatus::Running if runtime_has_progress => ProofStatus::Proving,
-            RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
-        },
+        ProofStatus::Pending => runner_status_to_proof_status(runner_status, runtime_has_progress),
         status => {
             if matches!(runner_status, RuntimeRunnerStatus::Cancelled)
                 && !matches!(status, ProofStatus::Completed)
@@ -659,11 +930,7 @@ fn resolve_root_task_state(
     let error = aggregate
         .and_then(|aggregate| aggregate.error.clone())
         .or_else(|| proposals.iter().find_map(|proposal| proposal.error.clone()))
-        .or_else(|| {
-            matches!(status, ProofStatus::Failed)
-                .then_some(runtime_error.map(str::to_string))
-                .flatten()
-        });
+        .or_else(|| failed_runtime_error(&status, runtime_error));
     let current_index = proposals
         .iter()
         .position(|proposal| !matches!(proposal.status, ProofStatus::Completed))
@@ -691,23 +958,181 @@ fn fallback_status_without_engine(
         return status;
     }
 
-    let next_status = match runner_status {
-        RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
-        RuntimeRunnerStatus::Failed => ProofStatus::Failed,
-        RuntimeRunnerStatus::Completed => ProofStatus::Completed,
-        RuntimeRunnerStatus::Running if has_runtime_progress => ProofStatus::Proving,
-        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
-    };
-    let error = next_status
-        .error_message(runtime_error)
-        .map(str::to_string)
-        .or(status.error);
+    let next_status = runner_status_to_proof_status(runner_status, has_runtime_progress);
+    let error = failed_runtime_error(&next_status, runtime_error).or(status.error);
     super::super::state::EngineStatusView {
         status: next_status,
         proof: None,
         error,
         extra_data: None,
     }
+}
+
+async fn load_task_lookup(state: &AppState, id: &str) -> Result<TaskLookup, ApiError> {
+    let record = state
+        .runtime
+        .get_task(id)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load task: {err}")))?
+        .ok_or_else(|| ApiError::not_found(format!("task not found: {id}")))?;
+    let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
+    let pipeline_key = parse_pipeline_key(&record.pipeline_key)?;
+    let engine = state
+        .pipelines
+        .get(&metadata.network_pair, pipeline_key)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("pipeline not available: {}", record.pipeline_key))
+        })?;
+
+    Ok(TaskLookup {
+        record,
+        metadata,
+        engine,
+    })
+}
+
+async fn load_proposal_statuses(
+    engine: &Arc<dyn EngineHandle>,
+    metadata: &HoodiTaskMetadata,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<(Vec<HoodiProposalStatus>, bool), ApiError> {
+    let mut proposals = Vec::with_capacity(metadata.proposals.len());
+    let mut any_engine_state_present = false;
+
+    for (index, proposal) in metadata.proposals.iter().enumerate() {
+        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
+            .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
+        let mut stage_statuses = Vec::with_capacity(3);
+
+        for stage_id in proposal_task_chain_ids(&task_id) {
+            let status = engine
+                .get_status(stage_id)
+                .await
+                .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?;
+            stage_statuses.push(status);
+        }
+
+        let engine_state_present = stage_statuses.iter().any(Option::is_some);
+        any_engine_state_present |= engine_state_present;
+        let runtime = metadata.proposal_runtime(&proposal.task_id);
+        let status = fallback_status_without_engine(
+            summarize_proposal_task_state(&stage_statuses),
+            record.runner_status,
+            runtime.is_some() || metadata.has_runtime_progress(),
+            record.error.as_deref(),
+        );
+        proposals.push(HoodiProposalStatus {
+            index,
+            proposal_id: proposal.proposal_id,
+            task_id: proposal.task_id.clone(),
+            status: status.status.clone(),
+            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+            l2_block_numbers: proposal.l2_block_numbers.clone(),
+            last_anchor_block_number: proposal.last_anchor_block_number,
+            proof: status.proof,
+            error: status.error,
+            runtime: task_runtime_view(runtime, engine_state_present, record.updated_at),
+            extra_data: status.extra_data,
+        });
+    }
+
+    Ok((proposals, any_engine_state_present))
+}
+
+async fn load_aggregate_status(
+    engine: &Arc<dyn EngineHandle>,
+    metadata: &HoodiTaskMetadata,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<(Option<HoodiAggregateStatus>, bool), ApiError> {
+    let Some(task_id) = metadata.aggregate_task_id.as_ref() else {
+        return Ok((None, false));
+    };
+
+    let task_id = decode_task_id::<EngineTaskKey>(task_id)
+        .map_err(|err| ApiError::internal(format!("invalid stored aggregate task id: {err}")))?;
+    let status = engine
+        .get_status(task_id)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to read aggregation status: {err}")))?;
+    let engine_state_present = status.is_some();
+    let status = fallback_status_without_engine(
+        status.map_or(
+            super::super::state::EngineStatusView {
+                status: ProofStatus::Pending,
+                proof: None,
+                error: None,
+                extra_data: None,
+            },
+            |status| status,
+        ),
+        record.runner_status,
+        metadata.aggregate_runtime().is_some() || metadata.has_runtime_progress(),
+        record.error.as_deref(),
+    );
+
+    Ok((
+        Some(HoodiAggregateStatus {
+            task_id: metadata.aggregate_task_id.clone().expect("checked"),
+            status: status.status.clone(),
+            proof: status.proof,
+            error: status.error,
+            runtime: task_runtime_view(
+                metadata.aggregate_runtime(),
+                engine_state_present,
+                record.updated_at,
+            ),
+            extra_data: status.extra_data,
+        }),
+        engine_state_present,
+    ))
+}
+
+fn build_task_data(
+    id: String,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &HoodiTaskMetadata,
+    root_state: RootTaskState,
+    proposals: Vec<HoodiProposalStatus>,
+    aggregate: Option<HoodiAggregateStatus>,
+    root_engine_state_present: bool,
+) -> HoodiTaskData {
+    HoodiTaskData {
+        task_id: id,
+        route: record.route.clone(),
+        execution_mode: metadata.execution_mode.clone(),
+        status: root_state.status,
+        network: metadata.network.clone(),
+        l1_network: metadata.l1_network.clone(),
+        runtime: root_runtime_view(record, metadata, root_engine_state_present),
+        current_index: root_state.current_index,
+        proposals,
+        aggregate,
+        proof: root_state.proof,
+        error: root_state.error,
+    }
+}
+
+async fn cancel_registered_tasks(
+    engine: &Arc<dyn EngineHandle>,
+    metadata: &HoodiTaskMetadata,
+) -> Result<(), ApiError> {
+    for proposal in &metadata.proposals {
+        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
+            .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
+        for stage_task_id in proposal_task_chain_ids(&task_id) {
+            let _ = engine.cancel(stage_task_id).await;
+        }
+    }
+
+    if let Some(task_id) = &metadata.aggregate_task_id {
+        let task_id = decode_task_id::<EngineTaskKey>(task_id).map_err(|err| {
+            ApiError::internal(format!("invalid stored aggregate task id: {err}"))
+        })?;
+        let _ = engine.cancel(task_id).await;
+    }
+
+    Ok(())
 }
 
 fn root_runtime_view(
@@ -747,21 +1172,12 @@ fn task_runtime_view(
         offchain: runtime.offchain,
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
+        sp1_network_mode: runtime.sp1_network_mode,
+        sp1_fulfillment_strategy: runtime.sp1_fulfillment_strategy,
+        sp1_skip_simulation: runtime.sp1_skip_simulation,
+        sp1_cycle_limit: runtime.sp1_cycle_limit,
+        sp1_timeout_secs: runtime.sp1_timeout_secs,
     })
-}
-
-trait ProofStatusExt {
-    fn error_message<'a>(&self, runtime_error: Option<&'a str>) -> Option<&'a str>;
-}
-
-impl ProofStatusExt for ProofStatus {
-    fn error_message<'a>(&self, runtime_error: Option<&'a str>) -> Option<&'a str> {
-        if matches!(self, ProofStatus::Failed) {
-            runtime_error
-        } else {
-            None
-        }
-    }
 }
 
 pub async fn request_batch_shasta_proof(
@@ -769,18 +1185,12 @@ pub async fn request_batch_shasta_proof(
     req: Result<Json<ShastaProofRequest>, JsonRejection>,
 ) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    validate_batch_request(&req)?;
-    let pair = resolved_pair(&state, &req.network, &req.l1_network)?;
-    let selection = route_for_proof_type(&state, req.proof_type)?;
-    let engine = state
-        .pipelines
-        .get(&pair.key, selection.pipeline_key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "pipeline not available: {}",
-                selection.pipeline_key.as_str()
-            ))
-        })?;
+    validate_batch_request(&state, &req)?;
+    let SubmissionContext {
+        pair,
+        selection,
+        engine,
+    } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
     let prover_args_json = validate_prover_args(&req.prover_args)?;
     let public_task_id = generate_public_task_id();
 
@@ -793,52 +1203,11 @@ pub async fn request_batch_shasta_proof(
         pair.key
     );
 
-    let mut proposal_tasks = Vec::with_capacity(req.proposals.len());
-    let mut previous = None;
-    for proposal in &req.proposals {
-        let task_request = ProposalTaskRequest {
-            proposal_id: proposal.proposal_id,
-            l2_block_range: Some(validate_l2_block_numbers(&proposal.l2_block_numbers)?),
-            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-            last_anchor_block_number: proposal.last_anchor_block_number,
-            blob_proof_type: req.blob_proof_type.clone(),
-            prover: req.prover.clone(),
-            graffiti: req.graffiti.clone(),
-            prover_args_json: prover_args_json.clone(),
-        };
-        let task_id = engine
-            .submit_proposal_proof_with_dependencies(
-                task_request,
-                previous.into_iter().collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to enqueue proposal proof: {err}"))
-            })?;
-        let encoded_task_id = encode_task_id(&task_id)
-            .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))?;
-        proposal_tasks.push(HoodiProposalTask {
-            proposal_id: proposal.proposal_id,
-            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-            l2_block_numbers: proposal.l2_block_numbers.clone(),
-            last_anchor_block_number: proposal.last_anchor_block_number,
-            task_id: encoded_task_id,
-        });
-        previous = Some(task_id);
-    }
+    let proposal_tasks =
+        enqueue_batch_proposals(&engine, &req, prover_args_json.as_deref()).await?;
 
     let aggregate_task_id = if req.aggregate {
-        let (request, proof_tasks) = prepare_aggregate_task(&public_task_id, &proposal_tasks)?;
-        let task_id = engine
-            .submit_aggregation_proof_from_tasks(request, proof_tasks)
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to enqueue aggregation proof: {err}"))
-            })?;
-        Some(
-            encode_task_id(&task_id)
-                .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))?,
-        )
+        Some(enqueue_aggregate_from_tasks(&engine, &public_task_id, &proposal_tasks).await?)
     } else {
         None
     };
@@ -854,14 +1223,7 @@ pub async fn request_batch_shasta_proof(
     )
     .await?;
 
-    Ok(Json(HoodiSuccess {
-        status: "ok",
-        proof_type: req.proof_type.as_str().to_string(),
-        data: RegistrationData {
-            status: "registered",
-            task_id: public_task_id,
-        },
-    }))
+    Ok(registration_response(req.proof_type, public_task_id))
 }
 
 pub async fn request_aggregation_proof(
@@ -869,173 +1231,45 @@ pub async fn request_aggregation_proof(
     req: Result<Json<AggregateProofRequest>, JsonRejection>,
 ) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    validate_aggregate_request(&req)?;
+    validate_aggregate_request(&state, &req)?;
     let _ = (&req.graffiti, &req.prover, &req.blob_proof_type);
-    let pair = resolved_pair(&state, &req.network, &req.l1_network)?;
-    let selection = route_for_proof_type(&state, req.proof_type)?;
+    let SubmissionContext {
+        pair,
+        selection,
+        engine,
+    } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
     validate_external_proofs(selection.pipeline_key, &req.proofs)?;
-    let engine = state
-        .pipelines
-        .get(&pair.key, selection.pipeline_key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "pipeline not available: {}",
-                selection.pipeline_key.as_str()
-            ))
-        })?;
     let public_task_id = generate_public_task_id();
+    let aggregate_task_id =
+        enqueue_aggregate_from_proofs(&engine, &public_task_id, req.proofs.clone()).await?;
 
-    let aggregate_engine_task_id = engine
-        .submit_aggregation_proof_from_proofs(
-            AggregationTaskRequest {
-                request_id: public_task_id.clone(),
-                proposal_ids: Vec::new(),
-            },
-            req.proofs.clone(),
-        )
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")))?;
-    let aggregate_task_id = encode_task_id(&aggregate_engine_task_id)
-        .map_err(|err| ApiError::internal(format!("failed to encode task id: {err}")))?;
+    register_aggregate_task(
+        &state,
+        &public_task_id,
+        &selection,
+        &pair,
+        &req,
+        aggregate_task_id,
+    )
+    .await?;
 
-    let metadata = HoodiTaskMetadata {
-        network_pair: pair.key.clone(),
-        network: req.network.clone(),
-        l1_network: req.l1_network.clone(),
-        proof_type: req.proof_type.as_str().to_string(),
-        execution_mode: matches!(req.proof_type, HoodiProofType::Sp1)
-            .then(|| Sp1ExecutionMode::Prove.as_str().to_string()),
-        aggregate_requested: true,
-        proposals: Vec::new(),
-        aggregate_task_id: Some(aggregate_task_id),
-        runtime: HoodiRuntimeMetadata::default(),
-    };
-
-    state
-        .runtime
-        .register_task(TaskRegistration {
-            task_id: public_task_id.clone(),
-            pipeline_key: selection.pipeline_key.as_str().to_string(),
-            route: selection.route.to_string(),
-            guest_system: selection.route.guest_system.to_string(),
-            runner: selection.route.runner.to_string(),
-            task_kind: "hoodi_aggregate".to_string(),
-            proposal_id: None,
-            proof_ids: Vec::new(),
-            metadata: serde_json::to_value(metadata).map_err(|err| {
-                ApiError::internal(format!("failed to serialize metadata: {err}"))
-            })?,
-        })
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))?;
-
-    Ok(Json(HoodiSuccess {
-        status: "ok",
-        proof_type: req.proof_type.as_str().to_string(),
-        data: RegistrationData {
-            status: "registered",
-            task_id: public_task_id,
-        },
-    }))
+    Ok(registration_response(req.proof_type, public_task_id))
 }
 
-#[allow(clippy::too_many_lines)]
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<HoodiSuccess<HoodiTaskData>>, ApiError> {
-    let record = state
-        .runtime
-        .get_task(&id)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load task: {err}")))?
-        .ok_or_else(|| ApiError::not_found(format!("task not found: {id}")))?;
-    let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
-        .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-    let pipeline_key = parse_pipeline_key(&record.pipeline_key)?;
-    let engine = state
-        .pipelines
-        .get(&metadata.network_pair, pipeline_key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!("pipeline not available: {}", record.pipeline_key))
-        })?;
-
-    let mut proposals = Vec::with_capacity(metadata.proposals.len());
-    let mut root_engine_state_present = false;
-    for (index, proposal) in metadata.proposals.iter().enumerate() {
-        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
-            .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
-        let stage_ids = proposal_task_chain_ids(&task_id);
-        let mut stage_statuses = Vec::with_capacity(stage_ids.len());
-        for stage_id in stage_ids {
-            let status = engine
-                .get_status(stage_id)
-                .await
-                .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?;
-            stage_statuses.push(status);
-        }
-        let engine_state_present = stage_statuses.iter().any(Option::is_some);
-        root_engine_state_present |= engine_state_present;
-        let runtime = metadata.proposal_runtime(&proposal.task_id);
-        let status = fallback_status_without_engine(
-            summarize_proposal_task_state(&stage_statuses),
-            record.runner_status,
-            runtime.is_some() || metadata.has_runtime_progress(),
-            record.error.as_deref(),
-        );
-        proposals.push(HoodiProposalStatus {
-            index,
-            proposal_id: proposal.proposal_id,
-            task_id: proposal.task_id.clone(),
-            status: status.status.clone(),
-            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-            l2_block_numbers: proposal.l2_block_numbers.clone(),
-            last_anchor_block_number: proposal.last_anchor_block_number,
-            proof: status.proof,
-            error: status.error,
-            runtime: task_runtime_view(runtime, engine_state_present, record.updated_at),
-            extra_data: status.extra_data,
-        });
-    }
-
-    let aggregate = if let Some(task_id) = metadata.aggregate_task_id.as_ref() {
-        let task_id = decode_task_id::<EngineTaskKey>(task_id).map_err(|err| {
-            ApiError::internal(format!("invalid stored aggregate task id: {err}"))
-        })?;
-        let status = engine.get_status(task_id).await.map_err(|err| {
-            ApiError::internal(format!("failed to read aggregation status: {err}"))
-        })?;
-        let engine_state_present = status.is_some();
-        root_engine_state_present |= engine_state_present;
-        let status = fallback_status_without_engine(
-            status.map_or(
-                super::super::state::EngineStatusView {
-                    status: ProofStatus::Pending,
-                    proof: None,
-                    error: None,
-                    extra_data: None,
-                },
-                |status| status,
-            ),
-            record.runner_status,
-            metadata.aggregate_runtime().is_some() || metadata.has_runtime_progress(),
-            record.error.as_deref(),
-        );
-        Some(HoodiAggregateStatus {
-            task_id: metadata.aggregate_task_id.clone().expect("checked"),
-            status: status.status.clone(),
-            proof: status.proof,
-            error: status.error,
-            runtime: task_runtime_view(
-                metadata.aggregate_runtime(),
-                engine_state_present,
-                record.updated_at,
-            ),
-            extra_data: status.extra_data,
-        })
-    } else {
-        None
-    };
+    let TaskLookup {
+        record,
+        metadata,
+        engine,
+    } = load_task_lookup(&state, &id).await?;
+    let (proposals, proposal_engine_state_present) =
+        load_proposal_statuses(&engine, &metadata, &record).await?;
+    let (aggregate, aggregate_engine_state_present) =
+        load_aggregate_status(&engine, &metadata, &record).await?;
+    let root_engine_state_present = proposal_engine_state_present || aggregate_engine_state_present;
 
     let root_state = resolve_root_task_state(
         record.runner_status,
@@ -1055,29 +1289,21 @@ pub async fn get_task(
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to sync runtime status: {err}")))?;
-    let route = record.route.clone();
-    let network = metadata.network.clone();
-    let l1_network = metadata.l1_network.clone();
-    let runtime = root_runtime_view(&record, &metadata, root_engine_state_present);
     let proof_type = metadata.proof_type.clone();
+    let data = build_task_data(
+        id,
+        &record,
+        &metadata,
+        root_state,
+        proposals,
+        aggregate,
+        root_engine_state_present,
+    );
 
     Ok(Json(HoodiSuccess {
         status: "ok",
         proof_type,
-        data: HoodiTaskData {
-            task_id: id,
-            route,
-            execution_mode: metadata.execution_mode.clone(),
-            status: root_state.status,
-            network,
-            l1_network,
-            runtime,
-            current_index: root_state.current_index,
-            proposals,
-            aggregate,
-            proof: root_state.proof,
-            error: root_state.error,
-        },
+        data,
     }))
 }
 
@@ -1085,35 +1311,10 @@ pub async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<HoodiSuccess<HoodiTaskData>>, ApiError> {
-    let record = state
-        .runtime
-        .get_task(&id)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load task: {err}")))?
-        .ok_or_else(|| ApiError::not_found(format!("task not found: {id}")))?;
-    let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
-        .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-    let pipeline_key = parse_pipeline_key(&record.pipeline_key)?;
-    let engine = state
-        .pipelines
-        .get(&metadata.network_pair, pipeline_key)
-        .ok_or_else(|| {
-            ApiError::not_found(format!("pipeline not available: {}", record.pipeline_key))
-        })?;
-
-    for proposal in &metadata.proposals {
-        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
-            .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
-        for stage_task_id in proposal_task_chain_ids(&task_id) {
-            let _ = engine.cancel(stage_task_id).await;
-        }
-    }
-    if let Some(task_id) = &metadata.aggregate_task_id {
-        let task_id = decode_task_id::<EngineTaskKey>(task_id).map_err(|err| {
-            ApiError::internal(format!("invalid stored aggregate task id: {err}"))
-        })?;
-        let _ = engine.cancel(task_id).await;
-    }
+    let TaskLookup {
+        metadata, engine, ..
+    } = load_task_lookup(&state, &id).await?;
+    cancel_registered_tasks(&engine, &metadata).await?;
 
     state
         .runtime
@@ -1131,33 +1332,58 @@ fn summarize_root_status(
     if proposals.is_empty() {
         return aggregate.map_or(ProofStatus::Pending, |aggregate| aggregate.status.clone());
     }
-    if proposals
-        .iter()
-        .any(|proposal| matches!(proposal.status, ProofStatus::Failed))
-        || aggregate.is_some_and(|aggregate| matches!(aggregate.status, ProofStatus::Failed))
-    {
+    if root_has_status(proposals, aggregate, is_failed) {
         return ProofStatus::Failed;
     }
-    if proposals
-        .iter()
-        .any(|proposal| matches!(proposal.status, ProofStatus::Proving))
-        || aggregate.is_some_and(|aggregate| matches!(aggregate.status, ProofStatus::Proving))
-    {
+    if root_has_status(proposals, aggregate, is_proving) {
         return ProofStatus::Proving;
     }
-    if proposals
-        .iter()
-        .all(|proposal| matches!(proposal.status, ProofStatus::Completed))
-    {
+    if proposals_all_status(proposals, is_completed) {
         return aggregate.map_or(ProofStatus::Completed, |aggregate| aggregate.status.clone());
     }
-    if proposals
-        .iter()
-        .any(|proposal| matches!(proposal.status, ProofStatus::Cancelled))
-    {
+    if proposals_have_status(proposals, is_cancelled) {
         return ProofStatus::Cancelled;
     }
     ProofStatus::Pending
+}
+
+fn root_has_status(
+    proposals: &[HoodiProposalStatus],
+    aggregate: Option<&HoodiAggregateStatus>,
+    predicate: fn(&ProofStatus) -> bool,
+) -> bool {
+    proposals_have_status(proposals, predicate)
+        || aggregate.is_some_and(|aggregate| predicate(&aggregate.status))
+}
+
+fn proposals_have_status(
+    proposals: &[HoodiProposalStatus],
+    predicate: fn(&ProofStatus) -> bool,
+) -> bool {
+    proposals.iter().any(|proposal| predicate(&proposal.status))
+}
+
+fn proposals_all_status(
+    proposals: &[HoodiProposalStatus],
+    predicate: fn(&ProofStatus) -> bool,
+) -> bool {
+    proposals.iter().all(|proposal| predicate(&proposal.status))
+}
+
+const fn is_failed(status: &ProofStatus) -> bool {
+    matches!(status, ProofStatus::Failed)
+}
+
+const fn is_proving(status: &ProofStatus) -> bool {
+    matches!(status, ProofStatus::Proving)
+}
+
+const fn is_completed(status: &ProofStatus) -> bool {
+    matches!(status, ProofStatus::Completed)
+}
+
+const fn is_cancelled(status: &ProofStatus) -> bool {
+    matches!(status, ProofStatus::Cancelled)
 }
 
 const fn runtime_status_from_proof_status(status: &ProofStatus) -> RuntimeRunnerStatus {

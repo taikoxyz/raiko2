@@ -64,7 +64,7 @@ raiko2-guests = { path = "./crates/guests" }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.3", features = ["prove"] }
-sp1-sdk = "6.0.2"
+sp1-sdk = { version = "6.0.2", features = ["network"] }
 
 # Alethia reth (main branch)
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false, features = [

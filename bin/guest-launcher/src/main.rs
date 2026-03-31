@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256, hex};
 use anyhow::{Context, Result};
@@ -17,11 +17,15 @@ use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
+use raiko2_prover::sp1::{
+    ProverMode as Sp1ProverMode, Sp1Config, Sp1FulfillmentStrategy, Sp1NetworkMode,
+};
 use serde::Serialize;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    Elf, ExecutionReport, HashableKey, ProveRequest as _, Prover as _, ProverClient,
-    ProvingKey as _, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey,
+    Elf, ExecutionReport, HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProverClient,
+    ProvingKey as _, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin,
+    SP1VerifyingKey,
 };
 
 #[derive(Parser)]
@@ -50,6 +54,24 @@ struct Args {
     /// Optional path to write a JSON benchmark report.
     #[arg(long)]
     json_out: Option<PathBuf>,
+    /// Override the SP1 prover mode. Defaults to `local` for execute and `network` for prove.
+    #[arg(long, value_enum)]
+    sp1_prover: Option<CliSp1ProverMode>,
+    /// Succinct network mode for SP1 remote proving.
+    #[arg(long, value_enum, default_value = "reserved")]
+    sp1_network_mode: CliSp1NetworkMode,
+    /// Succinct fulfillment strategy for SP1 remote proving.
+    #[arg(long, value_enum, default_value = "reserved")]
+    sp1_fulfillment_strategy: CliSp1FulfillmentStrategy,
+    /// Skip local simulation before submitting an SP1 network proof.
+    #[arg(long, default_value_t = true)]
+    sp1_skip_simulation: bool,
+    /// Cycle limit for SP1 network proving.
+    #[arg(long, default_value_t = 1_000_000_000_000)]
+    sp1_cycle_limit: u64,
+    /// Timeout in seconds when waiting for an SP1 network proof.
+    #[arg(long, default_value_t = 3_600)]
+    sp1_timeout_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -69,6 +91,26 @@ enum ProofMode {
     Core,
     Compressed,
     Plonk,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum CliSp1ProverMode {
+    Mock,
+    Local,
+    Network,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum CliSp1NetworkMode {
+    Reserved,
+    Mainnet,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+enum CliSp1FulfillmentStrategy {
+    Reserved,
+    Hosted,
+    Auction,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +178,73 @@ impl ProofType {
         match self {
             ProofType::Native => RaikoProofType::Native,
             ProofType::Sp1 => RaikoProofType::Sp1,
+        }
+    }
+}
+
+impl Args {
+    fn sp1_config(&self) -> Result<Sp1Config> {
+        let prover = self.sp1_prover.map_or_else(
+            || {
+                if self.mode == Mode::Execute {
+                    Sp1ProverMode::Local
+                } else {
+                    Sp1ProverMode::Network
+                }
+            },
+            Into::into,
+        );
+        let config = Sp1Config {
+            recursion: match self.proof_mode {
+                ProofMode::Core => raiko2_prover::sp1::RecursionMode::Core,
+                ProofMode::Compressed => raiko2_prover::sp1::RecursionMode::Compressed,
+                ProofMode::Plonk => raiko2_prover::sp1::RecursionMode::Plonk,
+            },
+            prover,
+            mode: match self.mode {
+                Mode::Execute => raiko2_prover::sp1::ExecutionMode::Execute,
+                Mode::Prove => raiko2_prover::sp1::ExecutionMode::Prove,
+            },
+            verify: true,
+            network_mode: self.sp1_network_mode.into(),
+            fulfillment_strategy: self.sp1_fulfillment_strategy.into(),
+            skip_simulation: self.sp1_skip_simulation,
+            cycle_limit: self.sp1_cycle_limit,
+            timeout_secs: self.sp1_timeout_secs,
+            rpc_url: None,
+        };
+        config
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .map(|()| config)
+    }
+}
+
+impl From<CliSp1ProverMode> for Sp1ProverMode {
+    fn from(value: CliSp1ProverMode) -> Self {
+        match value {
+            CliSp1ProverMode::Mock => Self::Mock,
+            CliSp1ProverMode::Local => Self::Local,
+            CliSp1ProverMode::Network => Self::Network,
+        }
+    }
+}
+
+impl From<CliSp1NetworkMode> for Sp1NetworkMode {
+    fn from(value: CliSp1NetworkMode) -> Self {
+        match value {
+            CliSp1NetworkMode::Reserved => Self::Reserved,
+            CliSp1NetworkMode::Mainnet => Self::Mainnet,
+        }
+    }
+}
+
+impl From<CliSp1FulfillmentStrategy> for Sp1FulfillmentStrategy {
+    fn from(value: CliSp1FulfillmentStrategy) -> Self {
+        match value {
+            CliSp1FulfillmentStrategy::Reserved => Self::Reserved,
+            CliSp1FulfillmentStrategy::Hosted => Self::Hosted,
+            CliSp1FulfillmentStrategy::Auction => Self::Auction,
         }
     }
 }
@@ -214,6 +323,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
     if args.aggregate.is_empty() {
         anyhow::bail!("missing --aggregate proofs");
     }
+    let sp1_config = args.sp1_config()?;
     let output_path = args
         .output
         .as_ref()
@@ -233,45 +343,99 @@ async fn run_aggregation(args: Args) -> Result<()> {
             .elf(ProofStage::Proposal)
             .context("load SP1 proposal ELF")?,
     );
-    let prover = ProverClient::from_env().await;
-    let proposal_pk = prover
-        .setup(proposal_elf)
-        .await
-        .context("setup SP1 proposal key")?;
-    let proposal_vk = proposal_pk.verifying_key().clone();
-
-    for proof in sp1_proofs {
-        match proof.proof {
-            SP1Proof::Compressed(reduce_proof) => {
-                stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
-            }
-            _ => {
-                anyhow::bail!("aggregation requires compressed proofs");
-            }
-        }
-    }
-
     let elf = Elf::from(
         SP1_SHASTA_BACKEND
             .elf(ProofStage::Aggregation)
             .context("load SP1 aggregation ELF")?,
     );
-    let pk = prover
-        .setup(elf)
-        .await
-        .context("setup SP1 aggregation key")?;
     let start = Instant::now();
-    let proof = prover
-        .prove(&pk, stdin)
-        .mode(args.proof_mode.into())
-        .await
-        .context("prove failed")?;
+    let proof = match sp1_config.prover {
+        Sp1ProverMode::Mock => {
+            let prover = ProverClient::builder().mock().build().await;
+            let proposal_pk = prover
+                .setup(proposal_elf)
+                .await
+                .context("setup SP1 proposal key")?;
+            let proposal_vk = proposal_pk.verifying_key().clone();
+            for proof in sp1_proofs {
+                match proof.proof {
+                    SP1Proof::Compressed(reduce_proof) => {
+                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
+                    }
+                    _ => anyhow::bail!("aggregation requires compressed proofs"),
+                }
+            }
+            let pk = prover
+                .setup(elf)
+                .await
+                .context("setup SP1 aggregation key")?;
+            Sp1ProofOutput {
+                proof: prover
+                    .prove(&pk, stdin)
+                    .mode(args.proof_mode.into())
+                    .await
+                    .context("prove failed")?,
+                vkey: pk.verifying_key().clone(),
+            }
+        }
+        Sp1ProverMode::Local => {
+            let prover = ProverClient::builder().cpu().build().await;
+            let proposal_pk = prover
+                .setup(proposal_elf)
+                .await
+                .context("setup SP1 proposal key")?;
+            let proposal_vk = proposal_pk.verifying_key().clone();
+            for proof in sp1_proofs {
+                match proof.proof {
+                    SP1Proof::Compressed(reduce_proof) => {
+                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
+                    }
+                    _ => anyhow::bail!("aggregation requires compressed proofs"),
+                }
+            }
+            let pk = prover
+                .setup(elf)
+                .await
+                .context("setup SP1 aggregation key")?;
+            Sp1ProofOutput {
+                proof: prover
+                    .prove(&pk, stdin)
+                    .mode(args.proof_mode.into())
+                    .await
+                    .context("prove failed")?,
+                vkey: pk.verifying_key().clone(),
+            }
+        }
+        Sp1ProverMode::Network => {
+            let prover = build_sp1_network_prover(&sp1_config).await?;
+            let proposal_pk = prover
+                .setup(proposal_elf)
+                .await
+                .context("setup SP1 proposal key")?;
+            let proposal_vk = proposal_pk.verifying_key().clone();
+            for proof in sp1_proofs {
+                match proof.proof {
+                    SP1Proof::Compressed(reduce_proof) => {
+                        stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
+                    }
+                    _ => anyhow::bail!("aggregation requires compressed proofs"),
+                }
+            }
+            let pk = prover
+                .setup(elf)
+                .await
+                .context("setup SP1 aggregation key")?;
+            request_network_proof(&prover, &pk, stdin, args.proof_mode.into(), &sp1_config)
+                .await
+                .context("prove failed")?
+        }
+    };
     let report = BenchReport {
         stage: "aggregation",
         mode: args.mode.as_str(),
         proof_mode: args.proof_mode.as_str(),
         input: output_path.display().to_string(),
-        public_values: proof.public_values.raw(),
+        public_values: proof.proof.public_values.raw(),
         wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         exit_code: None,
         gas: None,
@@ -284,7 +448,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
         syscall_counts: Vec::new(),
     };
 
-    let output = build_sp1_proof_output(&proof, pk.verifying_key(), None)?;
+    let output = build_sp1_proof_output(&proof.proof, proof.vkey(), None)?;
     write_proof_json(output_path, &output)?;
 
     println!("public_values: {}", report.public_values);
@@ -325,7 +489,60 @@ fn build_sp1_proof_output(
     })
 }
 
+#[derive(Clone)]
+struct Sp1ProofOutput {
+    proof: SP1ProofWithPublicValues,
+    vkey: SP1VerifyingKey,
+}
+
+impl Sp1ProofOutput {
+    fn vkey(&self) -> &SP1VerifyingKey {
+        &self.vkey
+    }
+}
+
+async fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
+    let private_key = std::env::var("NETWORK_PRIVATE_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .context("NETWORK_PRIVATE_KEY must be set for sp1 network proving")?;
+    let builder = ProverClient::builder()
+        .network_for(config.network_mode.into())
+        .private_key(&private_key);
+    Ok(builder.build().await)
+}
+
+async fn request_network_proof(
+    prover: &NetworkProver,
+    pk: &SP1ProvingKey,
+    stdin: SP1Stdin,
+    proof_mode: SP1ProofMode,
+    config: &Sp1Config,
+) -> Result<Sp1ProofOutput> {
+    let timeout = Duration::from_secs(config.timeout_secs);
+    let request_id = prover
+        .prove(pk, stdin)
+        .mode(proof_mode)
+        .strategy(config.fulfillment_strategy.into())
+        .skip_simulation(config.skip_simulation)
+        .cycle_limit(config.cycle_limit)
+        .timeout(timeout)
+        .request()
+        .await
+        .context("request SP1 network proof")?;
+    eprintln!("sp1 request_id: {request_id}");
+    let proof = prover
+        .wait_proof(request_id, Some(timeout), None)
+        .await
+        .context("wait for SP1 network proof")?;
+    Ok(Sp1ProofOutput {
+        proof,
+        vkey: pk.verifying_key().clone(),
+    })
+}
+
 async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
+    let sp1_config = args.sp1_config()?;
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
 
@@ -334,8 +551,6 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
             .elf(ProofStage::Proposal)
             .context("load SP1 proposal ELF")?,
     );
-
-    let prover = ProverClient::from_env().await;
 
     let mut report = BenchReport {
         stage: "proposal",
@@ -357,6 +572,7 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
 
     match args.mode {
         Mode::Execute => {
+            let prover = ProverClient::builder().light().build().await;
             let start = Instant::now();
             let (public_values, execution_report) =
                 prover.execute(elf, stdin).await.context("execute failed")?;
@@ -374,24 +590,78 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
             }
         }
         Mode::Prove => {
-            let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
             let start = Instant::now();
-            let proof = prover
-                .prove(&pk, stdin)
-                .mode(args.proof_mode.into())
-                .await
-                .context("prove failed")?;
-            report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-            report.public_values = proof.public_values.raw();
-            println!("public_values: {}", report.public_values);
+            match sp1_config.prover {
+                Sp1ProverMode::Mock => {
+                    let prover = ProverClient::builder().mock().build().await;
+                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let proof = prover
+                        .prove(&pk, stdin)
+                        .mode(args.proof_mode.into())
+                        .await
+                        .context("prove failed")?;
+                    report.wall_time_ms =
+                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    report.public_values = proof.public_values.raw();
+                    println!("public_values: {}", report.public_values);
 
-            if let Some(path) = &args.output {
-                let output = build_sp1_proof_output(
-                    &proof,
-                    pk.verifying_key(),
-                    Some(&input.proof_carry_data),
-                )?;
-                write_proof_json(path, &output)?;
+                    if let Some(path) = &args.output {
+                        let output = build_sp1_proof_output(
+                            &proof,
+                            pk.verifying_key(),
+                            Some(&input.proof_carry_data),
+                        )?;
+                        write_proof_json(path, &output)?;
+                    }
+                }
+                Sp1ProverMode::Local => {
+                    let prover = ProverClient::builder().cpu().build().await;
+                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let proof = prover
+                        .prove(&pk, stdin)
+                        .mode(args.proof_mode.into())
+                        .await
+                        .context("prove failed")?;
+                    report.wall_time_ms =
+                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    report.public_values = proof.public_values.raw();
+                    println!("public_values: {}", report.public_values);
+
+                    if let Some(path) = &args.output {
+                        let output = build_sp1_proof_output(
+                            &proof,
+                            pk.verifying_key(),
+                            Some(&input.proof_carry_data),
+                        )?;
+                        write_proof_json(path, &output)?;
+                    }
+                }
+                Sp1ProverMode::Network => {
+                    let prover = build_sp1_network_prover(&sp1_config).await?;
+                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let output = request_network_proof(
+                        &prover,
+                        &pk,
+                        stdin,
+                        args.proof_mode.into(),
+                        &sp1_config,
+                    )
+                    .await
+                    .context("prove failed")?;
+                    report.wall_time_ms =
+                        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    report.public_values = output.proof.public_values.raw();
+                    println!("public_values: {}", report.public_values);
+
+                    if let Some(path) = &args.output {
+                        let output = build_sp1_proof_output(
+                            &output.proof,
+                            output.vkey(),
+                            Some(&input.proof_carry_data),
+                        )?;
+                        write_proof_json(path, &output)?;
+                    }
+                }
             }
         }
     }

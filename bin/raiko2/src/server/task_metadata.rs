@@ -1,4 +1,4 @@
-use raiko2_prover::BoundlessSubmissionProgress;
+use raiko2_prover::{BoundlessSubmissionProgress, Sp1NetworkSubmissionProgress};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -55,6 +55,16 @@ pub(crate) struct HoodiTaskRuntimeMetadata {
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_network_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_fulfillment_strategy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_skip_simulation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_cycle_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_timeout_secs: Option<u64>,
 }
 
 impl HoodiTaskMetadata {
@@ -96,6 +106,30 @@ impl HoodiTaskMetadata {
             .get_or_insert_with(HoodiTaskRuntimeMetadata::default)
             .apply_boundless_submission(progress, updated_at);
     }
+
+    pub(crate) fn upsert_proposal_sp1_network_runtime(
+        &mut self,
+        task_id: &str,
+        progress: &Sp1NetworkSubmissionProgress,
+        updated_at: i64,
+    ) {
+        self.runtime
+            .proposals
+            .entry(task_id.to_string())
+            .or_default()
+            .apply_sp1_network_submission(progress, updated_at);
+    }
+
+    pub(crate) fn upsert_aggregate_sp1_network_runtime(
+        &mut self,
+        progress: &Sp1NetworkSubmissionProgress,
+        updated_at: i64,
+    ) {
+        self.runtime
+            .aggregate
+            .get_or_insert_with(HoodiTaskRuntimeMetadata::default)
+            .apply_sp1_network_submission(progress, updated_at);
+    }
 }
 
 impl HoodiTaskRuntimeMetadata {
@@ -112,5 +146,19 @@ impl HoodiTaskRuntimeMetadata {
         self.offchain = Some(progress.offchain);
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
+    }
+
+    fn apply_sp1_network_submission(
+        &mut self,
+        progress: &Sp1NetworkSubmissionProgress,
+        updated_at: i64,
+    ) {
+        self.updated_at = updated_at;
+        self.provider_request_id = Some(progress.provider_request_id.clone());
+        self.sp1_network_mode = Some(progress.network_mode.as_str().to_string());
+        self.sp1_fulfillment_strategy = Some(progress.fulfillment_strategy.as_str().to_string());
+        self.sp1_skip_simulation = Some(progress.skip_simulation);
+        self.sp1_cycle_limit = Some(progress.cycle_limit);
+        self.sp1_timeout_secs = Some(progress.timeout_secs);
     }
 }

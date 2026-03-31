@@ -13,7 +13,7 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
-    default_executor, default_prover,
+    default_executor, default_prover, get_prover_server,
 };
 use tracing::info;
 
@@ -80,6 +80,146 @@ impl Risc0Prover {
             .map(Some)
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize RISC0 metadata: {e}")))
     }
+
+    fn build_framed_env(input: &[u8]) -> RaikoResult<ExecutorEnv<'_>> {
+        ExecutorEnv::builder()
+            .write_frame(input)
+            .build()
+            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
+    }
+
+    fn build_aggregation_env<'a, T: serde::Serialize>(
+        aggregation_input: &'a T,
+        proofs: &[Proof],
+    ) -> RaikoResult<ExecutorEnv<'a>> {
+        let mut env_builder = ExecutorEnv::builder();
+        env_builder
+            .write(aggregation_input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?;
+
+        for proof in proofs {
+            if let Some(receipt_json) = &proof.quote {
+                let receipt: Receipt = serde_json::from_str(receipt_json).map_err(|e| {
+                    RaikoError::Guest(format!("Failed to parse RISC0 receipt: {e}"))
+                })?;
+                env_builder.add_assumption(receipt);
+            }
+        }
+
+        env_builder
+            .build()
+            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
+    }
+
+    fn compute_image_id(elf: &[u8]) -> RaikoResult<Digest> {
+        compute_image_id(elf)
+            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))
+    }
+
+    fn image_id_hex(image_id: Digest) -> String {
+        alloy_primitives::hex::encode_prefixed(image_id.as_bytes())
+    }
+
+    fn execute_real_proof(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+        stage: &str,
+    ) -> RaikoResult<Receipt> {
+        if self.config.bonsai {
+            return default_prover()
+                .prove_with_opts(env, elf, opts)
+                .map(|info| info.receipt)
+                .map_err(|e| {
+                    tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
+                    RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
+                });
+        }
+
+        let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
+        get_prover_server(opts)
+            .map_err(|e| {
+                RaikoError::Guest(format!(
+                    "Failed to initialize local RISC0 prover server: {e}"
+                ))
+            })?
+            .prove_with_ctx(env, &ctx, elf)
+            .map(|info| info.receipt)
+            .map_err(|e| {
+                tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
+                RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
+            })
+    }
+
+    fn execute_mock_proof<F>(
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: Digest,
+        stage: &str,
+        input_hash: F,
+    ) -> RaikoResult<(Receipt, Option<serde_json::Value>)>
+    where
+        F: FnOnce(&[u8]) -> RaikoResult<B256>,
+    {
+        let session = default_executor().execute(env, elf).map_err(|e| {
+            tracing::error!("Failed to execute RISC0 {} in mock mode: {:?}", stage, e);
+            RaikoError::Guest(format!("RISC0 {stage} mock execution failed: {e}"))
+        })?;
+        let claim = session.receipt_claim.clone().ok_or_else(|| {
+            RaikoError::Guest(format!(
+                "RISC0 {stage} mock execution returned no receipt claim"
+            ))
+        })?;
+        let receipt = Receipt::try_from(FakeReceipt::new(claim)).map_err(|e| {
+            RaikoError::Guest(format!("Failed to convert RISC0 {stage} mock receipt: {e}"))
+        })?;
+
+        let journal_bytes = &receipt.journal.bytes;
+        let extra_data = Self::mock_extra_data(
+            &session,
+            image_id,
+            input_hash(journal_bytes)?,
+            journal_bytes.len(),
+            "mock",
+        )?;
+        Ok((receipt, extra_data))
+    }
+
+    fn execute_proof<F>(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+        image_id: Digest,
+        stage: &str,
+        input_hash: F,
+    ) -> RaikoResult<(Receipt, Option<serde_json::Value>)>
+    where
+        F: FnOnce(&[u8]) -> RaikoResult<B256>,
+    {
+        if self.config.mock {
+            Self::execute_mock_proof(env, elf, image_id, stage, input_hash)
+        } else {
+            self.execute_real_proof(env, elf, opts, stage)
+                .map(|receipt| (receipt, None))
+        }
+    }
+
+    fn finalize_stage(&self, stage: &str, receipt: &Receipt, image_id: Digest) -> RaikoResult<()> {
+        info!("RISC0 {} proof generated successfully", stage);
+        if self.config.mock {
+            info!(
+                "RISC0 mock mode enabled; {} receipt is fake but journal is real",
+                stage
+            );
+        }
+        self.verify_receipt(receipt, image_id)?;
+        if self.config.verify {
+            info!("RISC0 {} proof verified successfully", stage);
+        }
+        Ok(())
+    }
 }
 
 impl GuestInputCodec<GuestInput> for Risc0Prover {
@@ -139,62 +279,18 @@ where
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
-            let env = ExecutorEnv::builder()
-                .write_frame(input.as_ref())
-                .build()
-                .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
-
-            let image_id = compute_image_id(&elf)
-                .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
-
-            let (receipt, extra_data) = if prover_config.mock {
-                let session = default_executor().execute(env, &elf).map_err(|e| {
-                    tracing::error!("Failed to execute RISC0 proposal in mock mode: {:?}", e);
-                    RaikoError::Guest(format!("RISC0 proposal mock execution failed: {e}"))
-                })?;
-                let claim = session.receipt_claim.clone().ok_or_else(|| {
-                    RaikoError::Guest(
-                        "RISC0 proposal mock execution returned no receipt claim".to_string(),
-                    )
-                })?;
-                let receipt = Receipt::try_from(FakeReceipt::new(claim)).map_err(|e| {
-                    RaikoError::Guest(format!(
-                        "Failed to convert RISC0 proposal mock receipt: {e}"
-                    ))
-                })?;
-
-                let journal_bytes = &receipt.journal.bytes;
-                let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
-                let extra_data = Self::mock_extra_data(
-                    &session,
-                    image_id,
-                    input_hash,
-                    journal_bytes.len(),
-                    "mock",
-                )?;
-                (receipt, extra_data)
-            } else {
-                let receipt = default_prover()
-                    .prove_with_opts(env, &elf, &opts)
-                    .map_err(|e| {
-                        tracing::error!("Failed to generate RISC0 proposal proof: {:?}", e);
-                        RaikoError::Guest(format!("RISC0 proposal proof generation failed: {e}"))
-                    })?
-                    .receipt;
-                (receipt, None)
-            };
-
-            info!("RISC0 proposal proof generated successfully");
-            if prover_config.mock {
-                info!("RISC0 mock mode enabled; proposal receipt is fake but journal is real");
-            }
-            Risc0Prover {
-                config: prover_config.clone(),
-            }
-            .verify_receipt(&receipt, image_id)?;
-            if prover_config.verify {
-                info!("RISC0 proposal proof verified successfully");
-            }
+            let prover = Risc0Prover::new(prover_config);
+            let env = Self::build_framed_env(input.as_ref())?;
+            let image_id = Self::compute_image_id(&elf)?;
+            let (receipt, extra_data) = prover.execute_proof(
+                env,
+                &elf,
+                &opts,
+                image_id,
+                "proposal",
+                parse_shasta_proposal_input_hash,
+            )?;
+            prover.finalize_stage("proposal", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
             let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
@@ -210,7 +306,7 @@ where
                 Risc0Response {
                     proof: encode_risc0_proof_payload(&receipt),
                     receipt: receipt_json,
-                    image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
+                    image_id: Self::image_id_hex(image_id),
                     input: input_hash,
                     extra_data: with_shasta_extra_data(&proof_carry_data, "risc0", extra_data)?,
                 }
@@ -240,75 +336,18 @@ where
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
-            let mut env_builder = ExecutorEnv::builder();
-            env_builder.write(&aggregation_input).map_err(|e| {
-                RaikoError::Guest(format!("Failed to write aggregation input: {e}"))
-            })?;
-
-            for proof in &input.proofs {
-                if let Some(receipt_json) = &proof.quote {
-                    let receipt: Receipt = serde_json::from_str(receipt_json).map_err(|e| {
-                        RaikoError::Guest(format!("Failed to parse RISC0 receipt: {e}"))
-                    })?;
-                    env_builder.add_assumption(receipt);
-                }
-            }
-
-            let env = env_builder
-                .build()
-                .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
-
-            let image_id = compute_image_id(&elf)
-                .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
-
-            let (receipt, extra_data) = if prover_config.mock {
-                let session = default_executor().execute(env, &elf).map_err(|e| {
-                    tracing::error!("Failed to execute RISC0 aggregation in mock mode: {:?}", e);
-                    RaikoError::Guest(format!("RISC0 aggregation mock execution failed: {e}"))
-                })?;
-                let claim = session.receipt_claim.clone().ok_or_else(|| {
-                    RaikoError::Guest(
-                        "RISC0 aggregation mock execution returned no receipt claim".to_string(),
-                    )
-                })?;
-                let receipt = Receipt::try_from(FakeReceipt::new(claim)).map_err(|e| {
-                    RaikoError::Guest(format!(
-                        "Failed to convert RISC0 aggregation mock receipt: {e}"
-                    ))
-                })?;
-
-                let journal_bytes = &receipt.journal.bytes;
-                let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes);
-                let extra_data = Self::mock_extra_data(
-                    &session,
-                    image_id,
-                    agg_input_hash,
-                    journal_bytes.len(),
-                    "mock",
-                )?;
-                (receipt, extra_data)
-            } else {
-                let receipt = default_prover()
-                    .prove_with_opts(env, &elf, &opts)
-                    .map_err(|e| {
-                        tracing::error!("Failed to generate RISC0 aggregation proof: {:?}", e);
-                        RaikoError::Guest(format!("RISC0 aggregation proof generation failed: {e}"))
-                    })?
-                    .receipt;
-                (receipt, None)
-            };
-
-            info!("RISC0 aggregation proof generated successfully");
-            if prover_config.mock {
-                info!("RISC0 mock mode enabled; aggregation receipt is fake but journal is real");
-            }
-            Risc0Prover {
-                config: prover_config.clone(),
-            }
-            .verify_receipt(&receipt, image_id)?;
-            if prover_config.verify {
-                info!("RISC0 aggregation proof verified successfully");
-            }
+            let prover = Risc0Prover::new(prover_config);
+            let env = Self::build_aggregation_env(&aggregation_input, &input.proofs)?;
+            let image_id = Self::compute_image_id(&elf)?;
+            let (receipt, extra_data) = prover.execute_proof(
+                env,
+                &elf,
+                &opts,
+                image_id,
+                "aggregation",
+                |journal_bytes| Ok(parse_shasta_aggregation_input_hash(journal_bytes)),
+            )?;
+            prover.finalize_stage("aggregation", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
             let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes);
@@ -319,7 +358,7 @@ where
                 Risc0Response {
                     proof: encode_risc0_proof_payload(&receipt),
                     receipt: receipt_json,
-                    image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
+                    image_id: Self::image_id_hex(image_id),
                     input: agg_input_hash,
                     extra_data,
                 }

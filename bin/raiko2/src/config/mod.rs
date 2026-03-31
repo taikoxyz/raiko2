@@ -14,7 +14,6 @@ mod validation;
 
 pub use prover::{GuestSystem, PipelineRoute, ProverConfig, RunnerKind};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
-#[allow(unused_imports)]
 pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
@@ -49,32 +48,10 @@ impl Config {
         }
 
         if let Some(l1_rpc) = &cli.l1_rpc {
-            config.rpc.l1_rpc.clone_from(l1_rpc);
-            if config.rpc.pairs.len() == 1 {
-                config.rpc.pairs[0].l1_rpc = Some(l1_rpc.clone());
-            }
+            override_single_rpc_pair(&mut config.rpc, |pair| pair.l1_rpc = Some(l1_rpc.clone()))?;
         }
         if let Some(l2_rpc) = &cli.l2_rpc {
-            config.rpc.l2_rpc.clone_from(l2_rpc);
-            if config.rpc.pairs.len() == 1 {
-                config.rpc.pairs[0].l2_rpc = Some(l2_rpc.clone());
-            }
-        }
-        if let Some(l1_chain_id) = cli.l1_chain_id {
-            if !config.rpc.pairs.is_empty() {
-                anyhow::bail!(
-                    "--l1-chain-id cannot override rpc.pairs; choose the L1 network in config instead"
-                );
-            }
-            config.rpc.l1_chain_id = l1_chain_id;
-        }
-        if let Some(l2_chain_id) = cli.l2_chain_id {
-            if !config.rpc.pairs.is_empty() {
-                anyhow::bail!(
-                    "--l2-chain-id cannot override rpc.pairs; choose the L2 network in config instead"
-                );
-            }
-            config.rpc.l2_chain_id = l2_chain_id;
+            override_single_rpc_pair(&mut config.rpc, |pair| pair.l2_rpc = Some(l2_rpc.clone()))?;
         }
         if let Some(timeout_ms) = cli.rpc_timeout_ms {
             config.rpc.client.timeout_ms = timeout_ms;
@@ -163,6 +140,17 @@ impl Config {
     }
 }
 
+fn override_single_rpc_pair(
+    rpc_config: &mut RpcConfig,
+    update: impl FnOnce(&mut NetworkPairConfig),
+) -> Result<()> {
+    let [pair] = rpc_config.pairs.as_mut_slice() else {
+        anyhow::bail!("RPC CLI endpoint overrides require exactly one rpc.pairs entry");
+    };
+    update(pair);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,10 +205,12 @@ mod tests {
     #[test]
     fn test_rpc_config_valid_urls() {
         let config = RpcConfig {
-            l1_rpc: "https://eth.llamarpc.com".to_string(),
-            l2_rpc: "wss://taiko-rpc.example.com".to_string(),
-            l1_chain_id: 1,
-            l2_chain_id: 167000,
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_hoodi".to_string(),
+                l1_network: "hoodi".to_string(),
+                l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
+            }],
             ..Default::default()
         };
         assert!(config.validate().is_ok());
@@ -229,10 +219,12 @@ mod tests {
     #[test]
     fn test_rpc_config_invalid_l1_url() {
         let config = RpcConfig {
-            l1_rpc: "not-a-valid-url".to_string(),
-            l2_rpc: "http://localhost:9545".to_string(),
-            l1_chain_id: 1,
-            l2_chain_id: 167000,
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_hoodi".to_string(),
+                l1_network: "hoodi".to_string(),
+                l1_rpc: Some("not-a-valid-url".to_string()),
+                l2_rpc: Some("http://localhost:9545".to_string()),
+            }],
             ..Default::default()
         };
         let result = config.validate();
@@ -241,12 +233,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rpc_config_invalid_chain_id() {
+    fn test_rpc_config_requires_pairs() {
         let config = RpcConfig {
-            l1_rpc: "http://localhost:8545".to_string(),
-            l2_rpc: "http://localhost:9545".to_string(),
-            l1_chain_id: 0,
-            l2_chain_id: 167000,
+            pairs: Vec::new(),
             ..Default::default()
         };
         assert!(config.validate().is_err());
@@ -311,10 +300,9 @@ host = "127.0.0.1"
 port = 9090
 
 [rpc]
-l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com"
-l2_rpc = "http://34.71.217.85:8545"
-l1_chain_id = 560048
-l2_chain_id = 167013
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "http://34.71.217.85:8545" },
+]
 
 [prover]
 guest_system = "native"
@@ -333,8 +321,12 @@ maintenance_interval_ms = 200
         let config = Config::load(&cli).expect("config load");
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
-        assert_eq!(config.rpc.l1_chain_id, 560048);
-        assert_eq!(config.rpc.l2_chain_id, 167013);
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l1_chain_id(), 560048);
+        assert_eq!(pair.l2_chain_id(), 167013);
         assert_eq!(
             config.prover.route(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
@@ -394,10 +386,9 @@ host = "0.0.0.0"
 port = 8080
 
 [rpc]
-l1_rpc = "http://localhost:8545"
-l2_rpc = "http://localhost:9545"
-l1_chain_id = 1
-l2_chain_id = 167000
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
 
 [prover]
 guest_system = "risc0"
@@ -439,10 +430,9 @@ host = "0.0.0.0"
 port = 8080
 
 [rpc]
-l1_rpc = "http://localhost:8545"
-l2_rpc = "http://localhost:9545"
-l1_chain_id = 1
-l2_chain_id = 167000
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
 
 [prover]
 guest_system = "risc0"

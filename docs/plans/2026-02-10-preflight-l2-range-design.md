@@ -1,5 +1,8 @@
 # Preflight L2 Range Support — Design & Plan
 
+> Historical design document. It may not match the current implementation. Use `README.md`,
+> `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 **Goal:** Make `preflight` accept an explicit L2 block span (start:end) alongside `proposal_id`, fetch that range, validate it matches the proposal, and embed it into `GuestInput`. This replaces the old assumption that `proposal_id == block number` and aligns with the legacy raiko flow where the block set was verified.
 
 **Architecture:** Extend the CLI to take `--l2-start` / `--l2-end`. Carry these into `ProofRequest`/`ProverConfig`, update provider/pipeline to fetch the supplied block range, and validate the blocks (proposal_id in extradata, contiguous, shared anchor where available). Discovery stays external.
@@ -61,4 +64,3 @@ Commands:
 - Proposal discovery was external; block grouping was verified by checking extradata proposal_id and anchor_number consistency.
 - No reth driver was used; full block fetch per block was acceptable for small ranges.
 - We mirror the validation, not the discovery, and keep discovery external for now.
-

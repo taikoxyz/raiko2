@@ -13,7 +13,6 @@ raiko2-provider.workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-queue.workspace = true
-# raiko2-stateless.workspace = true # TODO: add validation back
 raiko2-prover.workspace = true
 
 alloy-primitives.workspace = true

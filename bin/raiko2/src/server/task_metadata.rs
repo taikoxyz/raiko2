@@ -1,4 +1,4 @@
-use raiko2_primitives::ProofType;
+use raiko2_primitives::{ProofType, proof_type::lowercase};
 use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
@@ -6,35 +6,13 @@ use raiko2_prover::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-mod hoodi_proof_type {
-    use raiko2_primitives::{ProofType, proof_type::lowercase};
-    use serde::Serializer;
-
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub fn serialize<S>(proof_type: &ProofType, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        lowercase::serialize(proof_type, serializer)
-    }
-
-    pub fn parse(raw: &str) -> Result<ProofType, String> {
-        if raw.trim().eq_ignore_ascii_case("zk_any") {
-            return Ok(ProofType::Risc0);
-        }
-        raw.parse()
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HoodiTaskMetadata {
     pub(crate) network_pair: String,
     pub(crate) network: String,
     pub(crate) l1_network: String,
-    #[serde(serialize_with = "hoodi_proof_type::serialize")]
+    #[serde(with = "lowercase")]
     pub(crate) proof_type: ProofType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) api_proof_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
@@ -42,23 +20,6 @@ pub(crate) struct HoodiTaskMetadata {
     pub(crate) aggregate_task_id: Option<String>,
     #[serde(default)]
     pub(crate) runtime: HoodiRuntimeMetadata,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct HoodiTaskMetadataSerde {
-    network_pair: String,
-    network: String,
-    l1_network: String,
-    proof_type: String,
-    #[serde(default)]
-    api_proof_type: Option<String>,
-    #[serde(default)]
-    execution_mode: Option<ExecutionMode>,
-    aggregate_requested: bool,
-    proposals: Vec<HoodiProposalTask>,
-    aggregate_task_id: Option<String>,
-    #[serde(default)]
-    runtime: HoodiRuntimeMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,12 +73,6 @@ pub(crate) struct HoodiTaskRuntimeMetadata {
 }
 
 impl HoodiTaskMetadata {
-    pub(crate) fn response_proof_type(&self) -> String {
-        self.api_proof_type
-            .clone()
-            .unwrap_or_else(|| self.proof_type.to_string())
-    }
-
     pub(crate) fn execution_mode_str(&self) -> Option<String> {
         self.execution_mode.map(|mode| mode.as_str().to_string())
     }
@@ -186,34 +141,6 @@ impl HoodiTaskMetadata {
     }
 }
 
-impl<'de> Deserialize<'de> for HoodiTaskMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let metadata = HoodiTaskMetadataSerde::deserialize(deserializer)?;
-        let proof_type =
-            hoodi_proof_type::parse(&metadata.proof_type).map_err(serde::de::Error::custom)?;
-        let normalized_proof_type = metadata.proof_type.trim().to_lowercase();
-        let api_proof_type = metadata.api_proof_type.or_else(|| {
-            (normalized_proof_type != proof_type.to_string()).then_some(normalized_proof_type)
-        });
-
-        Ok(Self {
-            network_pair: metadata.network_pair,
-            network: metadata.network,
-            l1_network: metadata.l1_network,
-            proof_type,
-            api_proof_type,
-            execution_mode: metadata.execution_mode,
-            aggregate_requested: metadata.aggregate_requested,
-            proposals: metadata.proposals,
-            aggregate_task_id: metadata.aggregate_task_id,
-            runtime: metadata.runtime,
-        })
-    }
-}
-
 impl HoodiTaskRuntimeMetadata {
     fn apply_boundless_submission(
         &mut self,
@@ -248,39 +175,24 @@ impl HoodiTaskRuntimeMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn task_metadata_deserializes_legacy_zk_any_as_risc0() {
-        let metadata: HoodiTaskMetadata = serde_json::from_value(json!({
-            "network_pair": "taiko_hoodi/hoodi",
-            "network": "taiko_hoodi",
-            "l1_network": "hoodi",
-            "proof_type": "zk_any",
-            "aggregate_requested": false,
-            "proposals": []
-        }))
-        .expect("deserialize legacy metadata");
-
-        assert_eq!(metadata.proof_type, ProofType::Risc0);
-        assert_eq!(metadata.response_proof_type(), "zk_any");
-    }
-
-    #[test]
-    fn task_metadata_prefers_api_proof_type_for_response() {
+    fn task_metadata_roundtrips_canonical_proof_type() {
         let metadata = HoodiTaskMetadata {
             network_pair: "taiko_hoodi/hoodi".to_string(),
             network: "taiko_hoodi".to_string(),
             l1_network: "hoodi".to_string(),
             proof_type: ProofType::Risc0,
-            api_proof_type: Some("zk_any".to_string()),
             execution_mode: None,
             aggregate_requested: false,
             proposals: Vec::new(),
             aggregate_task_id: None,
             runtime: HoodiRuntimeMetadata::default(),
         };
+        let json = serde_json::to_value(&metadata).expect("serialize metadata");
+        let roundtrip: HoodiTaskMetadata =
+            serde_json::from_value(json).expect("deserialize metadata");
 
-        assert_eq!(metadata.response_proof_type(), "zk_any");
+        assert_eq!(roundtrip.proof_type, ProofType::Risc0);
     }
 }

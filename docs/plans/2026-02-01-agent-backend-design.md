@@ -1,5 +1,9 @@
 # Agent Backend Integration for Raiko2
 
+> Historical design document. It predates the current host-only `raiko2` deployment and canonical
+> `risc0/boundless` route naming. Use `README.md`, `docs/API.md`, and `config.example.toml` as
+> the current source of truth.
+
 Date: 2026-02-01
 
 ## Summary

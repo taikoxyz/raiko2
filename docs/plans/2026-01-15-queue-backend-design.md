@@ -1,5 +1,8 @@
 # Queue Backend Selection Design (raiko2)
 
+> Historical design document. It may not match the current implementation. Use `README.md`,
+> `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 ## Goal
 Provide a simple, explicit way to select a single queue backend (memory or Redis) for `bin/raiko2` at startup without introducing backup/replication semantics.
 
@@ -39,4 +42,3 @@ Configuration is loaded in `bin/raiko2` by `Config::load`, which merges the conf
 - Memory backend is for local or single-process deployments.
 - Redis backend is required for shared queueing across processes or restarts.
 - Feature gating: `--features redis-queue` is required to build Redis support.
-

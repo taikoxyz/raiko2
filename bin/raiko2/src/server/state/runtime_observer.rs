@@ -333,7 +333,6 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Risc0,
-                    api_proof_type: None,
                     execution_mode: None,
                     aggregate_requested: false,
                     proposals: vec![HoodiProposalTask {
@@ -415,7 +414,6 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
-                    api_proof_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
                     proposals: vec![HoodiProposalTask {

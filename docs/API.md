@@ -48,7 +48,7 @@ Content-Type: application/json
     }
   ],
   "aggregate": true,
-  "proof_type": "zk_any",
+  "proof_type": "risc0",
   "network": "taiko_hoodi",
   "l1_network": "hoodi",
   "sp1": {
@@ -82,7 +82,6 @@ Content-Type: application/json
   - `native -> native/local`
   - `sp1 -> sp1/local`
   - `risc0 -> risc0/<server default runner>`
-  - `zk_any -> risc0/<server default runner>`
   - `sgx -> 400`
 - Optional request-scoped prover config may be passed as flattened keys. For `sp1`, the canonical
   shape is a nested `sp1` object with:
@@ -113,7 +112,7 @@ Content-Type: application/json
 ```json
 {
   "status": "ok",
-  "proof_type": "zk_any",
+  "proof_type": "risc0",
   "data": {
     "status": "registered",
     "task_id": "task_..."
@@ -185,7 +184,7 @@ GET /v3/tasks/{id}
 ```json
 {
   "status": "ok",
-  "proof_type": "zk_any",
+  "proof_type": "risc0",
   "data": {
     "task_id": "task_...",
     "route": "risc0/boundless",
@@ -274,9 +273,8 @@ All API errors use the hoodi-style envelope:
 ## Configuration Notes
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
-- `rpc.l2_rpc` must point to a witness-capable endpoint that supports `debug_executionWitness`.
+- `rpc.pairs[*].l2_rpc` must point to a witness-capable endpoint that supports
+  `debug_executionWitness`.
 - If the upstream L2 does not expose `debug_executionWitness`, deploy `zeth-rpc-proxy` as a
-  compatibility layer and point `rpc.l2_rpc` at that proxy.
+  compatibility layer and point `rpc.pairs[*].l2_rpc` at that proxy.
 - Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
-- Legacy single-pair `rpc.l1_rpc` / `rpc.l2_rpc` / `rpc.l1_chain_id` / `rpc.l2_chain_id` remains
-  as a fallback only when `rpc.pairs` is empty.

@@ -265,7 +265,7 @@ impl ShastaManifestBuilder {
             blocks.len()
         );
 
-        // TODO: Implement actual L1 proposal fetching using raiko2-protocol.
+        // Proposal events are resolved by preflight and may be passed in explicitly by callers.
         let prover_data = Self::parse_prover_data(ctx);
         let chain_spec = Self::build_chain_spec(ctx);
 

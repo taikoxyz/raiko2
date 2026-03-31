@@ -28,6 +28,15 @@ const fn default_rpc_retry_cu_per_second() -> u64 {
 
 use super::validation;
 
+fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
+    vec![NetworkPairConfig {
+        network: "taiko_hoodi".to_string(),
+        l1_network: "hoodi".to_string(),
+        l1_rpc: None,
+        l2_rpc: None,
+    }]
+}
+
 /// Validate that a string is a valid URL.
 pub(crate) fn is_valid_url(url: &str) -> bool {
     url.starts_with("http://")
@@ -82,11 +91,7 @@ impl ResolvedNetworkPair {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RpcConfig {
-    pub l1_rpc: String,
-    pub l2_rpc: String,
-    pub l1_chain_id: u64,
-    pub l2_chain_id: u64,
-    #[serde(default)]
+    #[serde(default = "default_rpc_pairs")]
     pub pairs: Vec<NetworkPairConfig>,
     #[serde(default)]
     pub client: RpcClientConfig,
@@ -95,11 +100,7 @@ pub struct RpcConfig {
 impl Default for RpcConfig {
     fn default() -> Self {
         Self {
-            l1_rpc: "http://localhost:8545".to_string(),
-            l2_rpc: "http://localhost:9545".to_string(),
-            l1_chain_id: 1,
-            l2_chain_id: 167_000,
-            pairs: Vec::new(),
+            pairs: default_rpc_pairs(),
             client: RpcClientConfig::default(),
         }
     }
@@ -193,17 +194,10 @@ impl RpcConfig {
 
     /// Resolve the configured RPC matrix into explicit network pairs.
     pub fn resolved_pairs(&self) -> Result<Vec<ResolvedNetworkPair>> {
-        let known_specs = SupportedChainSpecs::default();
         if self.pairs.is_empty() {
-            return Ok(vec![resolve_legacy_pair(
-                &known_specs,
-                &self.l1_rpc,
-                &self.l2_rpc,
-                self.l1_chain_id,
-                self.l2_chain_id,
-            )?]);
+            bail!("rpc.pairs must contain at least one network pair");
         }
-
+        let known_specs = SupportedChainSpecs::default();
         self.pairs
             .iter()
             .map(|pair| resolve_pair(&known_specs, pair))
@@ -253,44 +247,6 @@ fn resolve_pair(
         l1_network: pair.l1_network.clone(),
         l1_rpc: pair.l1_rpc.clone().unwrap_or_else(|| l1_spec.rpc.clone()),
         l2_rpc: pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone()),
-        l1_spec,
-        l2_spec,
-    })
-}
-
-fn resolve_legacy_pair(
-    known_specs: &SupportedChainSpecs,
-    l1_rpc: &str,
-    l2_rpc: &str,
-    l1_chain_id: u64,
-    l2_chain_id: u64,
-) -> Result<ResolvedNetworkPair> {
-    if !is_valid_url(l1_rpc) {
-        bail!("{}: l1_rpc = '{}'", validation::INVALID_RPC_URL, l1_rpc);
-    }
-    if !is_valid_url(l2_rpc) {
-        bail!("{}: l2_rpc = '{}'", validation::INVALID_RPC_URL, l2_rpc);
-    }
-    if l1_chain_id == 0 {
-        bail!("{}: l1_chain_id", validation::INVALID_CHAIN_ID);
-    }
-    if l2_chain_id == 0 {
-        bail!("{}: l2_chain_id", validation::INVALID_CHAIN_ID);
-    }
-
-    let l1_spec = known_specs
-        .get_chain_spec_with_chain_id(l1_chain_id)
-        .ok_or_else(|| anyhow::anyhow!("unsupported L1 chain_id {l1_chain_id}"))?;
-    let l2_spec = known_specs
-        .get_chain_spec_with_chain_id(l2_chain_id)
-        .ok_or_else(|| anyhow::anyhow!("unsupported L2 chain_id {l2_chain_id}"))?;
-
-    Ok(ResolvedNetworkPair {
-        key: format!("{}/{}", l2_spec.network(), l1_spec.network()),
-        network: l2_spec.network(),
-        l1_network: l1_spec.network(),
-        l1_rpc: l1_rpc.to_string(),
-        l2_rpc: l2_rpc.to_string(),
         l1_spec,
         l2_spec,
     })

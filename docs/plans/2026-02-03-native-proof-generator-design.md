@@ -1,5 +1,8 @@
 # Native Proof Generator (Shasta SGX Format) — Design
 
+> Historical design document. It may not match the current implementation. Use `README.md`,
+> `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 ## Goal
 Align raiko2 native proof outputs with the **old raiko Shasta SGX proof format** so raiko2 can replace raiko without changing verification logic. This applies to **proposal proofs** and **native aggregation proofs**. The format is:
 

@@ -1,5 +1,8 @@
 # Shasta Regression Harness — Design
 
+> Historical design document. It may not match the current implementation. Use `README.md`,
+> `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 ## Goal
 Create a regression harness that validates Shasta proposal proof generation via **preflight → guest-launcher (native or SP1) → proof JSON**, and supports **SP1 aggregation** using proof JSON outputs. The harness is file-based, deterministic, and independent of HTTP API testing.
 

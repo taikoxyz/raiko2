@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::{env, fs, time::Instant};
 
 use raiko2_pipeline::{ProofStage, ProverBackend, forks::shasta::RISC0_SHASTA_BACKEND};

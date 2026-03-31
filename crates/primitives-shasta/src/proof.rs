@@ -59,7 +59,6 @@ pub fn decode_proof_carry_data_opt(
 /// # Errors
 ///
 /// Returns an error if `Proof.extra_data` cannot be deserialized into `ProofCarryData`.
-#[allow(dead_code)]
 pub fn proof_carry_from_proof(proof: &Proof) -> RaikoResult<Option<ProofCarryData>> {
     decode_proof_carry_data_opt(proof.extra_data.as_ref())
 }

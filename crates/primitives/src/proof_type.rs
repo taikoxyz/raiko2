@@ -66,7 +66,6 @@ impl TryFrom<u8> for ProofType {
 }
 
 /// Module for serializing `ProofType` as lowercase strings
-#[allow(dead_code)]
 pub mod lowercase {
     use super::ProofType;
     use serde::{Deserialize, Deserializer, Serializer};

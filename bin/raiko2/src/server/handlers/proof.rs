@@ -52,7 +52,6 @@ pub(crate) enum HoodiProofType {
     Native,
     Sp1,
     Risc0,
-    ZkAny,
     Sgx,
 }
 
@@ -62,7 +61,6 @@ impl HoodiProofType {
             Self::Native => "native",
             Self::Sp1 => "sp1",
             Self::Risc0 => "risc0",
-            Self::ZkAny => "zk_any",
             Self::Sgx => "sgx",
         }
     }
@@ -71,7 +69,7 @@ impl HoodiProofType {
         match self {
             Self::Native => Some(ProofType::Native),
             Self::Sp1 => Some(ProofType::Sp1),
-            Self::Risc0 | Self::ZkAny => Some(ProofType::Risc0),
+            Self::Risc0 => Some(ProofType::Risc0),
             Self::Sgx => None,
         }
     }
@@ -257,7 +255,6 @@ struct TaskMetadataParams {
     network: String,
     l1_network: String,
     proof_type: ProofType,
-    api_proof_type: Option<String>,
     execution_mode: Option<Sp1ExecutionMode>,
     aggregate_requested: bool,
     proposals: Vec<HoodiProposalTask>,
@@ -281,7 +278,7 @@ fn route_for_proof_type(
     let route = match proof_type {
         HoodiProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
         HoodiProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
-        HoodiProofType::Risc0 | HoodiProofType::ZkAny => {
+        HoodiProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
         HoodiProofType::Sgx => {
@@ -686,15 +683,6 @@ fn execution_mode_for_sp1(
     })
 }
 
-fn api_proof_type_alias(
-    proof_type: HoodiProofType,
-    canonical_proof_type: ProofType,
-) -> Option<String> {
-    let proof_type = proof_type.as_str();
-    let canonical_proof_type = canonical_proof_type.to_string();
-    (proof_type != canonical_proof_type.as_str()).then(|| proof_type.to_string())
-}
-
 fn build_task_metadata(
     pair: &ResolvedNetworkPair,
     params: TaskMetadataParams,
@@ -704,7 +692,6 @@ fn build_task_metadata(
         network: params.network,
         l1_network: params.l1_network,
         proof_type: params.proof_type,
-        api_proof_type: params.api_proof_type,
         execution_mode: params.execution_mode,
         aggregate_requested: params.aggregate_requested,
         proposals: params.proposals,
@@ -1206,7 +1193,6 @@ pub async fn request_batch_shasta_proof(
             network: req.network.clone(),
             l1_network: req.l1_network.clone(),
             proof_type,
-            api_proof_type: api_proof_type_alias(req.proof_type, proof_type),
             execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
             aggregate_requested: req.aggregate,
             proposals: proposal_tasks.clone(),
@@ -1249,7 +1235,6 @@ pub async fn request_aggregation_proof(
             network: req.network.clone(),
             l1_network: req.l1_network.clone(),
             proof_type,
-            api_proof_type: api_proof_type_alias(req.proof_type, proof_type),
             execution_mode: execution_mode_for_sp1(req.proof_type, None),
             aggregate_requested: true,
             proposals: Vec::new(),
@@ -1295,7 +1280,6 @@ pub async fn get_task(
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to sync runtime status: {err}")))?;
-    let proof_type = metadata.response_proof_type();
     let data = build_task_data(
         id,
         &record,
@@ -1308,7 +1292,7 @@ pub async fn get_task(
 
     Ok(Json(HoodiSuccess {
         status: "ok",
-        proof_type,
+        proof_type: metadata.proof_type.to_string(),
         data,
     }))
 }

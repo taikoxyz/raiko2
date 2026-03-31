@@ -43,14 +43,6 @@ pub struct Cli {
     #[arg(long)]
     pub json_logs: bool,
 
-    /// L1 chain ID
-    #[arg(long, env = "RAIKO2_L1_CHAIN_ID")]
-    pub l1_chain_id: Option<u64>,
-
-    /// L2 chain ID
-    #[arg(long, env = "RAIKO2_L2_CHAIN_ID")]
-    pub l2_chain_id: Option<u64>,
-
     /// RPC request timeout in milliseconds
     #[arg(long, env = "RAIKO2_RPC_TIMEOUT_MS")]
     pub rpc_timeout_ms: Option<u64>,

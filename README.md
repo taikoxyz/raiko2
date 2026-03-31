@@ -431,7 +431,6 @@ binary in front of it and point `l2_rpc` at the proxy instead.
 ## Documentation
 
 - [API Documentation](docs/API.md)
-- [Migration Guide](docs/MIGRATION.md)
 - [Regression Guide](script/regression/README.md)
 
 ## License

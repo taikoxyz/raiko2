@@ -1,8 +1,10 @@
 ![Raiko2 — Taiko proof orchestration for Shasta](docs/assets/readme-banner.png)
 
+[![CI status](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
+
 Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Development](docs/development.md) / [Operations](docs/operations.md) /
-[Config](config.example.toml)
+[Regression](script/regression/README.md) / [Config](config.example.toml)
 
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes an asynchronous,
@@ -58,15 +60,6 @@ flowchart LR
 - `crates/pipeline`: preflight, manifest building, and validation wiring
 - `crates/prover`: prover backends and aggregation adapters
 - `xtask`: guest build, benchmarking, and release automation
-
-## Documentation
-
-- [Docs index](docs/README.md)
-- [API contract](docs/API.md)
-- [Development guide](docs/development.md)
-- [Operations guide](docs/operations.md)
-- [Regression harness](script/regression/README.md)
-- [Configuration example](config.example.toml)
 
 ## License
 

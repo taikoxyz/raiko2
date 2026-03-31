@@ -4,11 +4,13 @@
 #![allow(unreachable_pub)]
 #![allow(clippy::redundant_pub_crate)]
 
+mod anchor;
 mod blob;
 mod input;
 pub mod instance;
 mod proof;
 
+pub use anchor::{anchor_max_offset_for_chain, validate_anchor_progression};
 pub use blob::verify_proposal_mode_blob_usage;
 pub use input::{GuestInput, ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput};
 pub use proof::{

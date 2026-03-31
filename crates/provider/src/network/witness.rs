@@ -11,7 +11,7 @@ impl NetworkProvider {
         const MAX_BATCH_SIZE: usize = 32;
         let mut witnesses = Vec::with_capacity(block_numbers.len());
         for block_numbers in block_numbers.chunks(MAX_BATCH_SIZE) {
-            let mut batch = self.client.new_batch();
+            let mut batch = self.l2_client.new_batch();
             let mut requests = Vec::with_capacity(block_numbers.len());
             for block_number in block_numbers {
                 requests.push(Box::pin(

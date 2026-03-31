@@ -456,9 +456,21 @@ impl ChainSpec {
     ///
     /// Returns an error if no active fork has an L1 contract address configured.
     pub fn get_fork_l1_contract_address(&self, block_num: u64) -> Result<Address> {
+        self.get_fork_l1_contract_address_at(block_num, 0)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if no active fork has an L1 contract address configured for the provided
+    /// block number and timestamp.
+    pub fn get_fork_l1_contract_address_at(
+        &self,
+        block_num: u64,
+        block_timestamp: u64,
+    ) -> Result<Address> {
         // fall down to the first fork that is active as default
         for (spec_id, fork) in self.hard_forks.iter().rev() {
-            if fork.active(block_num, 0u64)
+            if fork.active(block_num, block_timestamp)
                 && let Some(l1_address) = self.l1_contract.get(spec_id)
             {
                 return Ok(*l1_address);

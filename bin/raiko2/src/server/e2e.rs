@@ -395,6 +395,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),
             offchain: false,
+            quoted_mcycles_count: Some(6_000),
+            evaluated_mcycles_count: Some(12_345),
         },
         updated_at,
     );
@@ -455,6 +457,14 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
     );
     assert_eq!(res["data"]["proposals"][0]["runtime"]["deployment"], "base");
     assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], false);
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["quoted_mcycles_count"],
+        6000
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["evaluated_mcycles_count"],
+        12345
+    );
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],
         false

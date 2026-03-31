@@ -44,7 +44,8 @@ pub(crate) fn build_provider(
 ) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
     let _ = config;
-    NetworkProvider::new_with_config(&pair.l2_rpc, &rpc_config).map_err(|e| anyhow::anyhow!(e))
+    NetworkProvider::new_pair_with_config(&pair.l1_rpc, &pair.l2_rpc, &rpc_config)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[allow(clippy::missing_const_for_fn)]

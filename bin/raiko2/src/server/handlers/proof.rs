@@ -200,6 +200,10 @@ pub(crate) struct HoodiTaskRuntimeView {
     deployment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     offchain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quoted_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evaluated_mcycles_count: Option<u32>,
 }
 
 struct RouteSelection {
@@ -741,6 +745,8 @@ fn task_runtime_view(
         image_ref: runtime.image_ref,
         deployment: runtime.deployment,
         offchain: runtime.offchain,
+        quoted_mcycles_count: runtime.quoted_mcycles_count,
+        evaluated_mcycles_count: runtime.evaluated_mcycles_count,
     })
 }
 

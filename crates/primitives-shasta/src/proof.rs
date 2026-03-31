@@ -1,8 +1,7 @@
 //! Shasta proof helpers for carrying protocol data.
 
 use crate::GuestInput;
-use alloy_primitives::Address;
-use raiko2_primitives::{Proof, RaikoResult};
+use raiko2_primitives::{Proof, ProofType, RaikoError, RaikoResult};
 use raiko2_protocol_shasta::libhash::hash_proposal;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_protocol_shasta::shasta::TransitionInputData;
@@ -67,57 +66,81 @@ pub fn proof_carry_from_proof(proof: &Proof) -> RaikoResult<Option<ProofCarryDat
 
 /// Build the canonical `ProofCarryData` for a Shasta proposal guest input.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the last witness block number does not fit in Shasta's `uint48` checkpoint field.
-#[must_use]
-pub fn build_proof_carry_data(input: &GuestInput) -> ProofCarryData {
+/// Returns an error if the input is missing witnesses, if the verifier address cannot be resolved,
+/// if the witness block number does not fit the protocol checkpoint type, or if the embedded prover
+/// checkpoint does not match the canonical witness checkpoint.
+pub fn build_proof_carry_data(
+    input: &GuestInput,
+    proof_type: ProofType,
+) -> RaikoResult<ProofCarryData> {
     // The witness chain id is the canonical value the guest validates against.
-    let chain_id = input
-        .witnesses
-        .first()
-        .map(|witness| witness.chain_spec.chain_id)
-        .filter(|&id| id != 0)
-        .unwrap_or(input.taiko.chain_spec.chain_id);
-    let first_witness = input.witnesses.first();
-    let last_witness = input.witnesses.last();
+    let first_witness = input.witnesses.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build Shasta proof carry data without witnesses".to_string(),
+        )
+    })?;
+    let last_witness = input.witnesses.last().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build Shasta proof carry data without witnesses".to_string(),
+        )
+    })?;
+    let chain_id = if first_witness.chain_spec.chain_id != 0 {
+        first_witness.chain_spec.chain_id
+    } else {
+        input.taiko.chain_spec.chain_id
+    };
+    let verifier_proof_type = match proof_type {
+        ProofType::Native => ProofType::Sgx,
+        other => other,
+    };
+    let verifier = first_witness
+        .chain_spec
+        .get_fork_verifier_address(
+            first_witness.block.header.number,
+            first_witness.block.header.timestamp,
+            verifier_proof_type,
+        )
+        .map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "failed to resolve verifier address for proof type {verifier_proof_type}: {err}"
+            ))
+        })?;
     let proposal = &input.taiko.proposal_event.proposal;
+    let checkpoint = raiko2_protocol_shasta::shasta::Checkpoint {
+        blockNumber: last_witness.block.header.number.try_into().map_err(|_| {
+            RaikoError::InvalidRequestConfig(
+                "last witness block number does not fit in uint48".to_string(),
+            )
+        })?,
+        blockHash: last_witness.block.header.hash_slow(),
+        stateRoot: last_witness.block.header.state_root,
+    };
+    if let Some(expected_checkpoint) = input.taiko.prover_data.checkpoint.as_ref()
+        && expected_checkpoint != &checkpoint
+    {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "prover checkpoint mismatch: expected {expected_checkpoint:?}, got {checkpoint:?}"
+        )));
+    }
 
-    ProofCarryData {
+    Ok(ProofCarryData {
         chain_id,
-        verifier: Address::default(),
+        verifier,
         transition_input: TransitionInputData {
             proposal_id: input.taiko.proposal_id,
             proposal_hash: hash_proposal(proposal),
             parent_proposal_hash: proposal.parentProposalHash,
-            parent_block_hash: first_witness
-                .map(|witness| witness.block.header.parent_hash)
-                .unwrap_or_default(),
+            parent_block_hash: first_witness.block.header.parent_hash,
             actual_prover: input.taiko.prover_data.actual_prover,
             transition: raiko2_protocol_shasta::shasta::ShastaTransitionInput {
                 proposer: proposal.proposer,
                 timestamp: proposal.timestamp.to::<u64>(),
             },
-            checkpoint: raiko2_protocol_shasta::shasta::Checkpoint {
-                blockNumber: last_witness
-                    .map(|witness| {
-                        witness
-                            .block
-                            .header
-                            .number
-                            .try_into()
-                            .expect("block number fits in uint48")
-                    })
-                    .unwrap_or_default(),
-                blockHash: last_witness
-                    .map(|witness| witness.block.header.hash_slow())
-                    .unwrap_or_default(),
-                stateRoot: last_witness
-                    .map(|witness| witness.block.header.state_root)
-                    .unwrap_or_default(),
-            },
+            checkpoint,
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -125,6 +148,7 @@ mod tests {
     use super::build_proof_carry_data;
     use crate::GuestInput;
     use alloy_primitives::{Address, B256};
+    use raiko2_primitives::{ProofType, SupportedChainSpecs};
 
     #[test]
     fn build_proof_carry_data_populates_transition_fields_from_input() {
@@ -137,13 +161,16 @@ mod tests {
         input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x33; 32]);
 
         let mut witness = raiko2_primitives::StatelessInput::default();
-        witness.chain_spec.chain_id = 167_000;
+        witness.chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_000)
+            .expect("supported taiko mainnet chain spec");
         witness.block.header.number = 42;
+        witness.block.header.timestamp = u64::MAX / 2;
         witness.block.header.parent_hash = B256::from([0x44; 32]);
         witness.block.header.state_root = B256::from([0x55; 32]);
         input.witnesses.push(witness.clone());
 
-        let carry = build_proof_carry_data(&input);
+        let carry = build_proof_carry_data(&input, ProofType::Native).expect("build carry data");
 
         assert_eq!(carry.chain_id, 167_000);
         assert_eq!(carry.transition_input.proposal_id, 7);

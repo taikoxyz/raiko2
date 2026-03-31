@@ -3,20 +3,23 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use alloy::consensus::Header;
+use alloy_primitives::{B256, Bytes};
 use anyhow::Result;
 use axum::{Json, Router, routing::post};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
-    NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+    NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
+    ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
+    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND},
 };
-use raiko2_primitives::{ProofContext, ProofRequest, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
-use raiko2_protocol_shasta::shasta::ProofCarryData;
+use raiko2_primitives::{Proof, ProofContext, ProofRequest, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data};
+use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_prover::{
+    GuestInputCodec, Prover,
     native::NativeProver,
-    risc0::{Risc0Config, Risc0Prover},
-    sp1::{ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1Prover},
+    sp1::{ExecutionMode, RecursionMode, Sp1Config, Sp1ConfigOverrides},
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig};
@@ -32,12 +35,15 @@ use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
 use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
 
-pub(crate) type NativeFixtureSpec = ShastaSpec<NativeProver, NativeBackend, FixtureProvider>;
+pub(crate) type NativeFixtureSpec = FixtureSpec<NativeProver, NativeBackend>;
 pub(crate) type NativeFixtureEngine = Engine<NativeFixtureSpec>;
-pub(crate) type Risc0FixtureSpec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, FixtureProvider>;
+pub(crate) type Risc0FixtureSpec = FixtureSpec<FixtureRisc0Prover, Risc0ShastaBackend>;
 pub(crate) type Risc0FixtureEngine = Engine<Risc0FixtureSpec>;
-pub(crate) type Sp1FixtureSpec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, FixtureProvider>;
+pub(crate) type Sp1FixtureSpec = FixtureSpec<FixtureSp1Prover, Sp1ShastaBackend>;
 pub(crate) type Sp1FixtureEngine = Engine<Sp1FixtureSpec>;
+
+const FIXTURE_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
+const FIXTURE_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
 
 pub(crate) fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -60,12 +66,16 @@ impl FixtureProvider {
         let raw = include_str!("../../../../test.json");
         let mut input: GuestInput =
             serde_json::from_str(raw).expect("parse test.json as GuestInput");
-        if input.proof_carry_data == ProofCarryData::default() && !input.witnesses.is_empty() {
-            input.proof_carry_data = build_proof_carry_data(&input);
+        if input.taiko.l1_ancestor_headers.is_empty() && input.taiko.l1_header.number != 0 {
+            input.taiko.l1_ancestor_headers = vec![input.taiko.l1_header.clone()];
         }
         Self {
             input: Arc::new(input),
         }
+    }
+
+    fn cloned_input(&self) -> GuestInput {
+        (*self.input).clone()
     }
 
     fn witness_for_block(&self, block_number: u64) -> Option<&raiko2_primitives::StatelessInput> {
@@ -73,6 +83,285 @@ impl FixtureProvider {
             .witnesses
             .iter()
             .find(|w| w.block.header.number == block_number)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FixtureSpec<Pr, Bk> {
+    pipeline_key: PipelineKey,
+    prover: Pr,
+    backend: Bk,
+    provider: FixtureProvider,
+}
+
+impl<Pr, Bk> FixtureSpec<Pr, Bk> {
+    const fn new(
+        pipeline_key: PipelineKey,
+        prover: Pr,
+        backend: Bk,
+        provider: FixtureProvider,
+    ) -> Self {
+        Self {
+            pipeline_key,
+            prover,
+            backend,
+            provider,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<Pr, Bk> Preflight for FixtureSpec<Pr, Bk>
+where
+    Pr: Send + Sync,
+    Bk: ProverBackend,
+{
+    type Input = GuestInput;
+
+    async fn preflight<P: Provider>(
+        &self,
+        ctx: &ProofContext,
+        _provider: &P,
+    ) -> RaikoResult<Self::Input> {
+        let mut input = self.provider.cloned_input();
+        if let Some(data_sources) = ctx.config.get("shasta_data_sources") {
+            input.taiko.data_sources =
+                serde_json::from_value(data_sources.clone()).map_err(|err| {
+                    RaikoError::InvalidRequestConfig(format!(
+                        "invalid fixture shasta_data_sources override: {err}"
+                    ))
+                })?;
+        }
+        Ok(input)
+    }
+}
+
+impl<Pr, Bk> PipelineSpec for FixtureSpec<Pr, Bk>
+where
+    Pr: Send + Sync,
+    Bk: ProverBackend,
+{
+    type GuestInput = GuestInput;
+    type Preflight = Self;
+    type Validation = NoopValidation<GuestInput>;
+    type ManifestBuilder = NoopManifestBuilder;
+    type Prover = Pr;
+    type Backend = Bk;
+    type Provider = FixtureProvider;
+
+    fn pipeline_key(&self) -> PipelineKey {
+        self.pipeline_key
+    }
+
+    fn prover(&self) -> &Self::Prover {
+        &self.prover
+    }
+
+    fn backend(&self) -> &Self::Backend {
+        &self.backend
+    }
+
+    fn provider(&self) -> &Self::Provider {
+        &self.provider
+    }
+
+    fn preflight(&self) -> &Self::Preflight {
+        self
+    }
+
+    fn validation(&self) -> &Self::Validation {
+        &FIXTURE_VALIDATION
+    }
+
+    fn manifest_builder(&self) -> &Self::ManifestBuilder {
+        &FIXTURE_MANIFEST
+    }
+}
+
+fn proof_carry_extra_data(
+    input: &GuestInput,
+    namespace: Option<(&str, serde_json::Value)>,
+) -> RaikoResult<Option<serde_json::Value>> {
+    let mut extra_data = encode_proof_carry_data(&input.proof_carry_data)?;
+    if let Some((namespace, metadata)) = namespace
+        && let Some(root) = extra_data.as_object_mut()
+    {
+        root.insert(namespace.to_string(), metadata);
+    }
+    Ok(Some(extra_data))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FixtureRisc0Prover;
+
+impl GuestInputCodec<GuestInput> for FixtureRisc0Prover {
+    fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize fixture input: {e}")))?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
+#[async_trait::async_trait]
+impl<B> Prover<B> for FixtureRisc0Prover
+where
+    B: ProverBackend,
+{
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+        GuestInputCodec::encode(self, input, config)
+    }
+
+    async fn prove_encoded(
+        &self,
+        input: Bytes,
+        config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize fixture input: {e}")))?;
+        let should_fail = config
+            .get("shasta_data_sources")
+            .and_then(Value::as_array)
+            .is_some_and(|sources| {
+                sources.iter().any(|source| {
+                    source
+                        .get("tx_data_from_blob")
+                        .and_then(Value::as_array)
+                        .is_some_and(|blobs| !blobs.is_empty())
+                })
+            });
+        if should_fail {
+            return Err(RaikoError::Guest(
+                "RISC0 proposal mock execution failed: proposal mode blob usage verification failed: missing proposal source for data source index 0".to_string(),
+            ));
+        }
+
+        Ok(Proof {
+            proof: Some("0xfixture-risc0-proof".to_string()),
+            input: Some(B256::ZERO),
+            extra_data: proof_carry_extra_data(&guest_input, None)?,
+            ..Default::default()
+        })
+    }
+
+    async fn aggregate(
+        &self,
+        _input: raiko2_primitives::AggregationGuestInput,
+        _config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
+        Ok(Proof {
+            proof: Some("0xfixture-risc0-aggregation".to_string()),
+            input: Some(B256::ZERO),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FixtureSp1Prover {
+    config: Sp1Config,
+}
+
+impl FixtureSp1Prover {
+    const fn new(config: Sp1Config) -> Self {
+        Self { config }
+    }
+
+    fn resolve_config(&self, config: &ProverConfig) -> RaikoResult<Sp1Config> {
+        let overrides = config
+            .get("sp1")
+            .cloned()
+            .map(serde_json::from_value::<Sp1ConfigOverrides>)
+            .transpose()
+            .map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to parse 'sp1' prover args: {e}"))
+            })?
+            .unwrap_or_default();
+        Ok(self.config.merged_with(&overrides))
+    }
+}
+
+impl GuestInputCodec<GuestInput> for FixtureSp1Prover {
+    fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
+        let bytes = bincode::serialize(input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize fixture input: {e}")))?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
+#[async_trait::async_trait]
+impl<B> Prover<B> for FixtureSp1Prover
+where
+    B: ProverBackend,
+{
+    type GuestInput = GuestInput;
+
+    fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes> {
+        GuestInputCodec::encode(self, input, config)
+    }
+
+    async fn prove_encoded(
+        &self,
+        input: Bytes,
+        config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
+        let effective_config = self.resolve_config(config)?;
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize fixture input: {e}")))?;
+
+        match effective_config.mode {
+            ExecutionMode::Execute => {
+                let metadata = json!({
+                    "zkvm": "sp1",
+                    "mode": ExecutionMode::Execute.as_str(),
+                    "public_values": alloy_primitives::hex::encode_prefixed(B256::ZERO),
+                    "exit_code": 0,
+                    "gas": 0,
+                    "total_instruction_count": 0,
+                    "total_syscall_count": 0,
+                    "touched_memory_addresses": 0,
+                    "cycle_tracker": [{ "label": "fixture", "cycles": 1 }],
+                    "invocation_tracker": [{ "label": "fixture", "count": 1 }],
+                    "opcode_counts": [],
+                    "syscall_counts": [],
+                });
+                Ok(Proof {
+                    input: Some(B256::ZERO),
+                    extra_data: proof_carry_extra_data(&guest_input, Some(("sp1", metadata)))?,
+                    ..Default::default()
+                })
+            }
+            ExecutionMode::Prove => Ok(Proof {
+                proof: Some("0xfixture-sp1-proof".to_string()),
+                input: Some(B256::ZERO),
+                extra_data: proof_carry_extra_data(&guest_input, None)?,
+                ..Default::default()
+            }),
+        }
+    }
+
+    async fn aggregate(
+        &self,
+        _input: raiko2_primitives::AggregationGuestInput,
+        config: &ProverConfig,
+        _backend: &B,
+    ) -> RaikoResult<Proof> {
+        let effective_config = self.resolve_config(config)?;
+        if matches!(effective_config.mode, ExecutionMode::Execute) {
+            return Err(RaikoError::InvalidRequestConfig(
+                "sp1.mode=execute is not supported for aggregation".to_string(),
+            ));
+        }
+
+        Ok(Proof {
+            proof: Some("0xfixture-sp1-aggregation".to_string()),
+            input: Some(B256::ZERO),
+            ..Default::default()
+        })
     }
 }
 
@@ -119,6 +408,54 @@ impl Provider for FixtureProvider {
             out.push(witness.witness.clone());
         }
         Ok(out)
+    }
+
+    async fn batch_l1_headers(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Header>> {
+        let mut out = Vec::with_capacity(block_numbers.len());
+        for block_number in block_numbers {
+            if self.input.taiko.l1_header.number == *block_number {
+                out.push(self.input.taiko.l1_header.clone());
+                continue;
+            }
+
+            let header = self
+                .input
+                .taiko
+                .l1_ancestor_headers
+                .iter()
+                .find(|header| header.number == *block_number)
+                .cloned()
+                .ok_or_else(|| {
+                    RaikoError::RPC(format!(
+                        "fixture missing L1 header for block {block_number}"
+                    ))
+                })?;
+            out.push(header);
+        }
+
+        Ok(out)
+    }
+
+    async fn shasta_proposal_event(
+        &self,
+        _l1_contract: alloy_primitives::Address,
+        l1_inclusion_block_number: u64,
+        proposal_id: u64,
+    ) -> RaikoResult<ShastaEventData> {
+        if self.input.taiko.proposal_id != proposal_id {
+            return Err(RaikoError::RPC(format!(
+                "fixture missing Shasta proposal event for proposal_id {proposal_id}"
+            )));
+        }
+        if self.input.taiko.l1_header.number != 0 {
+            let expected_l1_inclusion_block_number = self.input.taiko.l1_header.number + 1;
+            if expected_l1_inclusion_block_number != l1_inclusion_block_number {
+                return Err(RaikoError::RPC(format!(
+                    "fixture Shasta inclusion block mismatch: expected {expected_l1_inclusion_block_number}, got {l1_inclusion_block_number}"
+                )));
+            }
+        }
+        Ok(self.input.taiko.proposal_event.clone())
     }
 }
 
@@ -176,7 +513,7 @@ fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
-    let spec = ShastaSpec::new(
+    let spec = FixtureSpec::new(
         PipelineKey::ShastaNative,
         NativeProver,
         NativeBackend,
@@ -208,16 +545,9 @@ fn risc0_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
-    let spec = ShastaSpec::new(
+    let spec = FixtureSpec::new(
         PipelineKey::ShastaRisc0,
-        Risc0Prover::new(Risc0Config {
-            bonsai: false,
-            snark: false,
-            mock: true,
-            profile: false,
-            execution_po2: 20,
-            verify: true,
-        }),
+        FixtureRisc0Prover,
         RISC0_SHASTA_BACKEND,
         provider,
     );
@@ -247,11 +577,11 @@ fn sp1_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Sp1FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
-    let spec = ShastaSpec::new(
+    let spec = FixtureSpec::new(
         PipelineKey::ShastaSp1,
-        Sp1Prover::new(Sp1Config {
+        FixtureSp1Prover::new(Sp1Config {
             recursion: RecursionMode::Plonk,
-            prover: Some(ProverMode::Local),
+            prover: None,
             mode: ExecutionMode::Prove,
             verify: true,
         }),

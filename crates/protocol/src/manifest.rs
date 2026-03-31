@@ -84,6 +84,9 @@ pub struct TaikoManifest<E = (), Cp = ()> {
     pub prover_data: TaikoProverData<Cp>,
     /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
+    /// L1 header chain covering Shasta anchor checkpoints through the proposal origin block.
+    #[serde(default, with = "l1_header_vec_bincode_compat")]
+    pub l1_ancestor_headers: Vec<Header>,
 }
 
 mod l1_header_bincode_compat {
@@ -120,6 +123,45 @@ mod l1_header_bincode_compat {
     }
 }
 
+mod l1_header_vec_bincode_compat {
+    use super::Header;
+    use alloy_rlp::Decodable;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(headers: &[Header], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return headers.serialize(serializer);
+        }
+
+        let encoded = headers
+            .iter()
+            .map(|header| alloy_rlp::encode(header).clone())
+            .collect::<Vec<_>>();
+        encoded.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Header>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Vec::<Header>::deserialize(deserializer);
+        }
+
+        let encoded = Vec::<Vec<u8>>::deserialize(deserializer)?;
+        encoded
+            .into_iter()
+            .map(|bytes| {
+                let mut slice = bytes.as_slice();
+                Header::decode(&mut slice).map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +185,7 @@ mod tests {
         let manifest: TaikoManifest<(), ()> = TaikoManifest::default();
         assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
+        assert!(manifest.l1_ancestor_headers.is_empty());
     }
 
     #[test]

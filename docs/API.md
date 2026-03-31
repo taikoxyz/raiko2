@@ -68,6 +68,11 @@ Content-Type: application/json
 - `proposals` must not be empty.
 - `proposal.l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
 - `proposal.checkpoint` is not supported in this version.
+- `proposal.l1_inclusion_block_number` is required. The server derives the canonical Shasta
+  `proposal_event` and `originBlockHash` from L1 RPC; clients should not send
+  `shasta_proposal_event` overrides.
+- `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation. At
+  least one anchor in the batch must advance beyond it.
 - `proof_type` mapping:
   - `native -> native/local`
   - `sp1 -> sp1/local`
@@ -197,7 +202,9 @@ GET /v3/tasks/{id}
           "remote_tx_hash": "0xabcd",
           "image_ref": "0ximage",
           "deployment": "base",
-          "offchain": false
+          "offchain": false,
+          "quoted_mcycles_count": 6000,
+          "evaluated_mcycles_count": 12345
         }
       }
     ],
@@ -220,7 +227,8 @@ aggregate task exists, it becomes `proposals.len()`.
 - `data.runtime` is the root task runtime view stored in `runtime.sqlite`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
-  `image_ref`, `deployment`, and `offchain`.
+  `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
+  `evaluated_mcycles_count`.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`.
 - `engine_state_present=false` means the HTTP response is serving the last runtime snapshot even

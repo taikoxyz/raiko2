@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
-use raiko2_primitives::Proof;
+use raiko2_primitives::{Proof, ProofType as RaikoProofType};
 use raiko2_primitives_shasta::build_proof_carry_data;
 use raiko2_primitives_shasta::decode_proof_carry_data;
 use raiko2_primitives_shasta::encode_proof_carry_data;
@@ -131,6 +131,15 @@ impl From<ProofMode> for SP1ProofMode {
     }
 }
 
+impl ProofType {
+    const fn as_raiko(self) -> RaikoProofType {
+        match self {
+            ProofType::Native => RaikoProofType::Native,
+            ProofType::Sp1 => RaikoProofType::Sp1,
+        }
+    }
+}
+
 fn count_entries(entries: impl Iterator<Item = (String, u64)>) -> Vec<BenchCountEntry> {
     let mut entries = entries
         .filter_map(|(label, count)| (count > 0).then_some(BenchCountEntry { label, count }))
@@ -179,18 +188,18 @@ async fn main() -> Result<()> {
     run_proposal(args).await
 }
 
-fn read_input(path: &PathBuf) -> Result<GuestInput> {
+fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
     let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut input: GuestInput = serde_json::from_str(&contents).context("parse input JSON")?;
-    if input.proof_carry_data == ProofCarryData::default() && !input.witnesses.is_empty() {
-        input.proof_carry_data = build_proof_carry_data(&input);
+    if !input.witnesses.is_empty() && input.proof_carry_data == ProofCarryData::default() {
+        input.proof_carry_data = build_proof_carry_data(&input, proof_type.as_raiko())?;
     }
     Ok(input)
 }
 
 async fn run_proposal(args: Args) -> Result<()> {
     let input_path = args.input.clone().context("missing --input")?;
-    let input = read_input(&input_path)?;
+    let input = read_input(&input_path, args.proof_type)?;
 
     match args.proof_type {
         ProofType::Sp1 => run_sp1_proposal(args, input_path, input).await,
@@ -532,7 +541,11 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_image_id_from_uuid;
+    use super::{ProofType, parse_image_id_from_uuid, read_input};
+    use alloy_primitives::{Address, B256};
+    use raiko2_primitives::{ProofType as RaikoProofType, SupportedChainSpecs};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use std::fs;
 
     #[test]
     fn parses_image_id_from_uuid_hex() {
@@ -545,5 +558,75 @@ mod tests {
                 0x1c1d1e1f
             ]
         );
+    }
+
+    fn sample_guest_input() -> GuestInput {
+        let mut input = GuestInput::default();
+        input.taiko.proposal_id = 7;
+        input.taiko.chain_spec.name = "taiko_mainnet".to_string();
+        input.taiko.chain_spec.chain_id = 167_000;
+        input.taiko.chain_spec.is_taiko = true;
+        input.taiko.prover_data.actual_prover = Address::from([0x11; 20]);
+        input.taiko.proposal_event.proposal.id = 7u64.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.proposer = Address::from([0x22; 20]);
+        input.taiko.proposal_event.proposal.timestamp = 123u64.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x33; 32]);
+
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_000)
+            .expect("supported chain");
+        let mut witness = raiko2_primitives::StatelessInput {
+            chain_spec,
+            ..Default::default()
+        };
+        witness.block.header.number = 1;
+        witness.block.header.timestamp = u64::MAX / 2;
+        witness.block.header.parent_hash = B256::from([0x44; 32]);
+        witness.block.header.state_root = B256::from([0x55; 32]);
+        input.witnesses.push(witness);
+        input.proof_carry_data =
+            build_proof_carry_data(&input, RaikoProofType::Native).expect("build carry data");
+        input
+    }
+
+    fn temp_input_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "guest-launcher-{name}-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn read_input_preserves_existing_proof_carry_data() {
+        let mut input = sample_guest_input();
+        let expected = input.proof_carry_data.clone();
+        input.proof_carry_data.transition_input.proposal_id += 9;
+
+        let path = temp_input_path("preserve-carry");
+        fs::write(&path, serde_json::to_vec(&input).expect("serialize input")).expect("write");
+        let parsed = read_input(&path, ProofType::Native).expect("read input");
+        fs::remove_file(path).expect("cleanup temp file");
+
+        assert_eq!(
+            parsed.proof_carry_data.transition_input.proposal_id,
+            expected.transition_input.proposal_id + 9
+        );
+    }
+
+    #[test]
+    fn read_input_backfills_default_proof_carry_data() {
+        let mut input = sample_guest_input();
+        let expected = input.proof_carry_data.clone();
+        input.proof_carry_data = Default::default();
+
+        let path = temp_input_path("backfill-carry");
+        fs::write(&path, serde_json::to_vec(&input).expect("serialize input")).expect("write");
+        let parsed = read_input(&path, ProofType::Native).expect("read input");
+        fs::remove_file(path).expect("cleanup temp file");
+
+        assert_eq!(parsed.proof_carry_data, expected);
     }
 }

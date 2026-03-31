@@ -126,7 +126,7 @@ where
                         RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
                     })?;
                 let public_values_raw = public_values.raw();
-                let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice());
+                let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
                 let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
                     public_values_raw,
                     &execution_report,
@@ -303,7 +303,7 @@ where
     }
 
     let public_values = proof.public_values.as_slice();
-    let input_hash = parse_shasta_proposal_input_hash(public_values);
+    let input_hash = parse_shasta_proposal_input_hash(public_values)?;
     let proof_bytes = bincode::serialize(&proof)
         .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
 

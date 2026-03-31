@@ -50,6 +50,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 
 anyhow.workspace = true
 async-trait.workspace = true
+bincode.workspace = true
 
 # Utilities
 dotenvy = "0.15"

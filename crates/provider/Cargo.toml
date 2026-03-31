@@ -20,6 +20,7 @@ async-trait.workspace = true
 futures.workspace = true
 itertools.workspace = true
 raiko2-primitives.workspace = true
+raiko2-protocol-shasta.workspace = true
 reth-chainspec.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-evm.workspace = true
@@ -28,6 +29,7 @@ reth-primitives-traits.workspace = true
 reqwest.workspace = true
 revm.workspace = true
 risc0-ethereum-trie = { workspace = true, features = ["orphan"] }
+alloy-sol-types.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

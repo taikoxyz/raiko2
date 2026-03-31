@@ -240,6 +240,9 @@ impl ManifestBuilder for ShastaManifestBuilder {
 
         let l1_header = Self::parse_config(&ctx.config, "l1_header")?
             .unwrap_or_else(alloy_consensus::Header::default);
+        let l1_ancestor_headers =
+            Self::parse_config::<Vec<alloy_consensus::Header>>(&ctx.config, "l1_ancestor_headers")?
+                .unwrap_or_default();
         let proposal_event = Self::parse_proposal_event(ctx)?;
         let mut data_sources =
             Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "shasta_data_sources")?
@@ -286,6 +289,7 @@ impl ManifestBuilder for ShastaManifestBuilder {
             chain_spec,
             prover_data,
             data_sources,
+            l1_ancestor_headers,
         })
     }
 }

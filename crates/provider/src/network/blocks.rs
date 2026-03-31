@@ -10,7 +10,7 @@ impl NetworkProvider {
         let mut blocks = Vec::with_capacity(block_numbers.len());
         for block_number in block_numbers {
             let rpc_block = self
-                .provider
+                .l2_provider
                 .get_block(BlockNumberOrTag::from(*block_number).into())
                 .full()
                 .await

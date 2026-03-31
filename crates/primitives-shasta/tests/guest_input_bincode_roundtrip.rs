@@ -191,10 +191,22 @@ fn explain_taiko_manifest_offset(m: &raiko2_protocol_shasta::TaikoManifest, off:
         );
         return;
     }
+    cursor += data_sources_len;
+
+    let l1_ancestor_headers_len = bincode::serialize(&m.l1_ancestor_headers)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    if off < cursor + l1_ancestor_headers_len {
+        eprintln!(
+            "[guest_input_bincode_roundtrip] in TaikoManifest.l1_ancestor_headers at off={}",
+            off - cursor
+        );
+        return;
+    }
 
     eprintln!(
         "[guest_input_bincode_roundtrip] offset {off} is past TaikoManifest end (computed_end={})",
-        cursor + data_sources_len
+        cursor + l1_ancestor_headers_len
     );
 }
 
@@ -297,10 +309,22 @@ fn explain_guest_input_offset(input: &GuestInput, fail_off: usize) {
         );
         return;
     }
+    cursor += data_sources_len;
+
+    let l1_ancestor_headers_len = bincode::serialize(&input.taiko.l1_ancestor_headers)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    if taiko_off < cursor + l1_ancestor_headers_len {
+        eprintln!(
+            "[guest_input_bincode_roundtrip] in TaikoManifest.l1_ancestor_headers at off={}",
+            taiko_off - cursor
+        );
+        return;
+    }
 
     eprintln!(
         "[guest_input_bincode_roundtrip] taiko_off={taiko_off} is past TaikoManifest end (computed_end={})",
-        cursor + data_sources_len
+        cursor + l1_ancestor_headers_len
     );
 }
 

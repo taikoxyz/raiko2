@@ -166,6 +166,13 @@ mod tests {
         ) -> RaikoResult<Vec<raiko2_primitives::ExecutionWitness>> {
             Ok(vec![])
         }
+
+        async fn batch_l1_headers(
+            &self,
+            _blocks: &[u64],
+        ) -> RaikoResult<Vec<alloy_consensus::Header>> {
+            Ok(vec![])
+        }
     }
 
     #[tokio::test]

@@ -52,6 +52,8 @@ pub struct BoundlessSubmissionProgress {
     pub image_ref: String,
     pub deployment: String,
     pub offchain: bool,
+    pub quoted_mcycles_count: Option<u32>,
+    pub evaluated_mcycles_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,14 +68,16 @@ pub trait ProverProgressObserver: Send + Sync {
 }
 
 const B256_BYTES: usize = 32;
-const SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES: usize = B256_BYTES * 2;
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
-pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> B256 {
-    if public_values.len() >= SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES {
-        B256::from_slice(&public_values[B256_BYTES..SHASTA_PROPOSAL_PUBLIC_VALUES_BYTES])
+pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
+    if public_values.len() == B256_BYTES {
+        Ok(B256::from_slice(public_values))
     } else {
-        B256::default()
+        Err(RaikoError::Guest(format!(
+            "invalid Shasta proposal journal length: expected {B256_BYTES} bytes, got {}",
+            public_values.len()
+        )))
     }
 }
 
@@ -245,15 +249,20 @@ mod tests {
     use alloy_primitives::B256;
 
     #[test]
-    fn parses_shasta_proposal_input_hash_from_second_committed_word() {
-        let instance_hash = B256::repeat_byte(0x11);
+    fn parses_shasta_proposal_input_hash_from_first_committed_word() {
         let subproof_input_hash = B256::repeat_byte(0x22);
-        let public_values = [instance_hash.as_slice(), subproof_input_hash.as_slice()].concat();
+        let public_values = subproof_input_hash.as_slice().to_vec();
 
         assert_eq!(
-            parse_shasta_proposal_input_hash(&public_values),
+            parse_shasta_proposal_input_hash(&public_values).expect("parse proposal input hash"),
             subproof_input_hash
         );
+    }
+
+    #[test]
+    fn rejects_non_exact_shasta_proposal_public_input_length() {
+        let err = parse_shasta_proposal_input_hash(&[0u8; 64]).expect_err("reject");
+        assert!(err.to_string().contains("expected 32 bytes"));
     }
 
     #[test]

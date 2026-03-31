@@ -38,6 +38,8 @@ use crate::{
 
 const MILLION_CYCLES: u64 = 1_000_000;
 const STAKE_TOKEN_DECIMALS: u8 = 18;
+const BATCH_QUOTED_MCYCLES: u32 = 6_000;
+const AGGREGATION_QUOTED_MCYCLES: u32 = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -110,24 +112,8 @@ impl Default for BoundlessConfig {
                 })),
             }),
             offer_params: OfferParamsConfig {
-                batch: BoundlessOfferParams {
-                    ramp_up_start_sec: 2,
-                    ramp_up_period_blocks: 60,
-                    lock_timeout_ms_per_mcycle: 150,
-                    timeout_ms_per_mcycle: 310,
-                    max_price_per_mcycle: "0.000000085".to_string(),
-                    min_price_per_mcycle: Some("0.000000005".to_string()),
-                    lock_collateral: "20".to_string(),
-                },
-                aggregation: BoundlessOfferParams {
-                    ramp_up_start_sec: 2,
-                    ramp_up_period_blocks: 60,
-                    lock_timeout_ms_per_mcycle: 1500,
-                    timeout_ms_per_mcycle: 3000,
-                    max_price_per_mcycle: "0.00000006".to_string(),
-                    min_price_per_mcycle: Some("0.000000006".to_string()),
-                    lock_collateral: "20".to_string(),
-                },
+                batch: default_batch_offer_params(),
+                aggregation: default_aggregation_offer_params(),
             },
             poll_interval_ms: default_poll_interval_ms(),
             timeout_ms: default_timeout_ms(),
@@ -175,7 +161,7 @@ impl BoundlessConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ElfType {
     Batch,
     Aggregation,
@@ -419,7 +405,8 @@ impl BoundlessProver {
         submission: &Submission,
         proof_type: &'static str,
         image_id: Digest,
-        mcycles_count: u32,
+        quoted_mcycles_count: u32,
+        evaluated_mcycles_count: u32,
     ) -> RaikoResult<Proof> {
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
         let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
@@ -466,7 +453,7 @@ impl BoundlessProver {
                         None
                     };
                     let input_hash = match proof_type {
-                        "proposal" => parse_shasta_proposal_input_hash(journal),
+                        "proposal" => parse_shasta_proposal_input_hash(journal)?,
                         _ => parse_shasta_aggregation_input_hash(journal),
                     };
                     return Ok(Proof {
@@ -479,7 +466,9 @@ impl BoundlessProver {
                             "zkvm": "risc0",
                             "runner": "boundless",
                             "proof_type": proof_type,
-                            "mcycles_count": mcycles_count,
+                            "mcycles_count": quoted_mcycles_count,
+                            "quoted_mcycles_count": quoted_mcycles_count,
+                            "evaluated_mcycles_count": evaluated_mcycles_count,
                             "boundless": {
                                 "provider_request_id": submission.provider_request_id,
                                 "remote_tx_hash": submission.remote_tx_hash,
@@ -513,8 +502,9 @@ impl BoundlessProver {
         let (guest_env, guest_env_bytes) = Self::process_input(input.as_ref())?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
-        let (mcycles_count, journal) =
+        let (evaluated_mcycles_count, journal) =
             Self::evaluate_guest(guest_env.clone(), elf.to_vec()).await?;
+        let quoted_mcycles_count = quoted_mcycles_count(elf_type);
         let request = self
             .build_request(
                 &client,
@@ -523,7 +513,7 @@ impl BoundlessProver {
                 elf,
                 &program,
                 offer_spec,
-                mcycles_count,
+                quoted_mcycles_count,
                 journal,
             )
             .await?;
@@ -540,6 +530,8 @@ impl BoundlessProver {
                         deployment: format!("{:?}", self.config.get_deployment_type())
                             .to_lowercase(),
                         offchain: self.config.offchain,
+                        quoted_mcycles_count: Some(quoted_mcycles_count),
+                        evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     },
                 ))
                 .await;
@@ -549,7 +541,8 @@ impl BoundlessProver {
             &submission,
             proof_type,
             program.image_id,
-            mcycles_count,
+            quoted_mcycles_count,
+            evaluated_mcycles_count,
         )
         .await
     }
@@ -679,6 +672,38 @@ const fn default_timeout_ms() -> u64 {
     3_600_000
 }
 
+fn default_batch_offer_params() -> BoundlessOfferParams {
+    BoundlessOfferParams {
+        ramp_up_start_sec: 20,
+        ramp_up_period_blocks: 60,
+        lock_timeout_ms_per_mcycle: 200,
+        timeout_ms_per_mcycle: 410,
+        max_price_per_mcycle: "0.000000085".to_string(),
+        min_price_per_mcycle: Some("0.000000010".to_string()),
+        lock_collateral: "20".to_string(),
+    }
+}
+
+fn default_aggregation_offer_params() -> BoundlessOfferParams {
+    BoundlessOfferParams {
+        ramp_up_start_sec: 20,
+        ramp_up_period_blocks: 60,
+        lock_timeout_ms_per_mcycle: 3000,
+        timeout_ms_per_mcycle: 6000,
+        max_price_per_mcycle: "0.00000006".to_string(),
+        min_price_per_mcycle: Some("0.000000006".to_string()),
+        lock_collateral: "20".to_string(),
+    }
+}
+
+// Keep boundless order pricing aligned with the legacy raiko-agent strategy.
+const fn quoted_mcycles_count(elf_type: ElfType) -> u32 {
+    match elf_type {
+        ElfType::Batch => BATCH_QUOTED_MCYCLES,
+        ElfType::Aggregation => AGGREGATION_QUOTED_MCYCLES,
+    }
+}
+
 fn parse_staking_token(value: &str) -> RaikoResult<U256> {
     parse_units(value, STAKE_TOKEN_DECIMALS)
         .map(Into::into)
@@ -775,21 +800,13 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessOfferParams, DeploymentType, proof_to_envelope,
-        validate_offer_params,
+        BoundlessConfig, DeploymentType, ElfType, default_batch_offer_params, proof_to_envelope,
+        quoted_mcycles_count, validate_offer_params,
     };
     use raiko2_primitives::Proof;
 
-    fn sample_offer() -> BoundlessOfferParams {
-        BoundlessOfferParams {
-            ramp_up_start_sec: 2,
-            ramp_up_period_blocks: 60,
-            lock_timeout_ms_per_mcycle: 150,
-            timeout_ms_per_mcycle: 310,
-            max_price_per_mcycle: "0.000000085".to_string(),
-            min_price_per_mcycle: Some("0.000000005".to_string()),
-            lock_collateral: "20".to_string(),
-        }
+    fn sample_offer() -> super::BoundlessOfferParams {
+        default_batch_offer_params()
     }
 
     #[test]
@@ -797,6 +814,39 @@ mod tests {
         let config = BoundlessConfig::default();
         assert_eq!(config.get_deployment_type(), DeploymentType::Base);
         assert!(!config.offchain);
+    }
+
+    #[test]
+    fn default_batch_offer_matches_tolba_deployment() {
+        let batch = BoundlessConfig::default().offer_params.batch;
+        assert_eq!(batch.ramp_up_start_sec, 20);
+        assert_eq!(batch.ramp_up_period_blocks, 60);
+        assert_eq!(batch.lock_timeout_ms_per_mcycle, 200);
+        assert_eq!(batch.timeout_ms_per_mcycle, 410);
+        assert_eq!(batch.max_price_per_mcycle, "0.000000085");
+        assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
+        assert_eq!(batch.lock_collateral, "20");
+    }
+
+    #[test]
+    fn default_aggregation_offer_matches_tolba_deployment() {
+        let aggregation = BoundlessConfig::default().offer_params.aggregation;
+        assert_eq!(aggregation.ramp_up_start_sec, 20);
+        assert_eq!(aggregation.ramp_up_period_blocks, 60);
+        assert_eq!(aggregation.lock_timeout_ms_per_mcycle, 3000);
+        assert_eq!(aggregation.timeout_ms_per_mcycle, 6000);
+        assert_eq!(aggregation.max_price_per_mcycle, "0.00000006");
+        assert_eq!(
+            aggregation.min_price_per_mcycle.as_deref(),
+            Some("0.000000006")
+        );
+        assert_eq!(aggregation.lock_collateral, "20");
+    }
+
+    #[test]
+    fn quoted_mcycles_count_matches_raiko_agent_strategy() {
+        assert_eq!(quoted_mcycles_count(ElfType::Batch), 6_000);
+        assert_eq!(quoted_mcycles_count(ElfType::Aggregation), 200);
     }
 
     #[test]

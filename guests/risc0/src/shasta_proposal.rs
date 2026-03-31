@@ -22,9 +22,6 @@ pub fn main() {
     let guest_input: GuestInput =
         bincode::deserialize(&input_buf).expect("failed to deserialize proposal guest input");
 
-    let (instance_hash, subproof_input_hash) =
-        prove_shasta_proposal(&guest_input).expect("proposal proving failed");
-
-    env::commit_slice(instance_hash.as_slice());
+    let subproof_input_hash = prove_shasta_proposal(&guest_input).expect("proposal proving failed");
     env::commit_slice(subproof_input_hash.as_slice());
 }

@@ -20,11 +20,9 @@ pub fn main() {
 
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-start: prove_shasta_proposal");
-    let (instance_hash, subproof_input_hash) =
-        prove_shasta_proposal(&guest_input).expect("proposal proving failed");
+    let subproof_input_hash = prove_shasta_proposal(&guest_input).expect("proposal proving failed");
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-end: prove_shasta_proposal");
 
-    io::commit_slice(instance_hash.as_slice());
     io::commit_slice(subproof_input_hash.as_slice());
 }

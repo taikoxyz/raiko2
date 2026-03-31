@@ -43,7 +43,7 @@ impl NetworkProvider {
             let block_id = BlockNumberOrTag::from(*block_number);
             // Get block hash once for all addresses in this block
             let block = self
-                .provider
+                .l2_provider
                 .get_block(block_id.into())
                 .await
                 .map_err(|e| {
@@ -57,7 +57,7 @@ impl NetworkProvider {
             for address in addresses {
                 // Use eth_getProof to get account information (standard Ethereum RPC method)
                 let proof = self
-                    .provider
+                    .l2_provider
                     .get_proof(*address, vec![])
                     .hash(block_hash)
                     .await

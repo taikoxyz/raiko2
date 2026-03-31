@@ -301,6 +301,8 @@ cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test.json 
 # Generate input via preflight and write an aggregated report
 cargo run -r -p xtask -- bench-guest sp1 \
   --rpc-url http://localhost:9545 \
+  --l1-inclusion-block-number 11 \
+  --last-anchor-block-number 0 \
   --l2-chain-id 167000 \
   --proposal-id 3 \
   --repeat 3 \
@@ -391,19 +393,19 @@ deployment_type = "base"
 order_stream_url = "https://base-mainnet.boundless.network"
 
 [prover.boundless.offer_params.batch]
-ramp_up_start_sec = 2
+ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 150
-timeout_ms_per_mcycle = 310
+lock_timeout_ms_per_mcycle = 200
+timeout_ms_per_mcycle = 410
 max_price_per_mcycle = "0.000000085"
-min_price_per_mcycle = "0.000000005"
+min_price_per_mcycle = "0.000000010"
 lock_collateral = "20"
 
 [prover.boundless.offer_params.aggregation]
-ramp_up_start_sec = 2
+ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 1500
-timeout_ms_per_mcycle = 3000
+lock_timeout_ms_per_mcycle = 3000
+timeout_ms_per_mcycle = 6000
 max_price_per_mcycle = "0.00000006"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"
@@ -413,6 +415,10 @@ The boundless route is now fully in-process. `raiko2` uploads guest ELFs itself,
 requests directly, and records task/runtime state under `./data/runtime` by default. Task
 workdirs, runtime state, and reusable image references are managed there, while `guests/risc0`
 and `guests/sp1` remain separate Cargo workspaces.
+
+Boundless request pricing stays aligned with the legacy `raiko-agent` strategy. Proposal requests
+quote a fixed `6000` mcycles budget, aggregation requests quote a fixed `200` mcycles budget, and
+the local dry-run only validates guest execution and produces the request journal.
 
 `l2_rpc` is expected to be a witness-capable endpoint that supports `debug_executionWitness`.
 If the upstream L2 does not expose that method yet, run the compatibility `zeth-rpc-proxy`

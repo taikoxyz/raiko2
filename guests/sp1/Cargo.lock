@@ -3663,12 +3663,15 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
+ "alloy-consensus",
  "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
  "raiko2-stateless",
+ "reth-ethereum-primitives",
 ]
 
 [[package]]

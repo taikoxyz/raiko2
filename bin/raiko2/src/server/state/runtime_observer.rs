@@ -14,6 +14,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::HoodiTaskMetadata;
 
+fn extra_data_u32(
+    extra_data: &Value,
+    root: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<u32> {
+    extra_data
+        .get(key)
+        .or_else(|| root.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
@@ -298,6 +310,9 @@ fn apply_boundless_runtime_from_extra_data(
             .get("offchain")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        quoted_mcycles_count: extra_data_u32(extra_data, root, "quoted_mcycles_count")
+            .or_else(|| extra_data_u32(extra_data, root, "mcycles_count")),
+        evaluated_mcycles_count: extra_data_u32(extra_data, root, "evaluated_mcycles_count"),
     };
     match task {
         EngineTask::ProveProposal { .. } => {
@@ -414,6 +429,8 @@ mod tests {
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
                     offchain: false,
+                    quoted_mcycles_count: Some(6_000),
+                    evaluated_mcycles_count: Some(12_345),
                 }),
             )
             .await;
@@ -433,6 +450,66 @@ mod tests {
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
+        assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
+        assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
         Ok(())
+    }
+
+    #[test]
+    fn apply_boundless_runtime_from_extra_data_restores_cycle_metadata() {
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Boundless,
+            request: proposal_request(),
+            stage: ProposalStage::Prove,
+        });
+        let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
+        let mut metadata = HoodiTaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: "risc0".to_string(),
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: vec![HoodiProposalTask {
+                proposal_id: 42,
+                l1_inclusion_block_number: 1,
+                l2_block_numbers: vec![42],
+                last_anchor_block_number: 0,
+                task_id: encoded_task_id.clone(),
+            }],
+            aggregate_task_id: None,
+            runtime: HoodiRuntimeMetadata::default(),
+        };
+
+        apply_boundless_runtime_from_extra_data(
+            &mut metadata,
+            &EngineTask::ProveProposal {
+                request: proposal_request(),
+                input_task: proposal_task_id,
+            },
+            &encoded_task_id,
+            Some(&serde_json::json!({
+                "mcycles_count": 6000,
+                "quoted_mcycles_count": 6000,
+                "evaluated_mcycles_count": 12345,
+                "boundless": {
+                    "provider_request_id": "0x1234",
+                    "remote_tx_hash": "0xabcd",
+                    "image_id": "0ximage",
+                    "deployment": "base",
+                    "offchain": false
+                }
+            })),
+            123,
+        );
+
+        let runtime_entry = metadata
+            .proposal_runtime(&encoded_task_id)
+            .expect("proposal runtime exists");
+        assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
+        assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
+        assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
+        assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
     }
 }

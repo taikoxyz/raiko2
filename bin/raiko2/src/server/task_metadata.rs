@@ -51,6 +51,10 @@ pub(crate) struct HoodiTaskRuntimeMetadata {
     pub(crate) deployment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) offchain: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) quoted_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evaluated_mcycles_count: Option<u32>,
 }
 
 impl HoodiTaskMetadata {
@@ -106,5 +110,7 @@ impl HoodiTaskRuntimeMetadata {
         self.image_ref = Some(progress.image_ref.clone());
         self.deployment = Some(progress.deployment.clone());
         self.offchain = Some(progress.offchain);
+        self.quoted_mcycles_count = progress.quoted_mcycles_count;
+        self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
     }
 }

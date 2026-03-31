@@ -9829,6 +9829,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.8",
+ "bincode",
  "clap",
  "dotenvy",
  "http-body-util",
@@ -9856,6 +9857,7 @@ dependencies = [
 name = "raiko2-engine"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-trie 0.9.5",
  "async-trait",
@@ -9886,6 +9888,7 @@ dependencies = [
  "alethia-reth-consensus 0.6.0 (git+https://github.com/taikoxyz/alethia-reth?branch=main)",
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-sol-types",
  "alloy-trie 0.9.5",
  "async-trait",
  "raiko2-guests",
@@ -9977,8 +9980,10 @@ dependencies = [
 name = "raiko2-prover"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-signer-local",
+ "alloy-sol-types",
  "async-trait",
  "bincode",
  "boundless-market",
@@ -9989,6 +9994,7 @@ dependencies = [
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
  "reqwest",
+ "reth-ethereum-primitives",
  "risc0-ethereum-contracts",
  "risc0-zkvm",
  "secp256k1 0.30.0",
@@ -10012,12 +10018,14 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "alloy-trie 0.9.5",
  "anyhow",
  "async-trait",
  "futures",
  "itertools 0.14.0",
  "raiko2-primitives",
+ "raiko2-protocol-shasta",
  "reqwest",
  "reth-chainspec",
  "reth-ethereum-primitives",

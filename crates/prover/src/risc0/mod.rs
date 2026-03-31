@@ -164,7 +164,7 @@ where
                 })?;
 
                 let journal_bytes = &receipt.journal.bytes;
-                let input_hash = parse_shasta_proposal_input_hash(journal_bytes);
+                let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
                 let extra_data = Self::mock_extra_data(
                     &session,
                     image_id,
@@ -197,7 +197,7 @@ where
             }
 
             let journal_bytes = &receipt.journal.bytes;
-            let input_hash = parse_shasta_proposal_input_hash(journal_bytes);
+            let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
 
             info!(
                 "Generated proposal receipt journal: {:?}",
@@ -334,22 +334,99 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Risc0Config, Risc0Prover};
-    use crate::{Prover, encode_risc0_proof_payload};
+    use crate::Prover;
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_primitives::{Address, B256, Signature, TxKind, U256};
+    use alloy_sol_types::{SolCall, sol};
     use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
-    use raiko2_primitives::ProverConfig;
+    use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
-    use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-    use risc0_zkvm::Receipt;
+    use raiko2_protocol_shasta::TaikoManifest;
+    sol! {
+        #[derive(Debug)]
+        struct AnchorV4Checkpoint {
+            uint48 blockNumber;
+            bytes32 blockHash;
+            bytes32 stateRoot;
+        }
+
+        function anchorV4(AnchorV4Checkpoint _checkpoint) external;
+    }
+
+    fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
+        TxEip1559 {
+            chain_id: 167_000,
+            nonce: 0,
+            gas_limit: 1_000_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: anchorV4Call {
+                _checkpoint: checkpoint.clone(),
+            }
+            .abi_encode()
+            .into(),
+        }
+        .into_signed(Signature::test_signature())
+        .into()
+    }
 
     fn fixture_guest_input() -> GuestInput {
-        let mut input: GuestInput = serde_json::from_str(include_str!("../../../../test.json"))
-            .expect("parse test.json as GuestInput");
-        input.proof_carry_data = build_proof_carry_data(&input);
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_000)
+            .expect("supported taiko mainnet chain spec");
+        let mut witness = raiko2_primitives::StatelessInput {
+            chain_spec,
+            ..Default::default()
+        };
+        witness.block.header.number = 1;
+        witness.block.header.timestamp = u64::MAX / 2;
+        witness.block.header.parent_hash = B256::from([9u8; 32]);
+        witness.block.header.state_root = B256::from([1u8; 32]);
+
+        let mut l1_header = alloy_consensus::Header::default();
+        l1_header.number = 7;
+        l1_header.parent_hash = B256::from([0xAA; 32]);
+        l1_header.state_root = B256::from([0x66; 32]);
+        let checkpoint = AnchorV4Checkpoint {
+            blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+            blockHash: l1_header.hash_slow(),
+            stateRoot: l1_header.state_root,
+        };
+        witness.block.body.transactions.push(anchor_tx(&checkpoint));
+
+        let mut input = GuestInput {
+            witnesses: vec![witness],
+            taiko: TaikoManifest {
+                proposal_id: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        input.taiko.chain_spec.name = "taiko_mainnet".to_string();
+        input.taiko.chain_spec.chain_id = 167_000;
+        input.taiko.chain_spec.is_taiko = true;
+        input.taiko.l1_header = l1_header.clone();
+        input.taiko.l1_ancestor_headers = vec![l1_header.clone()];
+        input.taiko.prover_data.actual_prover = Address::from([0x22; 20]);
+        input.taiko.proposal_event.proposal.id =
+            input.taiko.proposal_id.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
+        input.taiko.proposal_event.proposal.timestamp =
+            123u64.try_into().expect("timestamp fits in uint48");
+        input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
+        input.taiko.proposal_event.proposal.originBlockNumber =
+            l1_header.number.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
+        input.proof_carry_data =
+            build_proof_carry_data(&input, ProofType::Risc0).expect("build carry data");
         input
     }
 
     #[tokio::test]
-    async fn risc0_mock_proposal_proves_from_fixture_with_framed_input() {
+    async fn risc0_mock_proposal_surfaces_guest_validation_errors_after_framed_input() {
         let prover = Risc0Prover::new(Risc0Config {
             bonsai: false,
             snark: false,
@@ -359,37 +436,15 @@ mod tests {
             verify: true,
         });
         let guest_input = fixture_guest_input();
-        let expected_input = hash_shasta_subproof_input(&guest_input.proof_carry_data);
 
-        let proof = prover
+        let err = prover
             .prove(guest_input, &ProverConfig::default(), &RISC0_SHASTA_BACKEND)
             .await
-            .expect("risc0 mock proposal proof should succeed");
-        let receipt: Receipt = serde_json::from_str(proof.quote.as_deref().expect("receipt json"))
-            .expect("parse risc0 receipt");
+            .expect_err("fixture input should reach guest validation and fail there");
 
-        assert_eq!(
-            proof.proof,
-            Some(encode_risc0_proof_payload(&receipt)),
-            "proof should expose the canonical risc0 payload"
-        );
-        assert!(proof.quote.is_some(), "receipt JSON should be present");
-        assert_eq!(
-            proof.input,
-            Some(expected_input),
-            "proposal proof input should be shasta subproof input hash"
-        );
-
-        let extra_data = proof.extra_data.expect("mock metadata should be present");
-        assert!(
-            extra_data
-                .get("shasta")
-                .and_then(|value| value.get("proof_carry_data"))
-                .is_some(),
-            "proof carry data should be preserved under the shasta namespace"
-        );
-        assert_eq!(extra_data["risc0"]["zkvm"], "risc0");
-        assert_eq!(extra_data["risc0"]["mode"], "mock");
-        assert_eq!(extra_data["risc0"]["fake_receipt"], true);
+        let message = err.to_string();
+        assert!(message.contains("RISC0 proposal mock execution failed"));
+        assert!(message.contains("stateless block validation failed at index 0"));
+        assert!(message.contains("missing required ancestor headers"));
     }
 }

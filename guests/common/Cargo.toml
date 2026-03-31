@@ -13,7 +13,13 @@ alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch 
     "serde",
 ] }
 alloy-primitives = { version = "1.5.0", default-features = false }
+alloy-consensus = { version = "1.0", default-features = false, features = ["serde"] }
+alloy-sol-types = { version = "1.5.0", default-features = false }
 anyhow = "1.0"
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", features = [
+    "serde",
+    "serde-bincode-compat",
+] }
 
 [dev-dependencies]
 reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }

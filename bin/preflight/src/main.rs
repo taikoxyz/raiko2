@@ -13,9 +13,13 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Upstream RPC URL to fetch block/witness data.
+    /// Upstream L2 RPC URL to fetch block/witness data.
     #[arg(long, env)]
     rpc_url: String,
+
+    /// Optional L1 RPC URL for Shasta anchor linkage. Defaults to `--rpc-url`.
+    #[arg(long, env)]
+    l1_rpc_url: Option<String>,
 
     /// L2 chain ID for the proof context.
     #[arg(long)]
@@ -28,6 +32,14 @@ struct Args {
     /// Proposal ID (L1 event id) to preflight.
     #[arg(long)]
     proposal_id: u64,
+
+    /// L1 block number that contains the Shasta proposal event.
+    #[arg(long)]
+    l1_inclusion_block_number: u64,
+
+    /// Last committed anchor block number carried across proposals.
+    #[arg(long, default_value_t = 0)]
+    last_anchor_block_number: u64,
 
     /// L2 block range start (inclusive).
     #[arg(long)]
@@ -66,7 +78,8 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let provider = NetworkProvider::new(&args.rpc_url)?;
+    let l1_rpc_url = args.l1_rpc_url.as_deref().unwrap_or(&args.rpc_url);
+    let provider = NetworkProvider::new_pair(l1_rpc_url, &args.rpc_url)?;
 
     if args.l2_start > args.l2_end {
         anyhow::bail!("--l2-start must be <= --l2-end");
@@ -92,6 +105,8 @@ async fn main() -> Result<()> {
         "end": args.l2_end,
         "proposal_id": args.proposal_id,
     });
+    config["shasta_l1_inclusion_block_number"] = serde_json::json!(args.l1_inclusion_block_number);
+    config["shasta_last_anchor_block_number"] = serde_json::json!(args.last_anchor_block_number);
 
     let ctx = ProofContext::new(request, config);
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);

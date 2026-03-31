@@ -6,12 +6,12 @@ use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
     instance::{
-        ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_public_input_from_proof_carry_data_vec, words_to_bytes_be,
         words_to_bytes_le,
     },
 };
+use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{GuestInputCodec, parse_shasta_aggregation_input};
@@ -60,44 +60,16 @@ where
 
         let proof_carry_data = input.proof_carry_data.clone();
 
-        let first = input.witnesses.first().ok_or_else(|| {
-            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
-        })?;
-        let last = input.witnesses.last().ok_or_else(|| {
-            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
-        })?;
-
-        let transition = ShastaTransition {
-            parent_hash: first.block.header.parent_hash,
-            block_hash: last.block.header.hash_slow(),
-            state_root: last.block.header.state_root,
-        };
-
-        let proposal_metadata = ShastaProposalMetadata {
-            info_hash: B256::default(),
-            proposer: proof_carry_data.transition_input.transition.proposer,
-            proposal_id: proof_carry_data.transition_input.proposal_id,
-            proposed_at: proof_carry_data.transition_input.transition.timestamp,
-        };
-
-        let instance = ProtocolInstance {
-            transition,
-            proposal_metadata,
-            prover: proof_carry_data.transition_input.actual_prover,
-            chain_id: proof_carry_data.chain_id,
-            verifier_address: proof_carry_data.verifier,
-        };
-
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let instance_hash = instance.instance_hash();
-        let signature = sign_hash(instance_hash)?;
+        let input_hash = hash_shasta_subproof_input(&proof_carry_data);
+        let signature = sign_hash(input_hash)?;
         let sgx_instance = signer_address()?;
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
-            input: Some(instance_hash),
+            input: Some(input_hash),
             extra_data: Some(extra_data),
             ..Default::default()
         })

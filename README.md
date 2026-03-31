@@ -1,6 +1,6 @@
 ![Raiko2 — Taiko proof orchestration for Shasta](docs/assets/readme-banner.png)
 
-[![CI status](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
+[![CI status](https://img.shields.io/github/actions/workflow/status/taikoxyz/raiko2/ci.yml?branch=main&label=CI)](https://github.com/taikoxyz/raiko2/actions/workflows/ci.yml)
 
 Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Development](docs/development.md) / [Operations](docs/operations.md) /

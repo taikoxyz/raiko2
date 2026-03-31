@@ -42,9 +42,9 @@ impl ShastaManifestBuilder {
             parent_transition_hash: None,
             checkpoint: None,
             last_anchor_block_number: ctx
-                .config
-                .get("shasta_last_anchor_block_number")
-                .and_then(Value::as_u64),
+                .request
+                .shasta
+                .map(|shasta| shasta.last_anchor_block_number),
         }
     }
 
@@ -176,7 +176,7 @@ impl ShastaManifestBuilder {
         let Some(value) = config.get(key) else {
             return Ok(None);
         };
-        serde_json::from_value(value.clone())
+        T::deserialize(value)
             .map(Some)
             .map_err(|e| RaikoError::InvalidRequestConfig(format!("invalid {key}: {e}")))
     }
@@ -236,6 +236,29 @@ impl ManifestBuilder for ShastaManifestBuilder {
         ctx: &ProofContext,
         blocks: &[Block],
     ) -> RaikoResult<TaikoManifest> {
+        Self::build_taiko_manifest(ctx, blocks, None)
+    }
+}
+
+impl ShastaManifestBuilder {
+    /// Build a Shasta manifest using an already-resolved proposal event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if manifest config or payload data is invalid.
+    pub fn taiko_manifest_with_event(
+        ctx: &ProofContext,
+        blocks: &[Block],
+        proposal_event: ShastaEventData,
+    ) -> RaikoResult<TaikoManifest> {
+        Self::build_taiko_manifest(ctx, blocks, Some(proposal_event))
+    }
+
+    fn build_taiko_manifest(
+        ctx: &ProofContext,
+        blocks: &[Block],
+        proposal_event_override: Option<ShastaEventData>,
+    ) -> RaikoResult<TaikoManifest> {
         info!(
             "Creating Taiko manifest for proposal {} with {} blocks",
             ctx.request.proposal_id,
@@ -251,7 +274,8 @@ impl ManifestBuilder for ShastaManifestBuilder {
         let l1_ancestor_headers =
             Self::parse_config::<Vec<alloy_consensus::Header>>(&ctx.config, "l1_ancestor_headers")?
                 .unwrap_or_default();
-        let proposal_event = Self::parse_proposal_event(ctx)?;
+        let proposal_event =
+            proposal_event_override.map_or_else(|| Self::parse_proposal_event(ctx), Ok)?;
         let mut data_sources =
             Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "shasta_data_sources")?
                 .unwrap_or_default();

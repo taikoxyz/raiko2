@@ -7,9 +7,9 @@ use raiko2_engine::{
     AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
 };
 use raiko2_pipeline::PipelineKey;
-use raiko2_primitives::{L2BlockRange, Proof};
+use raiko2_primitives::{L2BlockRange, Proof, ProofType};
 use raiko2_prover::sp1::{
-    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1ConfigOverrides,
+    ExecutionMode as Sp1ExecutionMode, Sp1ConfigOverrides, Sp1RequestContext,
 };
 use raiko2_queue::{decode_task_id, encode_task_id};
 use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistration};
@@ -64,6 +64,15 @@ impl HoodiProofType {
             Self::Risc0 => "risc0",
             Self::ZkAny => "zk_any",
             Self::Sgx => "sgx",
+        }
+    }
+
+    const fn canonical_proof_type(self) -> Option<ProofType> {
+        match self {
+            Self::Native => Some(ProofType::Native),
+            Self::Sp1 => Some(ProofType::Sp1),
+            Self::Risc0 | Self::ZkAny => Some(ProofType::Risc0),
+            Self::Sgx => None,
         }
     }
 }
@@ -241,13 +250,15 @@ struct SubmissionContext {
     pair: ResolvedNetworkPair,
     selection: RouteSelection,
     engine: Arc<dyn EngineHandle>,
+    proof_type: ProofType,
 }
 
 struct TaskMetadataParams {
     network: String,
     l1_network: String,
-    proof_type: HoodiProofType,
-    execution_mode: Option<String>,
+    proof_type: ProofType,
+    api_proof_type: Option<String>,
+    execution_mode: Option<Sp1ExecutionMode>,
     aggregate_requested: bool,
     proposals: Vec<HoodiProposalTask>,
     aggregate_task_id: Option<String>,
@@ -385,23 +396,12 @@ fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> 
 fn validate_sp1_request(
     base_config: &raiko2_prover::sp1::Sp1Config,
     overrides: Option<&Sp1ConfigOverrides>,
-    aggregate: bool,
-    execute_aggregate_message: &str,
+    context: Sp1RequestContext,
 ) -> Result<(), ApiError> {
-    let overrides = overrides.cloned().unwrap_or_default();
-    let effective_config = base_config.merged_with(&overrides);
-    if overrides.has_network_overrides()
-        && !matches!(effective_config.prover, Sp1ProverMode::Network)
-    {
-        return Err(ApiError::bad_request(
-            "sp1 network-only settings require sp1.prover=network",
-        ));
-    }
-    if aggregate && matches!(effective_config.mode, Sp1ExecutionMode::Execute) {
-        return Err(ApiError::bad_request(execute_aggregate_message));
-    }
-    effective_config.validate().map_err(ApiError::bad_request)?;
-    Ok(())
+    base_config
+        .resolve_request_config(overrides, context)
+        .map(|_| ())
+        .map_err(|err| ApiError::bad_request(err.to_string()))
 }
 
 fn validate_batch_request(state: &AppState, req: &ShastaProofRequest) -> Result<(), ApiError> {
@@ -418,8 +418,9 @@ fn validate_batch_request(state: &AppState, req: &ShastaProofRequest) -> Result<
         validate_sp1_request(
             &state.config.prover.sp1,
             sp1_args.as_ref(),
-            req.aggregate,
-            "sp1.mode=execute does not support aggregate=true",
+            Sp1RequestContext::ProposalBatch {
+                aggregate: req.aggregate,
+            },
         )?;
     }
     for proposal in &req.proposals {
@@ -453,8 +454,7 @@ fn validate_aggregate_request(
         validate_sp1_request(
             &state.config.prover.sp1,
             sp1_args.as_ref(),
-            true,
-            "sp1.mode=execute is not supported for aggregation",
+            Sp1RequestContext::Aggregation,
         )?;
     }
     let _ = validate_prover_args(&req.prover_args)?;
@@ -537,11 +537,15 @@ fn resolve_submission_context(
 ) -> Result<SubmissionContext, ApiError> {
     let pair = resolved_pair(state, network, l1_network)?;
     let selection = route_for_proof_type(state, proof_type)?;
+    let proof_type = proof_type
+        .canonical_proof_type()
+        .ok_or_else(|| ApiError::bad_request("proof_type=sgx is not supported"))?;
     let engine = resolve_engine(state, &pair, &selection)?;
     Ok(SubmissionContext {
         pair,
         selection,
         engine,
+        proof_type,
     })
 }
 
@@ -635,24 +639,9 @@ async fn register_batch_task(
     state: &AppState,
     public_task_id: &str,
     selection: &RouteSelection,
-    req: &ShastaProofRequest,
-    pair: &ResolvedNetworkPair,
     proposal_tasks: &[HoodiProposalTask],
-    aggregate_task_id: Option<String>,
+    metadata: HoodiTaskMetadata,
 ) -> Result<(), ApiError> {
-    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
-    let metadata = build_task_metadata(
-        pair,
-        TaskMetadataParams {
-            network: req.network.clone(),
-            l1_network: req.l1_network.clone(),
-            proof_type: req.proof_type,
-            execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
-            aggregate_requested: req.aggregate,
-            proposals: proposal_tasks.to_vec(),
-            aggregate_task_id,
-        },
-    );
     register_runtime_task(
         state,
         public_task_id,
@@ -672,22 +661,8 @@ async fn register_aggregate_task(
     state: &AppState,
     public_task_id: &str,
     selection: &RouteSelection,
-    pair: &ResolvedNetworkPair,
-    req: &AggregateProofRequest,
-    aggregate_task_id: String,
+    metadata: HoodiTaskMetadata,
 ) -> Result<(), ApiError> {
-    let metadata = build_task_metadata(
-        pair,
-        TaskMetadataParams {
-            network: req.network.clone(),
-            l1_network: req.l1_network.clone(),
-            proof_type: req.proof_type,
-            execution_mode: execution_mode_for_sp1(req.proof_type, None),
-            aggregate_requested: true,
-            proposals: Vec::new(),
-            aggregate_task_id: Some(aggregate_task_id),
-        },
-    );
     register_runtime_task(
         state,
         public_task_id,
@@ -703,14 +678,21 @@ async fn register_aggregate_task(
 fn execution_mode_for_sp1(
     proof_type: HoodiProofType,
     sp1_args: Option<&Sp1ConfigOverrides>,
-) -> Option<String> {
+) -> Option<Sp1ExecutionMode> {
     matches!(proof_type, HoodiProofType::Sp1).then(|| {
         sp1_args
             .and_then(|args| args.mode)
             .unwrap_or(Sp1ExecutionMode::Prove)
-            .as_str()
-            .to_string()
     })
+}
+
+fn api_proof_type_alias(
+    proof_type: HoodiProofType,
+    canonical_proof_type: ProofType,
+) -> Option<String> {
+    let proof_type = proof_type.as_str();
+    let canonical_proof_type = canonical_proof_type.to_string();
+    (proof_type != canonical_proof_type.as_str()).then(|| proof_type.to_string())
 }
 
 fn build_task_metadata(
@@ -721,7 +703,8 @@ fn build_task_metadata(
         network_pair: pair.key.clone(),
         network: params.network,
         l1_network: params.l1_network,
-        proof_type: params.proof_type.as_str().to_string(),
+        proof_type: params.proof_type,
+        api_proof_type: params.api_proof_type,
         execution_mode: params.execution_mode,
         aggregate_requested: params.aggregate_requested,
         proposals: params.proposals,
@@ -1100,7 +1083,7 @@ fn build_task_data(
     HoodiTaskData {
         task_id: id,
         route: record.route.clone(),
-        execution_mode: metadata.execution_mode.clone(),
+        execution_mode: metadata.execution_mode_str(),
         status: root_state.status,
         network: metadata.network.clone(),
         l1_network: metadata.l1_network.clone(),
@@ -1172,8 +1155,12 @@ fn task_runtime_view(
         offchain: runtime.offchain,
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
-        sp1_network_mode: runtime.sp1_network_mode,
-        sp1_fulfillment_strategy: runtime.sp1_fulfillment_strategy,
+        sp1_network_mode: runtime
+            .sp1_network_mode
+            .map(|mode| mode.as_str().to_string()),
+        sp1_fulfillment_strategy: runtime
+            .sp1_fulfillment_strategy
+            .map(|strategy| strategy.as_str().to_string()),
         sp1_skip_simulation: runtime.sp1_skip_simulation,
         sp1_cycle_limit: runtime.sp1_cycle_limit,
         sp1_timeout_secs: runtime.sp1_timeout_secs,
@@ -1190,8 +1177,10 @@ pub async fn request_batch_shasta_proof(
         pair,
         selection,
         engine,
+        proof_type,
     } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
     let prover_args_json = validate_prover_args(&req.prover_args)?;
+    let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
     let public_task_id = generate_public_task_id();
 
     info!(
@@ -1211,15 +1200,26 @@ pub async fn request_batch_shasta_proof(
     } else {
         None
     };
+    let metadata = build_task_metadata(
+        &pair,
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type,
+            api_proof_type: api_proof_type_alias(req.proof_type, proof_type),
+            execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
+            aggregate_requested: req.aggregate,
+            proposals: proposal_tasks.clone(),
+            aggregate_task_id: aggregate_task_id.clone(),
+        },
+    );
 
     register_batch_task(
         &state,
         &public_task_id,
         &selection,
-        &req,
-        &pair,
         &proposal_tasks,
-        aggregate_task_id.clone(),
+        metadata,
     )
     .await?;
 
@@ -1237,21 +1237,27 @@ pub async fn request_aggregation_proof(
         pair,
         selection,
         engine,
+        proof_type,
     } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
     validate_external_proofs(selection.pipeline_key, &req.proofs)?;
     let public_task_id = generate_public_task_id();
     let aggregate_task_id =
         enqueue_aggregate_from_proofs(&engine, &public_task_id, req.proofs.clone()).await?;
-
-    register_aggregate_task(
-        &state,
-        &public_task_id,
-        &selection,
+    let metadata = build_task_metadata(
         &pair,
-        &req,
-        aggregate_task_id,
-    )
-    .await?;
+        TaskMetadataParams {
+            network: req.network.clone(),
+            l1_network: req.l1_network.clone(),
+            proof_type,
+            api_proof_type: api_proof_type_alias(req.proof_type, proof_type),
+            execution_mode: execution_mode_for_sp1(req.proof_type, None),
+            aggregate_requested: true,
+            proposals: Vec::new(),
+            aggregate_task_id: Some(aggregate_task_id.clone()),
+        },
+    );
+
+    register_aggregate_task(&state, &public_task_id, &selection, metadata).await?;
 
     Ok(registration_response(req.proof_type, public_task_id))
 }
@@ -1289,7 +1295,7 @@ pub async fn get_task(
         )
         .await
         .map_err(|err| ApiError::internal(format!("failed to sync runtime status: {err}")))?;
-    let proof_type = metadata.proof_type.clone();
+    let proof_type = metadata.response_proof_type();
     let data = build_task_data(
         id,
         &record,

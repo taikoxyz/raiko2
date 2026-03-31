@@ -7,6 +7,59 @@ use sp1_sdk::{
 };
 use tracing::error;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sp1RequestContext {
+    ProposalBatch { aggregate: bool },
+    Aggregation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sp1ConfigError {
+    NetworkOverridesRequireNetworkProver,
+    BatchExecuteAggregationNotSupported,
+    AggregationExecuteNotSupported,
+    CycleLimitMustBePositive,
+    TimeoutSecsMustBePositive,
+    RpcUrlMustNotBeEmpty,
+    ExecuteModeDoesNotSupportNetworkProver,
+    MainnetRequiresAuction(Sp1FulfillmentStrategy),
+    ReservedRequiresReservedOrHosted(Sp1FulfillmentStrategy),
+}
+
+impl std::fmt::Display for Sp1ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NetworkOverridesRequireNetworkProver => {
+                f.write_str("sp1 network-only settings require sp1.prover=network")
+            }
+            Self::BatchExecuteAggregationNotSupported => {
+                f.write_str("sp1.mode=execute does not support aggregate=true")
+            }
+            Self::AggregationExecuteNotSupported => {
+                f.write_str("sp1.mode=execute is not supported for aggregation")
+            }
+            Self::CycleLimitMustBePositive => f.write_str("sp1.cycle_limit must be greater than 0"),
+            Self::TimeoutSecsMustBePositive => {
+                f.write_str("sp1.timeout_secs must be greater than 0")
+            }
+            Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
+            Self::ExecuteModeDoesNotSupportNetworkProver => {
+                f.write_str("sp1.mode=execute does not support sp1.prover=network")
+            }
+            Self::MainnetRequiresAuction(strategy) => write!(
+                f,
+                "sp1.network_mode=mainnet requires sp1.fulfillment_strategy=auction, got {strategy}"
+            ),
+            Self::ReservedRequiresReservedOrHosted(strategy) => write!(
+                f,
+                "sp1.network_mode=reserved requires sp1.fulfillment_strategy=reserved or hosted, got {strategy}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Sp1ConfigError {}
+
 /// SP1 prover configuration parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,7 +109,7 @@ const fn default_cycle_limit() -> u64 {
 }
 
 const fn default_timeout_secs() -> u64 {
-    3_600
+    7_200
 }
 
 impl Default for Sp1Config {
@@ -121,23 +174,52 @@ impl Sp1Config {
 
     /// # Errors
     ///
+    /// Returns an error when request-scoped overrides produce an invalid SP1 configuration.
+    pub fn resolve_request_config(
+        &self,
+        overrides: Option<&Sp1ConfigOverrides>,
+        context: Sp1RequestContext,
+    ) -> Result<Self, Sp1ConfigError> {
+        let empty_overrides = Sp1ConfigOverrides::default();
+        let overrides = overrides.unwrap_or(&empty_overrides);
+        let effective_config = self.merged_with(overrides);
+        if overrides.has_network_overrides() && effective_config.prover != ProverMode::Network {
+            return Err(Sp1ConfigError::NetworkOverridesRequireNetworkProver);
+        }
+        if effective_config.mode == ExecutionMode::Execute {
+            match context {
+                Sp1RequestContext::ProposalBatch { aggregate: true } => {
+                    return Err(Sp1ConfigError::BatchExecuteAggregationNotSupported);
+                }
+                Sp1RequestContext::Aggregation => {
+                    return Err(Sp1ConfigError::AggregationExecuteNotSupported);
+                }
+                Sp1RequestContext::ProposalBatch { aggregate: false } => {}
+            }
+        }
+        effective_config.validate()?;
+        Ok(effective_config)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error when the SP1 prover configuration is internally inconsistent.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), Sp1ConfigError> {
         if self.cycle_limit == 0 {
-            return Err("sp1.cycle_limit must be greater than 0".to_string());
+            return Err(Sp1ConfigError::CycleLimitMustBePositive);
         }
         if self.timeout_secs == 0 {
-            return Err("sp1.timeout_secs must be greater than 0".to_string());
+            return Err(Sp1ConfigError::TimeoutSecsMustBePositive);
         }
         if self
             .rpc_url
             .as_deref()
             .is_some_and(|rpc_url| rpc_url.trim().is_empty())
         {
-            return Err("sp1.rpc_url must not be empty".to_string());
+            return Err(Sp1ConfigError::RpcUrlMustNotBeEmpty);
         }
         if self.mode == ExecutionMode::Execute && self.prover == ProverMode::Network {
-            return Err("sp1.mode=execute does not support sp1.prover=network".to_string());
+            return Err(Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
         }
         if self.prover == ProverMode::Network {
             match (self.network_mode, self.fulfillment_strategy) {
@@ -147,16 +229,10 @@ impl Sp1Config {
                     Sp1FulfillmentStrategy::Reserved | Sp1FulfillmentStrategy::Hosted,
                 ) => {}
                 (Sp1NetworkMode::Mainnet, strategy) => {
-                    return Err(format!(
-                        "sp1.network_mode=mainnet requires sp1.fulfillment_strategy=auction, got {}",
-                        strategy.as_str()
-                    ));
+                    return Err(Sp1ConfigError::MainnetRequiresAuction(strategy));
                 }
                 (Sp1NetworkMode::Reserved, strategy) => {
-                    return Err(format!(
-                        "sp1.network_mode=reserved requires sp1.fulfillment_strategy=reserved or hosted, got {}",
-                        strategy.as_str()
-                    ));
+                    return Err(Sp1ConfigError::ReservedRequiresReservedOrHosted(strategy));
                 }
             }
         }
@@ -253,6 +329,12 @@ impl Sp1NetworkMode {
     }
 }
 
+impl std::fmt::Display for Sp1NetworkMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl From<Sp1NetworkMode> for NetworkMode {
     fn from(value: Sp1NetworkMode) -> Self {
         match value {
@@ -283,6 +365,12 @@ impl Sp1FulfillmentStrategy {
             Self::Hosted => "hosted",
             Self::Auction => "auction",
         }
+    }
+}
+
+impl std::fmt::Display for Sp1FulfillmentStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -460,8 +548,8 @@ impl From<Sp1Response> for Proof {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionMode, ProverMode, Sp1Config, Sp1ConfigOverrides, Sp1FulfillmentStrategy,
-        Sp1NetworkMode,
+        ExecutionMode, ProverMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
+        Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1RequestContext,
     };
 
     #[test]
@@ -480,7 +568,7 @@ mod tests {
         let err = config
             .validate()
             .expect_err("execute should reject network");
-        assert!(err.contains("sp1.mode=execute"));
+        assert_eq!(err, Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
     }
 
     #[test]
@@ -494,7 +582,10 @@ mod tests {
         let err = config
             .validate()
             .expect_err("mainnet should reject reserved strategy");
-        assert!(err.contains("sp1.network_mode=mainnet"));
+        assert_eq!(
+            err,
+            Sp1ConfigError::MainnetRequiresAuction(Sp1FulfillmentStrategy::Reserved)
+        );
     }
 
     #[test]
@@ -505,5 +596,42 @@ mod tests {
         };
 
         assert!(overrides.has_network_overrides());
+    }
+
+    #[test]
+    fn resolve_request_config_rejects_aggregate_execute_override() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            mode: Some(ExecutionMode::Execute),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let err = config
+            .resolve_request_config(Some(&overrides), Sp1RequestContext::Aggregation)
+            .expect_err("aggregate execute should be rejected");
+        assert_eq!(err, Sp1ConfigError::AggregationExecuteNotSupported);
+    }
+
+    #[test]
+    fn resolve_request_config_rejects_network_only_override_without_network_prover() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            network_mode: Some(Sp1NetworkMode::Reserved),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let err = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect_err("network overrides should require network prover");
+        assert_eq!(err, Sp1ConfigError::NetworkOverridesRequireNetworkProver);
     }
 }

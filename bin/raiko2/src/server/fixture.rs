@@ -13,17 +13,22 @@ use raiko2_pipeline::{
     ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND},
 };
-use raiko2_primitives::{Proof, ProofContext, ProofRequest, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{
+    Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
+};
 use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_prover::{
     GuestInputCodec, Prover,
     native::NativeProver,
-    sp1::{ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides},
+    sp1::{
+        ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides, Sp1RequestContext,
+    },
 };
 use raiko2_provider::Provider;
 use raiko2_queue::{MemoryStore, RetryPolicy, SchedulerConfig};
 use raiko2_runtime::RuntimeManager;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -270,26 +275,20 @@ impl FixtureSp1Prover {
         Self { config }
     }
 
-    fn resolve_config(&self, config: &ProverConfig) -> RaikoResult<Sp1Config> {
-        let overrides = config
-            .get("sp1")
-            .cloned()
-            .map(serde_json::from_value::<Sp1ConfigOverrides>)
-            .transpose()
-            .map_err(|e| {
+    fn resolve_config(
+        &self,
+        config: &ProverConfig,
+        context: Sp1RequestContext,
+    ) -> RaikoResult<Sp1Config> {
+        let overrides = match config.get("sp1") {
+            Some(value) => Sp1ConfigOverrides::deserialize(value).map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to parse 'sp1' prover args: {e}"))
-            })?
-            .unwrap_or_default();
-        let effective_config = self.config.merged_with(&overrides);
-        if overrides.has_network_overrides() && effective_config.prover != ProverMode::Network {
-            return Err(RaikoError::InvalidRequestConfig(
-                "sp1 network-only settings require sp1.prover=network".to_string(),
-            ));
-        }
-        effective_config
-            .validate()
-            .map_err(RaikoError::InvalidRequestConfig)?;
-        Ok(effective_config)
+            })?,
+            None => Sp1ConfigOverrides::default(),
+        };
+        self.config
+            .resolve_request_config(Some(&overrides), context)
+            .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))
     }
 }
 
@@ -318,7 +317,10 @@ where
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let effective_config = self.resolve_config(config)?;
+        let effective_config = self.resolve_config(
+            config,
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )?;
         let guest_input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize fixture input: {e}")))?;
 
@@ -359,12 +361,7 @@ where
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let effective_config = self.resolve_config(config)?;
-        if matches!(effective_config.mode, ExecutionMode::Execute) {
-            return Err(RaikoError::InvalidRequestConfig(
-                "sp1.mode=execute is not supported for aggregation".to_string(),
-            ));
-        }
+        self.resolve_config(config, Sp1RequestContext::Aggregation)?;
 
         Ok(Proof {
             proof: Some("0xfixture-sp1-aggregation".to_string()),
@@ -534,7 +531,8 @@ fn native_fixture_engine_with_observer(
             l2_chain_id: 167_001,
             proposal_id: 0,
             l2_block_range: None,
-            proof_type: "native".to_string(),
+            shasta: None,
+            proof_type: ProofType::Native,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
@@ -566,7 +564,8 @@ fn risc0_fixture_engine_with_observer(
             l2_chain_id: 167_001,
             proposal_id: 0,
             l2_block_range: None,
-            proof_type: "risc0".to_string(),
+            shasta: None,
+            proof_type: ProofType::Risc0,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
@@ -604,7 +603,8 @@ fn sp1_fixture_engine_with_observer(
             l2_chain_id: 167_001,
             proposal_id: 0,
             l2_block_range: None,
-            proof_type: "sp1".to_string(),
+            shasta: None,
+            proof_type: ProofType::Sp1,
             blob_proof_type: None,
             prover: None,
             graffiti: None,

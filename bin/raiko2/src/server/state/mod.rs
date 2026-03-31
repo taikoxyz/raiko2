@@ -18,6 +18,7 @@ use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
     forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
+use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::BoundlessProver, native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover,
 };
@@ -140,7 +141,7 @@ async fn build_risc0_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, "risc0")?;
+            let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0,
                 Risc0Prover::new(risc0_config),
@@ -161,7 +162,7 @@ async fn build_risc0_engine(
                 type Risc0Output =
                     EngineOutput<<Risc0Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, "risc0")?;
+                let context = setup::build_context(config, pair, ProofType::Risc0)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace =
                     setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaRisc0);
@@ -211,7 +212,7 @@ async fn build_sp1_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, "sp1")?;
+            let context = setup::build_context(config, pair, ProofType::Sp1)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaSp1,
                 Sp1Prover::new(sp1_config),
@@ -232,7 +233,7 @@ async fn build_sp1_engine(
                 type Sp1Output =
                     EngineOutput<<Sp1Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, "sp1")?;
+                let context = setup::build_context(config, pair, ProofType::Sp1)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace =
                     setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaSp1);
@@ -280,7 +281,7 @@ async fn build_native_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, "native")?;
+            let context = setup::build_context(config, pair, ProofType::Native)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaNative,
                 NativeProver,
@@ -301,7 +302,7 @@ async fn build_native_engine(
                 type NativeOutput =
                     EngineOutput<<NativeSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, "native")?;
+                let context = setup::build_context(config, pair, ProofType::Native)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,
@@ -354,7 +355,7 @@ async fn build_boundless_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, "risc0")?;
+            let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Boundless,
                 BoundlessProver::new(agent_config),
@@ -375,7 +376,7 @@ async fn build_boundless_engine(
                 type BoundlessOutput =
                     EngineOutput<<BoundlessSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, "risc0")?;
+                let context = setup::build_context(config, pair, ProofType::Risc0)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,

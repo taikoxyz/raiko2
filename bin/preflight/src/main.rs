@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use raiko2_pipeline::forks::shasta::ShastaSpec;
 use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
-use raiko2_primitives::{ProofContext, ProofRequest, ProverConfig, SupportedChainSpecs};
+use raiko2_primitives::{
+    ProofContext, ProofRequest, ProofType, ProverConfig, ShastaRequest, SupportedChainSpecs,
+};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_provider::NetworkProvider;
 use std::time::Instant;
@@ -93,22 +95,20 @@ async fn main() -> Result<()> {
             start: args.l2_start,
             end: args.l2_end,
         }),
-        proof_type: args.proof_type,
+        shasta: Some(ShastaRequest {
+            l1_inclusion_block_number: args.l1_inclusion_block_number,
+            last_anchor_block_number: args.last_anchor_block_number,
+        }),
+        proof_type: args
+            .proof_type
+            .parse::<ProofType>()
+            .map_err(anyhow::Error::msg)?,
         blob_proof_type: None,
         prover: args.prover,
         graffiti: args.graffiti,
     };
 
-    let mut config = ProverConfig::default();
-    config["l2_block_range"] = serde_json::json!({
-        "start": args.l2_start,
-        "end": args.l2_end,
-        "proposal_id": args.proposal_id,
-    });
-    config["shasta_l1_inclusion_block_number"] = serde_json::json!(args.l1_inclusion_block_number);
-    config["shasta_last_anchor_block_number"] = serde_json::json!(args.last_anchor_block_number);
-
-    let mut ctx = ProofContext::new(request, config);
+    let mut ctx = ProofContext::new(request, ProverConfig::default());
     if let Some(l2_chain_spec) =
         SupportedChainSpecs::default().get_chain_spec_with_chain_id(args.l2_chain_id)
     {

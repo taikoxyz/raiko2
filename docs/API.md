@@ -60,7 +60,7 @@ Content-Type: application/json
     "fulfillment_strategy": "reserved",
     "skip_simulation": true,
     "cycle_limit": 1000000000000,
-    "timeout_secs": 3600
+    "timeout_secs": 7200
   },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "prover": "0x0000000000000000000000000000000000000000",

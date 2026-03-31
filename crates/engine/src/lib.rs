@@ -20,15 +20,13 @@ pub use tasks::{
     ProposalStage, ProposalTaskRequest,
 };
 
-use alloy_primitives::Address;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
-use raiko2_primitives::{AggregationGuestInput, L2BlockRange, Proof, ProofContext};
-use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, proof_carry_from_proof};
+use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
 use raiko2_prover::{Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -197,63 +195,36 @@ where
         let mut ctx = self.inner.context.clone();
         ctx.request.proposal_id = request.proposal_id;
         ctx.request.l2_block_range = request.l2_block_range;
+        ctx.request.shasta = Some(ShastaRequest {
+            l1_inclusion_block_number: request.l1_inclusion_block_number,
+            last_anchor_block_number: request.last_anchor_block_number,
+        });
         ctx.request
             .blob_proof_type
             .clone_from(&request.blob_proof_type);
         ctx.request.prover.clone_from(&request.prover);
         ctx.request.graffiti.clone_from(&request.graffiti);
-        if let Some(range) = request.l2_block_range {
-            Self::set_l2_block_range(&mut ctx.config, request.proposal_id, range);
-        }
-        Self::set_request_metadata(&mut ctx.config, request);
+        Self::merge_prover_args(&mut ctx.config, request);
         ctx
     }
 
-    fn set_l2_block_range(config: &mut serde_json::Value, proposal_id: u64, range: L2BlockRange) {
+    fn merge_prover_args(config: &mut serde_json::Value, request: &ProposalTaskRequest) {
         if !config.is_object() {
             *config = serde_json::json!({});
-        }
-        if let Some(config) = config.as_object_mut() {
-            config.insert(
-                "l2_block_range".to_string(),
-                serde_json::json!({
-                    "start": range.start,
-                    "end": range.end,
-                    "proposal_id": proposal_id,
-                }),
-            );
-        }
-    }
-
-    fn set_request_metadata(config: &mut serde_json::Value, request: &ProposalTaskRequest) {
-        if !config.is_object() {
-            *config = serde_json::json!({});
-        }
-        if let Some(config) = config.as_object_mut() {
-            config.insert(
-                "shasta_l1_inclusion_block_number".to_string(),
-                serde_json::json!(request.l1_inclusion_block_number),
-            );
-            config.insert(
-                "shasta_last_anchor_block_number".to_string(),
-                serde_json::json!(request.last_anchor_block_number),
-            );
         }
 
         let Some(raw) = &request.prover_args_json else {
             return;
         };
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
-            return;
-        };
-        let Some(parsed) = parsed.as_object() else {
+        let Ok(serde_json::Value::Object(parsed)) = serde_json::from_str::<serde_json::Value>(raw)
+        else {
             return;
         };
         let Some(config) = config.as_object_mut() else {
             return;
         };
         for (key, value) in parsed {
-            config.insert(key.clone(), value.clone());
+            config.insert(key, value);
         }
     }
 
@@ -702,48 +673,6 @@ where
         }
     }
 
-    fn build_aggregation_config(&self, proofs: &[Proof]) -> Result<serde_json::Value, String> {
-        if matches!(
-            self.inner.spec.pipeline_key(),
-            raiko2_pipeline::PipelineKey::ShastaRisc0Boundless
-        ) {
-            return Ok(self.inner.context.config.clone());
-        }
-        let image_id = aggregation_image_id_words(proofs)?;
-        let mut block_inputs = Vec::with_capacity(proofs.len());
-        let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
-
-        for (index, proof) in proofs.iter().enumerate() {
-            let input = proof
-                .input
-                .ok_or_else(|| format!("proof {index} missing input"))?;
-            let carry = proof_carry_from_proof(proof)
-                .map_err(|err| format!("proof {index} invalid shasta carry data: {err}"))?
-                .ok_or_else(|| format!("proof {index} missing shasta carry data"))?;
-            block_inputs.push(input);
-            proof_carry_data_vec.push(carry);
-        }
-
-        let mut config = self.inner.context.config.clone();
-        if !config.is_object() {
-            config = serde_json::json!({});
-        }
-        let Some(config_obj) = config.as_object_mut() else {
-            return Err("failed to build aggregation config object".to_string());
-        };
-        config_obj.insert(
-            "shasta_zk_aggregation_input".to_string(),
-            serde_json::to_value(ShastaZkAggregationGuestInput {
-                image_id,
-                block_inputs,
-                proof_carry_data_vec,
-                prover_address: Address::ZERO,
-            })
-            .map_err(|err| format!("failed to serialize aggregation input: {err}"))?,
-        );
-        Ok(config)
-    }
-
     async fn prove_proposal(
         &self,
         task_id: &EngineTaskId,
@@ -756,19 +685,7 @@ where
         };
         // Keep dependency output until downstream completes.
         let encoded = self.get_encoded_input(input_task).await?;
-        let validated_input = self
-            .get_guest_input(
-                self.proposal_task_id(request.clone(), ProposalStage::Validation),
-                PipelineStage::Validation,
-                "validated input",
-            )
-            .await?;
-        let mut ctx = self.context_for_proposal(&request);
-        self.inner
-            .spec
-            .prover()
-            .prepare_config_for_input(&validated_input, &mut ctx.config)
-            .map_err(|e| e.to_string())?;
+        let ctx = self.context_for_proposal(&request);
 
         let proof = self
             .inner
@@ -863,14 +780,13 @@ where
                     }
                     AggregationSource::Proofs(proofs) => proofs,
                 };
-                let config = self.build_aggregation_config(&proofs)?;
                 let proof = self
                     .inner
                     .spec
                     .prover()
                     .aggregate_with_observer(
                         AggregationGuestInput { proofs },
-                        &config,
+                        &self.inner.context.config,
                         self.inner.spec.backend(),
                         self.inner.observer.as_ref().map(|observer| {
                             Arc::new(EngineProgressObserver {
@@ -889,41 +805,6 @@ where
             }
         }
     }
-}
-
-fn aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], String> {
-    let mut image_id = None;
-    for (index, proof) in proofs.iter().enumerate() {
-        let Some(uuid) = proof.uuid.as_deref() else {
-            continue;
-        };
-        let words = parse_image_id_words(uuid)
-            .map_err(|err| format!("proof {index} invalid uuid/image id: {err}"))?;
-        match image_id {
-            Some(existing) if existing != words => {
-                return Err("proofs do not share the same image id".to_string());
-            }
-            Some(_) => {}
-            None => image_id = Some(words),
-        }
-    }
-
-    Ok(image_id.unwrap_or([0; 8]))
-}
-
-fn parse_image_id_words(raw: &str) -> Result<[u32; 8], String> {
-    let bytes = alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("expected 32 bytes, got {}", bytes.len()));
-    }
-
-    let mut words = [0u32; 8];
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(chunk);
-        words[index] = u32::from_be_bytes(word);
-    }
-    Ok(words)
 }
 
 fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {

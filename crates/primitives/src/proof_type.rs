@@ -71,13 +71,19 @@ pub mod lowercase {
     use super::ProofType;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(proof_type: ProofType, serializer: S) -> Result<S::Ok, S::Error>
+    /// # Errors
+    ///
+    /// Returns an error when the proof type cannot be serialized as a lowercase string.
+    pub fn serialize<S>(proof_type: &ProofType, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_str(&proof_type.to_string())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the proof type string is unknown.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<ProofType, D::Error>
     where
         D: Deserializer<'de>,

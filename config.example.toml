@@ -19,12 +19,12 @@ pairs = [
 ]
 
 [rpc.client]
-timeout_ms = 10000
+timeout_ms = 60000
 concurrency_limit = 32
 
 [rpc.client.retry]
-max_attempts = 3
-initial_backoff_ms = 500
+max_attempts = 4
+initial_backoff_ms = 1000
 compute_units_per_second = 1000
 
 [runtime]
@@ -51,7 +51,7 @@ network_mode = "reserved"
 fulfillment_strategy = "reserved"
 skip_simulation = true
 cycle_limit = 1000000000000
-timeout_secs = 3600
+timeout_secs = 7200
 # rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.boundless]

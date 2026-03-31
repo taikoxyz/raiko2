@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::ProofType;
 use crate::chain_spec::TaikoChainSpec;
 use crate::proof::ProverConfig;
 use reth_chainspec::ChainSpec as RethChainSpec;
@@ -22,6 +23,15 @@ impl L2BlockRange {
     }
 }
 
+/// Shasta-specific request metadata required during preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ShastaRequest {
+    /// The L1 block containing the proposal event.
+    pub l1_inclusion_block_number: u64,
+    /// The previously committed anchor block number.
+    pub last_anchor_block_number: u64,
+}
+
 /// Proof request parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofRequest {
@@ -33,8 +43,12 @@ pub struct ProofRequest {
     pub proposal_id: u64,
     /// Optional explicit L2 block span used during preflight.
     pub l2_block_range: Option<L2BlockRange>,
+    /// Optional Shasta-specific request metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shasta: Option<ShastaRequest>,
     /// The proof type (risc0, sp1).
-    pub proof_type: String,
+    #[serde(with = "crate::proof_type::lowercase")]
+    pub proof_type: ProofType,
     /// The blob proof type.
     pub blob_proof_type: Option<String>,
     /// The prover address.
@@ -50,7 +64,8 @@ impl Default for ProofRequest {
             l2_chain_id: 167_000,
             proposal_id: 0,
             l2_block_range: None,
-            proof_type: "risc0".to_string(),
+            shasta: None,
+            proof_type: ProofType::Risc0,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
@@ -90,7 +105,8 @@ mod tests {
         assert_eq!(req.l2_chain_id, 167000);
         assert_eq!(req.proposal_id, 0);
         assert_eq!(req.l2_block_range, None);
-        assert_eq!(req.proof_type, "risc0");
+        assert_eq!(req.shasta, None);
+        assert_eq!(req.proof_type, ProofType::Risc0);
         assert!(req.blob_proof_type.is_none());
         assert!(req.prover.is_none());
         assert!(req.graffiti.is_none());
@@ -103,7 +119,11 @@ mod tests {
             l2_chain_id: 167000,
             proposal_id: 123,
             l2_block_range: Some(L2BlockRange { start: 10, end: 12 }),
-            proof_type: "sp1".to_string(),
+            shasta: Some(ShastaRequest {
+                l1_inclusion_block_number: 456,
+                last_anchor_block_number: 455,
+            }),
+            proof_type: ProofType::Sp1,
             blob_proof_type: Some("kzg".to_string()),
             prover: Some("0x1234".to_string()),
             graffiti: Some("test".to_string()),
@@ -114,6 +134,7 @@ mod tests {
 
         assert_eq!(req.proposal_id, deserialized.proposal_id);
         assert_eq!(req.l2_block_range, deserialized.l2_block_range);
+        assert_eq!(req.shasta, deserialized.shasta);
         assert_eq!(req.proof_type, deserialized.proof_type);
         assert_eq!(req.blob_proof_type, deserialized.blob_proof_type);
         Ok(())

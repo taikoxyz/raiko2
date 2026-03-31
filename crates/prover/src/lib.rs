@@ -33,7 +33,9 @@ pub use sp1::{
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{ShastaZkAggregationGuestInput, encode_proof_carry_data};
+use raiko2_primitives_shasta::{
+    ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
+};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_ethereum_contracts_boundless::encode_seal;
 use risc0_zkvm::Receipt as Risc0Receipt;
@@ -105,50 +107,36 @@ pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_shasta_aggregation_input(
-    config: &ProverConfig,
+pub(crate) fn build_shasta_aggregation_input(
+    proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
-    serde_json::from_value(
-        config
-            .get("shasta_zk_aggregation_input")
-            .cloned()
-            .ok_or_else(|| {
-                RaikoError::InvalidRequestConfig(
-                    "Missing 'shasta_zk_aggregation_input' in config".to_string(),
-                )
-            })?,
-    )
-    .map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Failed to parse aggregation input: {e}"))
-    })
-}
+    let image_id = shasta_aggregation_image_id_words(proofs)?;
+    let mut block_inputs = Vec::with_capacity(proofs.len());
+    let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
 
-pub(crate) fn validate_shasta_aggregation_lengths(
-    aggregation_input: &ShastaZkAggregationGuestInput,
-) -> Result<(), RaikoError> {
-    if aggregation_input.block_inputs.len() != aggregation_input.proof_carry_data_vec.len() {
-        return Err(RaikoError::InvalidRequestConfig(
-            "Mismatched block_inputs and proof_carry_data_vec lengths".to_string(),
-        ));
+    for (index, proof) in proofs.iter().enumerate() {
+        let input = proof.input.ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!("proof {index} missing input"))
+        })?;
+        let carry = proof_carry_from_proof(proof)
+            .map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "proof {index} invalid shasta carry data: {err}"
+                ))
+            })?
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
+            })?;
+        block_inputs.push(input);
+        proof_carry_data_vec.push(carry);
     }
 
-    Ok(())
-}
-
-pub(crate) fn parse_shasta_proof_carry_data(
-    config: &ProverConfig,
-) -> Result<ProofCarryData, RaikoError> {
-    serde_json::from_value(
-        config
-            .get("shasta_proof_carry_data")
-            .cloned()
-            .ok_or_else(|| {
-                RaikoError::InvalidRequestConfig(
-                    "Missing 'shasta_proof_carry_data' in config".to_string(),
-                )
-            })?,
-    )
-    .map_err(|e| RaikoError::InvalidRequestConfig(format!("Failed to parse proof carry data: {e}")))
+    Ok(ShastaZkAggregationGuestInput {
+        image_id,
+        block_inputs,
+        proof_carry_data_vec,
+        prover_address: alloy_primitives::Address::ZERO,
+    })
 }
 
 pub(crate) fn with_shasta_extra_data(
@@ -165,6 +153,44 @@ pub(crate) fn with_shasta_extra_data(
     Ok(Some(extra_data))
 }
 
+fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], RaikoError> {
+    let mut image_id = None;
+    for (index, proof) in proofs.iter().enumerate() {
+        let Some(uuid) = proof.uuid.as_deref() else {
+            continue;
+        };
+        let words = parse_image_id_words(uuid).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!("proof {index} invalid uuid/image id: {err}"))
+        })?;
+        match image_id {
+            Some(existing) if existing != words => {
+                return Err(RaikoError::InvalidRequestConfig(
+                    "proofs do not share the same image id".to_string(),
+                ));
+            }
+            Some(_) => {}
+            None => image_id = Some(words),
+        }
+    }
+
+    Ok(image_id.unwrap_or([0; 8]))
+}
+
+fn parse_image_id_words(raw: &str) -> Result<[u32; 8], String> {
+    let bytes = alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+
+    let mut words = [0u32; 8];
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        words[index] = u32::from_be_bytes(word);
+    }
+    Ok(words)
+}
+
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
 pub trait Prover<B>: Send + Sync
@@ -177,23 +203,6 @@ where
     ///
     /// Returns an error if the input cannot be encoded.
     fn encode(&self, input: &Self::GuestInput, config: &ProverConfig) -> RaikoResult<Bytes>;
-
-    /// Update request-scoped prover config derived from the validated guest input.
-    ///
-    /// Backends that need extra request metadata, such as `ProofCarryData`, should populate it
-    /// here so `prove_encoded` and `aggregate` can read a canonical config shape.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backend cannot derive a valid request-scoped configuration from
-    /// the guest input.
-    fn prepare_config_for_input(
-        &self,
-        _input: &Self::GuestInput,
-        _config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        Ok(())
-    }
 
     /// Generate a proof for the given input.
     async fn prove_encoded(
@@ -220,10 +229,8 @@ where
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let mut request_config = config.clone();
-        self.prepare_config_for_input(&input, &mut request_config)?;
-        let encoded = self.encode(&input, &request_config)?;
-        self.prove_encoded(encoded, &request_config, backend).await
+        let encoded = self.encode(&input, config)?;
+        self.prove_encoded(encoded, config, backend).await
     }
 
     /// Generate an aggregation proof.

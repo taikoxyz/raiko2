@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 const fn default_rpc_timeout_ms() -> u64 {
-    10_000
+    60_000
 }
 
 const fn default_rpc_concurrency_limit() -> usize {
@@ -15,11 +15,11 @@ const fn default_rpc_concurrency_limit() -> usize {
 }
 
 const fn default_rpc_retry_max_attempts() -> u32 {
-    3
+    4
 }
 
 const fn default_rpc_retry_initial_backoff_ms() -> u64 {
-    500
+    1_000
 }
 
 const fn default_rpc_retry_cu_per_second() -> u64 {

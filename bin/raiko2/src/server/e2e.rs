@@ -403,7 +403,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
-        proof_type: "native".to_string(),
+        proof_type: raiko2_primitives::ProofType::Native,
+        api_proof_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![HoodiProposalTask {

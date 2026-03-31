@@ -1,5 +1,5 @@
 use super::manifest::ShastaManifestBuilder;
-use crate::{ManifestBuilder, PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
+use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
 use alloy_consensus::{
     Header,
@@ -15,7 +15,6 @@ use raiko2_primitives_shasta::{GuestInput, validate_anchor_progression};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block;
-use serde_json::Value;
 use std::collections::HashSet;
 
 sol! {
@@ -83,7 +82,7 @@ where
         ctx: &ProofContext,
         provider: &P,
     ) -> RaikoResult<GuestInput> {
-        let proof_type = proof_type_from_context(ctx)?;
+        let proof_type = proof_type_from_context(ctx);
         let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
         let chain_spec = chain_spec_from_context(ctx);
         let blocks = provider.batch_blocks(&block_numbers).await?;
@@ -113,12 +112,8 @@ where
 
         let proposal_event =
             resolve_shasta_proposal_event(ctx, provider, &chain_spec, &blocks).await?;
-        let manifest_ctx =
-            proof_context_with_config_value(ctx, "shasta_proposal_event", &proposal_event)?;
-        let mut manifest = self
-            .manifest_builder
-            .taiko_manifest(&manifest_ctx, &blocks)
-            .await?;
+        let mut manifest =
+            ShastaManifestBuilder::taiko_manifest_with_event(ctx, &blocks, proposal_event)?;
         hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
         if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty()
         {
@@ -174,35 +169,6 @@ fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
         })
 }
 
-fn proof_context_with_config_value<T: serde::Serialize>(
-    ctx: &ProofContext,
-    key: &str,
-    value: &T,
-) -> RaikoResult<ProofContext> {
-    let mut config = ctx.config.clone();
-    if !config.is_object() {
-        config = serde_json::json!({});
-    }
-    let Some(config_object) = config.as_object_mut() else {
-        return Err(RaikoError::InvalidRequestConfig(
-            "proof context config must be a JSON object".to_string(),
-        ));
-    };
-    config_object.insert(
-        key.to_string(),
-        serde_json::to_value(value).map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("failed to serialize {key}: {e}"))
-        })?,
-    );
-
-    Ok(ProofContext {
-        l1_chain_spec: ctx.l1_chain_spec.clone(),
-        l2_chain_spec: ctx.l2_chain_spec.clone(),
-        request: ctx.request.clone(),
-        config,
-    })
-}
-
 async fn resolve_shasta_proposal_event<P: Provider>(
     ctx: &ProofContext,
     provider: &P,
@@ -210,12 +176,13 @@ async fn resolve_shasta_proposal_event<P: Provider>(
     blocks: &[reth_ethereum_primitives::Block],
 ) -> RaikoResult<ShastaEventData> {
     let l1_inclusion_block_number = ctx
-        .config
-        .get("shasta_l1_inclusion_block_number")
-        .and_then(Value::as_u64)
+        .request
+        .shasta
+        .map(|shasta| shasta.l1_inclusion_block_number)
         .ok_or_else(|| {
             RaikoError::InvalidRequestConfig(
-                "shasta_l1_inclusion_block_number is required for Shasta preflight".to_string(),
+                "request.shasta.l1_inclusion_block_number is required for Shasta preflight"
+                    .to_string(),
             )
         })?;
     let proposal_block = blocks.first().ok_or_else(|| {
@@ -241,11 +208,8 @@ async fn resolve_shasta_proposal_event<P: Provider>(
         .await
 }
 
-fn proof_type_from_context(ctx: &ProofContext) -> RaikoResult<ProofType> {
-    ctx.request
-        .proof_type
-        .parse()
-        .map_err(RaikoError::InvalidRequestConfig)
+const fn proof_type_from_context(ctx: &ProofContext) -> ProofType {
+    ctx.request.proof_type
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -417,28 +381,7 @@ fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
         return Ok(((range.start..=range.end).collect(), ctx.request.proposal_id));
     }
 
-    if let Some(range) = ctx.config.get("l2_block_range") {
-        let start = range.get("start").and_then(Value::as_u64).ok_or_else(|| {
-            RaikoError::InvalidRequestConfig("l2_block_range.start missing".into())
-        })?;
-        let end = range
-            .get("end")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| RaikoError::InvalidRequestConfig("l2_block_range.end missing".into()))?;
-        if start > end {
-            return Err(RaikoError::InvalidRequestConfig(
-                "l2_block_range.start must be <= end".into(),
-            ));
-        }
-        let proposal_id = range
-            .get("proposal_id")
-            .and_then(Value::as_u64)
-            .unwrap_or(ctx.request.proposal_id);
-        let blocks: Vec<u64> = (start..=end).collect();
-        Ok((blocks, proposal_id))
-    } else {
-        Ok((vec![ctx.request.proposal_id], ctx.request.proposal_id))
-    }
+    Ok((vec![ctx.request.proposal_id], ctx.request.proposal_id))
 }
 
 fn validate_block_range(
@@ -593,8 +536,8 @@ mod tests {
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
-        ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProverConfig, RaikoError,
-        RaikoResult, SupportedChainSpecs,
+        ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
+        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
     };
     use raiko2_protocol::InputDataSource;
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
@@ -735,18 +678,14 @@ mod tests {
             l2_chain_id: 167_013,
             proposal_id,
             l2_block_range: Some(L2BlockRange { start: 1, end: 1 }),
-            proof_type: "native".to_string(),
+            shasta: Some(ShastaRequest {
+                l1_inclusion_block_number,
+                last_anchor_block_number,
+            }),
+            proof_type: ProofType::Native,
             ..Default::default()
         };
-        let mut config = ProverConfig::default();
-        config["l2_block_range"] = serde_json::json!({
-            "start": 1,
-            "end": 1,
-            "proposal_id": proposal_id,
-        });
-        config["shasta_l1_inclusion_block_number"] = serde_json::json!(l1_inclusion_block_number);
-        config["shasta_last_anchor_block_number"] = serde_json::json!(last_anchor_block_number);
-        ProofContext::new(request, config)
+        ProofContext::new(request, ProverConfig::default())
     }
 
     fn sample_provider() -> TestProvider {

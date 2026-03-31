@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
+    GuestInput, encode_proof_carry_data,
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_public_input_from_proof_carry_data_vec, words_to_bytes_be,
@@ -14,7 +14,7 @@ use raiko2_primitives_shasta::{
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
-use crate::{GuestInputCodec, parse_shasta_aggregation_input};
+use crate::{GuestInputCodec, build_shasta_aggregation_input};
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,7 +58,7 @@ where
             ));
         }
 
-        let proof_carry_data = input.proof_carry_data.clone();
+        let proof_carry_data = input.proof_carry_data;
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
         let input_hash = hash_shasta_subproof_input(&proof_carry_data);
@@ -77,12 +77,11 @@ where
 
     async fn aggregate(
         &self,
-        _input: raiko2_primitives::AggregationGuestInput,
+        input: raiko2_primitives::AggregationGuestInput,
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let aggregation_input: ShastaZkAggregationGuestInput =
-            parse_shasta_aggregation_input(config)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
         let endianness = config
             .get("native_image_id_endianness")
@@ -189,9 +188,9 @@ mod tests {
     use crate::Prover;
     use alloy_primitives::{Address, B256, keccak256};
     use raiko2_pipeline::NativeBackend;
-    use raiko2_primitives::{AggregationGuestInput, ProverConfig};
+    use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
     use raiko2_primitives_shasta::{
-        GuestInput, ShastaZkAggregationGuestInput,
+        GuestInput, encode_proof_carry_data,
         instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
     };
     use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -272,18 +271,18 @@ mod tests {
             chain_id: 1,
             ..ProofCarryData::default()
         };
-        let aggregation_input = ShastaZkAggregationGuestInput {
-            image_id: [0u32; 8],
-            block_inputs: vec![B256::ZERO],
-            proof_carry_data_vec: vec![proof_carry.clone()],
-            prover_address: Address::ZERO,
-        };
-        let config = serde_json::json!({
-            "shasta_zk_aggregation_input": aggregation_input,
-        });
+        let proofs = vec![Proof {
+            input: Some(B256::ZERO),
+            extra_data: Some(encode_proof_carry_data(&proof_carry).expect("encode carry data")),
+            ..Proof::default()
+        }];
 
         let proof = prover
-            .aggregate(AggregationGuestInput::default(), &config, &NativeBackend)
+            .aggregate(
+                AggregationGuestInput { proofs },
+                &serde_json::json!({}),
+                &NativeBackend,
+            )
             .await
             .expect("aggregate");
 

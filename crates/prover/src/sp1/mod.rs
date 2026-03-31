@@ -6,15 +6,16 @@
 mod types;
 
 pub use types::{
-    ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides, Sp1ExecutionMetadata,
-    Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
-    Sp1Response,
+    ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
+    Sp1ExecutionMetadata, Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode,
+    Sp1NetworkSubmissionProgress, Sp1RequestContext, Sp1Response,
 };
 
 use alloy_primitives::Bytes;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
+use serde::Deserialize;
 use sp1_sdk::{
     Elf, HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProverClient, ProvingKey as _,
     SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin,
@@ -23,9 +24,8 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, ProverProgress, ProverProgressObserver, parse_shasta_aggregation_input,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-    validate_shasta_aggregation_lengths, with_shasta_extra_data,
+    GuestInputCodec, ProverProgress, ProverProgressObserver, build_shasta_aggregation_input,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 /// SP1 Prover for Shasta proposal proofs.
@@ -40,26 +40,20 @@ impl Sp1Prover {
         Self { config }
     }
 
-    fn resolve_config(&self, config: &ProverConfig) -> RaikoResult<Sp1Config> {
-        let overrides = config
-            .get("sp1")
-            .cloned()
-            .map(serde_json::from_value::<Sp1ConfigOverrides>)
-            .transpose()
-            .map_err(|e| {
+    fn resolve_config_for_request(
+        &self,
+        config: &ProverConfig,
+        context: Sp1RequestContext,
+    ) -> RaikoResult<Sp1Config> {
+        let overrides = match config.get("sp1") {
+            Some(value) => Sp1ConfigOverrides::deserialize(value).map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to parse 'sp1' prover args: {e}"))
-            })?
-            .unwrap_or_default();
-        let effective_config = self.config.merged_with(&overrides);
-        if overrides.has_network_overrides() && effective_config.prover != ProverMode::Network {
-            return Err(RaikoError::InvalidRequestConfig(
-                "sp1 network-only settings require sp1.prover=network".to_string(),
-            ));
-        }
-        effective_config
-            .validate()
-            .map_err(RaikoError::InvalidRequestConfig)?;
-        Ok(effective_config)
+            })?,
+            None => Sp1ConfigOverrides::default(),
+        };
+        self.config
+            .resolve_request_config(Some(&overrides), context)
+            .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))
     }
 }
 
@@ -82,30 +76,6 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
-    fn prepare_config_for_input(
-        &self,
-        input: &Self::GuestInput,
-        config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        if !config.is_object() {
-            *config = serde_json::json!({});
-        }
-        let Some(config) = config.as_object_mut() else {
-            return Err(RaikoError::InvalidRequestConfig(
-                "prover config must be a JSON object".to_string(),
-            ));
-        };
-        config.insert(
-            "shasta_proof_carry_data".to_string(),
-            serde_json::to_value(&input.proof_carry_data).map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!(
-                    "Failed to serialize proof carry data: {e}"
-                ))
-            })?,
-        );
-        Ok(())
-    }
-
     async fn prove_encoded(
         &self,
         input: Bytes,
@@ -123,7 +93,10 @@ where
         backend: &B,
         observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
-        let effective_config = self.resolve_config(config)?;
+        let effective_config = self.resolve_config_for_request(
+            config,
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )?;
         info!(mode = %effective_config.mode.as_str(), "Starting SP1 proposal run...");
 
         // Prepare stdin for SP1 guest program
@@ -223,21 +196,14 @@ where
         config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let effective_config = self.resolve_config(config)?;
-        if matches!(effective_config.mode, ExecutionMode::Execute) {
-            return Err(RaikoError::InvalidRequestConfig(
-                "sp1.mode=execute is not supported for aggregation".to_string(),
-            ));
-        }
+        let effective_config =
+            self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
         info!(
             "Starting SP1 aggregation proof generation with {} proofs...",
             input.proofs.len()
         );
 
-        // Extract ShastaZkAggregationGuestInput from config
-        // The caller should provide this in config["shasta_zk_aggregation_input"]
-        let aggregation_input = parse_shasta_aggregation_input(config)?;
-        validate_shasta_aggregation_lengths(&aggregation_input)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
         // Prepare stdin for SP1 aggregation guest program
         // The guest reads ShastaZkAggregationGuestInput via sp1_zkvm::io::read()

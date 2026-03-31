@@ -1,6 +1,6 @@
 use crate::config::{Config, ResolvedNetworkPair, RetryStrategy};
 use anyhow::Result;
-use raiko2_primitives::{ProofContext, ProofRequest};
+use raiko2_primitives::{ProofContext, ProofRequest, ProofType};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::time::Duration;
@@ -8,7 +8,7 @@ use std::time::Duration;
 pub(crate) fn build_context(
     config: &Config,
     pair: &ResolvedNetworkPair,
-    proof_type: &str,
+    proof_type: ProofType,
 ) -> Result<ProofContext> {
     let mut context = ProofContext::new(
         ProofRequest {
@@ -16,7 +16,8 @@ pub(crate) fn build_context(
             l2_chain_id: pair.l2_chain_id(),
             proposal_id: 0,
             l2_block_range: None,
-            proof_type: proof_type.to_string(),
+            shasta: None,
+            proof_type,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
@@ -50,16 +51,17 @@ pub(crate) fn build_provider(
 
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
-    let attempts = u64::from(config.rpc.client.retry.max_attempts.max(1));
+    let retries = u64::from(config.rpc.client.retry.max_attempts);
+    let total_attempts = retries.saturating_add(1);
     let timeout_ms = config.rpc.client.timeout_ms;
-    let backoff_ms = config
-        .rpc
-        .client
-        .retry
-        .initial_backoff_ms
-        .saturating_mul(attempts.saturating_sub(1));
+    let mut backoff_ms = 0u64;
+    let mut next_backoff_ms = config.rpc.client.retry.initial_backoff_ms;
+    for _ in 0..retries {
+        backoff_ms = backoff_ms.saturating_add(next_backoff_ms);
+        next_backoff_ms = next_backoff_ms.saturating_mul(2);
+    }
     let lease_ms = timeout_ms
-        .saturating_mul(attempts)
+        .saturating_mul(total_attempts)
         .saturating_add(backoff_ms)
         .saturating_add(30_000);
     let retry_policy = match config.queue.retry.strategy {
@@ -174,7 +176,7 @@ mod tests {
         config.rpc.client.retry.initial_backoff_ms = 500;
 
         let scheduler = scheduler_config(&config);
-        assert_eq!(scheduler.lease_duration, Duration::from_millis(211_000));
+        assert_eq!(scheduler.lease_duration, Duration::from_millis(273_500));
     }
 
     #[test]

@@ -18,9 +18,8 @@ use risc0_zkvm::{
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, encode_risc0_proof_payload, parse_shasta_aggregation_input,
-    parse_shasta_aggregation_input_hash, parse_shasta_proof_carry_data,
-    parse_shasta_proposal_input_hash, validate_shasta_aggregation_lengths, with_shasta_extra_data,
+    GuestInputCodec, build_shasta_aggregation_input, encode_risc0_proof_payload,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -241,41 +240,19 @@ where
         GuestInputCodec::encode(self, input, config)
     }
 
-    fn prepare_config_for_input(
-        &self,
-        input: &Self::GuestInput,
-        config: &mut ProverConfig,
-    ) -> RaikoResult<()> {
-        if !config.is_object() {
-            *config = serde_json::json!({});
-        }
-        let Some(config) = config.as_object_mut() else {
-            return Err(RaikoError::InvalidRequestConfig(
-                "prover config must be a JSON object".to_string(),
-            ));
-        };
-        config.insert(
-            "shasta_proof_carry_data".to_string(),
-            serde_json::to_value(&input.proof_carry_data).map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!(
-                    "Failed to serialize proof carry data: {e}"
-                ))
-            })?,
-        );
-        Ok(())
-    }
-
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!("Starting RISC0 proposal proof generation...");
 
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         let prover_config = self.config.clone();
-        let proof_carry_data = parse_shasta_proof_carry_data(config)?;
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
+        let proof_carry_data = guest_input.proof_carry_data;
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
@@ -297,7 +274,7 @@ where
 
             info!(
                 "Generated proposal receipt journal: {:?}",
-                alloy_primitives::hex::encode_prefixed(journal_bytes.clone())
+                alloy_primitives::hex::encode_prefixed(journal_bytes)
             );
 
             let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
@@ -320,7 +297,7 @@ where
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!(
@@ -328,9 +305,7 @@ where
             input.proofs.len()
         );
 
-        // Extract ShastaZkAggregationGuestInput from config
-        let aggregation_input = parse_shasta_aggregation_input(config)?;
-        validate_shasta_aggregation_lengths(&aggregation_input)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
         let elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         let prover_config = self.config.clone();
         let opts = self.prover_opts();

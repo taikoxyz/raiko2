@@ -1,5 +1,9 @@
 ![Raiko2 — Taiko proof orchestration for Shasta](docs/assets/readme-banner.png)
 
+Home / [Docs](docs/README.md) / [API](docs/API.md) /
+[Development](docs/development.md) / [Operations](docs/operations.md) /
+[Config](config.example.toml)
+
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes an asynchronous,
 Hoodi-compatible v3 API.

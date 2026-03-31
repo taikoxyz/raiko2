@@ -1,6 +1,18 @@
-# Raiko V2
+# Raiko2
 
-Raiko V2 is a zkVM prover for Taiko, built on top of [alethia-reth](https://github.com/taikoxyz/alethia-reth).
+![Raiko2 hero banner](docs/assets/readme-banner.png)
+
+Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
+validates them, runs local or remote proving routes, and exposes an asynchronous,
+Hoodi-compatible v3 API.
+
+## At a Glance
+
+- Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
+- Canonical routes: `native/local`, `risc0/local`, `risc0/boundless`, `sp1/local`
+- Shasta-first pipeline for preflight, validation, proving, and aggregation
+- Config-driven RPC pair allowlist via `rpc.pairs`
+- In-process runtime state under `./data/runtime` by default
 
 ## Quickstart
 
@@ -9,429 +21,50 @@ cp config.example.toml config.toml
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
-Configuration is loaded from a TOML file via `--config` (or `RAIKO2_CONFIG`). CLI flags and
-environment variables override values from the file.
+Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
+override values from the file.
 
-## Local fixture-backed v3 testing
+## Core Flow
 
-For manual HTTP testing without external RPC dependencies, run the fixture server:
-
-```bash
-cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
-```
-
-Then submit a real asynchronous v3 request:
-
-```bash
-curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
-  -H 'content-type: application/json' \
-  -d '{
-    "proposals": [{
-      "proposal_id": 3,
-      "l1_inclusion_block_number": 1,
-      "l2_block_numbers": [3],
-      "last_anchor_block_number": 0
-    }],
-    "aggregate": false,
-    "proof_type": "sp1",
-    "network": "taiko_dev",
-    "l1_network": "ethereum",
-    "sp1": {
-      "mode": "execute",
-      "prover": "local"
-    }
-  }'
-```
-
-The server returns a `task_id`. Query it with:
-
-```bash
-curl http://127.0.0.1:8087/v3/tasks/<task_id>
-```
-
-For `sp1.mode=execute`, completion returns `proof = null` and the execution report under
-`proposals[].extra_data.sp1`.
-
-For `sp1.mode=prove`, the server can use `sp1.prover = network` and submit the request to the
-Succinct network. `sp1.mode=execute` remains local-only.
-
-## Features
-
-- Split into focused crates: `primitives`, `protocol`, `pipeline`, `provider`, `engine`, `queue`, `stateless`, `prover`
-- Built on Taiko's `alethia-reth`
-- Shasta protocol support (Based Contestable Rollup)
-- Canonical proving routes: `risc0/local`, `risc0/boundless`, `sp1/local`, `native/local`
-- Native mode: runs locally and outputs public inputs (no zk proof)
-
-## Project structure
-
-```
-raiko2/
-├── Cargo.toml                 # Workspace root
-├── justfile                   # Task entrypoints (build-guest, etc.)
-├── bin/                       # Standalone binaries
-│   ├── raiko2/                # Prover server (HTTP API + CLI)
-│   ├── rpc-proxy/             # RPC proxy service
-│   ├── preflight/             # Preflight CLI (build GuestInput)
-│   ├── guest-launcher/        # Local guest runner
-│   └── witness-check/         # Witness/debug helpers
-├── crates/                    # Reusable library crates
-│   ├── primitives/            # Core types and traits
-│   ├── primitives-shasta/     # Shasta-specific primitives
-│   ├── protocol/              # Protocol core types
-│   ├── protocol-shasta/       # Shasta types and codecs
-│   ├── pipeline/              # Pipeline spec + manifest builder
-│   ├── provider/              # Data provider interfaces
-│   ├── engine/                # Execution engine
-│   ├── queue/                 # Queue + scheduler backends
-│   ├── stateless/             # Stateless validation
-│   ├── prover/                # Prover backends (risc0, sp1, boundless runner)
-│   └── guests/                # Guest ELF assets (compiled outputs)
-├── config/                    # Chain spec lists and config assets
-├── docker/                    # Toolchain images
-├── docs/                      # Documentation
-├── xtask/                     # Automation (guest builds via xtask)
-└── guests/                    # Guest program sources (not in workspace)
-    ├── common/                # Shared guest abstractions
-    ├── risc0/                 # RISC0 guest programs
-    └── sp1/                   # SP1 guest programs
-```
-
-## How it works
-
-Main flow:
-
-1. `Preflight` builds `GuestInput` (includes `TaikoManifest`) from RPC/provider data.
-2. `Validation` runs stateless checks for Shasta.
-3. `Encode` serializes `GuestInput` for the prover backend.
-4. `Prover` runs the zkVM using the hardfork-selected ELF.
-5. `Aggregate` combines proposal proofs (aggregation stage).
-
-Dataflow diagram:
+1. `Preflight` resolves canonical Shasta inputs from L1 and L2 RPC.
+2. `Validation` checks request invariants and witness-derived data.
+3. `Prover` runs the selected backend and runner.
+4. `Aggregate` combines proposal proofs when the request asks for it.
 
 ```mermaid
 flowchart LR
-  P["Provider"] --> PF["Preflight"]
+  RPC["L1/L2 RPC"] --> PF["Preflight"]
   PF --> VA["Validation"]
-  VA --> GI["GuestInput"]
-  GI --> EN["Encode"]
-  EN --> PR["Prover"]
-  PR --> PO["Proof"]
-  PO -.-> AG["Aggregate"]
+  VA --> PR["Prover"]
+  PR --> AG["Aggregate"]
+  PR --> API["Task API"]
+  AG --> API
 ```
 
-Key traits and types:
-
-- `PipelineSpec`: binds `Preflight` + `Validation` + `ManifestBuilder` for a fork.
-- `ProverBackend`: selects guest ELFs per `ProofStage` (proposal/aggregation).
-- `Pipeline`: hardfork-agnostic preflight + validation flow.
-- `Engine`: schedules pipeline stages and prover work.
-- `Prover`: encode/prove/aggregate execution (RISC0 / SP1 / boundless-backed RISC0).
-
-High-level view:
-
-```mermaid
-flowchart LR
-  C["Client / SDK"] --> A["raiko2 HTTP API"]
-  A --> Q["Engine"]
-  Q --> SCH["Queue/Scheduler"]
-  SCH --> W["Worker"]
-  W --> PL["Pipeline"]
-  PL --> PF["Preflight"]
-  PL --> VA["Validation"]
-  VA --> GI["GuestInput"]
-  W --> EN["Encode"]
-  W --> PR["Prover (RISC0/SP1)"]
-  PR --> PO["Proof"]
-  PO --> AG["Aggregation Proof"]
-  HF["PipelineSpec"] -.-> PF
-  HF -.-> VA
-  HF -.-> EN
-  PB["ProverBackend"] -.-> PR
-```
-
-Pipeline flow:
-
-```mermaid
-flowchart TD
-  Start([Start]) --> Build[Preflight: build GuestInput]
-  Build --> Validate[Validation: stateless checks]
-  Validate --> Encode[Encode: serialize GuestInput]
-  Encode --> Prove[Prover: run zkVM]
-  Prove --> Done([Proof])
-```
-
-Request sequence:
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant API as HTTP API
-  participant Q as Engine
-  participant W as Worker
-  participant P as Provider
-  participant Z as Prover
-
-  C->>API: POST /v3/proof/batch/shasta
-  API->>Q: submit_proposal_proof_with_dependencies
-  Q->>W: Preflight task
-  W->>P: fetch blocks/witnesses/accounts
-  W->>Q: store Preflight output
-  Q->>W: Validation task
-  W->>Q: store GuestInput
-  Q->>W: Encode task
-  W->>Q: store EncodedInput
-  Q->>W: Prove task
-  W->>Z: prove(EncodedInput)
-  Z-->>W: Proof
-  W->>Q: store Proof
-  C->>API: GET /v3/tasks/{id}
-  API-->>C: root task status + proof
-```
-
-## Build
-
-```bash
-cargo build --release -p raiko2
-```
-
-## Test
-
-Before opening a PR, run:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace -- -D warnings
-cargo nextest run --workspace
-```
-
-## Build guests
-
-Guest programs live in `guests/` as standalone crates (they are not part of the workspace). Each guest
-crate has its own `[patch.crates-io]` in its `Cargo.toml` so RISC0/SP1 dependency versions stay
-isolated. `xtask` builds guests using the published Docker toolchain images and copies the resulting
-ELFs into `crates/guests/elf` for the host to load. Use `just` unless you have a reason not to.
-
-Prerequisites: `docker` and `just`.
-
-By default, `xtask` uses repo-managed local toolchain images:
-
-- RISC0: `RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local`
-- SP1: `SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local`
-
-When a default local image is missing, `xtask` builds it locally from the matching Dockerfile.
-The SP1 image uses the upstream version derived from `guests/sp1/Cargo.lock`.
-
-Docker builds reuse a persistent Cargo download cache by default:
-
-- Disable: `DOCKER_CARGO_CACHE=none`
-- Override the volume name: `DOCKER_CARGO_CACHE_VOLUME=...` (e.g. `raiko2-cargo-sp1`)
-
-To use local toolchains instead, set `RISC0_TOOLCHAIN_IMAGE=none` and/or `SP1_TOOLCHAIN_IMAGE=none`.
-
-```bash
-just build-guest all
-# or individually:
-just build-guest risc0
-just build-guest sp1
-# Override docker tags/platform if needed (only applies when toolchain images are disabled):
-RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
-  RISC0_DOCKER_CONTAINER_TAG=<risc0-tag> SP1_DOCKER_TAG=<sp1-tag> \
-  DOCKER_DEFAULT_PLATFORM=linux/amd64 \
-  just build-guest all
-```
-
-To build the SP1 toolchain image locally:
-
-```bash
-docker build -f docker/sp1-toolchain/Dockerfile -t raiko2-sp1-toolchain:local docker/sp1-toolchain
-SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local just build-guest sp1
-```
-
-To build the RISC0 toolchain image locally:
-
-```bash
-docker build -f docker/risc0-toolchain/Dockerfile -t raiko2-risc0-toolchain:local docker/risc0-toolchain
-RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local just build-guest risc0
-```
-
-Without `just`:
-
-```bash
-cargo run -r -p xtask -- build-guest all
-```
-
-## Release image
-
-Use the `xtask` release entrypoint for runtime images. It is the canonical flow for image releases:
-
-1. rebuild the guest ELF assets for the selected backend
-2. build the runtime image
-3. push the image
-4. print the exact `kubectl set image` and `kubectl rollout status` commands
-
-Release images should not be built via ad-hoc `docker build` because the Dockerfile packages the
-existing `crates/guests/elf` artifacts and does not rebuild guest sources on its own.
-
-```bash
-just release-image risc0 tolba-20260310-1013
-
-# Equivalent xtask command:
-cargo run -r -p xtask -- release-image risc0 \
-  --tag tolba-20260310-1013 \
-  --repository us-docker.pkg.dev/evmchain/images/raiko2 \
-  --namespace tolba-raiko2-host \
-  --deployment raiko2 \
-  --container raiko2
-```
-
-## Guest benchmarking
-
-The `bench-guest` task measures guest execution costs (cycles + wall time):
-
-1. (Optional) Run `preflight` to dump a `GuestInput` JSON.
-2. Build SP1 guest ELFs with the `bench` feature enabled (docker).
-3. Run `guest-launcher` and collect a JSON report (execution metadata + cycles + wall time).
-
-Examples:
-
-```bash
-# Build ELFs (docker) + enable cycle tracking, then run
-cargo run -r -p xtask -- bench-guest sp1 --input ./test.json --repeat 3
-
-# Reuse prebuilt ELFs (skip docker build)
-cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test.json --repeat 3
-
-# Generate input via preflight and write an aggregated report
-cargo run -r -p xtask -- bench-guest sp1 \
-  --rpc-url http://localhost:9545 \
-  --l1-inclusion-block-number 11 \
-  --last-anchor-block-number 0 \
-  --l2-chain-id 167000 \
-  --proposal-id 3 \
-  --repeat 3 \
-  --json-out target/bench/guest-report.json
-```
-
-If `guest-launcher` panics while deserializing `GuestInput`, the checked-in ELFs are probably stale.
-Rebuild them with:
-
-```bash
-cargo run -r -p xtask -- build-guest sp1 --bench
-```
-
-## Run
-
-```bash
-# Start the prover server
-cp config.example.toml config.toml
-./target/release/raiko2 --config config.toml
-
-# Or with environment variables
-RAIKO2_L1_RPC=http://localhost:8545 \
-RAIKO2_L2_RPC=http://localhost:9545 \
-./target/release/raiko2
-```
-
-## Docker
-
-`raiko2` ships a Docker deployment path that matches the existing Docker-based operator flow, but
-excludes all SGX-specific setup.
-
-The Docker path uses:
-
-- the root [`Dockerfile`](./Dockerfile) to build the `raiko2` binary
-- [`docker/docker-compose.yml`](./docker/docker-compose.yml) for runtime orchestration
-- [`docker/config.compose.toml`](./docker/config.compose.toml) for the base config file mounted into
-  the container
-- [`docker/.env.sample`](./docker/.env.sample) as the operator-facing environment template
-
-Quickstart:
-
-```bash
-cp docker/.env.sample docker/.env
-$EDITOR docker/.env
-
-docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
-```
-
-The default compose stack starts a single `raiko2` container on port `8080` and uses the in-process
-memory queue.
-
-Health checks:
-
-- liveness/readiness: `GET /ready`
-- basic status: `GET /health`
-
-The default image is built without optional queue features. If you later want Redis-backed queueing,
-rebuild with `BIN_FEATURES=--features redis-queue` and provide the corresponding runtime settings.
-
-To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
-
-- `native/local`
-- `risc0/local`
-- `risc0/boundless`
-- `sp1/local`
-
-## Boundless runner
-
-To use the boundless-backed RISC0 route, configure `guest_system = "risc0"` and
-`runner = "boundless"`:
-
-```toml
-[prover]
-guest_system = "risc0"
-runner = "boundless"
-
-[prover.boundless]
-offchain = false
-rpc_url = "https://base-rpc.publicnode.com"
-signer_key = "0xYOUR_PRIVATE_KEY"
-poll_interval_ms = 10000
-timeout_ms = 3600000
-
-[prover.boundless.deployment]
-deployment_type = "base"
-
-[prover.boundless.deployment.overrides]
-order_stream_url = "https://base-mainnet.boundless.network"
-
-[prover.boundless.offer_params.batch]
-ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 200
-timeout_ms_per_mcycle = 410
-max_price_per_mcycle = "0.000000085"
-min_price_per_mcycle = "0.000000010"
-lock_collateral = "20"
-
-[prover.boundless.offer_params.aggregation]
-ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 3000
-timeout_ms_per_mcycle = 6000
-max_price_per_mcycle = "0.00000006"
-min_price_per_mcycle = "0.000000006"
-lock_collateral = "20"
-```
-
-The boundless route is now fully in-process. `raiko2` uploads guest ELFs itself, submits market
-requests directly, and records task/runtime state under `./data/runtime` by default. Task
-workdirs, runtime state, and reusable image references are managed there, while `guests/risc0`
-and `guests/sp1` remain separate Cargo workspaces.
-
-Boundless request pricing stays aligned with the legacy `raiko-agent` strategy. Proposal requests
-quote a fixed `6000` mcycles budget, aggregation requests quote a fixed `200` mcycles budget, and
-the local dry-run only validates guest execution and produces the request journal.
-
-`l2_rpc` is expected to be a witness-capable endpoint that supports `debug_executionWitness`.
-If the upstream L2 does not expose that method yet, run the compatibility `zeth-rpc-proxy`
-binary in front of it and point `l2_rpc` at the proxy instead.
+## Routes
+
+- `native/local` executes the proving pipeline locally and returns public inputs
+  instead of a zk proof.
+- `risc0/local` generates RISC Zero proofs locally.
+- `risc0/boundless` submits RISC Zero proving directly to Boundless from the `raiko2` process.
+- `sp1/local` runs the SP1 flow; request-scoped SP1 settings also cover execute
+  mode and network proving.
+
+## Repository Map
+
+- `bin/raiko2`: HTTP server and CLI
+- `crates/pipeline`: preflight, manifest building, and validation wiring
+- `crates/prover`: prover backends and aggregation adapters
+- `xtask`: guest build, benchmarking, and release automation
 
 ## Documentation
 
-- [API Documentation](docs/API.md)
-- [Regression Guide](script/regression/README.md)
+- [Docs index](docs/README.md)
+- [API contract](docs/API.md)
+- [Development guide](docs/development.md)
+- [Operations guide](docs/operations.md)
+- [Regression harness](script/regression/README.md)
+- [Configuration example](config.example.toml)
 
 ## License
 

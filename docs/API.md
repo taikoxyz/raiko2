@@ -2,7 +2,19 @@
 
 ## Overview
 
-Raiko2 exposes a hoodi-compatible v3 API for Shasta batch proof requests and aggregation.
+Raiko2 exposes an asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation.
+
+Proof registration is asynchronous. Successful `POST` requests return a `task_id`, and clients
+poll `GET /v3/tasks/{id}` for progress, runtime metadata, and final proof material.
+
+Related docs:
+
+- [Docs index](README.md)
+- [README](../README.md) for the project overview
+- [Development guide](development.md) for local workflows
+- [Operations guide](operations.md) for runtime and deployment
+- [`config.example.toml`](../config.example.toml) for the canonical config shape
+
 The public API surface is:
 
 - `POST /v3/proof/batch/shasta`
@@ -34,6 +46,9 @@ Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`.
 POST /v3/proof/batch/shasta
 Content-Type: application/json
 ```
+
+Registers a batch root task for Shasta proposal proving. The server expands it into
+proposal-stage tasks and an optional aggregation task.
 
 ### Request
 
@@ -83,8 +98,8 @@ Content-Type: application/json
   - `sp1 -> sp1/local`
   - `risc0 -> risc0/<server default runner>`
   - `sgx -> 400`
-- Optional request-scoped prover config may be passed as flattened keys. For `sp1`, the canonical
-  shape is a nested `sp1` object with:
+- Optional request-scoped prover config may be passed as flattened keys. For `sp1`, the
+  canonical shape is a nested `sp1` object with:
   - `mode`: `prove` or `execute`
   - `prover`: `local`, `mock`, or `network`
   - `recursion`: `core`, `compressed`, or `plonk`
@@ -101,8 +116,8 @@ Content-Type: application/json
 - `sp1.network_mode=mainnet` requires `sp1.fulfillment_strategy=auction`.
 - `sp1.network_mode=reserved` requires `sp1.fulfillment_strategy=reserved` or `hosted`.
 - `network` and `l1_network` must match an explicitly configured allowed pair.
-- flattened `prover_args` are accepted, but they must not override route/spec selection keys such as
-  `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
+- flattened `prover_args` are accepted, but they must not override route or spec selection keys
+  such as `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
 - `NETWORK_PRIVATE_KEY` must be present in the server environment when `sp1.prover=network` is
   used. `sp1.rpc_url` is an operator config file setting only; it is not accepted in request
   overrides.
@@ -126,6 +141,8 @@ Content-Type: application/json
 POST /v3/proof/aggregate
 Content-Type: application/json
 ```
+
+Registers an aggregation task for already-produced canonical proof objects.
 
 ### Request
 
@@ -178,6 +195,9 @@ Content-Type: application/json
 ```http
 GET /v3/tasks/{id}
 ```
+
+Returns the batch root view for proposal and aggregation work derived from the
+original request.
 
 ### Response
 
@@ -246,9 +266,10 @@ aggregate task exists, it becomes `proposals.len()`.
   `evaluated_mcycles_count`.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`.
-- `engine_state_present=false` means the HTTP response is serving the last runtime snapshot even
-  though the in-memory engine no longer has a live status object for that stage. This preserves
-  observability after container restarts, but it does not imply task recovery.
+- `engine_state_present=false` means the HTTP response is serving the last runtime
+  snapshot even though the in-memory engine no longer has a live status object
+  for that stage. This preserves observability after container restarts, but it
+  does not imply task recovery.
 
 ## Cancel Task
 
@@ -256,7 +277,8 @@ aggregate task exists, it becomes `proposals.len()`.
 POST /v3/tasks/{id}/cancel
 ```
 
-Cancelling a batch root cascades to every proposal stage task and to the optional aggregate task.
+Cancelling a batch root cascades to every proposal stage task and to the
+optional aggregate task.
 
 ## Error Envelope
 

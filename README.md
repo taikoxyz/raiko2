@@ -4,7 +4,7 @@
 
 Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Development](docs/development.md) / [Operations](docs/operations.md) /
-[Regression](script/regression/README.md) / [Config](config.example.toml)
+[Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
 validates them, runs local or remote proving routes, and exposes an asynchronous,

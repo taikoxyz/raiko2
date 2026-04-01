@@ -65,7 +65,9 @@ def resolve_chain_id_from_specs(specs: List[Dict], chain_name: str) -> Optional[
     return None
 
 
-def resolve_event_address_from_config(config: Dict, specs: Optional[List[Dict]] = None) -> Optional[str]:
+def resolve_event_address_from_config(
+    config: Dict, specs: Optional[List[Dict]] = None
+) -> Optional[str]:
     event_address = config.get("event_address")
     if event_address:
         return event_address
@@ -90,7 +92,9 @@ def preflight_rpc_from_config(config: Dict) -> Optional[str]:
     return config.get("l2_rpc") or config.get("l1_rpc")
 
 
-def format_progress(index: int, total: int, stage: str, proposal_id: Optional[int] = None) -> str:
+def format_progress(
+    index: int, total: int, stage: str, proposal_id: Optional[int] = None
+) -> str:
     suffix = f" proposal={proposal_id}" if proposal_id is not None else ""
     return f"[{index}/{total}] {stage}{suffix}"
 
@@ -155,7 +159,9 @@ def discover_proposals_from_blocks(blocks: Iterable[Dict]) -> List[int]:
     return proposals
 
 
-def discover_latest_proposals_from_blocks(blocks: Iterable[Dict], count: int) -> List[int]:
+def discover_latest_proposals_from_blocks(
+    blocks: Iterable[Dict], count: int
+) -> List[int]:
     proposals: List[int] = []
     last_id: Optional[int] = None
     for block in blocks:
@@ -193,7 +199,9 @@ def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[
 
 
 def get_l2_block(rpc_url: str, block_number: int, timeout: int) -> Optional[Dict]:
-    payload = rpc_call(rpc_url, "eth_getBlockByNumber", [hex(block_number), False], timeout)
+    payload = rpc_call(
+        rpc_url, "eth_getBlockByNumber", [hex(block_number), False], timeout
+    )
     if not payload:
         return None
     return payload.get("result")
@@ -506,6 +514,7 @@ def derive_block_range_for_proposal(
     latest = get_latest_l2_block_number(rpc_url, timeout)
 
     logger.info(f"latest proposal is {latest}")
+
     def pid_at(num: int) -> Optional[int]:
         block = get_l2_block(rpc_url, num, timeout)
         if not block:
@@ -525,7 +534,12 @@ def derive_block_range_for_proposal(
         if pid == proposal_id:
             found = pos
             break
-        if pid is not None and last_pid is not None and last_pid > proposal_id and pid < proposal_id:
+        if (
+            pid is not None
+            and last_pid is not None
+            and last_pid > proposal_id
+            and pid < proposal_id
+        ):
             s = max(1, s // 2)
         last_pid = pid
         pos = max(0, pos - s)
@@ -577,7 +591,9 @@ def setup_logger(log_path: Path) -> logging.Logger:
     return logger
 
 
-def proposal_id_for_block(rpc_url: str, block_number: int, timeout: int) -> Optional[int]:
+def proposal_id_for_block(
+    rpc_url: str, block_number: int, timeout: int
+) -> Optional[int]:
     block = get_l2_block(rpc_url, block_number, timeout)
     if not block:
         return None
@@ -587,14 +603,18 @@ def proposal_id_for_block(rpc_url: str, block_number: int, timeout: int) -> Opti
 def main() -> int:
     parser = argparse.ArgumentParser(description="Shasta regression runner")
     parser.add_argument("--config", required=True, help="Path to JSON config")
-    parser.add_argument("--range", dest="range_value", help="L2 range start:end", default=None)
+    parser.add_argument(
+        "--range", dest="range_value", help="L2 range start:end", default=None
+    )
     parser.add_argument(
         "--count",
         type=int,
         default=None,
         help="Most recent N completed proposals (max 5; skips current)",
     )
-    parser.add_argument("--aggregate", type=int, default=0, help="Aggregation group size (0=off)")
+    parser.add_argument(
+        "--aggregate", type=int, default=0, help="Aggregation group size (0=off)"
+    )
     parser.add_argument("--out-dir", default="test/regression/shasta")
     parser.add_argument(
         "--proof-type",
@@ -665,7 +685,9 @@ def main() -> int:
     logger = setup_logger(out_dir / "regression.log")
 
     if check_binaries(args.preflight_bin, args.guest_launcher_bin):
-        logger.error("Missing binaries. Run script/prepare_regression.sh first.")
+        logger.error(
+            "Missing binaries. Run scripts/regression/prepare_regression.sh first."
+        )
         return 2
 
     logger.info(
@@ -698,8 +720,10 @@ def main() -> int:
         return 2
 
     if range_tuple:
-        expanded_start, expanded_end, start_pid, end_pid = expand_range_to_proposal_boundaries(
-            l2_rpc, range_tuple[0], range_tuple[1], timeout
+        expanded_start, expanded_end, start_pid, end_pid = (
+            expand_range_to_proposal_boundaries(
+                l2_rpc, range_tuple[0], range_tuple[1], timeout
+            )
         )
         logger.info(
             "Resolved range %s:%s (proposals %s..%s)",
@@ -751,7 +775,9 @@ def main() -> int:
             logger.error("Aggregation requires proof_type=sp1.")
             return 2
         if guest_mode != "prove":
-            logger.warning("Aggregation requested; switching guest-launcher to prove mode.")
+            logger.warning(
+                "Aggregation requested; switching guest-launcher to prove mode."
+            )
         guest_mode = "prove"
         proof_mode = "compressed"
 
@@ -810,7 +836,9 @@ def main() -> int:
         summary["successes"].append(proposal_id)
 
     if args.aggregate and args.aggregate > 0:
-        proof_files = [output_paths(out_dir, pid)["proof"] for pid in summary["successes"]]
+        proof_files = [
+            output_paths(out_dir, pid)["proof"] for pid in summary["successes"]
+        ]
         groups = group_for_aggregation(proof_files, args.aggregate)
         for idx, group in enumerate(groups, start=1):
             logger.info(format_progress(idx, len(groups), "aggregate"))
@@ -820,7 +848,11 @@ def main() -> int:
                 logger.error("aggregation failed for group %s: %s", idx, result.stderr)
 
     write_summary(out_dir / "run_summary.json", summary)
-    logger.info("Done: %s success, %s failures", len(summary["successes"]), len(summary["failures"]))
+    logger.info(
+        "Done: %s success, %s failures",
+        len(summary["successes"]),
+        len(summary["failures"]),
+    )
     return 0
 
 

@@ -8,7 +8,7 @@ This directory contains the contributor- and operator-facing documentation for `
 - [API contract](API.md)
 - [Development guide](development.md)
 - [Operations guide](operations.md)
-- [Regression harness](../script/regression/README.md)
+- [Regression harness](../scripts/regression/README.md)
 - [Configuration example](../config.example.toml)
 
 ## How to Use These Docs

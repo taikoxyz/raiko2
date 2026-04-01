@@ -123,14 +123,14 @@ cargo run -r -p xtask -- build-guest sp1 --bench
 ## Regression Harness
 
 The file-based Shasta regression flow lives in
-[script/regression/README.md](../script/regression/README.md).
+[scripts/regression/README.md](../scripts/regression/README.md).
 
 Setup and run:
 
 ```bash
-script/regression/prepare_regression.sh
-python script/regression/shasta_regression.py \
-  --config script/regression/config/shasta_regression_devnet.json \
+scripts/regression/prepare_regression.sh
+python scripts/regression/shasta_regression.py \
+  --config scripts/regression/config/shasta_regression_devnet.json \
   --count 3
 ```
 

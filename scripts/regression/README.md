@@ -5,22 +5,22 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r script/regression/requirements.txt
+pip install -r scripts/regression/requirements.txt
 ```
 
 ## Build binaries
 
 ```bash
-script/regression/prepare_regression.sh
+scripts/regression/prepare_regression.sh
 ```
 
 ## Run
 
 ```bash
-python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --range 1000:1010
+python scripts/regression/shasta_regression.py --config scripts/regression/config/shasta_regression_devnet.json --range 1000:1010
 
 # Or run the most recent completed proposals (skips the current in-progress proposal).
-python script/regression/shasta_regression.py --config script/regression/config/shasta_regression_devnet.json --count 3
+python scripts/regression/shasta_regression.py --config scripts/regression/config/shasta_regression_devnet.json --count 3
 ```
 
 - Proof backend defaults to `native`; switch with `--proof-type sp1`.

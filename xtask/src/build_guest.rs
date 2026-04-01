@@ -615,7 +615,7 @@ fn update_image_ids(root: &Path, backend: &str) -> Result<()> {
         return Ok(());
     }
 
-    let script = root.join("script/update_imageid.sh");
+    let script = root.join("scripts/update_imageid.sh");
     if !script.exists() {
         println!("[WARN] update_imageid.sh not found at {script:?}, skipping image ID update");
         return Ok(());

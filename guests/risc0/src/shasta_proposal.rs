@@ -5,6 +5,7 @@ risc0_zkvm::guest::entry!(main);
 
 extern crate alloc;
 
+mod crypto;
 mod sys;
 
 use alloc::vec;
@@ -14,6 +15,8 @@ use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::guest::env;
 
 pub fn main() {
+    crypto::install_guest_crypto();
+
     let mut len = 0u32;
     env::read_slice(core::slice::from_mut(&mut len));
 

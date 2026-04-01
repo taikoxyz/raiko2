@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 sp1_zkvm::entrypoint!(main);
 
+mod crypto;
 mod sys;
 
 use raiko2_guest_common::prove_shasta_proposal;
@@ -10,6 +11,8 @@ use raiko2_primitives_shasta::GuestInput;
 use sp1_zkvm::io;
 
 pub fn main() {
+    crypto::install_guest_crypto();
+
     // Read the guest input prepared by the host
     // The host has already prepared the witnesses for each block.
     #[cfg(feature = "bench")]

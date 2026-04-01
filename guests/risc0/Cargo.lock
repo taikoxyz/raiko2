@@ -139,7 +139,7 @@ dependencies = [
  "reth-primitives-traits",
  "serde",
  "serde_with",
- "sha2",
+ "sha2 0.10.9",
  "tracing",
 ]
 
@@ -179,7 +179,7 @@ dependencies = [
  "c-kzg",
  "derive_more",
  "either",
- "k256",
+ "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "once_cell",
  "rand 0.8.5",
  "secp256k1 0.30.0",
@@ -237,7 +237,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "borsh",
- "k256",
+ "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_with",
  "thiserror",
@@ -277,7 +277,7 @@ dependencies = [
  "ethereum_ssz_derive",
  "serde",
  "serde_with",
- "sha2",
+ "sha2 0.10.9",
  "thiserror",
 ]
 
@@ -412,7 +412,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap 2.13.0",
  "itoa",
- "k256",
+ "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "keccak-asm",
  "paste",
  "proptest",
@@ -587,7 +587,7 @@ dependencies = [
  "auto_impl",
  "either",
  "elliptic-curve",
- "k256",
+ "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
 ]
 
@@ -806,7 +806,7 @@ dependencies = [
  "digest 0.10.7",
  "fnv",
  "merlin",
- "sha2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2688,7 +2688,22 @@ dependencies = [
  "elliptic-curve",
  "once_cell",
  "serdect",
- "sha2",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "k256"
+version = "0.13.4"
+source = "git+https://github.com/risc0/RustCrypto-elliptic-curves?tag=k256%2Fv0.13.4-risczero.1#7d4a8d6477e258ce4169ee4669cf92aee0582c39"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "ecdsa",
+ "elliptic-curve",
+ "once_cell",
+ "risc0-bigint2",
+ "sha2 0.10.9",
+ "signature",
 ]
 
 [[package]]
@@ -2718,7 +2733,7 @@ dependencies = [
  "arbitrary",
  "hashbrown 0.15.5",
  "hex",
- "sha2",
+ "sha2 0.10.9",
  "siphasher",
 ]
 
@@ -3170,7 +3185,7 @@ dependencies = [
  "ethereum_ssz_derive",
  "op-alloy-consensus",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "snap",
  "thiserror",
 ]
@@ -3196,7 +3211,7 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "risc0-bigint2",
- "sha2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3561,11 +3576,14 @@ dependencies = [
  "alloy-primitives",
  "bincode",
  "c-kzg",
+ "k256 0.13.4 (git+https://github.com/risc0/RustCrypto-elliptic-curves?tag=k256%2Fv0.13.4-risczero.1)",
  "raiko2-guest-common",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
+ "revm-precompile",
  "risc0-zkvm",
  "risc0-zkvm-platform",
+ "sha2 0.10.8",
 ]
 
 [[package]]
@@ -4013,7 +4031,7 @@ dependencies = [
  "reth-payload-primitives",
  "reth-primitives-traits",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "thiserror",
 ]
 
@@ -4608,12 +4626,12 @@ dependencies = [
  "aurora-engine-modexp",
  "c-kzg",
  "cfg-if",
- "k256",
+ "k256 0.13.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "p256",
  "revm-primitives",
  "ripemd",
  "secp256k1 0.31.1",
- "sha2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4816,7 +4834,7 @@ dependencies = [
  "risc0-core",
  "risc0-zkvm-platform",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "stability",
  "tracing",
 ]
@@ -4844,7 +4862,7 @@ dependencies = [
  "rrs-lib",
  "semver 1.0.27",
  "serde",
- "sha2",
+ "sha2 0.10.9",
  "stability",
  "tracing",
 ]
@@ -5217,6 +5235,16 @@ checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.8"
+source = "git+https://github.com/risc0/RustCrypto-hashes?tag=sha2-v0.10.8-risczero.0#244dc3b08788f7a4ccce14c66896ae3b4f24c166"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -6207,43 +6235,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "bls12_381"
-version = "0.8.0"
-source = "git+https://github.com/risc0/zkcrypto-bls12_381?tag=bls12_381%2Fv0.8.0-risczero.1#a3192e1bc58921d42d03d99957abf3be55f9d435"
-
-[[patch.unused]]
-name = "blst"
-version = "0.3.14"
-source = "git+https://github.com/risc0/blst?tag=blst%2Fv0.3.14-risczero.0#4bb7133be362fce47525dc0c877e058e5a6db5ac"
-
-[[patch.unused]]
-name = "curve25519-dalek"
-version = "4.1.3"
-source = "git+https://github.com/risc0/curve25519-dalek?tag=curve25519-4.1.3-risczero.0#385adda1fa3b66d9aaa8b8fcc99ddc324d33ba32"
-
-[[patch.unused]]
-name = "k256"
-version = "0.13.3"
-source = "git+https://github.com/risc0/RustCrypto-elliptic-curves?tag=k256%2Fv0.13.3-risczero.1#ff5d67b095cfcc2569b7789f2079ed87ef2c7756"
-
-[[patch.unused]]
-name = "rsa"
-version = "0.9.6"
-source = "git+https://github.com/risc0/RustCrypto-RSA?tag=v0.9.6-risczero.0#cb42fd295c096c6dddd8386cd57b122add8d0cbc"
-
-[[patch.unused]]
-name = "sha2"
-version = "0.10.8"
-source = "git+https://github.com/risc0/RustCrypto-hashes?tag=sha2-v0.10.8-risczero.0#244dc3b08788f7a4ccce14c66896ae3b4f24c166"
-
-[[patch.unused]]
-name = "substrate-bn"
-version = "0.6.0"
-source = "git+https://github.com/risc0/paritytech-bn?tag=v0.6.0-risczero.0#22108fe8c6ea1ebc1358fc4fd6854a6bf46e3509"
-
-[[patch.unused]]
-name = "tiny-keccak"
-version = "2.0.2"
-source = "git+https://github.com/risc0/tiny-keccak?tag=tiny-keccak%2Fv2.0.2-risczero.0#8fcc866dc94dcec3e79c3b2bc8fbc51b22f2d5e1"

@@ -10,7 +10,9 @@ use core::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// Blob proof type for Taiko.
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BlobProofType {
     /// Guest runs through the entire computation from blob to Kzg commitment
@@ -82,6 +84,9 @@ pub struct TaikoManifest<E = (), Cp = ()> {
     pub chain_spec: ManifestChainSpec,
     /// Prover-specific data.
     pub prover_data: TaikoProverData<Cp>,
+    /// The blob proof strategy resolved for the current prover backend.
+    #[serde(default)]
+    pub blob_proof_type: BlobProofType,
     /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
     /// L1 header chain covering Shasta anchor checkpoints through the proposal origin block.
@@ -186,6 +191,7 @@ mod tests {
         assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
         assert!(manifest.l1_ancestor_headers.is_empty());
+        assert_eq!(manifest.blob_proof_type, BlobProofType::KzgVersionedHash);
     }
 
     #[test]

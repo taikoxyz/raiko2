@@ -202,7 +202,14 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
     let mut measured_reports = Vec::with_capacity(args.repeat);
     for i in 0..(args.warmup + args.repeat) {
         let result_path = results_dir.join(format!("sp1-proposal-{run_id}-run{}.json", i + 1));
-        run_guest_launcher(&launcher_path, &input_path, mode, proof_mode, &result_path)?;
+        run_guest_launcher(
+            &launcher_path,
+            &input_path,
+            &args.proof_type,
+            mode,
+            proof_mode,
+            &result_path,
+        )?;
         if i >= args.warmup {
             let report = read_report(&result_path)?;
             measured_reports.push(report);
@@ -306,14 +313,16 @@ fn prepare_input(root: &Path, args: &BenchGuestArgs) -> Result<PathBuf> {
 }
 
 fn build_guest_launcher(root: &Path) -> Result<PathBuf> {
-    println!("[INFO] Building guest-launcher (release)...");
+    println!("[INFO] Building guest-launcher (release, SP1 profiling enabled)...");
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root);
     cmd.arg("build")
         .arg("--locked")
         .arg("--release")
         .arg("--bin")
-        .arg("guest-launcher");
+        .arg("guest-launcher")
+        .arg("--features")
+        .arg("sp1-sdk/profiling");
     util::run(cmd)?;
 
     let bin_name = if cfg!(windows) {
@@ -327,6 +336,7 @@ fn build_guest_launcher(root: &Path) -> Result<PathBuf> {
 fn run_guest_launcher(
     launcher: &Path,
     input: &Path,
+    proof_type: &str,
     mode: &str,
     proof_mode: &str,
     json_out: &Path,
@@ -335,6 +345,8 @@ fn run_guest_launcher(
     let mut cmd = Command::new(launcher);
     cmd.arg("--input")
         .arg(input)
+        .arg("--proof-type")
+        .arg(proof_type)
         .arg("--mode")
         .arg(mode)
         .arg("--proof-mode")

@@ -1,10 +1,12 @@
 use crate::{RaikoError, RaikoResult};
 use alloy_primitives::B256;
 use kzg::kzg_proofs::KZGSettings;
+use kzg::kzg_types::ZFr;
 use kzg_traits::G1;
 use kzg_traits::eip_4844::{
-    blob_to_kzg_commitment_rust, bytes_to_blob, compute_blob_kzg_proof_rust, hash,
-    verify_blob_kzg_proof_rust,
+    blob_to_kzg_commitment_rust, blob_to_polynomial, bytes_to_blob, compute_blob_kzg_proof_rust,
+    compute_kzg_proof_rust, evaluate_polynomial_in_evaluation_form, hash, hash_to_bls_field,
+    verify_blob_kzg_proof_rust, verify_kzg_proof_rust,
 };
 use std::sync::OnceLock;
 
@@ -56,6 +58,16 @@ fn blob_to_commitment_with_settings(
         .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to compute commitment: {e}")))?;
 
     Ok(g1_to_kzg_commitment_bytes(&commitment))
+}
+
+fn proof_of_equivalence_point(blob: &[u8], commitment: &KzgCommitmentBytes) -> ZFr {
+    let blob_hash = hash(blob);
+    let versioned_hash = commitment_to_version_hash(commitment);
+    let mut challenge_input = [0u8; 64];
+    challenge_input[..32].copy_from_slice(&blob_hash);
+    challenge_input[32..].copy_from_slice(versioned_hash.as_slice());
+    let evaluation_challenge = hash(&challenge_input);
+    hash_to_bls_field(&evaluation_challenge)
 }
 
 /// Convert blob (Vec<u8>) to KZG commitment using the static KZG settings.
@@ -122,6 +134,34 @@ pub fn blob_to_proof(
     blob_to_proof_with_settings(blob, commitment, get_kzg_settings()?)
 }
 
+fn blob_to_proof_of_equivalence_with_settings(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+    kzg_settings: &KZGSettings,
+) -> RaikoResult<KzgCommitmentBytes> {
+    let blob_fields = bytes_to_blob(blob)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {e}")))?;
+    let evaluation_point = proof_of_equivalence_point(blob, commitment);
+    let (proof, _) = compute_kzg_proof_rust(&blob_fields, &evaluation_point, kzg_settings)
+        .map_err(|e| {
+            RaikoError::InvalidBlobOption(format!("Failed to compute proof of equivalence: {e}"))
+        })?;
+
+    Ok(g1_to_kzg_commitment_bytes(&proof))
+}
+
+/// Compute the point-evaluation proof used by Raiko's proof-of-equivalence strategy.
+///
+/// # Errors
+///
+/// Returns an error if the blob cannot be converted or the proof computation fails.
+pub fn blob_to_proof_of_equivalence(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+) -> RaikoResult<KzgCommitmentBytes> {
+    blob_to_proof_of_equivalence_with_settings(blob, commitment, get_kzg_settings()?)
+}
+
 /// Convert KZG commitment to versioned hash (EIP-4844).
 ///
 /// Computes SHA256 hash of the commitment and sets the first byte to `VERSIONED_HASH_VERSION_KZG`.
@@ -170,6 +210,65 @@ pub fn verify_blob_kzg_proof(
     verify_blob_kzg_proof_with_settings(blob, commitment, proof, get_kzg_settings()?)
 }
 
+fn verify_blob_proof_of_equivalence_with_settings(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+    proof: &KzgCommitmentBytes,
+    kzg_settings: &KZGSettings,
+) -> RaikoResult<()> {
+    let blob_fields = bytes_to_blob(blob)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Failed to convert blob: {e}")))?;
+    let polynomial = blob_to_polynomial(&blob_fields).map_err(|e| {
+        RaikoError::InvalidBlobOption(format!(
+            "Failed to build polynomial for proof of equivalence: {e}"
+        ))
+    })?;
+    let evaluation_point = proof_of_equivalence_point(blob, commitment);
+    let evaluation_value =
+        evaluate_polynomial_in_evaluation_form(&polynomial, &evaluation_point, kzg_settings)
+            .map_err(|e| {
+                RaikoError::InvalidBlobOption(format!(
+                    "Failed to evaluate polynomial for proof of equivalence: {e}"
+                ))
+            })?;
+
+    let kzg_commitment = G1::from_bytes(commitment)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid commitment: {e}")))?;
+    let kzg_proof = G1::from_bytes(proof)
+        .map_err(|e| RaikoError::InvalidBlobOption(format!("Invalid proof: {e}")))?;
+
+    let is_valid = verify_kzg_proof_rust(
+        &kzg_commitment,
+        &evaluation_point,
+        &evaluation_value,
+        &kzg_proof,
+        kzg_settings,
+    )
+    .map_err(|e| {
+        RaikoError::InvalidBlobOption(format!("Proof of equivalence verification error: {e}"))
+    })?;
+    if !is_valid {
+        return Err(RaikoError::InvalidBlobOption(
+            "Proof of equivalence verification failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify the point-evaluation proof used by Raiko's proof-of-equivalence strategy.
+///
+/// # Errors
+///
+/// Returns an error if the proof is invalid or verification fails.
+pub fn verify_blob_proof_of_equivalence(
+    blob: &[u8],
+    commitment: &KzgCommitmentBytes,
+    proof: &KzgCommitmentBytes,
+) -> RaikoResult<()> {
+    verify_blob_proof_of_equivalence_with_settings(blob, commitment, proof, get_kzg_settings()?)
+}
+
 // Note: `get_kzg_settings` and `verify_blob_kzg_proof_with_settings` are `pub(crate)` so
 // `verification.rs` can call them without making them public API.
 
@@ -211,6 +310,31 @@ mod test {
         let mut expected = hash(&commitment_bytes);
         expected[0] = VERSIONED_HASH_VERSION_KZG;
         assert_eq!(version_hash, B256::from_slice(&expected));
+        Ok(())
+    }
+
+    #[test]
+    fn blob_proof_of_equivalence_verify() -> Result<()> {
+        let kzg_settings = get_kzg_settings().context("embedded settings load")?;
+
+        let blob_bytes = vec![0u8; BYTES_PER_BLOB];
+        let commitment_bytes =
+            blob_to_commitment_with_settings(&blob_bytes, kzg_settings).context("commitment")?;
+        let proof_bytes = blob_to_proof_of_equivalence_with_settings(
+            &blob_bytes,
+            &commitment_bytes,
+            kzg_settings,
+        )
+        .context("proof of equivalence")?;
+
+        verify_blob_proof_of_equivalence_with_settings(
+            &blob_bytes,
+            &commitment_bytes,
+            &proof_bytes,
+            kzg_settings,
+        )
+        .context("verify proof of equivalence")?;
+
         Ok(())
     }
 

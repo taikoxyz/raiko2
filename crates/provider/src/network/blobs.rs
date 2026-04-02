@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::hex;
 use raiko2_primitives::blob::util::{
-    KzgCommitmentBytes, blob_to_commitment, blob_to_proof, commitment_to_version_hash,
-    verify_blob_kzg_proof,
+    KzgCommitmentBytes, blob_to_commitment, blob_to_proof_of_equivalence,
+    commitment_to_version_hash, verify_blob_proof_of_equivalence,
 };
 use raiko2_primitives::{ChainSpec, RaikoError, RaikoResult};
-use raiko2_protocol::InputDataSource;
+use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use serde::Deserialize;
 
@@ -63,6 +63,27 @@ fn timestamp_to_slot(timestamp: u64, chain_spec: &ChainSpec) -> RaikoResult<u64>
 }
 
 impl NetworkProvider {
+    fn blob_proof_for_type(
+        blob: &[u8],
+        commitment: &KzgCommitmentBytes,
+        blob_proof_type: BlobProofType,
+    ) -> RaikoResult<Vec<u8>> {
+        match blob_proof_type {
+            BlobProofType::KzgVersionedHash => Ok(Vec::new()),
+            BlobProofType::ProofOfEquivalence => {
+                let proof = blob_to_proof_of_equivalence(blob, commitment).map_err(|err| {
+                    RaikoError::Preflight(format!(
+                        "failed to compute proof-of-equivalence proof: {err}"
+                    ))
+                })?;
+                verify_blob_proof_of_equivalence(blob, commitment, &proof).map_err(|err| {
+                    RaikoError::Preflight(format!("invalid proof-of-equivalence proof: {err}"))
+                })?;
+                Ok(proof.to_vec())
+            }
+        }
+    }
+
     async fn fetch_blob_sidecars(
         &self,
         beacon_rpc: &str,
@@ -105,6 +126,7 @@ impl NetworkProvider {
         &self,
         l1_chain_spec: &ChainSpec,
         proposal_event: &ShastaEventData,
+        blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
         let beacon_rpc = l1_chain_spec.beacon_rpc.as_deref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig(format!(
@@ -163,17 +185,13 @@ impl NetworkProvider {
                             "beacon commitment mismatch for source {source_idx}, blob {blob_idx}"
                         )));
                     }
-                    let proof = blob_to_proof(&blob, &commitment).map_err(|err| {
-                        RaikoError::Preflight(format!(
-                            "failed to compute blob proof for source {source_idx}, blob {blob_idx}: {err}"
-                        ))
-                    })?;
-                    verify_blob_kzg_proof(&blob, &commitment, &proof).map_err(|err| {
-                        RaikoError::Preflight(format!(
-                            "invalid beacon blob sidecar for source {source_idx}, blob {blob_idx}: {err}"
-                        ))
-                    })?;
-                    matched = Some((blob, commitment.to_vec(), proof.to_vec()));
+                    let proof = Self::blob_proof_for_type(&blob, &commitment, blob_proof_type)
+                        .map_err(|err| {
+                            RaikoError::Preflight(format!(
+                                "failed to resolve blob proof for source {source_idx}, blob {blob_idx}: {err}"
+                            ))
+                        })?;
+                    matched = Some((blob, commitment.to_vec(), proof));
                     break;
                 }
 

@@ -4,16 +4,16 @@ use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy_consensus::transaction::Transaction as _;
 use alloy_primitives::B256;
-use alloy_sol_types::{SolCall, sol};
-use anyhow::{Context, Result, ensure};
+use alloy_sol_types::{sol, SolCall};
+use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs};
 use raiko2_primitives_shasta::{
-    GuestInput, ShastaZkAggregationGuestInput,
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output,
     },
-    validate_anchor_progression, verify_proposal_mode_blob_usage,
+    validate_anchor_progression, verify_proposal_mode_blob_usage, GuestInput,
+    ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_stateless::validate_block;
@@ -34,6 +34,22 @@ pub struct TaikoRuntime {
     pub chain_spec: Arc<TaikoChainSpec>,
     pub evm_config: TaikoEvmConfig,
 }
+
+#[cfg(feature = "bench")]
+fn bench_report_start(label: &str) {
+    println!("cycle-tracker-report-start: {label}");
+}
+
+#[cfg(not(feature = "bench"))]
+fn bench_report_start(_label: &str) {}
+
+#[cfg(feature = "bench")]
+fn bench_report_end(label: &str) {
+    println!("cycle-tracker-report-end: {label}");
+}
+
+#[cfg(not(feature = "bench"))]
+fn bench_report_end(_label: &str) {}
 
 impl TaikoRuntime {
     fn from_chain_spec(chain_spec: &raiko2_primitives::ChainSpec) -> Result<Self> {
@@ -228,8 +244,10 @@ fn validate_l1_anchor_linkage(
 }
 
 pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
+    bench_report_start("proposal_blob_usage");
     verify_proposal_mode_blob_usage(guest_input)
         .context("proposal mode blob usage verification failed")?;
+    bench_report_end("proposal_blob_usage");
 
     prove_shasta_proposal_with_validator(guest_input, |stateless_input, runtime| {
         validate_block(
@@ -256,6 +274,7 @@ where
         "GuestInput must contain at least one witness"
     );
 
+    bench_report_start("proposal_invariants");
     let first_chain_spec = &guest_input.witnesses.first().expect("checked").chain_spec;
     validate_known_chain_spec(first_chain_spec)?;
     ensure!(
@@ -314,9 +333,12 @@ where
         proof_carry_data.transition_input.transition.timestamp == proposal.timestamp.to::<u64>(),
         "proof_carry_data.transition.timestamp mismatch"
     );
+    bench_report_end("proposal_invariants");
 
+    bench_report_start("proposal_runtime");
     let runtime = TaikoRuntime::from_chain_spec(first_chain_spec)
         .context("Failed to build Taiko runtime from GuestInput chain_spec")?;
+    bench_report_end("proposal_runtime");
 
     let mut anchor_checkpoints = Vec::with_capacity(guest_input.witnesses.len());
     let mut first_parent_block_hash = None;
@@ -326,6 +348,7 @@ where
     let mut last_block_hash = None;
     let mut last_state_root = None;
 
+    bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
         if let Some(prev_hash) = previous_block_hash {
@@ -351,7 +374,9 @@ where
         last_state_root = Some(block.header.state_root);
         anchor_checkpoints.push(decode_anchor_checkpoint(block)?);
     }
+    bench_report_end("proposal_stateless_validation");
 
+    bench_report_start("proposal_anchor_linkage");
     validate_l1_anchor_linkage(guest_input, &anchor_checkpoints)?;
     let first_parent_block_hash = first_parent_block_hash.expect("checked");
     let last_block_number = last_block_number.expect("checked");
@@ -378,8 +403,13 @@ where
         proof_carry_data.transition_input.checkpoint.stateRoot == last_state_root,
         "proof_carry_data.checkpoint.stateRoot mismatch"
     );
+    bench_report_end("proposal_anchor_linkage");
 
-    Ok(hash_shasta_subproof_input(proof_carry_data))
+    bench_report_start("proposal_output_hash");
+    let output = hash_shasta_subproof_input(proof_carry_data);
+    bench_report_end("proposal_output_hash");
+
+    Ok(output)
 }
 
 pub fn aggregate_shasta_zk_with_verifier<V>(
@@ -436,9 +466,9 @@ mod tests {
     use raiko2_primitives::ProofType;
     use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs};
     use raiko2_primitives_shasta::build_proof_carry_data;
-    use raiko2_protocol_shasta::TaikoManifest;
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
+    use raiko2_protocol_shasta::TaikoManifest;
 
     fn taiko_mainnet_chain_spec() -> ChainSpec {
         SupportedChainSpecs::default()
@@ -548,10 +578,9 @@ mod tests {
                 Ok(B256::ZERO)
             })
             .expect_err("empty witnesses should fail");
-        assert!(
-            err.to_string()
-                .contains("must contain at least one witness")
-        );
+        assert!(err
+            .to_string()
+            .contains("must contain at least one witness"));
     }
 
     #[test]
@@ -737,10 +766,9 @@ mod tests {
             })
             .expect_err("expected chain_id mismatch to fail");
 
-        assert!(
-            err.to_string()
-                .contains("proof_carry_data.chain_id mismatch")
-        );
+        assert!(err
+            .to_string()
+            .contains("proof_carry_data.chain_id mismatch"));
     }
 
     #[test]
@@ -763,12 +791,11 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(
-            prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
-                Ok(B256::ZERO)
-            })
-            .is_err()
-        );
+        assert!(prove_shasta_proposal_with_validator(
+            &guest_input,
+            |_stateless_input, _runtime| { Ok(B256::ZERO) }
+        )
+        .is_err());
     }
 
     #[test]
@@ -860,9 +887,8 @@ mod tests {
             Err(anyhow::anyhow!("boom"))
         })
         .expect_err("verifier error should bubble up");
-        assert!(
-            err.to_string()
-                .contains("proof verification failed at index 0")
-        );
+        assert!(err
+            .to_string()
+            .contains("proof verification failed at index 0"));
     }
 }

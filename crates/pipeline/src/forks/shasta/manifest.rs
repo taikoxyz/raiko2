@@ -1,6 +1,9 @@
 use crate::ManifestBuilder;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
-use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
+use raiko2_primitives::{
+    ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, SupportedChainSpecs,
+};
+use raiko2_protocol::BlobProofType;
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol::ManifestChainSpec;
 use raiko2_protocol_shasta::shasta::{
@@ -76,6 +79,24 @@ impl ShastaManifestBuilder {
             });
         }
         Ok(ShastaEventData::default())
+    }
+
+    fn resolve_blob_proof_type(ctx: &ProofContext) -> RaikoResult<BlobProofType> {
+        let hint = ctx
+            .request
+            .blob_proof_type
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!("invalid blob_proof_type: {err}"))
+            })?;
+
+        Ok(match ctx.request.proof_type {
+            ProofType::Native => hint.unwrap_or_default(),
+            ProofType::Sgx => BlobProofType::KzgVersionedHash,
+            ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
+        })
     }
 
     fn resolve_manifest_payload(
@@ -268,6 +289,7 @@ impl ShastaManifestBuilder {
         // Proposal events are resolved by preflight and may be passed in explicitly by callers.
         let prover_data = Self::parse_prover_data(ctx);
         let chain_spec = Self::build_chain_spec(ctx);
+        let blob_proof_type = Self::resolve_blob_proof_type(ctx)?;
 
         let l1_header = Self::parse_config(&ctx.config, "l1_header")?
             .unwrap_or_else(alloy_consensus::Header::default);
@@ -320,6 +342,7 @@ impl ShastaManifestBuilder {
             proposal_event,
             chain_spec,
             prover_data,
+            blob_proof_type,
             data_sources,
             l1_ancestor_headers,
         })

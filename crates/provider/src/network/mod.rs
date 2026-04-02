@@ -5,7 +5,7 @@ use alloy::{
 };
 use alloy_primitives::{Address, map::AddressMap};
 use raiko2_primitives::{ExecutionWitness, RaikoResult};
-use raiko2_protocol::InputDataSource;
+use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
 use std::time::Duration;
@@ -121,8 +121,9 @@ impl Provider for NetworkProvider {
         &self,
         l1_chain_spec: &raiko2_primitives::ChainSpec,
         proposal_event: &ShastaEventData,
+        blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
-        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event)
+        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
             .await
     }
 }

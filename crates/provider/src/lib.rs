@@ -10,7 +10,7 @@ use alloy::consensus::Header;
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
-use raiko2_protocol::InputDataSource;
+use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
 
@@ -59,6 +59,7 @@ pub trait Provider: Send + Sync {
         &self,
         _l1_chain_spec: &ChainSpec,
         _proposal_event: &ShastaEventData,
+        _blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
         Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
             "provider does not support canonical Shasta data source lookup".to_string(),

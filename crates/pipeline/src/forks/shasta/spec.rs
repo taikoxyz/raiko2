@@ -118,7 +118,11 @@ where
         {
             let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
             manifest.data_sources = provider
-                .shasta_data_sources(&l1_chain_spec, &manifest.proposal_event)
+                .shasta_data_sources(
+                    &l1_chain_spec,
+                    &manifest.proposal_event,
+                    manifest.blob_proof_type,
+                )
                 .await?;
         }
 
@@ -558,7 +562,7 @@ mod tests {
         ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
         RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
     };
-    use raiko2_protocol::InputDataSource;
+    use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
     use raiko2_provider::Provider;
 
@@ -621,6 +625,7 @@ mod tests {
             &self,
             _l1_chain_spec: &raiko2_primitives::ChainSpec,
             _proposal_event: &ShastaEventData,
+            _blob_proof_type: BlobProofType,
         ) -> RaikoResult<Vec<InputDataSource>> {
             Ok(self.data_sources.clone())
         }
@@ -747,11 +752,33 @@ mod tests {
         );
         assert_eq!(input.taiko.l1_ancestor_headers.len(), 1);
         assert_eq!(input.taiko.prover_data.last_anchor_block_number, Some(9));
+        assert_eq!(input.taiko.blob_proof_type, BlobProofType::KzgVersionedHash);
         assert_eq!(
             input.witnesses[0].chain_spec,
             SupportedChainSpecs::default()
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_forces_proof_of_equivalence_for_sp1() {
+        let provider = sample_provider();
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.proof_type = ProofType::Sp1;
+        ctx.request.blob_proof_type = Some("kzg_versioned_hash".to_string());
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(
+            input.taiko.blob_proof_type,
+            BlobProofType::ProofOfEquivalence
         );
     }
 

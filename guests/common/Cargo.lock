@@ -3322,6 +3322,7 @@ dependencies = [
  "bincode",
  "hex",
  "raiko2-primitives",
+ "raiko2-protocol",
  "raiko2-protocol-shasta",
  "reth-ethereum-primitives",
  "serde",

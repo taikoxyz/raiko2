@@ -13,7 +13,7 @@ name = "risc0-shasta-aggregation"
 path = "src/shasta_aggregation.rs"
 
 [dependencies]
-raiko2-guest-common = { path = "../common" }
+raiko2-guest-common = { path = "../common", default-features = false }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 risc0-zkvm = { version = "=3.0.3", default-features = false, features = [
@@ -30,7 +30,7 @@ sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8
 
 [features]
 default = []
-bench = []
+bench = ["raiko2-guest-common/bench"]
 
 [patch.crates-io]
 p256 = { git = "https://github.com/risc0/RustCrypto-elliptic-curves", tag = "p256/v0.13.2-risczero.1" }

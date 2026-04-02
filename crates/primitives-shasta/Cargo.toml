@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 raiko2-primitives.workspace = true
+raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 
 reth-ethereum-primitives.workspace = true

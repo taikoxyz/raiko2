@@ -59,6 +59,10 @@ struct Args {
     #[arg(long)]
     prover: Option<String>,
 
+    /// Optional blob proof strategy to record in the context.
+    #[arg(long)]
+    blob_proof_type: Option<String>,
+
     /// Optional graffiti to embed in the manifest.
     #[arg(long)]
     graffiti: Option<String>,
@@ -103,7 +107,7 @@ async fn main() -> Result<()> {
             .proof_type
             .parse::<ProofType>()
             .map_err(anyhow::Error::msg)?,
-        blob_proof_type: None,
+        blob_proof_type: args.blob_proof_type,
         prover: args.prover,
         graffiti: args.graffiti,
     };

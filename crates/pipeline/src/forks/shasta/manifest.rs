@@ -125,26 +125,30 @@ impl ShastaManifestBuilder {
     ) -> Vec<InputDataSource> {
         let sources = &proposal_event.proposal.sources;
         if sources.is_empty() {
-            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
-                payloads.clone()
-            } else {
-                vec![payload.to_vec()]
-            };
             return vec![InputDataSource {
-                tx_data_from_blob,
+                tx_data_from_calldata: if let Some(payloads) = manifest_payloads {
+                    payloads
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
+                } else {
+                    payload.to_vec()
+                },
                 is_forced_inclusion: false,
                 ..Default::default()
             }];
         }
 
         if sources.len() == 1 {
-            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
-                payloads.clone()
-            } else {
-                vec![payload.to_vec()]
-            };
             return vec![InputDataSource {
-                tx_data_from_blob,
+                tx_data_from_calldata: if let Some(payloads) = manifest_payloads {
+                    payloads
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
+                } else {
+                    payload.to_vec()
+                },
                 is_forced_inclusion: sources[0].isForcedInclusion,
                 ..Default::default()
             }];
@@ -156,14 +160,17 @@ impl ShastaManifestBuilder {
             for source in sources {
                 let expected = source.blobSlice.blobHashes.len();
                 let end = cursor.saturating_add(expected).min(payloads.len());
-                let blob_payloads = if cursor < end {
-                    payloads[cursor..end].to_vec()
+                let inline_payload = if cursor < end {
+                    payloads[cursor..end]
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
                 } else {
                     Vec::new()
                 };
                 cursor = end;
                 data_sources.push(InputDataSource {
-                    tx_data_from_blob: blob_payloads,
+                    tx_data_from_calldata: inline_payload,
                     is_forced_inclusion: source.isForcedInclusion,
                     ..Default::default()
                 });
@@ -171,18 +178,17 @@ impl ShastaManifestBuilder {
             return data_sources;
         }
 
-        let tx_data_from_blob = vec![payload.to_vec()];
         sources
             .iter()
             .enumerate()
             .map(|(index, source)| {
-                let blob_payloads = if index == sources.len() - 1 {
-                    tx_data_from_blob.clone()
+                let inline_payload = if index == sources.len() - 1 {
+                    payload.to_vec()
                 } else {
                     Vec::new()
                 };
                 InputDataSource {
-                    tx_data_from_blob: blob_payloads,
+                    tx_data_from_calldata: inline_payload,
                     is_forced_inclusion: source.isForcedInclusion,
                     ..Default::default()
                 }

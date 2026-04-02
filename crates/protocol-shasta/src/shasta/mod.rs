@@ -4,10 +4,10 @@
 
 #[cfg(feature = "net")]
 pub mod anchor;
-#[cfg(feature = "net")]
 pub mod blob_coder;
 #[cfg(feature = "net")]
 pub mod constants;
+pub mod derivation;
 #[cfg(feature = "net")]
 pub mod error;
 pub mod manifest;
@@ -16,8 +16,12 @@ pub mod payload_helpers;
 
 #[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
-#[cfg(feature = "net")]
 pub use blob_coder::BlobCoder;
+pub use derivation::{
+    ParentBlockContext, ProposalMetadata, SourceDerivationError, ValidationContext,
+    ValidationError, apply_inherited_metadata, manifest_is_default, prepare_source_manifest,
+    validate_source_manifest,
+};
 #[cfg(feature = "net")]
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
 #[cfg(feature = "net")]

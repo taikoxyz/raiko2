@@ -9,7 +9,7 @@ use raiko2_primitives::{
     ProofContext, ProofRequest, ProofType, ProverConfig, ShastaRequest, SupportedChainSpecs,
 };
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_provider::NetworkProvider;
+use raiko2_provider::{NetworkProvider, RpcClientConfig, RpcRetryConfig};
 use std::time::Instant;
 
 #[derive(Parser, Debug)]
@@ -22,6 +22,26 @@ struct Args {
     /// Optional L1 RPC URL for Shasta anchor linkage. Defaults to `--rpc-url`.
     #[arg(long, env)]
     l1_rpc_url: Option<String>,
+
+    /// RPC client timeout in milliseconds for both L1 and L2 providers.
+    #[arg(long, default_value_t = 60_000)]
+    rpc_timeout_ms: u64,
+
+    /// Maximum number of concurrent RPC requests.
+    #[arg(long, default_value_t = 32)]
+    rpc_concurrency_limit: usize,
+
+    /// Maximum retry attempts for transient RPC failures.
+    #[arg(long, default_value_t = 4)]
+    rpc_retry_max_attempts: u32,
+
+    /// Initial RPC retry backoff in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    rpc_retry_initial_backoff_ms: u64,
+
+    /// RPC retry rate limit in compute units per second.
+    #[arg(long, default_value_t = 1_000)]
+    rpc_retry_cu_per_second: u64,
 
     /// L2 chain ID for the proof context.
     #[arg(long)]
@@ -85,7 +105,19 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let l1_rpc_url = args.l1_rpc_url.as_deref().unwrap_or(&args.rpc_url);
-    let provider = NetworkProvider::new_pair(l1_rpc_url, &args.rpc_url)?;
+    let provider = NetworkProvider::new_pair_with_config(
+        l1_rpc_url,
+        &args.rpc_url,
+        &RpcClientConfig {
+            timeout_ms: args.rpc_timeout_ms,
+            concurrency_limit: args.rpc_concurrency_limit,
+            retry: RpcRetryConfig {
+                max_attempts: args.rpc_retry_max_attempts,
+                initial_backoff_ms: args.rpc_retry_initial_backoff_ms,
+                compute_units_per_second: args.rpc_retry_cu_per_second,
+            },
+        },
+    )?;
 
     if args.l2_start > args.l2_end {
         anyhow::bail!("--l2-start must be <= --l2-end");

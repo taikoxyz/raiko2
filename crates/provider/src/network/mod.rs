@@ -23,7 +23,7 @@ mod witness;
 pub struct NetworkProvider {
     _l1_client: RpcClient,
     l1_provider: DynProvider,
-    l2_client: RpcClient,
+    _l2_client: RpcClient,
     l2_provider: DynProvider,
     http_client: reqwest::Client,
 }
@@ -78,7 +78,7 @@ impl NetworkProvider {
         Ok(Self {
             _l1_client: l1_client,
             l1_provider,
-            l2_client,
+            _l2_client: l2_client,
             l2_provider,
             http_client,
         })

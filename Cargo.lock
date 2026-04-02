@@ -10170,6 +10170,7 @@ dependencies = [
  "raiko2-protocol",
  "reth-ethereum-primitives",
  "serde",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

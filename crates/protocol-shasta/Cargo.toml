@@ -23,6 +23,7 @@ reth-ethereum-primitives.workspace = true
 # Serialization
 serde = { workspace = true, features = ["derive"] }
 flate2.workspace = true
+thiserror.workspace = true
 
 # Logging
 tracing.workspace = true

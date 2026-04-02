@@ -1,10 +1,17 @@
 //! Helpers for zkVM guest programs.
 
 use alethia_reth_block::config::TaikoEvmConfig;
-use alethia_reth_chainspec::spec::TaikoChainSpec;
-use alloy_consensus::transaction::Transaction as _;
-use alloy_primitives::B256;
-use alloy_sol_types::{sol, SolCall};
+use alethia_reth_chainspec::{
+    hardfork::{TaikoHardfork, TaikoHardforks},
+    spec::TaikoChainSpec,
+};
+use alloy_consensus::{
+    transaction::{SignerRecoverable, Transaction as _},
+    BlockHeader as _, Header,
+};
+use alloy_primitives::{keccak256, Bytes, B256, U256};
+use alloy_rlp::Decodable;
+use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs};
 use raiko2_primitives_shasta::{
@@ -16,6 +23,9 @@ use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
+use raiko2_protocol_shasta::shasta::{
+    manifest::BlockManifest, prepare_source_manifest, ParentBlockContext, ProposalMetadata,
+};
 use raiko2_stateless::validate_block;
 use std::sync::Arc;
 
@@ -28,12 +38,19 @@ sol! {
     }
 
     function anchorV4(AnchorV4Checkpoint _checkpoint) external;
+
+    struct ShastaDifficultyInput {
+        bytes32 parentDifficulty;
+        uint256 blockNumber;
+    }
 }
 
 pub struct TaikoRuntime {
     pub chain_spec: Arc<TaikoChainSpec>,
     pub evm_config: TaikoEvmConfig,
 }
+
+const ANCHOR_GAS_LIMIT: u64 = 1_000_000;
 
 #[cfg(feature = "bench")]
 fn bench_report_start(label: &str) {
@@ -243,6 +260,256 @@ fn validate_l1_anchor_linkage(
     Ok(())
 }
 
+fn encode_shasta_extra_data(basefee_sharing_pctg: u8, proposal_id: u64) -> Bytes {
+    let mut data = [0u8; 7];
+    data[0] = basefee_sharing_pctg;
+    let proposal_bytes = proposal_id.to_be_bytes();
+    data[1..7].copy_from_slice(&proposal_bytes[2..8]);
+    Bytes::from(data.to_vec())
+}
+
+fn calculate_shasta_difficulty(parent_difficulty: B256, block_number: u64) -> B256 {
+    let params = ShastaDifficultyInput {
+        parentDifficulty: parent_difficulty,
+        blockNumber: U256::from(block_number),
+    };
+    B256::from(keccak256(params.abi_encode()))
+}
+
+fn decode_last_ancestor_header(stateless_input: &StatelessInput) -> Result<Header> {
+    let encoded = stateless_input
+        .witness
+        .headers
+        .last()
+        .context("missing parent header in witness.headers")?;
+    let mut slice = encoded.as_ref();
+    Header::decode(&mut slice).context("failed to decode parent header from witness.headers")
+}
+
+fn shasta_fork_timestamp(chain_spec: &TaikoChainSpec) -> Result<u64> {
+    match chain_spec.taiko_fork_activation(TaikoHardfork::Shasta) {
+        alloy_hardforks::ForkCondition::Timestamp(timestamp) => Ok(timestamp),
+        other => Err(anyhow::anyhow!(
+            "unsupported Shasta fork activation condition: {other:?}"
+        )),
+    }
+}
+
+fn derive_expected_shasta_blocks(
+    guest_input: &GuestInput,
+    runtime: &TaikoRuntime,
+) -> Result<Option<Vec<BlockManifest>>> {
+    let proposal = &guest_input.taiko.proposal_event.proposal;
+    if proposal.sources.is_empty() {
+        return Ok(None);
+    }
+
+    ensure!(
+        guest_input.taiko.data_sources.len() == proposal.sources.len(),
+        "data source count ({}) does not match proposal source count ({})",
+        guest_input.taiko.data_sources.len(),
+        proposal.sources.len()
+    );
+
+    let fork_timestamp = shasta_fork_timestamp(runtime.chain_spec.as_ref())?;
+    let mut parent = {
+        let header = decode_last_ancestor_header(guest_input.witnesses.first().expect("checked"))?;
+        ParentBlockContext {
+            timestamp: header.timestamp,
+            gas_limit: header.gas_limit,
+            block_number: header.number,
+            anchor_block_number: guest_input
+                .taiko
+                .prover_data
+                .last_anchor_block_number
+                .unwrap_or_default(),
+        }
+    };
+    let meta = ProposalMetadata {
+        proposal_timestamp: proposal.timestamp.to::<u64>(),
+        origin_block_number: proposal.originBlockNumber.to::<u64>(),
+        proposer: proposal.proposer,
+    };
+
+    let mut blocks = Vec::new();
+    for (source_index, source) in proposal.sources.iter().enumerate() {
+        let manifest = prepare_source_manifest(
+            source,
+            guest_input.taiko.data_sources.get(source_index),
+            parent,
+            meta,
+            fork_timestamp,
+        )
+        .with_context(|| format!("failed to prepare derivation source {source_index}"))?;
+
+        for block in manifest.blocks {
+            parent = ParentBlockContext {
+                timestamp: block.timestamp,
+                gas_limit: block.gas_limit.saturating_add(ANCHOR_GAS_LIMIT),
+                block_number: parent.block_number + 1,
+                anchor_block_number: block.anchor_block_number,
+            };
+            blocks.push(block);
+        }
+    }
+
+    ensure!(
+        blocks.len() == guest_input.witnesses.len(),
+        "witness count ({}) does not match derived manifest block count ({})",
+        guest_input.witnesses.len(),
+        blocks.len()
+    );
+
+    Ok(Some(blocks))
+}
+
+fn validate_anchor_transaction_binding(
+    stateless_input: &StatelessInput,
+    expected_block: &BlockManifest,
+) -> Result<()> {
+    let block = &stateless_input.block;
+    let anchor_tx = block
+        .body
+        .transactions()
+        .next()
+        .context("missing anchor transaction")?;
+    let expected_anchor_recipient = stateless_input
+        .chain_spec
+        .l2_contract
+        .context("missing chain_spec.l2_contract for Shasta anchor validation")?;
+    ensure!(
+        anchor_tx.to() == Some(expected_anchor_recipient),
+        "anchor transaction recipient mismatch: expected {expected_anchor_recipient:?}, got {:?}",
+        anchor_tx.to()
+    );
+    ensure!(
+        anchor_tx.chain_id() == Some(stateless_input.chain_spec.chain_id),
+        "anchor transaction chain_id mismatch: expected {}, got {:?}",
+        stateless_input.chain_spec.chain_id,
+        anchor_tx.chain_id()
+    );
+
+    let anchor_signer = anchor_tx
+        .recover_signer()
+        .context("failed to recover anchor transaction signer")?;
+    let pre_state_account = stateless_input
+        .accounts
+        .get(&anchor_signer)
+        .context("missing anchor signer account in pre-state callers")?;
+    ensure!(
+        anchor_tx.nonce() == pre_state_account.nonce,
+        "anchor transaction nonce mismatch: expected {}, got {}",
+        pre_state_account.nonce,
+        anchor_tx.nonce()
+    );
+
+    let base_fee = block
+        .header
+        .base_fee_per_gas()
+        .context("missing base fee per gas in Shasta block header")?;
+    ensure!(
+        anchor_tx.max_fee_per_gas() == u128::from(base_fee),
+        "anchor transaction max_fee_per_gas mismatch: expected {base_fee}, got {}",
+        anchor_tx.max_fee_per_gas()
+    );
+    ensure!(
+        anchor_tx.max_priority_fee_per_gas() == Some(0),
+        "anchor transaction max_priority_fee_per_gas mismatch"
+    );
+    if let Some(access_list) = anchor_tx.access_list() {
+        ensure!(
+            access_list.0.is_empty(),
+            "anchor transaction access list must be empty"
+        );
+    }
+
+    let checkpoint = decode_anchor_checkpoint(block)?;
+    ensure!(
+        checkpoint.block_number == expected_block.anchor_block_number,
+        "anchor checkpoint block number mismatch: expected {}, got {}",
+        expected_block.anchor_block_number,
+        checkpoint.block_number
+    );
+
+    Ok(())
+}
+
+fn validate_shasta_manifest_block(
+    guest_input: &GuestInput,
+    stateless_input: &StatelessInput,
+    expected_block: &BlockManifest,
+    parent_header: &Header,
+) -> Result<()> {
+    let block = &stateless_input.block;
+    let expected_extra_data = encode_shasta_extra_data(
+        guest_input.taiko.proposal_event.proposal.basefeeSharingPctg,
+        guest_input.taiko.proposal_id,
+    );
+    let expected_mix_hash = calculate_shasta_difficulty(
+        B256::from(parent_header.difficulty.to_be_bytes::<32>()),
+        block.header.number,
+    );
+
+    ensure!(
+        block.header.timestamp == expected_block.timestamp,
+        "block {} timestamp mismatch: expected {}, got {}",
+        block.header.number,
+        expected_block.timestamp,
+        block.header.timestamp
+    );
+    ensure!(
+        block.header.beneficiary == expected_block.coinbase,
+        "block {} coinbase mismatch: expected {:?}, got {:?}",
+        block.header.number,
+        expected_block.coinbase,
+        block.header.beneficiary
+    );
+    ensure!(
+        block.header.gas_limit == expected_block.gas_limit.saturating_add(ANCHOR_GAS_LIMIT),
+        "block {} gas limit mismatch: expected {}, got {}",
+        block.header.number,
+        expected_block.gas_limit.saturating_add(ANCHOR_GAS_LIMIT),
+        block.header.gas_limit
+    );
+    ensure!(
+        block.header.extra_data == expected_extra_data,
+        "block {} extra_data mismatch",
+        block.header.number
+    );
+    ensure!(
+        block.header.mix_hash == expected_mix_hash,
+        "block {} mix_hash mismatch",
+        block.header.number
+    );
+
+    validate_anchor_transaction_binding(stateless_input, expected_block)?;
+
+    let actual_transactions = block.body.transactions().collect::<Vec<_>>();
+    ensure!(
+        actual_transactions.len() == expected_block.transactions.len() + 1,
+        "block {} transaction count mismatch: expected {}, got {}",
+        block.header.number,
+        expected_block.transactions.len() + 1,
+        actual_transactions.len()
+    );
+
+    for (tx_index, (expected_tx, actual_tx)) in expected_block
+        .transactions
+        .iter()
+        .zip(actual_transactions.iter().skip(1))
+        .enumerate()
+    {
+        ensure!(
+            alloy_rlp::encode(expected_tx) == alloy_rlp::encode(actual_tx),
+            "block {} transaction {} mismatch",
+            block.header.number,
+            tx_index + 1
+        );
+    }
+
+    Ok(())
+}
+
 pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
     bench_report_start("proposal_blob_usage");
     verify_proposal_mode_blob_usage(guest_input)
@@ -340,6 +607,14 @@ where
         .context("Failed to build Taiko runtime from GuestInput chain_spec")?;
     bench_report_end("proposal_runtime");
 
+    bench_report_start("proposal_derivation");
+    let expected_blocks = derive_expected_shasta_blocks(guest_input, &runtime)?;
+    let mut canonical_parent_header = expected_blocks
+        .as_ref()
+        .map(|_| decode_last_ancestor_header(guest_input.witnesses.first().expect("checked")))
+        .transpose()?;
+    bench_report_end("proposal_derivation");
+
     let mut anchor_checkpoints = Vec::with_capacity(guest_input.witnesses.len());
     let mut first_parent_block_hash = None;
     let mut previous_block_hash: Option<B256> = None;
@@ -351,6 +626,20 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
+        if let (Some(expected_blocks), Some(parent_header)) =
+            (expected_blocks.as_ref(), canonical_parent_header.as_ref())
+        {
+            let expected_block = expected_blocks
+                .get(index)
+                .with_context(|| format!("missing derived manifest block at index {index}"))?;
+            validate_shasta_manifest_block(
+                guest_input,
+                stateless_input,
+                expected_block,
+                parent_header,
+            )
+            .with_context(|| format!("canonical Shasta derivation mismatch at index {index}"))?;
+        }
         if let Some(prev_hash) = previous_block_hash {
             ensure!(
                 block.header.parent_hash == prev_hash,
@@ -373,6 +662,9 @@ where
         last_block_hash = Some(validated_hash);
         last_state_root = Some(block.header.state_root);
         anchor_checkpoints.push(decode_anchor_checkpoint(block)?);
+        if canonical_parent_header.is_some() {
+            canonical_parent_header = Some(block.header.clone());
+        }
     }
     bench_report_end("proposal_stateless_validation");
 
@@ -477,11 +769,12 @@ mod tests {
     }
 
     fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
-        let mut header = alloy_consensus::Header::default();
-        header.number = number;
-        header.parent_hash = B256::from([0xAA; 32]);
-        header.state_root = state_root;
-        header
+        alloy_consensus::Header {
+            number,
+            parent_hash: B256::from([0xAA; 32]),
+            state_root,
+            ..Default::default()
+        }
     }
 
     fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {

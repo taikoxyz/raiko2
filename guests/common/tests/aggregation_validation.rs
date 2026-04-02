@@ -28,11 +28,12 @@ fn taiko_mainnet_chain_spec() -> ChainSpec {
 }
 
 fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
-    let mut header = alloy_consensus::Header::default();
-    header.number = number;
-    header.parent_hash = B256::from([0xAA; 32]);
-    header.state_root = state_root;
-    header
+    alloy_consensus::Header {
+        number,
+        parent_hash: B256::from([0xAA; 32]),
+        state_root,
+        ..Default::default()
+    }
 }
 
 fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {

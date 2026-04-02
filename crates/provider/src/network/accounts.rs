@@ -41,7 +41,7 @@ impl NetworkProvider {
         for (block_number, addresses) in block_numbers.iter().zip(addresses.iter()) {
             let mut accounts = AddressMap::default();
             let block_id = BlockNumberOrTag::from(*block_number);
-            // Get block hash once for all addresses in this block
+            // Load the block once so account proofs can be queried against the parent state root.
             let block = self
                 .l2_provider
                 .get_block(block_id.into())
@@ -52,18 +52,19 @@ impl NetworkProvider {
                     ))
                 })?
                 .ok_or_else(|| RaikoError::RPC(format!("Block {block_number} not found")))?;
-            let block_hash = block.header.hash_slow();
+            let parent_block_hash = block.header.parent_hash;
 
             for address in addresses {
-                // Use eth_getProof to get account information (standard Ethereum RPC method)
+                // Execution witnesses contain pre-state, so signer accounts must come from the
+                // parent block state rather than the post-state of the current block.
                 let proof = self
                     .l2_provider
                     .get_proof(*address, vec![])
-                    .hash(block_hash)
+                    .hash(parent_block_hash)
                     .await
                     .map_err(|e| {
                         RaikoError::RPC(format!(
-                            "eth_getProof failed for address {address} at block {block_number}: {e}"
+                            "eth_getProof failed for address {address} at parent of block {block_number}: {e}"
                         ))
                     })?;
                 let account = decode_account_from_proof(&proof)?;

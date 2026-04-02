@@ -1,12 +1,20 @@
 #![allow(missing_docs)]
 
-use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_consensus::{
+    transaction::SignerRecoverable, SignableTransaction, TrieAccount, TxEip1559,
+};
 use alloy_primitives::{Address, B256};
 use alloy_primitives::{Signature, TxKind, U256};
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{sol, SolCall, SolValue};
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
 use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs};
 use raiko2_primitives_shasta::{build_proof_carry_data, GuestInput};
+use raiko2_protocol::InputDataSource;
+use raiko2_protocol_shasta::libhash::hash_proposal;
+use raiko2_protocol_shasta::shasta::{
+    manifest::{BlockManifest, DerivationSourceManifest},
+    BlobSlice, DerivationSource,
+};
 use raiko2_protocol_shasta::TaikoManifest;
 
 sol! {
@@ -18,6 +26,11 @@ sol! {
     }
 
     function anchorV4(AnchorV4Checkpoint _checkpoint) external;
+
+    struct ShastaDifficultyInput {
+        bytes32 parentDifficulty;
+        uint256 blockNumber;
+    }
 }
 
 fn taiko_mainnet_chain_spec() -> ChainSpec {
@@ -27,11 +40,12 @@ fn taiko_mainnet_chain_spec() -> ChainSpec {
 }
 
 fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
-    let mut header = alloy_consensus::Header::default();
-    header.number = number;
-    header.parent_hash = B256::from([0xAA; 32]);
-    header.state_root = state_root;
-    header
+    alloy_consensus::Header {
+        number,
+        parent_hash: B256::from([0xAA; 32]),
+        state_root,
+        ..Default::default()
+    }
 }
 
 fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
@@ -100,6 +114,144 @@ fn guest_input_with_single_block() -> GuestInput {
     guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
     guest_input.proof_carry_data =
         build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+    guest_input
+}
+
+fn canonical_inline_source_guest_input() -> GuestInput {
+    let mut guest_input = guest_input_with_single_block();
+    let chain_spec = guest_input.witnesses[0].chain_spec.clone();
+    let parent_timestamp = 1_775_135_700u64;
+    let block_timestamp = parent_timestamp + 1;
+    let proposal_timestamp = parent_timestamp + 100;
+    let parent_header = alloy_consensus::Header {
+        number: 0,
+        timestamp: parent_timestamp,
+        gas_limit: 30_000_000,
+        base_fee_per_gas: Some(1),
+        ..Default::default()
+    };
+    let l1_header = sample_l1_header(7, B256::from([0x66; 32]));
+    let checkpoint = AnchorV4Checkpoint {
+        blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+        blockHash: l1_header.hash_slow(),
+        stateRoot: l1_header.state_root,
+    };
+    let anchor_address = chain_spec
+        .l2_contract
+        .expect("shasta chain has l2 contract");
+    let anchor_tx: reth_ethereum_primitives::TransactionSigned = TxEip1559 {
+        chain_id: chain_spec.chain_id,
+        nonce: 0,
+        gas_limit: 1_000_000,
+        max_fee_per_gas: 1,
+        max_priority_fee_per_gas: 0,
+        to: TxKind::Call(anchor_address),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: anchorV4Call {
+            _checkpoint: checkpoint.clone(),
+        }
+        .abi_encode()
+        .into(),
+    }
+    .into_signed(Signature::test_signature())
+    .into();
+    let anchor_signer = anchor_tx.recover_signer().expect("recover anchor signer");
+
+    guest_input.witnesses[0].witness.headers = vec![alloy_rlp::encode(&parent_header).into()];
+    guest_input.witnesses[0].accounts.insert(
+        anchor_signer,
+        TrieAccount {
+            nonce: 0,
+            balance: U256::ZERO,
+            storage_root: B256::ZERO,
+            code_hash: B256::ZERO,
+        },
+    );
+    guest_input.witnesses[0].block.header.number = 1;
+    guest_input.witnesses[0].block.header.parent_hash = parent_header.hash_slow();
+    guest_input.witnesses[0].block.header.timestamp = block_timestamp;
+    guest_input.witnesses[0].block.header.beneficiary =
+        guest_input.taiko.proposal_event.proposal.proposer;
+    guest_input.witnesses[0].block.header.gas_limit = 31_000_000;
+    guest_input.witnesses[0].block.header.base_fee_per_gas = Some(1);
+    guest_input.witnesses[0].block.header.difficulty = U256::ZERO;
+    guest_input.witnesses[0].block.header.mix_hash = alloy_primitives::keccak256(
+        ShastaDifficultyInput {
+            parentDifficulty: B256::ZERO,
+            blockNumber: U256::from(1),
+        }
+        .abi_encode(),
+    );
+    guest_input.witnesses[0].block.header.extra_data = [7u8, 0, 0, 0, 0, 0, 42].to_vec().into();
+    guest_input.witnesses[0].block.body.transactions = vec![anchor_tx];
+
+    guest_input.taiko.l1_header = l1_header.clone();
+    guest_input.taiko.l1_ancestor_headers = vec![l1_header.clone()];
+    guest_input.taiko.proposal_event.proposal.timestamp =
+        proposal_timestamp.try_into().expect("fits in uint48");
+    guest_input.taiko.proposal_event.proposal.originBlockNumber =
+        l1_header.number.try_into().expect("fits in uint48");
+    guest_input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
+    guest_input.taiko.proposal_event.proposal.basefeeSharingPctg = 7;
+    guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource {
+        isForcedInclusion: false,
+        blobSlice: BlobSlice::default(),
+    }];
+    guest_input.taiko.data_sources = vec![InputDataSource {
+        tx_data_from_calldata: DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: block_timestamp,
+                coinbase: guest_input.taiko.proposal_event.proposal.proposer,
+                anchor_block_number: 7,
+                gas_limit: 30_000_000,
+                transactions: Vec::new(),
+            }],
+        }
+        .encode_and_compress()
+        .expect("manifest payload"),
+        ..Default::default()
+    }];
+    guest_input.proof_carry_data.chain_id = chain_spec.chain_id;
+    guest_input.proof_carry_data.transition_input.proposal_id = guest_input.taiko.proposal_id;
+    guest_input.proof_carry_data.transition_input.proposal_hash =
+        hash_proposal(&guest_input.taiko.proposal_event.proposal);
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .parent_proposal_hash = guest_input.taiko.proposal_event.proposal.parentProposalHash;
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .parent_block_hash = parent_header.hash_slow();
+    guest_input.proof_carry_data.transition_input.actual_prover =
+        guest_input.taiko.prover_data.actual_prover;
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .proposer = guest_input.taiko.proposal_event.proposal.proposer;
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .timestamp = proposal_timestamp;
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .checkpoint
+        .blockNumber = 1u64.try_into().expect("fits in uint48");
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .checkpoint
+        .blockHash = guest_input.witnesses[0].block.header.hash_slow();
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .checkpoint
+        .stateRoot = guest_input.witnesses[0].block.header.state_root;
+
     guest_input
 }
 
@@ -205,6 +357,41 @@ fn rejects_proof_carry_data_parent_block_hash_mismatch() {
         .parent_block_hash = B256::from([0x99; 32]);
 
     assert_rejected_with_message(&guest_input, "proof_carry_data.parent_block_hash mismatch");
+}
+
+#[test]
+fn accepts_canonical_inline_source_derivation() {
+    let guest_input = canonical_inline_source_guest_input();
+
+    prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        Ok(stateless_input.block.header.hash_slow())
+    })
+    .expect("inline source derivation should validate");
+}
+
+#[test]
+fn rejects_inline_source_transaction_count_mismatch() {
+    let mut guest_input = canonical_inline_source_guest_input();
+    guest_input.witnesses[0].block.body.transactions.push(
+        TxEip1559 {
+            chain_id: 167_000,
+            nonce: 1,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::repeat_byte(0x55)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Default::default(),
+        }
+        .into_signed(Signature::test_signature())
+        .into(),
+    );
+
+    assert_rejected_with_message(
+        &guest_input,
+        "canonical Shasta derivation mismatch at index 0",
+    );
 }
 
 #[test]

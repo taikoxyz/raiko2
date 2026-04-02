@@ -173,6 +173,9 @@ impl ProverConfig {
                 bail!("prover.boundless.signer_key must not be empty");
             }
         }
+        if self.risc0.execution_po2 == 0 {
+            bail!("prover.risc0.execution_po2 must be greater than zero");
+        }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
 
         Ok(())
@@ -181,11 +184,14 @@ impl ProverConfig {
 
 /// RISC0 configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Risc0Config {
     pub bonsai: bool,
     pub snark: bool,
     #[serde(default)]
     pub mock: bool,
+    #[serde(default = "default_risc0_execution_po2")]
+    pub execution_po2: u32,
 }
 
 impl Default for Risc0Config {
@@ -194,8 +200,13 @@ impl Default for Risc0Config {
             bonsai: true,
             snark: true,
             mock: false,
+            execution_po2: default_risc0_execution_po2(),
         }
     }
+}
+
+fn default_risc0_execution_po2() -> u32 {
+    raiko2_prover::risc0::Risc0Config::default().execution_po2
 }
 
 /// Boundless configuration.

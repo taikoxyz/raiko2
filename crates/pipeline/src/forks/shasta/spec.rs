@@ -15,7 +15,6 @@ use raiko2_primitives_shasta::{GuestInput, validate_anchor_progression};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block;
-use std::collections::HashSet;
 
 sol! {
     #[derive(Debug)]
@@ -326,7 +325,16 @@ fn validate_l1_headers(
     anchor_checkpoints: &[AnchorCheckpoint],
     expected_origin_hash: B256,
 ) -> RaikoResult<()> {
-    let mut known_headers = HashSet::with_capacity(headers.len());
+    if headers.is_empty() {
+        return Err(RaikoError::Preflight(
+            "no L1 headers returned for Shasta linkage".to_string(),
+        ));
+    }
+
+    let mut checkpoint_index = 0usize;
+    let mut previous_hash = None;
+    let mut last_hash = B256::ZERO;
+
     for (index, (header, expected_number)) in headers.iter().zip(expected_numbers).enumerate() {
         if header.number != *expected_number {
             return Err(RaikoError::Preflight(format!(
@@ -334,38 +342,49 @@ fn validate_l1_headers(
                 header.number
             )));
         }
-        if index > 0 {
-            let previous = &headers[index - 1];
-            if header.parent_hash != previous.hash_slow() {
+        let header_hash = header.hash_slow();
+        if let Some(previous_hash) = previous_hash
+            && header.parent_hash != previous_hash
+        {
+            return Err(RaikoError::Preflight(format!(
+                "L1 header chain broken at {} -> {}",
+                expected_numbers[index - 1],
+                header.number
+            )));
+        }
+
+        loop {
+            let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) else {
+                break;
+            };
+            if checkpoint.block_number != header.number {
+                break;
+            }
+
+            if checkpoint.block_hash != header_hash || checkpoint.state_root != header.state_root {
                 return Err(RaikoError::Preflight(format!(
-                    "L1 header chain broken at {} -> {}",
-                    previous.number, header.number
+                    "anchor checkpoint ({}, {:?}, {:?}) not found in fetched L1 header chain",
+                    checkpoint.block_number, checkpoint.block_hash, checkpoint.state_root
                 )));
             }
+            checkpoint_index += 1;
         }
-        known_headers.insert((header.number, header.hash_slow(), header.state_root));
+
+        previous_hash = Some(header_hash);
+        last_hash = header_hash;
     }
 
-    let actual_origin_hash = headers.last().map(Header::hash_slow).ok_or_else(|| {
-        RaikoError::Preflight("no L1 headers returned for Shasta linkage".to_string())
-    })?;
-    if actual_origin_hash != expected_origin_hash {
+    if let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) {
         return Err(RaikoError::Preflight(format!(
-            "proposal origin block hash mismatch: expected {expected_origin_hash:?}, got {actual_origin_hash:?}"
+            "anchor checkpoint ({}, {:?}, {:?}) not found in fetched L1 header chain",
+            checkpoint.block_number, checkpoint.block_hash, checkpoint.state_root
         )));
     }
 
-    for checkpoint in anchor_checkpoints {
-        if !known_headers.contains(&(
-            checkpoint.block_number,
-            checkpoint.block_hash,
-            checkpoint.state_root,
-        )) {
-            return Err(RaikoError::Preflight(format!(
-                "anchor checkpoint ({}, {:?}, {:?}) not found in fetched L1 header chain",
-                checkpoint.block_number, checkpoint.block_hash, checkpoint.state_root
-            )));
-        }
+    if last_hash != expected_origin_hash {
+        return Err(RaikoError::Preflight(format!(
+            "proposal origin block hash mismatch: expected {expected_origin_hash:?}, got {last_hash:?}"
+        )));
     }
 
     Ok(())

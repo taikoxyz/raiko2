@@ -86,6 +86,8 @@ pub struct DeploymentConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoundlessConfig {
+    #[serde(default = "default_execution_po2")]
+    pub execution_po2: u32,
     #[serde(default)]
     pub offchain: bool,
     pub rpc_url: String,
@@ -102,6 +104,7 @@ pub struct BoundlessConfig {
 impl Default for BoundlessConfig {
     fn default() -> Self {
         Self {
+            execution_po2: default_execution_po2(),
             offchain: false,
             rpc_url: "https://base-rpc.publicnode.com".to_string(),
             signer_key: String::new(),
@@ -119,6 +122,10 @@ impl Default for BoundlessConfig {
             timeout_ms: default_timeout_ms(),
         }
     }
+}
+
+fn default_execution_po2() -> u32 {
+    crate::risc0::Risc0Config::default().execution_po2
 }
 
 impl BoundlessConfig {
@@ -273,11 +280,19 @@ impl BoundlessProver {
         Ok((guest_env, guest_env_bytes))
     }
 
-    async fn evaluate_guest(guest_env: GuestEnv, elf: Vec<u8>) -> RaikoResult<(u32, Vec<u8>)> {
+    async fn evaluate_guest(
+        input: Vec<u8>,
+        execution_po2: u32,
+        elf: Vec<u8>,
+    ) -> RaikoResult<(u32, Vec<u8>)> {
         tokio::task::spawn_blocking(move || {
-            let executor_env = guest_env.try_into().map_err(|e| {
-                RaikoError::Guest(format!("Failed to convert boundless guest env: {e}"))
-            })?;
+            let executor_env = risc0_zkvm::ExecutorEnv::builder()
+                .write_frame(input.as_slice())
+                .segment_limit_po2(execution_po2)
+                .build()
+                .map_err(|e| {
+                    RaikoError::Guest(format!("Failed to build boundless execution env: {e}"))
+                })?;
             let session = local_executor()
                 .execute(executor_env, &elf)
                 .map_err(|e| RaikoError::Guest(format!("Boundless dry-run failed: {e}")))?;
@@ -503,7 +518,7 @@ impl BoundlessProver {
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
-            Self::evaluate_guest(guest_env.clone(), elf.to_vec()).await?;
+            Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
         let quoted_mcycles_count = quoted_mcycles_count(elf_type);
         let request = self
             .build_request(

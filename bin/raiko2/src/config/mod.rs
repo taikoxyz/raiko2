@@ -293,6 +293,50 @@ mod tests {
     }
 
     #[test]
+    fn test_risc0_execution_po2_must_be_non_zero() {
+        let mut config = Config::default();
+        config.prover.risc0.execution_po2 = 0;
+
+        let err = config.prover.validate().expect_err("zero po2 should fail");
+        assert!(err.to_string().contains("execution_po2"));
+    }
+
+    #[test]
+    fn test_config_loads_risc0_execution_po2() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[prover.risc0]
+execution_po2 = 24
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.prover.risc0.execution_po2, 24);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_config_file_values_are_not_overridden_by_cli_defaults() {
         let config_toml = r#"
 [server]

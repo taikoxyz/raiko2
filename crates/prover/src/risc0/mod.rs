@@ -80,9 +80,12 @@ impl Risc0Prover {
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize RISC0 metadata: {e}")))
     }
 
-    fn build_framed_env(input: &[u8]) -> RaikoResult<ExecutorEnv<'_>> {
-        ExecutorEnv::builder()
+    fn build_framed_env(input: &[u8], execution_po2: u32) -> RaikoResult<ExecutorEnv<'_>> {
+        let mut env_builder = ExecutorEnv::builder();
+        env_builder
             .write_frame(input)
+            .segment_limit_po2(execution_po2);
+        env_builder
             .build()
             .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
     }
@@ -90,11 +93,13 @@ impl Risc0Prover {
     fn build_aggregation_env<'a, T: serde::Serialize>(
         aggregation_input: &'a T,
         proofs: &[Proof],
+        execution_po2: u32,
     ) -> RaikoResult<ExecutorEnv<'a>> {
         let mut env_builder = ExecutorEnv::builder();
         env_builder
             .write(aggregation_input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?;
+            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?
+            .segment_limit_po2(execution_po2);
 
         for proof in proofs {
             if let Some(receipt_json) = &proof.quote {
@@ -257,7 +262,7 @@ where
 
         tokio::task::spawn_blocking(move || {
             let prover = Risc0Prover::new(prover_config);
-            let env = Self::build_framed_env(input.as_ref())?;
+            let env = Self::build_framed_env(input.as_ref(), prover.config.execution_po2)?;
             let image_id = Self::compute_image_id(&elf)?;
             let (receipt, extra_data) = prover.execute_proof(
                 env,
@@ -312,7 +317,11 @@ where
 
         tokio::task::spawn_blocking(move || {
             let prover = Risc0Prover::new(prover_config);
-            let env = Self::build_aggregation_env(&aggregation_input, &input.proofs)?;
+            let env = Self::build_aggregation_env(
+                &aggregation_input,
+                &input.proofs,
+                prover.config.execution_po2,
+            )?;
             let image_id = Self::compute_image_id(&elf)?;
             let (receipt, extra_data) = prover.execute_proof(
                 env,

@@ -2,16 +2,32 @@
 
 use std::{collections::BTreeMap, env, fs};
 
-use raiko2_pipeline::{forks::shasta::RISC0_SHASTA_BACKEND, ProofStage, ProverBackend};
+use raiko2_pipeline::{ProofStage, ProverBackend, forks::shasta::RISC0_SHASTA_BACKEND};
 use raiko2_primitives_shasta::GuestInput;
-use risc0_zkvm::{local_executor, ExecutorEnv};
+use risc0_zkvm::{ExecutorEnv, local_executor};
 
 const MILLION_CYCLES: u64 = 1_000_000;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let input_path = env::args()
-        .nth(1)
-        .ok_or("usage: cargo run -p raiko2-prover --example risc0_cyclecheck -- <input.json>")?;
+    let mut args = env::args().skip(1);
+    let input_path = args
+        .next()
+        .ok_or("usage: cargo run -p raiko2-prover --example risc0_cyclecheck -- <input.json> [execution_po2]")?;
+    let execution_po2 = args
+        .next()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|err| format!("parse execution_po2 from {value}: {err}"))
+        })
+        .transpose()?
+        .unwrap_or(20);
+    if args.next().is_some() {
+        return Err(
+            "usage: cargo run -p raiko2-prover --example risc0_cyclecheck -- <input.json> [execution_po2]"
+                .into(),
+        );
+    }
 
     let input_bytes = fs::read_to_string(&input_path)
         .map_err(|err| format!("read guest input from {input_path}: {err}"))?;
@@ -26,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bincode::serialize(&guest_input).map_err(|err| format!("serialize guest input: {err}"))?;
     let env = ExecutorEnv::builder()
         .write_frame(encoded.as_slice())
+        .segment_limit_po2(execution_po2)
         .build()
         .map_err(|err| format!("build executor env: {err}"))?;
     let session = local_executor()
@@ -44,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("current_input_bincode_len={}", encoded.len());
+    println!("current_risc0_execution_po2={execution_po2}");
     println!("current_risc0_segments={}", session.segments.len());
     println!("current_risc0_padded_cycles={padded_cycles}");
     println!(

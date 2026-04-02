@@ -41,6 +41,7 @@ runner = "local"
 bonsai = true
 snark = true
 mock = false
+execution_po2 = 20
 
 [prover.sp1]
 mode = "prove"

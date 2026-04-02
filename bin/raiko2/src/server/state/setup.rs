@@ -109,7 +109,7 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
         snark: config.prover.risc0.snark,
         mock: config.prover.risc0.mock,
         profile: false,
-        execution_po2: 20,
+        execution_po2: config.prover.risc0.execution_po2,
         verify: true,
     }
 }
@@ -123,6 +123,7 @@ pub(crate) fn boundless_prover_config(
     config: &Config,
 ) -> raiko2_prover::boundless::BoundlessConfig {
     raiko2_prover::boundless::BoundlessConfig {
+        execution_po2: config.prover.risc0.execution_po2,
         offchain: config.prover.boundless.offchain,
         rpc_url: config.prover.boundless.rpc_url.clone(),
         signer_key: config.prover.boundless.signer_key.clone(),
@@ -144,7 +145,9 @@ pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: Pipel
 
 #[cfg(test)]
 mod tests {
-    use super::{boundless_scheduler_config, scheduler_config};
+    use super::{
+        boundless_prover_config, boundless_scheduler_config, risc0_prover_config, scheduler_config,
+    };
     use crate::config::Config;
     use std::time::Duration;
 
@@ -187,5 +190,17 @@ mod tests {
 
         let scheduler = scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn boundless_prover_inherits_risc0_execution_po2() {
+        let mut config = Config::default();
+        config.prover.risc0.execution_po2 = 24;
+
+        let risc0 = risc0_prover_config(&config);
+        let boundless = boundless_prover_config(&config);
+
+        assert_eq!(risc0.execution_po2, 24);
+        assert_eq!(boundless.execution_po2, risc0.execution_po2);
     }
 }

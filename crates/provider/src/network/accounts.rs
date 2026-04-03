@@ -1,11 +1,13 @@
-use alloy::{eips::BlockNumberOrTag, providers::Provider as AlloyProvider, rlp::decode_exact};
-use alloy_primitives::{Address, keccak256, map::AddressMap};
+use alloy::{eips::BlockNumberOrTag, rlp::decode_exact};
+use alloy_primitives::{Address, B256, keccak256, map::AddressMap};
 use alloy_rpc_types_eth::EIP1186AccountProofResponse;
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{RaikoError, RaikoResult};
 use risc0_ethereum_trie::Trie;
 
 use super::NetworkProvider;
+
+const ACCOUNT_PROOF_BATCH_SIZE: usize = 250;
 
 /// Decode account from EIP-1186 proof response
 fn decode_account_from_proof(
@@ -40,36 +42,54 @@ impl NetworkProvider {
         let mut result = Vec::with_capacity(block_numbers.len());
         for (block_number, addresses) in block_numbers.iter().zip(addresses.iter()) {
             let mut accounts = AddressMap::default();
-            let block_id = BlockNumberOrTag::from(*block_number);
-            // Load the block once so account proofs can be queried against the parent state root.
-            let block = self
-                .l2_provider
-                .get_block(block_id.into())
-                .await
-                .map_err(|e| {
-                    RaikoError::RPC(format!(
-                        "eth_getBlockByNumber failed for block {block_number}: {e}"
-                    ))
-                })?
-                .ok_or_else(|| RaikoError::RPC(format!("Block {block_number} not found")))?;
-            let parent_block_hash = block.header.parent_hash;
+            let parent_block_number = block_number.checked_sub(1).ok_or_else(|| {
+                RaikoError::RPC(format!(
+                    "cannot fetch pre-state signer accounts for genesis block {block_number}"
+                ))
+            })?;
 
-            for address in addresses {
-                // Execution witnesses contain pre-state, so signer accounts must come from the
-                // parent block state rather than the post-state of the current block.
-                let proof = self
-                    .l2_provider
-                    .get_proof(*address, vec![])
-                    .hash(parent_block_hash)
-                    .await
-                    .map_err(|e| {
+            for chunk in addresses.chunks(ACCOUNT_PROOF_BATCH_SIZE) {
+                let mut batch = self.l2_client.new_batch();
+                let mut requests = Vec::with_capacity(chunk.len());
+                for &address in chunk {
+                    requests.push((
+                        address,
+                        Box::pin(
+                            batch
+                                .add_call::<_, EIP1186AccountProofResponse>(
+                                    "eth_getProof",
+                                    &(
+                                        address,
+                                        Vec::<B256>::new(),
+                                        BlockNumberOrTag::from(parent_block_number),
+                                    ),
+                                )
+                                .map_err(|_| {
+                                    RaikoError::RPC(
+                                        "failed adding eth_getProof call to batch".to_owned(),
+                                    )
+                                })?,
+                        ),
+                    ));
+                }
+
+                batch.send().await.map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "error sending eth_getProof batch for parent of block {block_number}: {e}"
+                    ))
+                })?;
+
+                for (address, request) in requests {
+                    let proof = request.await.map_err(|e| {
                         RaikoError::RPC(format!(
-                            "eth_getProof failed for address {address} at parent of block {block_number}: {e}"
+                            "error collecting eth_getProof for address {address} at parent of block {block_number}: {e}"
                         ))
                     })?;
-                let account = decode_account_from_proof(&proof)?;
-                accounts.insert(*address, account);
+                    let account = decode_account_from_proof(&proof)?;
+                    accounts.insert(address, account);
+                }
             }
+
             result.push(accounts);
         }
 

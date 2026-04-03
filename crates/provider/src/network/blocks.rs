@@ -1,30 +1,52 @@
-use alloy::{eips::BlockNumberOrTag, providers::Provider as AlloyProvider};
+use alloy::eips::BlockNumberOrTag;
+use alloy_rpc_types_eth::Block as AlloyBlock;
 use raiko2_primitives::{RaikoError, RaikoResult};
 use reth_ethereum_primitives::Block as RethBlock;
 
 use super::NetworkProvider;
 
+const BLOCK_BATCH_SIZE: usize = 32;
+
 impl NetworkProvider {
     pub(crate) async fn fetch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
-        // Use provider.get_block().full() to get complete blocks with header
         let mut blocks = Vec::with_capacity(block_numbers.len());
-        for block_number in block_numbers {
-            let rpc_block = self
-                .l2_provider
-                .get_block(BlockNumberOrTag::from(*block_number).into())
-                .full()
-                .await
-                .map_err(|e| {
+        for chunk in block_numbers.chunks(BLOCK_BATCH_SIZE) {
+            let mut batch = self.l2_client.new_batch();
+            let mut requests = Vec::with_capacity(chunk.len());
+            for &block_number in chunk {
+                requests.push((
+                    block_number,
+                    Box::pin(
+                        batch
+                            .add_call::<_, Option<AlloyBlock>>(
+                                "eth_getBlockByNumber",
+                                &(BlockNumberOrTag::from(block_number), true),
+                            )
+                            .map_err(|_| {
+                                RaikoError::RPC(
+                                    "failed adding eth_getBlockByNumber call to batch".to_owned(),
+                                )
+                            })?,
+                    ),
+                ));
+            }
+
+            batch.send().await.map_err(|e| {
+                RaikoError::RPC(format!(
+                    "error sending eth_getBlockByNumber batch for blocks {chunk:?}: {e}"
+                ))
+            })?;
+
+            for (block_number, request) in requests {
+                let rpc_block = request.await.map_err(|e| {
                     RaikoError::RPC(format!(
-                        "eth_getBlockByNumber failed for block {block_number}: {e}"
+                        "error collecting eth_getBlockByNumber for block {block_number}: {e}"
                     ))
-                })?
-                .ok_or_else(|| RaikoError::RPC(format!("Block {block_number} not found")))?;
-
-            // Convert alloy BlockResponse to RethBlock
-            let reth_block: RethBlock = rpc_block.into();
-
-            blocks.push(reth_block);
+                })?;
+                let rpc_block = rpc_block
+                    .ok_or_else(|| RaikoError::RPC(format!("block {block_number} not found")))?;
+                blocks.push(rpc_block.into());
+            }
         }
 
         Ok(blocks)

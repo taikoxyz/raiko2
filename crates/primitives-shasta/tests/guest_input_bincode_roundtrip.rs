@@ -230,101 +230,125 @@ fn explain_guest_input_offset(input: &GuestInput, fail_off: usize) {
     }
 
     let taiko_off = fail_off - witnesses_len;
+    let taiko_len = bincode::serialize(&input.taiko)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    if taiko_off < taiko_len {
+        eprintln!(
+            "[guest_input_bincode_roundtrip] fail_off={} is within GuestInput.taiko at taiko_off={taiko_off}",
+            fail_off
+        );
+
+        // TaikoManifest field order (see raiko2_protocol::manifest::TaikoManifest)
+        let mut cursor = 0usize;
+
+        let proposal_id_len = bincode::serialize(&input.taiko.proposal_id)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + proposal_id_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.proposal_id at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+        cursor += proposal_id_len;
+
+        let l1_header_len = bincode::serialize(&input.taiko.l1_header)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + l1_header_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.l1_header at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+        cursor += l1_header_len;
+
+        let proposal_event_len = bincode::serialize(&input.taiko.proposal_event)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + proposal_event_len {
+            let event_off = taiko_off - cursor;
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.proposal_event at off={event_off}"
+            );
+            explain_shasta_event_data_offset(&input.taiko.proposal_event, event_off);
+            return;
+        }
+        cursor += proposal_event_len;
+
+        let chain_spec_len = bincode::serialize(&input.taiko.chain_spec)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + chain_spec_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.chain_spec at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+        cursor += chain_spec_len;
+
+        let prover_data_len = bincode::serialize(&input.taiko.prover_data)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + prover_data_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.prover_data at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+        cursor += prover_data_len;
+
+        let data_sources_len = bincode::serialize(&input.taiko.data_sources)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + data_sources_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.data_sources at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+        cursor += data_sources_len;
+
+        let l1_ancestor_headers_len = bincode::serialize(&input.taiko.l1_ancestor_headers)
+            .map(|b| b.len())
+            .unwrap_or(0);
+        if taiko_off < cursor + l1_ancestor_headers_len {
+            eprintln!(
+                "[guest_input_bincode_roundtrip] in TaikoManifest.l1_ancestor_headers at off={}",
+                taiko_off - cursor
+            );
+            return;
+        }
+
+        eprintln!(
+            "[guest_input_bincode_roundtrip] taiko_off={taiko_off} is past TaikoManifest end (computed_end={})",
+            cursor + l1_ancestor_headers_len
+        );
+        return;
+    }
+
+    let proposal_headers_off = taiko_off - taiko_len;
+    let proposal_headers_len = bincode::serialize(&input.proposal_ancestor_headers)
+        .map(|b| b.len())
+        .unwrap_or(0);
+    if proposal_headers_off < proposal_headers_len {
+        eprintln!(
+            "[guest_input_bincode_roundtrip] fail_off={} is within GuestInput.proposal_ancestor_headers at off={proposal_headers_off}",
+            fail_off
+        );
+        return;
+    }
+
+    let proof_carry_off = proposal_headers_off - proposal_headers_len;
     eprintln!(
-        "[guest_input_bincode_roundtrip] fail_off={} is within GuestInput.taiko at taiko_off={taiko_off}",
+        "[guest_input_bincode_roundtrip] fail_off={} is within GuestInput.proof_carry_data at off={proof_carry_off}",
         fail_off
-    );
-
-    // TaikoManifest field order (see raiko2_protocol::manifest::TaikoManifest)
-    let mut cursor = 0usize;
-
-    let proposal_id_len = bincode::serialize(&input.taiko.proposal_id)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + proposal_id_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.proposal_id at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-    cursor += proposal_id_len;
-
-    let l1_header_len = bincode::serialize(&input.taiko.l1_header)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + l1_header_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.l1_header at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-    cursor += l1_header_len;
-
-    let proposal_event_len = bincode::serialize(&input.taiko.proposal_event)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + proposal_event_len {
-        let event_off = taiko_off - cursor;
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.proposal_event at off={event_off}"
-        );
-        explain_shasta_event_data_offset(&input.taiko.proposal_event, event_off);
-        return;
-    }
-    cursor += proposal_event_len;
-
-    let chain_spec_len = bincode::serialize(&input.taiko.chain_spec)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + chain_spec_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.chain_spec at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-    cursor += chain_spec_len;
-
-    let prover_data_len = bincode::serialize(&input.taiko.prover_data)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + prover_data_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.prover_data at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-    cursor += prover_data_len;
-
-    let data_sources_len = bincode::serialize(&input.taiko.data_sources)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + data_sources_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.data_sources at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-    cursor += data_sources_len;
-
-    let l1_ancestor_headers_len = bincode::serialize(&input.taiko.l1_ancestor_headers)
-        .map(|b| b.len())
-        .unwrap_or(0);
-    if taiko_off < cursor + l1_ancestor_headers_len {
-        eprintln!(
-            "[guest_input_bincode_roundtrip] in TaikoManifest.l1_ancestor_headers at off={}",
-            taiko_off - cursor
-        );
-        return;
-    }
-
-    eprintln!(
-        "[guest_input_bincode_roundtrip] taiko_off={taiko_off} is past TaikoManifest end (computed_end={})",
-        cursor + l1_ancestor_headers_len
     );
 }
 

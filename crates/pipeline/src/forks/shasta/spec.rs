@@ -11,10 +11,12 @@ use raiko2_primitives::{
     ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs,
 };
-use raiko2_primitives_shasta::{GuestInput, validate_anchor_progression};
+use raiko2_primitives_shasta::{
+    GuestInput, roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
+};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_provider::Provider;
-use raiko2_stateless::validate_block;
+use raiko2_stateless::validate_block_with_witness_resources;
 
 sol! {
     #[derive(Debug)]
@@ -144,7 +146,10 @@ where
             taiko: manifest,
             witnesses,
             proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
+            proposal_ancestor_headers: Vec::new(),
+            proposal_state_nodes: Vec::new(),
         };
+        input.compact_proposal_witness_data();
         input.proof_carry_data =
             raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
         Ok(input)
@@ -479,6 +484,12 @@ where
             .to_taiko_chain_spec()
             .map_err(|e| RaikoError::Preflight(e.to_string()))?;
         let evm_config = TaikoEvmConfig::new(taiko_chain_spec.clone());
+        let mut ancestor_headers = input.initial_proposal_ancestor_headers();
+        if ancestor_headers.is_empty() {
+            return Err(RaikoError::Preflight(
+                "GuestInput is missing proposal ancestor headers".to_string(),
+            ));
+        }
 
         for (index, stateless_input) in input.witnesses.iter().enumerate() {
             if stateless_input.chain_spec.chain_id != chain_spec.chain_id {
@@ -495,13 +506,19 @@ where
                 )));
             }
 
-            validate_block(
+            validate_block_with_witness_resources(
                 stateless_input.block.clone(),
                 &stateless_input.witness,
+                &ancestor_headers,
+                input.proposal_state_nodes(),
                 stateless_input.accounts.clone(),
                 &taiko_chain_spec,
                 &evm_config,
             )?;
+            roll_proposal_ancestor_headers_in_place(
+                &mut ancestor_headers,
+                &stateless_input.block.header,
+            );
         }
 
         Ok(())

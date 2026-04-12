@@ -88,6 +88,7 @@ pub mod name {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reth_revm::revm::precompile::{PrecompileSpecId, Precompiles, u64_to_address};
     use std::vec;
 
     #[test]
@@ -142,5 +143,21 @@ mod tests {
         assert_eq!(TaikoSpecId::from_str(name::UZEN).unwrap(), TaikoSpecId::UZEN);
         assert_eq!(<&str>::from(TaikoSpecId::UZEN), name::UZEN);
         assert_eq!(SpecId::from(TaikoSpecId::UZEN), SpecId::OSAKA);
+    }
+
+    #[test]
+    fn test_shasta_uses_berlin_precompiles() {
+        let precompile_spec = PrecompileSpecId::from_spec_id(SpecId::from(TaikoSpecId::SHASTA));
+        assert_eq!(precompile_spec, PrecompileSpecId::BERLIN);
+
+        let mut addresses: Vec<_> = Precompiles::new(precompile_spec).addresses().copied().collect();
+        let mut expected: Vec<_> = (1..=9).map(u64_to_address).collect();
+        addresses.sort_unstable();
+        expected.sort_unstable();
+
+        assert_eq!(addresses, expected);
+        assert!(!addresses.contains(&u64_to_address(0x0A)));
+        assert!(!addresses.contains(&u64_to_address(0x0B)));
+        assert!(!addresses.contains(&u64_to_address(0x100)));
     }
 }

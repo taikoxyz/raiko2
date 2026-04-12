@@ -13,7 +13,8 @@ impl NetworkProvider {
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         stream::iter(block_numbers.iter().copied())
             .map(|block_number| async move {
-                self.l2_provider
+                let raw_witness: alloy_rpc_types_debug::ExecutionWitness = self
+                    .l2_provider
                     .client()
                     .request(
                         "debug_executionWitness",
@@ -24,7 +25,13 @@ impl NetworkProvider {
                         RaikoError::RPC(format!(
                             "debug_executionWitness failed for block {block_number}: {e}"
                         ))
-                    })
+                    })?;
+
+                ExecutionWitness::try_from(raw_witness).map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "failed to decode debug_executionWitness headers for block {block_number}: {e}"
+                    ))
+                })
             })
             .buffered(WITNESS_CONCURRENCY)
             .try_collect()

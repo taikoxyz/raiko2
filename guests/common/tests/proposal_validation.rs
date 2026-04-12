@@ -157,7 +157,8 @@ fn canonical_inline_source_guest_input() -> GuestInput {
     .into();
     let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
-    guest_input.witnesses[0].witness.headers = vec![alloy_rlp::encode(&parent_header).into()];
+    guest_input.witnesses[0].witness.headers =
+        vec![raiko2_primitives::WitnessHeader::from_header(parent_header.clone())];
     guest_input.witnesses[0].accounts.insert(
         anchor_signer,
         TrieAccount {
@@ -255,9 +256,12 @@ fn canonical_inline_source_guest_input() -> GuestInput {
 }
 
 fn assert_rejected_with_message(guest_input: &GuestInput, expected: &str) {
-    let err = prove_shasta_proposal_with_validator(guest_input, |stateless_input, _runtime| {
+    let err = prove_shasta_proposal_with_validator(
+        guest_input,
+        |stateless_input, _ancestor_headers, _runtime| {
         Ok(stateless_input.block.header.hash_slow())
-    })
+        },
+    )
     .expect_err("guest input should fail validation");
     assert!(
         err.to_string().contains(expected),
@@ -362,7 +366,7 @@ fn rejects_proof_carry_data_parent_block_hash_mismatch() {
 fn accepts_canonical_inline_source_derivation() {
     let guest_input = canonical_inline_source_guest_input();
 
-    prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+    prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _ancestor_headers, _runtime| {
         Ok(stateless_input.block.header.hash_slow())
     })
     .expect("inline source derivation should validate");
@@ -427,7 +431,7 @@ fn rejects_checkpoint_state_root_mismatch() {
 fn wraps_validator_error_with_block_index() {
     let guest_input = guest_input_with_single_block();
 
-    let err = prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+    let err = prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _ancestor_headers, _runtime| {
         Err(anyhow::anyhow!("boom"))
     })
     .expect_err("validator failure should bubble up");

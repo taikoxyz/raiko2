@@ -19,7 +19,7 @@ static KZG_SETTINGS: OnceLock<Result<KZGSettings, String>> = OnceLock::new();
 /// Default embedded KZG settings in `bincode` format.
 ///
 /// This avoids any filesystem IO, suitable for zk guest builds.
-static DEFAULT_KZG_SETTINGS_BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
+static DEFAULT_KZG_SETTINGS_BIN: &[u8] = include_bytes!("../../kzg_settings_raiko.bin");
 
 /// Get or initialize the KZG settings.
 pub(crate) fn get_kzg_settings() -> RaikoResult<&'static KZGSettings> {

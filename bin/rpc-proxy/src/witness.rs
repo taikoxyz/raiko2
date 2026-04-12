@@ -24,7 +24,7 @@ use alloy::{
     providers::Provider,
 };
 use anyhow::{Context, Result};
-use raiko2_primitives::ExecutionWitness;
+use raiko2_primitives::{ExecutionWitness, WitnessHeader, WitnessStateNode};
 use reth_evm::{ConfigureEvm, execute::Executor};
 use reth_primitives_traits::{Block, BlockBody, NodePrimitives};
 use std::collections::HashSet;
@@ -129,15 +129,17 @@ where
     let mut headers = Vec::new();
     for header in ancestors {
         let header: <E::Primitives as NodePrimitives>::BlockHeader = header.try_into()?;
-        headers.push(alloy::rlp::encode(header).into());
+        headers.push(WitnessHeader::from_encoded_header(&header)?);
     }
 
     debug!("Preflight check completed successfully");
 
     Ok(ExecutionWitness {
-        state: state.into_iter().collect(),
+        state: ExecutionWitness::canonicalize_state_nodes(
+            state.into_iter().map(WitnessStateNode::from_bytes).collect(),
+        ),
         codes: db.contracts().values().cloned().collect(),
         keys: vec![],
-        headers,
+        headers: ExecutionWitness::canonicalize_headers(headers),
     })
 }

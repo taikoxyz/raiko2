@@ -25,8 +25,10 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY bin ./bin
 COPY xtask ./xtask
+COPY vendor ./vendor
 COPY config ./config
 COPY config.example.toml ./
+COPY test.json ./
 
 RUN cargo +1.93.0 build --release -p raiko2 ${BIN_FEATURES}
 

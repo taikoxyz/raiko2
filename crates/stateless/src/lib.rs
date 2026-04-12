@@ -15,7 +15,9 @@ mod witness_db;
 
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
-pub use validation::validate_block;
+pub use validation::{
+    validate_block, validate_block_with_ancestor_headers, validate_block_with_witness_resources,
+};
 
 #[cfg(test)]
 mod tests {

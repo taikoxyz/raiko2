@@ -108,7 +108,6 @@ async fn main() -> Result<()> {
         );
         res.context("Failed to fetch witnesses")?
     };
-
     let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
     let signer_count = signers.iter().map(Vec::len).sum::<usize>();
     let accounts = {

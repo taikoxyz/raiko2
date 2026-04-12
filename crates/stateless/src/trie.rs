@@ -3,7 +3,7 @@ use alloy_primitives::{
     Address, B256, U256,
     map::{AddressMap, B256Map},
 };
-use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
+use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
 use reth_trie_common::HashedPostState;
@@ -21,6 +21,23 @@ pub trait StatelessTrie: core::fmt::Debug {
     ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError>
     where
         Self: Sized;
+
+    /// Initialize the trie from a witness plus a proposal-level shared state node pool.
+    ///
+    /// Implementations may ignore `shared_state_nodes` when the witness already carries inline
+    /// state. Proposal-mode callers use this to avoid embedding duplicate state node bytes in each
+    /// witness.
+    fn new_with_state_pool(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+        pre_state_root: B256,
+    ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError>
+    where
+        Self: Sized,
+    {
+        let _ = shared_state_nodes;
+        Self::new(witness, pre_state_root)
+    }
 
     /// Return the account data for an address.
     ///

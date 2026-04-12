@@ -5,7 +5,27 @@ use crate::trie::StatelessTrie;
 use alloy_primitives::{Address, B256, U256, map::B256Map};
 use reth_errors::ProviderError;
 use reth_revm::{Database, bytecode::Bytecode, state::AccountInfo};
-use std::{collections::btree_map::BTreeMap, format};
+use std::format;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct AncestorHashes {
+    start_block_number: u64,
+    hashes: Vec<B256>,
+}
+
+impl AncestorHashes {
+    pub(super) const fn new(start_block_number: u64, hashes: Vec<B256>) -> Self {
+        Self {
+            start_block_number,
+            hashes,
+        }
+    }
+
+    fn get(&self, block_number: u64) -> Option<B256> {
+        let index = block_number.checked_sub(self.start_block_number)? as usize;
+        self.hashes.get(index).copied()
+    }
+}
 
 /// An EVM database implementation backed by witness data.
 ///
@@ -22,12 +42,8 @@ pub(super) struct WitnessDatabase<'a, T>
 where
     T: StatelessTrie,
 {
-    /// Map of block numbers to block hashes.
-    /// This is used to service the `BLOCKHASH` opcode.
-    // TODO: use Vec instead -- ancestors should be contiguous
-    // TODO: so we can use the current_block_number and an offset to
-    // TODO: get the block number of a particular ancestor
-    block_hashes_by_block_number: BTreeMap<u64, B256>,
+    /// Contiguous window of ancestor block hashes used to service the `BLOCKHASH` opcode.
+    block_hashes: AncestorHashes,
     /// Map of code hashes to bytecode.
     /// Used to fetch contract code needed during execution.
     bytecode: B256Map<Bytecode>,
@@ -59,11 +75,11 @@ where
     pub(super) const fn new(
         trie: &'a T,
         bytecode: B256Map<Bytecode>,
-        ancestor_hashes: BTreeMap<u64, B256>,
+        ancestor_hashes: AncestorHashes,
     ) -> Self {
         Self {
             trie,
-            block_hashes_by_block_number: ancestor_hashes,
+            block_hashes: ancestor_hashes,
             bytecode,
         }
     }
@@ -112,9 +128,8 @@ where
     ///
     /// Returns an error if the hash for the given block number is not found in the map.
     fn block_hash(&mut self, block_number: u64) -> Result<B256, Self::Error> {
-        self.block_hashes_by_block_number
-            .get(&block_number)
-            .copied()
+        self.block_hashes
+            .get(block_number)
             .ok_or(ProviderError::StateForNumberNotFound(block_number))
     }
 }

@@ -4,7 +4,7 @@ use alloy_primitives::{
     map::{AddressMap, B256Map},
 };
 use alloy_trie::EMPTY_ROOT_HASH;
-use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
+use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
 use reth_trie_common::HashedPostState;
@@ -74,6 +74,33 @@ pub(super) struct SparseState {
 }
 
 impl SparseState {
+    fn rlp_by_digest(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+    ) -> Result<B256Map<Bytes>, StatelessValidationError> {
+        if witness.state_indices.is_empty() {
+            return Ok(witness
+                .state
+                .iter()
+                .map(|node| (node.hash, node.bytes.clone()))
+                .collect());
+        }
+
+        witness
+            .state_indices
+            .iter()
+            .map(|index| {
+                let node = shared_state_nodes.get(*index as usize).ok_or(
+                    StatelessValidationError::SharedWitnessStateIndexOutOfBounds {
+                        index: *index,
+                        len: shared_state_nodes.len(),
+                    },
+                )?;
+                Ok((node.hash, node.bytes.clone()))
+            })
+            .collect()
+    }
+
     /// Removes an account from the state.
     fn remove_account(&mut self, hashed_address: &B256) {
         self.state.remove(hashed_address);
@@ -107,26 +134,22 @@ impl SparseState {
     }
 }
 
-impl StatelessTrieExt for SparseState {
-    fn append_callers(&mut self, callers: AddressMap<TrieAccount>) {
-        for (addr, caller) in callers {
-            self.callers.insert(addr, caller);
-        }
-    }
-}
-
 impl StatelessTrie for SparseState {
     /// Initialize the stateless trie using the `ExecutionWitness`.
     fn new(
         witness: &ExecutionWitness,
         pre_state_root: B256,
     ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
-        // fist, hash all the RLP nodes once
-        let rlp_by_digest: B256Map<_> = witness
-            .state
-            .iter()
-            .map(|rlp| (keccak256(rlp), rlp.clone()))
-            .collect();
+        Self::new_with_state_pool(witness, &[], pre_state_root)
+    }
+
+    fn new_with_state_pool(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+        pre_state_root: B256,
+    ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
+        // First, hash all the RLP nodes once.
+        let rlp_by_digest = Self::rlp_by_digest(witness, shared_state_nodes)?;
 
         // construct the state trie from the witness data and the given state root
         let state = RlpTrie::from_prehashed(pre_state_root, &rlp_by_digest)
@@ -243,5 +266,13 @@ impl StatelessTrie for SparseState {
         }
 
         Ok(self.state.hash())
+    }
+}
+
+impl StatelessTrieExt for SparseState {
+    fn append_callers(&mut self, callers: AddressMap<TrieAccount>) {
+        for (addr, caller) in callers {
+            self.callers.insert(addr, caller);
+        }
     }
 }

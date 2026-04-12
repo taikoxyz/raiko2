@@ -8,23 +8,23 @@ use alethia_reth_chainspec::{
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{transaction::Transaction as _, BlockHeader as _, Header};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use alloy_rlp::Decodable;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::{ensure, Context, Result};
-use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs};
+use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs, WitnessHeader};
 use raiko2_primitives_shasta::{
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output,
     },
-    validate_anchor_progression, verify_proposal_mode_blob_usage, GuestInput,
+    roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
+    verify_proposal_mode_blob_usage, GuestInput,
     ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
     manifest::BlockManifest, prepare_source_manifest, ParentBlockContext, ProposalMetadata,
 };
-use raiko2_stateless::validate_block;
+use raiko2_stateless::validate_block_with_witness_resources;
 use std::sync::Arc;
 
 sol! {
@@ -274,14 +274,21 @@ fn calculate_shasta_difficulty(parent_difficulty: B256, block_number: u64) -> B2
     B256::from(keccak256(params.abi_encode()))
 }
 
-fn decode_last_ancestor_header(stateless_input: &StatelessInput) -> Result<Header> {
-    let encoded = stateless_input
-        .witness
-        .headers
-        .last()
-        .context("missing parent header in witness.headers")?;
-    let mut slice = encoded.as_ref();
-    Header::decode(&mut slice).context("failed to decode parent header from witness.headers")
+fn initial_proposal_ancestor_headers(guest_input: &GuestInput) -> Result<Vec<WitnessHeader>> {
+    let headers = guest_input.initial_proposal_ancestor_headers();
+    ensure!(
+        !headers.is_empty(),
+        "missing proposal ancestor headers"
+    );
+    Ok(headers)
+}
+
+fn last_full_header(headers: &[WitnessHeader]) -> Result<Header> {
+    headers
+        .iter()
+        .rev()
+        .find_map(|header| header.full_header().cloned())
+        .context("missing parent header in proposal ancestor headers")
 }
 
 fn shasta_fork_timestamp(chain_spec: &TaikoChainSpec) -> Result<u64> {
@@ -311,7 +318,8 @@ fn derive_expected_shasta_blocks(
 
     let fork_timestamp = shasta_fork_timestamp(runtime.chain_spec.as_ref())?;
     let mut parent = {
-        let header = decode_last_ancestor_header(guest_input.witnesses.first().expect("checked"))?;
+        let headers = initial_proposal_ancestor_headers(guest_input)?;
+        let header = last_full_header(&headers)?;
         ParentBlockContext {
             timestamp: header.timestamp,
             gas_limit: header.gas_limit,
@@ -512,16 +520,21 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
         .context("proposal mode blob usage verification failed")?;
     bench_report_end("proposal_blob_usage");
 
-    prove_shasta_proposal_with_validator(guest_input, |stateless_input, runtime| {
-        validate_block(
-            stateless_input.block.clone(),
-            &stateless_input.witness,
-            stateless_input.accounts.clone(),
-            &runtime.chain_spec,
-            &runtime.evm_config,
-        )
-        .map_err(|e| anyhow::anyhow!(e))
-    })
+    prove_shasta_proposal_with_validator(
+        guest_input,
+        |stateless_input, ancestor_headers, runtime| {
+            validate_block_with_witness_resources(
+                stateless_input.block.clone(),
+                &stateless_input.witness,
+                ancestor_headers,
+                guest_input.proposal_state_nodes(),
+                stateless_input.accounts.clone(),
+                &runtime.chain_spec,
+                &runtime.evm_config,
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+        },
+    )
 }
 
 pub fn prove_shasta_proposal_with_validator<V>(
@@ -529,7 +542,7 @@ pub fn prove_shasta_proposal_with_validator<V>(
     mut validate_block: V,
 ) -> Result<B256>
 where
-    V: FnMut(&StatelessInput, &TaikoRuntime) -> Result<B256>,
+    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
 {
     let proof_carry_data = &guest_input.proof_carry_data;
     ensure!(
@@ -605,10 +618,14 @@ where
 
     bench_report_start("proposal_derivation");
     let expected_blocks = derive_expected_shasta_blocks(guest_input, &runtime)?;
+    let mut proposal_ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
     let mut canonical_parent_header = expected_blocks
         .as_ref()
-        .map(|_| decode_last_ancestor_header(guest_input.witnesses.first().expect("checked")))
-        .transpose()?;
+        .and_then(|_| {
+            proposal_ancestor_headers
+                .last()
+                .and_then(|header| header.full_header().cloned())
+        });
     bench_report_end("proposal_derivation");
 
     let mut anchor_checkpoints = Vec::with_capacity(guest_input.witnesses.len());
@@ -649,7 +666,7 @@ where
             );
         }
 
-        let validated_hash = validate_block(stateless_input, &runtime)
+        let validated_hash = validate_block(stateless_input, &proposal_ancestor_headers, &runtime)
             .with_context(|| format!("stateless block validation failed at index {index}"))?;
         first_parent_block_hash.get_or_insert(block.header.parent_hash);
         previous_block_hash = Some(validated_hash);
@@ -661,6 +678,7 @@ where
         if canonical_parent_header.is_some() {
             canonical_parent_header = Some(block.header.clone());
         }
+        roll_proposal_ancestor_headers_in_place(&mut proposal_ancestor_headers, &block.header);
     }
     bench_report_end("proposal_stateless_validation");
 
@@ -847,11 +865,13 @@ mod tests {
         let guest_input = guest_input_with_single_block();
         let proof_carry_data = guest_input.proof_carry_data.clone();
 
-        let subproof_input_hash =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let subproof_input_hash = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect("proposal proving should succeed");
+            },
+        )
+        .expect("proposal proving should succeed");
 
         assert_eq!(
             subproof_input_hash,
@@ -862,11 +882,13 @@ mod tests {
     #[test]
     fn rejects_empty_witnesses() {
         let guest_input = GuestInput::default();
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |_stateless_input, _ancestor_headers, _runtime| {
                 Ok(B256::ZERO)
-            })
-            .expect_err("empty witnesses should fail");
+            },
+        )
+        .expect_err("empty witnesses should fail");
         assert!(err
             .to_string()
             .contains("must contain at least one witness"));
@@ -894,11 +916,13 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("expected parent-hash mismatch to fail");
+            },
+        )
+        .expect_err("expected parent-hash mismatch to fail");
 
         assert!(err.to_string().contains("must link to previous block hash"));
         assert_ne!(
@@ -917,11 +941,13 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("block number gap should fail");
+            },
+        )
+        .expect_err("block number gap should fail");
 
         assert!(err.to_string().contains("must increment block number by 1"));
     }
@@ -937,11 +963,13 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("chain_id mismatch should fail");
+            },
+        )
+        .expect_err("chain_id mismatch should fail");
 
         assert!(err.to_string().contains("chain_spec mismatch"));
     }
@@ -955,11 +983,13 @@ mod tests {
             .checkpoint
             .blockHash = B256::from([0x99; 32]);
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("checkpoint mismatch should fail");
+            },
+        )
+        .expect_err("checkpoint mismatch should fail");
 
         assert!(err.to_string().contains("checkpoint.blockHash mismatch"));
     }
@@ -969,11 +999,13 @@ mod tests {
         let mut guest_input = guest_input_with_single_block();
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("stalled anchor should fail");
+            },
+        )
+        .expect_err("stalled anchor should fail");
 
         assert!(err.to_string().contains("did not grow"));
     }
@@ -1001,11 +1033,13 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect_err("anchor regression should fail");
+            },
+        )
+        .expect_err("anchor regression should fail");
 
         assert!(err.to_string().contains("regressed below previous anchor"));
     }
@@ -1032,11 +1066,13 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let subproof_input_hash =
-            prove_shasta_proposal_with_validator(&guest_input, |stateless_input, _runtime| {
+        let subproof_input_hash = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
-            })
-            .expect("repeated anchor checkpoint should validate");
+            },
+        )
+        .expect("repeated anchor checkpoint should validate");
 
         assert_eq!(
             subproof_input_hash,
@@ -1049,11 +1085,13 @@ mod tests {
         let mut guest_input = guest_input_with_single_block();
         guest_input.proof_carry_data.chain_id = 167_001;
 
-        let err =
-            prove_shasta_proposal_with_validator(&guest_input, |_stateless_input, _runtime| {
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |_stateless_input, _ancestor_headers, _runtime| {
                 Ok(B256::ZERO)
-            })
-            .expect_err("expected chain_id mismatch to fail");
+            },
+        )
+        .expect_err("expected chain_id mismatch to fail");
 
         assert!(err
             .to_string()
@@ -1082,7 +1120,7 @@ mod tests {
 
         assert!(prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _runtime| { Ok(B256::ZERO) }
+            |_stateless_input, _ancestor_headers, _runtime| { Ok(B256::ZERO) }
         )
         .is_err());
     }

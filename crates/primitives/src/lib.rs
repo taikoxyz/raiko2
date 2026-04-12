@@ -25,4 +25,4 @@ pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, State
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};
 pub use proof_type::ProofType;
-pub use stateless::{ExecutionWitness, StatelessValidationError};
+pub use stateless::{ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode};

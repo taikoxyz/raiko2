@@ -193,8 +193,8 @@ risc0-ethereum-contracts-boundless = { package = "risc0-ethereum-contracts", ver
 boundless-market = { version = "=1.0.0" }
 
 # kzg
-kzg = { package = "rust-kzg-zkcrypto", git = "https://github.com/smtmfft/rust-kzg.git", branch = "raiko2-main", default-features = false }
-kzg_traits = { package = "kzg", git = "https://github.com/smtmfft/rust-kzg.git", branch = "raiko2-main", default-features = false }
+kzg = { package = "rust-kzg-zkcrypto", path = "vendor/rust-kzg-legacy/zkcrypto", default-features = false }
+kzg_traits = { package = "kzg", path = "vendor/rust-kzg-legacy/kzg", default-features = false }
 
 [patch.crates-io]
 reth-primitives-traits = { path = "vendor/reth-primitives-traits" }

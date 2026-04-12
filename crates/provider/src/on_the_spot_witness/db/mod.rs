@@ -78,7 +78,7 @@ impl<D> Debug for PreflightDb<D> {
 
 impl<D> PreflightDb<D> {
     /// Creates a new `PreflightDb` instance, with a [`RevmDatabase`].
-    pub(crate) fn new(db: D) -> Self
+    pub fn new(db: D) -> Self
     where
         D: RevmDatabase,
     {
@@ -93,14 +93,23 @@ impl<D> PreflightDb<D> {
     }
 
     /// Returns the referenced contracts
-    pub(crate) const fn contracts(&self) -> &B256HashMap<Bytes> {
+    pub const fn contracts(&self) -> &B256HashMap<Bytes> {
         &self.contracts
+    }
+
+    /// Returns all accessed accounts together with the storage keys queried for each account.
+    #[must_use]
+    pub fn accessed_storage_keys(&self) -> AddressMap<Vec<B256>> {
+        self.accounts
+            .iter()
+            .map(|(address, keys)| (*address, keys.iter().copied().collect()))
+            .collect()
     }
 }
 
 impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
     /// Fetches all the EIP-1186 storage proofs from the `access_list` and stores them in the DB.
-    pub(crate) async fn add_access_list(&mut self, access_list: &AccessList) -> Result<()> {
+    pub async fn add_access_list(&mut self, access_list: &AccessList) -> Result<()> {
         for AccessListItem {
             address,
             storage_keys,
@@ -121,7 +130,7 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
     ///
     /// This trace continues until it reaches a block number lower than the minimum
     /// number recorded in `self.block_hash_numbers`.
-    pub(crate) async fn ancestor_proof(
+    pub async fn ancestor_proof(
         &self,
         start_hash: B256,
     ) -> Result<Vec<<N as Network>::HeaderResponse>> {
@@ -161,7 +170,7 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
 
     /// Returns the Merkle proofs (sparse [`MerkleTrie`]) for the state and all storage queries
     /// recorded by the [`RevmDatabase`].
-    pub(crate) async fn state_proof(&mut self) -> Result<(MerkleTrie, AddressMap<MerkleTrie>)> {
+    pub async fn state_proof(&mut self) -> Result<(MerkleTrie, AddressMap<MerkleTrie>)> {
         // if no accounts were accessed, use the state root of the corresponding block as is
         if self.accounts.is_empty() {
             let hash = self.inner.block();

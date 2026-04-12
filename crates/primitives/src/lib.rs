@@ -15,6 +15,7 @@ mod input;
 mod output;
 pub mod proof;
 pub mod proof_type;
+mod serde_bincode;
 mod stateless;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};

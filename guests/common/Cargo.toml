@@ -9,23 +9,23 @@ raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol = { path = "../../crates/protocol" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 raiko2-stateless = { path = "../../crates/stateless" }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false }
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "main", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false, features = [
     "serde",
 ] }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false }
 alloy-primitives = { version = "1.5.0", default-features = false }
 alloy-consensus = { version = "1.0", default-features = false, features = ["serde"] }
 alloy-sol-types = { version = "1.5.0", default-features = false }
 alloy-rlp = { version = "0.3.4", default-features = false }
 alloy-hardforks = "0.4.7"
 anyhow = "1.0"
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", features = [
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", features = [
     "serde",
-    "serde-bincode-compat",
 ] }
 
 [dev-dependencies]
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
 
 [features]
 default = []

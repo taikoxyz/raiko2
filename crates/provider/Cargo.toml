@@ -42,4 +42,7 @@ alethia-reth-block.workspace = true
 alethia-reth-chainspec.workspace = true
 
 [dev-dependencies]
+clap.workspace = true
+raiko2-primitives-shasta.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

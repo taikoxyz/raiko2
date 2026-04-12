@@ -1,0 +1,23 @@
+[package]
+name = "alethia-reth-evm"
+version = "0.7.1"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+alethia-reth-primitives = { path = "../primitives", default-features = false }
+alloy-evm = { workspace = true }
+alloy-primitives = { workspace = true }
+reth-evm = { workspace = true }
+reth-revm = { workspace = true }
+revm-database-interface = { workspace = true }
+serde = { workspace = true, optional = true }
+tracing = { workspace = true }

@@ -5,11 +5,9 @@ use alethia_reth_chainspec::{
     hardfork::{TaikoHardfork, TaikoHardforks},
     spec::TaikoChainSpec,
 };
-use alloy_consensus::{
-    transaction::{SignerRecoverable, Transaction as _},
-    BlockHeader as _, Header,
-};
-use alloy_primitives::{keccak256, Bytes, B256, U256};
+use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
+use alloy_consensus::{transaction::Transaction as _, BlockHeader as _, Header};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rlp::Decodable;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::{ensure, Context, Result};
@@ -389,9 +387,7 @@ fn validate_anchor_transaction_binding(
         anchor_tx.chain_id()
     );
 
-    let anchor_signer = anchor_tx
-        .recover_signer()
-        .context("failed to recover anchor transaction signer")?;
+    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
     let pre_state_account = stateless_input
         .accounts
         .get(&anchor_signer)

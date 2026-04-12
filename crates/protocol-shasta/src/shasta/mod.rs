@@ -13,6 +13,8 @@ pub mod error;
 pub mod manifest;
 #[cfg(feature = "net")]
 pub mod payload_helpers;
+#[cfg(feature = "net")]
+mod signer;
 
 #[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};

@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 raiko2-protocol.workspace = true
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", rev = "3b5ac063e0ea363e978d03b7802a22496edb033f", package = "protocol", default-features = false, optional = true }
 
 # Alloy types
 alloy-primitives.workspace = true
@@ -18,7 +17,9 @@ alloy-sol-types.workspace = true
 alloy-rlp.workspace = true
 alloy-eips.workspace = true
 alloy-consensus.workspace = true
+alloy-provider = { workspace = true, optional = true }
 reth-ethereum-primitives.workspace = true
+k256 = { workspace = true, optional = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -30,7 +31,7 @@ tracing.workspace = true
 
 [features]
 default = []
-net = ["dep:taiko-client-protocol", "taiko-client-protocol/net"]
+net = ["dep:alloy-provider", "dep:k256"]
 
 [dev-dependencies]
 alloy-rpc-types-engine.workspace = true

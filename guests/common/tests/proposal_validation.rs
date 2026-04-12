@@ -1,8 +1,7 @@
 #![allow(missing_docs)]
 
-use alloy_consensus::{
-    transaction::SignerRecoverable, SignableTransaction, TrieAccount, TxEip1559,
-};
+use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
+use alloy_consensus::{SignableTransaction, TrieAccount, TxEip1559};
 use alloy_primitives::{Address, B256};
 use alloy_primitives::{Signature, TxKind, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
@@ -156,7 +155,7 @@ fn canonical_inline_source_guest_input() -> GuestInput {
     }
     .into_signed(Signature::test_signature())
     .into();
-    let anchor_signer = anchor_tx.recover_signer().expect("recover anchor signer");
+    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
     guest_input.witnesses[0].witness.headers = vec![alloy_rlp::encode(&parent_header).into()];
     guest_input.witnesses[0].accounts.insert(

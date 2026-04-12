@@ -12,9 +12,7 @@ use serde_with::serde_as;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StatelessInput {
     /// The block being executed in the stateless validation function.
-    #[serde_as(
-        as = "reth_primitives_traits::serde_bincode_compat::Block<reth_ethereum_primitives::TransactionSigned, alloy_consensus::Header>"
-    )]
+    #[serde_as(as = "crate::serde_bincode::EthereumBlock<'_>")]
     pub block: Block,
     /// The network to generate the proof for
     pub chain_spec: ChainSpec,

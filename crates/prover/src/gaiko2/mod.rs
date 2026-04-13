@@ -24,7 +24,7 @@ use self::{
 pub mod adapter;
 pub mod protocol;
 
-const SHASTA_PROPOSAL_PATH: &str = "/internal/prove/shasta-proposal";
+const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 
 #[derive(Debug, Clone, Default)]
 pub struct Gaiko2Config {

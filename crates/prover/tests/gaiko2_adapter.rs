@@ -1,7 +1,8 @@
 #![allow(missing_docs)]
 
+use alloy_consensus::Header;
 use alloy_primitives::B256;
-use raiko2_primitives::StatelessInput;
+use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::gaiko2::{
     adapter::build_shasta_packet,
@@ -17,6 +18,16 @@ fn fixture_guest_input() -> GuestInput {
 
     let mut input = GuestInput::default();
     input.witnesses.push(witness);
+    input
+        .proposal_ancestor_headers
+        .push(WitnessHeader::from_header(Header {
+            number: 41,
+            parent_hash: B256::from([0x33; 32]),
+            state_root: B256::from([0x44; 32]),
+            timestamp: 1,
+            gas_limit: 30_000_000,
+            ..Default::default()
+        }));
     input.proof_carry_data.chain_id = 167_013;
     input.proof_carry_data.transition_input.proposal_id = 7;
     input.proof_carry_data.transition_input.parent_block_hash = B256::from([0x33; 32]);
@@ -40,6 +51,7 @@ fn adapter_projects_guest_input_into_execution_packet() {
         packet.payload.blocks[0].block.header.parent_hash,
         B256::from([0x11; 32])
     );
+    assert_eq!(packet.payload.blocks[0].witness.headers.len(), 1);
 }
 
 #[test]

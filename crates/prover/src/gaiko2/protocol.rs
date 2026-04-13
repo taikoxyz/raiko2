@@ -6,7 +6,7 @@ use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-pub const GAIKO2_SHASTA_REQUEST_SCHEMA: &str = "gaiko2-shasta-v1";
+pub const GAIKO2_SHASTA_REQUEST_SCHEMA: &str = "v1";
 pub const GAIKO2_PROOF_RESPONSE_SCHEMA: &str = "gaiko2-proof-v1";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

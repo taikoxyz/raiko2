@@ -1,10 +1,11 @@
 #![allow(missing_docs)]
 
+use alloy_consensus::Header;
 use alloy_primitives::{B256, hex};
 use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::NativeBackend;
-use raiko2_primitives::ProverConfig;
+use raiko2_primitives::{ProverConfig, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::{
     Prover,
@@ -24,6 +25,16 @@ fn fixture_guest_input() -> GuestInput {
     witness.chain_spec.chain_id = 167_013;
 
     input.witnesses.push(witness);
+    input
+        .proposal_ancestor_headers
+        .push(WitnessHeader::from_header(Header {
+            number: 41,
+            parent_hash: B256::from([0x33; 32]),
+            state_root: B256::from([0x44; 32]),
+            timestamp: 1,
+            gas_limit: 30_000_000,
+            ..Default::default()
+        }));
     input.proof_carry_data.chain_id = 167_013;
     input.proof_carry_data.transition_input.parent_block_hash = B256::from([0x33; 32]);
     input
@@ -35,7 +46,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let expected_input = format!("0x{}", hex::encode([0x44; 32]));
     let mock = server.mock(|when, then| {
         when.method(POST)
-            .path("/internal/prove/shasta-proposal")
+            .path("/prove/shasta")
             .body_contains(GAIKO2_SHASTA_REQUEST_SCHEMA);
         then.status(200)
             .header("content-type", "application/json")
@@ -84,7 +95,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
 async fn gaiko2_prover_surfaces_remote_error_envelope() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
-        when.method(POST).path("/internal/prove/shasta-proposal");
+        when.method(POST).path("/prove/shasta");
         then.status(400)
             .header("content-type", "application/json")
             .json_body(json!({

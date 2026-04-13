@@ -6,8 +6,10 @@
 TODO.md
 .worktrees/
 test.json
+.codex
 __pycache__/
 *.pyc
 core.[0-9]*
 regression.log
 test/regression/**/*.log
+scripts/regression/*.log

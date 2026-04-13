@@ -14,7 +14,6 @@ from typing import Tuple, List, Optional
 from dataclasses import dataclass
 
 LOGGER = logging.getLogger(__name__)
-
 @dataclass
 class InboxConfig:
     """IInbox Config structure - matches IInbox.sol Config struct"""
@@ -366,7 +365,11 @@ class ShastaEventDecoder:
                 return None
             return int.from_bytes(data[0:6], byteorder="big")
         except Exception as e:
+<<<<<<< HEAD
             LOGGER.debug("Error extracting batch ID: %s", e)
+=======
+            print(f"Error extracting batch ID: {e}")
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             return None
 
 def test_decoder():

@@ -155,8 +155,6 @@ def write_discovered_proposals(path: Path, records: list[Dict[str, Any]]) -> Non
     path.write_text(
         json.dumps(discovered_proposals_payload(records), indent=2, sort_keys=True) + "\n"
     )
-
-
 class BatchMonitor:
     def __init__(
         self,
@@ -222,9 +220,13 @@ class BatchMonitor:
         self.pending_proposals: list[Dict[str, Any]] = []
         # Aggregate running count
         self.aggregate_running_count = 0
-        # Track aggregate requests: list of proposal data dicts
-        self.aggregate_requests: list[list[Dict[str, Any]]] = []
+        # Track aggregate requests: list of proposal_ids lists
+        self.aggregate_requests: list[list[int]] = []
         # logger
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
         handlers = [logging.StreamHandler()]
         if log_file is not None:
             log_path = Path(log_file)
@@ -244,7 +246,6 @@ class BatchMonitor:
             return
         with open(self.log_file, "a") as f:
             f.write(message)
-
     def _extract_proposal_id_from_proposed_log(self, log) -> Optional[int]:
         """
         Extract proposal id from a Proposed event log.
@@ -332,12 +333,15 @@ class BatchMonitor:
             self.logger.error(f"Failed to get L2 block {block_number}: {e}")
             return None
 
+<<<<<<< HEAD
     async def get_l2_block_proposal_id(self, block_number: int) -> Optional[int]:
         block = await self.get_l2_block(block_number)
         if block is None:
             return None
         return self.extract_proposal_id_from_extradata(block.get("extraData", "0x"))
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     def extract_proposal_id_from_extradata(self, extradata: str) -> Optional[int]:
         """
         Extract proposal_id from block extradata.
@@ -486,6 +490,7 @@ class BatchMonitor:
             block = await self.get_l2_block(l2_block_number)
             if block is None:
                 return None
+<<<<<<< HEAD
 
             return self._parse_anchor_info_from_block(block, l2_block_number)
         except Exception as e:
@@ -498,6 +503,9 @@ class BatchMonitor:
         self, block: Dict[str, Any], l2_block_number: int
     ) -> Optional[AnchorTxInfo]:
         try:
+=======
+            
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             # Extract proposal_id from block extradata
             extradata = block.get("extraData", "0x")
             if not extradata or extradata == "0x":
@@ -638,6 +646,7 @@ class BatchMonitor:
         if l2_block_number in self.anchor_info_cache:
             return self.anchor_info_cache[l2_block_number]
 
+<<<<<<< HEAD
         block = await self.get_l2_block(l2_block_number)
         if block is None:
             return None
@@ -652,6 +661,13 @@ class BatchMonitor:
             headers["x-api-key"] = self.api_key
         return headers
 
+=======
+        anchor_info = await self.parse_l2_block_anchor_tx(l2_block_number)
+        if anchor_info is not None:
+            self.anchor_info_cache[l2_block_number] = anchor_info
+        return anchor_info
+
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     async def search_proposal_boundary_in_window(
         self,
         proposal_id: int,
@@ -768,6 +784,7 @@ class BatchMonitor:
             return cached_result
         
         # Not in cache, do individual search (fallback, should rarely happen if batch query worked)
+<<<<<<< HEAD
         search_range = self._clamp_l1_search_range(anchor_number + 1, anchor_number + 128)
         if search_range is None:
             self.logger.info(
@@ -782,16 +799,33 @@ class BatchMonitor:
             f"Searching L1 blocks {search_start} to {search_end} for proposal_id {proposal_id} (not in cache)"
         )
 
+=======
+        search_start = anchor_number + 1
+        search_end = anchor_number + 128
+        
+        self.logger.info(
+            f"Searching L1 blocks {search_start} to {search_end} for proposal_id {proposal_id} (not in cache)"
+        )
+        
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         try:
             # Get events in the range
             logs = self.evt_contract.events.Proposed.get_logs(
                 from_block=search_start, to_block=search_end
             )
+<<<<<<< HEAD
 
             for log in logs:
                 try:
                     decoded_proposal_id = self._extract_proposal_id_from_proposed_log(log)
 
+=======
+            
+            for log in logs:
+                try:
+                    decoded_proposal_id = self._extract_proposal_id_from_proposed_log(log)
+                    
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
                     if decoded_proposal_id == proposal_id:
                         l1_block_number = log.blockNumber
                         self.proposal_block_cache[proposal_id] = l1_block_number
@@ -802,7 +836,11 @@ class BatchMonitor:
                 except Exception as e:
                     self.logger.error(f"Error decoding event log: {e}")
                     continue
+<<<<<<< HEAD
 
+=======
+            
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             self.logger.warning(
                 f"Proposal_id {proposal_id} not found in L1 blocks {search_start} to {search_end}"
             )
@@ -812,6 +850,7 @@ class BatchMonitor:
             self.logger.error(f"Error searching L1 events: {e}")
             self.proposal_block_cache[proposal_id] = None
             return None
+<<<<<<< HEAD
 
     def find_l1_inclusion_block_by_indexed_proposal_id(
         self, proposal_id: int
@@ -850,6 +889,8 @@ class BatchMonitor:
             f"Found proposal_id {proposal_id} in L1 block {l1_block_number} by indexed lookup"
         )
         return l1_block_number
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     
     async def batch_find_proposal_blocks(
         self, proposal_queries: list[Tuple[int, int]], search_start: int, search_end: int
@@ -881,6 +922,7 @@ class BatchMonitor:
             }
         
         uncached_proposal_ids = {proposal_id for proposal_id, _ in uncached_queries}
+<<<<<<< HEAD
         search_range = self._clamp_l1_search_range(search_start, search_end)
         if search_range is None:
             self.logger.info(
@@ -895,6 +937,8 @@ class BatchMonitor:
             }
 
         search_start, search_end = search_range
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         self.logger.info(
             f"Batch querying {len(uncached_proposal_ids)} proposals in L1 blocks {search_start} to {search_end}: {list(uncached_proposal_ids)}"
         )
@@ -944,6 +988,7 @@ class BatchMonitor:
             for proposal_id in proposal_ids_to_find
         }
 
+<<<<<<< HEAD
     def get_latest_l1_block_number(self) -> int:
         """Get the latest L1 block number."""
         return int(self.l1_w3.eth.block_number)
@@ -973,6 +1018,8 @@ class BatchMonitor:
             return None
         return search_start, clamped_end
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     def parse_batch_proposed_meta(self, log):
         try:
             parsed_log = self.evt_contract.events.Proposed.process_log(log)
@@ -1012,6 +1059,7 @@ class BatchMonitor:
             self.logger.error(f"Error getting events from block {block_number}: {e}")
             return []
 
+<<<<<<< HEAD
     @property
     def block_range(self):
         """Backward-compatible alias for the configured L2 batch scan range."""
@@ -1031,6 +1079,11 @@ class BatchMonitor:
         block_range = self.block_range
         if block_range is not None:
             self._ensure_in_range_state()
+=======
+    async def get_next_batches(self) -> Optional[tuple[int, list[int]]]:
+        """get latest block number"""
+        if self.block_range is not None:
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             return await self.get_in_range_next_batch()
         else:
             return await self.get_latest_block_batchs()
@@ -1187,10 +1240,17 @@ class BatchMonitor:
 
     async def submit_to_raiko(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
+<<<<<<< HEAD
     ) -> None:
         """submit batch to Raiko"""
         try:
             headers = self._request_headers()
+=======
+    ) -> Optional[str]:
+        """submit batch to Raiko"""
+        try:
+            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 
             proposal_data = {
                 "proposal_id": proposal_id,
@@ -1216,10 +1276,15 @@ class BatchMonitor:
                 self.logger.info(
                     f"Proposal {proposal_id} (L2 blocks {l2_block_numbers}) in L1 block {l1_inclusion_block} submitted to Raiko with response: {result}"
                 )
+<<<<<<< HEAD
+=======
+                return None
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             else:
                 self.logger.error(
                     f"Failed to submit proposal: {result.get('message', 'Unknown error')}"
                 )
+<<<<<<< HEAD
         except Exception as e:
             self.logger.error(f"Failed to submit to Raiko: {e}")
     
@@ -1230,6 +1295,20 @@ class BatchMonitor:
             
         try:
             headers = self._request_headers()
+=======
+                return None
+        except Exception as e:
+            self.logger.error(f"Failed to submit to Raiko: {e}")
+            return None
+    
+    async def submit_aggregate_to_raiko(self) -> Optional[str]:
+        """submit aggregate request to Raiko"""
+        if len(self.pending_proposals) == 0:
+            return None
+            
+        try:
+            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             
             # Use the collected proposals
             proposals_to_aggregate = self.pending_proposals.copy()
@@ -1260,19 +1339,34 @@ class BatchMonitor:
                     f"Aggregate request for proposals {proposal_ids} submitted to Raiko with response: {result}, "
                     f"current running aggregate requests: {self.aggregate_running_count}"
                 )
+<<<<<<< HEAD
+=======
+                return None
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             else:
                 self.logger.error(
                     f"Failed to submit aggregate request: {result.get('message', 'Unknown error')}"
                 )
+<<<<<<< HEAD
         except Exception as e:
             self.logger.error(f"Failed to submit aggregate to Raiko: {e}")
+=======
+                return None
+        except Exception as e:
+            self.logger.error(f"Failed to submit aggregate to Raiko: {e}")
+            return None
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 
     async def query_raiko_status(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
     ) -> RaikoResponse:
         """query Raiko status"""
         try:
+<<<<<<< HEAD
             headers = self._request_headers()
+=======
+            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             proposal_data = {
                 "proposal_id": proposal_id,
                 "l1_inclusion_block_number": l1_inclusion_block,
@@ -1303,7 +1397,11 @@ class BatchMonitor:
     async def query_aggregate_status(self, proposals: list[Dict[str, Any]]) -> RaikoResponse:
         """query aggregate request status"""
         try:
+<<<<<<< HEAD
             headers = self._request_headers()
+=======
+            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             payload = self.generate_post_data(proposals, aggregate=True)
             response = requests.post(
                 f"{self.raiko_rpc}/v3/proof/batch/shasta",
@@ -1338,9 +1436,16 @@ class BatchMonitor:
 
             start_time = datetime.now()
 
+<<<<<<< HEAD
             self.append_log(
                 f"\nproposal {group.proposal_id} (L2 blocks {group.l2_block_numbers}) in L1 block {l1_inclusion_block} processing started at {start_time}\n"
             )
+=======
+            with open(self.log_file, "a") as f:
+                f.write(
+                    f"\nproposal {group.proposal_id} (L2 blocks {group.l2_block_numbers}) in L1 block {l1_inclusion_block} processing started at {start_time}\n"
+                )
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 
             self.logger.info(
                 f"Starting to process {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)} at {start_time}"
@@ -1416,6 +1521,7 @@ class BatchMonitor:
             duration = (end_time - start_time).total_seconds()
 
             # log ending status
+<<<<<<< HEAD
             self.append_log(
                 f"Proposal {group.proposal_id} in L1 {l1_inclusion_block} processed {response.status} at {end_time}, duration: {duration} seconds\n"
             )
@@ -1423,6 +1529,16 @@ class BatchMonitor:
                 self.append_log(f"Message: {response.message}\n")
             if response.data and response.data.get("proof"):
                 self.append_log(f"Proof: {response.data['proof']['proof']}\n")
+=======
+            with open(self.log_file, "a") as f:
+                f.write(
+                    f"Proposal {group.proposal_id} in L1 {l1_inclusion_block} processed {response.status} at {end_time}, duration: {duration} seconds\n"
+                )
+                if response.message:
+                    f.write(f"Message: {response.message}\n")
+                if response.data and response.data.get("proof"):
+                    f.write(f"Proof: {response.data['proof']['proof']}\n")
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         finally:
             self.running_count -= 1
             self.logger.info(
@@ -1615,6 +1731,7 @@ class BatchMonitor:
                 f"Processing {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)}"
             )
 
+<<<<<<< HEAD
             if self.discover_only:
                 self.discovered_proposals.append(
                     build_discovered_proposal_record(
@@ -1627,6 +1744,8 @@ class BatchMonitor:
                 )
                 continue
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             # Get L1 block timestamp for time-based throttling
             l1_block = await self.get_block(l1_inclusion_block)
             if l1_block is None:
@@ -1703,6 +1822,7 @@ class BatchMonitor:
             self.logger.error("No valid proposal groups found in L2 block range")
             return
 
+<<<<<<< HEAD
         if self.discover_only:
             if self.proposal_out:
                 write_discovered_proposals(self.proposal_out, self.discovered_proposals)
@@ -1719,6 +1839,8 @@ class BatchMonitor:
                 )
             return
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         # Wait for all tasks to complete
         self.logger.info(f"Waiting for {len(tasks)} processing tasks to complete...")
         if tasks:
@@ -1750,6 +1872,7 @@ class BatchMonitor:
         
         self.logger.info("All L2 blocks processed")
 
+<<<<<<< HEAD
     async def find_l2_block_for_proposal_id(self, proposal_id: int) -> Optional[int]:
         """
         Find one L2 block carrying the requested proposal id.
@@ -1916,21 +2039,30 @@ class BatchMonitor:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     async def run(self):
         """main loop"""
         self.logger.info("Starting block monitor")
         # print start config
         config_dict = {
+<<<<<<< HEAD
             "network": self.network,
             "l1_network": self.l1_network,
             "l1_rpc": self.l1_rpc,
             "l2_rpc": self.l2_rpc,
             "raiko_rpc": self.raiko_rpc,
             "has_api_key": bool(self.api_key),
+=======
+            "l1_rpc": self.l1_rpc,
+            "l2_rpc": self.l2_rpc,
+            "raiko_rpc": self.raiko_rpc,
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             "l2_block_range": self.l2_block_range,
             "prove_type": self.prove_type,
             "block_running_ratio": self.block_running_ratio,
             "aggregate": self.aggregate,
+<<<<<<< HEAD
             "discover_only": self.discover_only,
             "proposal_ids": self.proposal_ids,
         }
@@ -1942,6 +2074,16 @@ class BatchMonitor:
             await self.process_l2_block_range()
         else:
             self.logger.error("Either L2 block range or proposal ids are required")
+=======
+        }
+        self.logger.info(f"Config:\n{json.dumps(config_dict, indent=2, default=str)}")
+        
+        if self.l2_block_range is not None:
+            # Process L2 block range
+            await self.process_l2_block_range()
+        else:
+            self.logger.error("L2 block range is required for the new workflow")
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
             return
 
 
@@ -1964,6 +2106,7 @@ def parse_block_range(value):
         )
 
 
+<<<<<<< HEAD
 def parse_proposal_ids(value):
     """support comma-separated proposal IDs"""
     if value and value.lower() in ["none", "null"]:
@@ -1987,10 +2130,13 @@ def parse_proposal_ids(value):
         ) from exc
 
 
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 async def main():
     parser = argparse.ArgumentParser(description="Block Monitor CLI")
 
     parser.add_argument(
+<<<<<<< HEAD
         "--chain-spec-list",
         type=Path,
         default=DEFAULT_CHAIN_SPEC_LIST,
@@ -2015,14 +2161,26 @@ async def main():
         type=lambda x: parse_none_value(x, str),
         default=None,
         help="L1 Ethereum RPC endpoint override",
+=======
+        "-e",
+        "--l1-rpc",
+        type=lambda x: parse_none_value(x, str),
+        default="https://l1rpc.internal.taiko.xyz",
+        help='L1 Ethereum RPC endpoint (use "none" for None value)',
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     parser.add_argument(
         "-l",
         "--l2-rpc",
         type=lambda x: parse_none_value(x, str),
+<<<<<<< HEAD
         default=None,
         help="L2 RPC endpoint override",
+=======
+        default="https://l2rpc.internal.taiko.xyz",
+        help='L2 RPC endpoint (use "none" for None value)',
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     parser.add_argument(
@@ -2032,12 +2190,15 @@ async def main():
         default="http://localhost:8080",
         help='Raiko RPC endpoint (use "none" for None value)',
     )
+<<<<<<< HEAD
     parser.add_argument(
         "--api-key",
         type=lambda x: parse_none_value(x, str),
         default=os.environ.get("RAIKO2_API_KEY"),
         help='Optional x-api-key header value (defaults to RAIKO2_API_KEY when set)',
     )
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 
     parser.add_argument(
         "-o",
@@ -2067,11 +2228,16 @@ async def main():
         "-g",
         "--l2-block-range",
         type=parse_block_range,
+<<<<<<< HEAD
         default=None,
+=======
+        default="None",
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         help='L2 block range in format "start,end" or "none" for None value',
     )
 
     parser.add_argument(
+<<<<<<< HEAD
         "--proposal-id",
         dest="proposal_id",
         action="append",
@@ -2089,6 +2255,8 @@ async def main():
     )
 
     parser.add_argument(
+=======
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         "-t",
         "--prove-type",
         type=lambda x: parse_none_value(x, str),
@@ -2100,8 +2268,13 @@ async def main():
         "-i",
         "--abi-file",
         type=lambda x: parse_none_value(x, str),
+<<<<<<< HEAD
         default=None,
         help="L1 event ABI file path override",
+=======
+        default="./IInbox.json",
+        help='L1 event ABI file path (use "none" for None value)',
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     parser.add_argument(
@@ -2109,15 +2282,24 @@ async def main():
         "--anchor-abi-file",
         type=lambda x: parse_none_value(x, str),
         default=None,
+<<<<<<< HEAD
         help="L2 anchor contract ABI file path override",
+=======
+        help='L2 anchor contract ABI file path for decoding anchorV4 function (optional, use "none" for None value)',
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     parser.add_argument(
         "-c",
         "--event-contract",
         type=lambda x: parse_none_value(x, str),
+<<<<<<< HEAD
         default=None,
         help="Event contract address override",
+=======
+        default="0x3b37a799290950fef954dfF547608baC52A12571",
+        help='Event contract address (use "none" for None value)',
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     parser.add_argument(
@@ -2144,6 +2326,7 @@ async def main():
         help="Aggregate mode: if > 0, collect n proposals and submit as aggregate request",
     )
 
+<<<<<<< HEAD
     parser.add_argument(
         "--discover-only",
         action="store_true",
@@ -2188,6 +2371,15 @@ async def main():
         l2_rpc=resolved.l2_rpc,
         abi_file=resolved.abi_file,
         evt_address=web3.Web3.to_checksum_address(resolved.event_contract),
+=======
+    args = parser.parse_args()
+
+    monitor = BatchMonitor(
+        l1_rpc=args.l1_rpc,
+        l2_rpc=args.l2_rpc,
+        abi_file=args.abi_file,
+        evt_address=web3.Web3.to_checksum_address(args.event_contract),
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
         raiko_rpc=args.raiko_rpc,
         log_file=args.log_file,
         polling_interval=args.polling_interval,
@@ -2196,6 +2388,7 @@ async def main():
         prove_type=args.prove_type,
         watch_mode=args.watch_event,
         time_speed=args.time_speed,
+<<<<<<< HEAD
         anchor_abi_file=resolved.anchor_abi_file,
         aggregate=args.aggregate,
         network=args.network,
@@ -2204,14 +2397,23 @@ async def main():
         proposal_out=args.proposal_out,
         api_key=args.api_key,
         proposal_ids=proposal_ids,
+=======
+        anchor_abi_file=args.anchor_abi_file,
+        aggregate=args.aggregate,
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
     )
 
     await monitor.run()
 
 
 # Example usage:
+<<<<<<< HEAD
 # python stress_shasta_proposal.py -t native -g 1000,2000 -p 10 -o stress_dev.log -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json -x 100 -w
 # python stress_shasta_proposal.py -t native -g 1000,2000 -A 5 -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1-rpc.example.com -l https://l2-rpc.example.com -i IInbox.json -b Anchor.json
+=======
+# python stress_shasta_proposal.py -t native -g 1000,2000 -p 10 -o stress_dev.log -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1rpc.internal.taiko.xyz -l https://l2rpc.internal.taiko.xyz -i IInbox.json -b Anchor.json -x 100 -w
+# python stress_shasta_proposal.py -t native -g 1000,2000 -A 5 -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1rpc.internal.taiko.xyz -l https://l2rpc.internal.taiko.xyz -i IInbox.json -b Anchor.json
+>>>>>>> 0610fdd (chore: add shasta regression helper scripts)
 # Note: 
 #   -a (--raiko-rpc): Raiko RPC endpoint (default: http://localhost:8080)
 #   -g now specifies L2 block range instead of L1 block range

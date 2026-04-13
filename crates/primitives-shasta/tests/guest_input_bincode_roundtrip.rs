@@ -1,11 +1,14 @@
-//! Regression test: fixture GuestInput must bincode roundtrip.
+//! Regression test: the shared Shasta GuestInput fixture must bincode roundtrip.
 use raiko2_primitives_shasta::GuestInput;
 
 #[test]
-fn guest_input_json_to_bincode_roundtrip_test_json() -> Result<(), Box<dyn std::error::Error>> {
-    // Keep this test pinned to the repo's checked-in GuestInput fixture so we catch any newly
-    // introduced non-bincode-compatible custom serde early (before SP1 runtime).
-    let json = include_str!("../../../test/guest_inputs/shasta/fixture/proposals/proposal_3.json");
+fn guest_input_json_to_bincode_roundtrip_shared_fixture() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Keep this test pinned to the repo's shared Shasta fixture so we catch any newly introduced
+    // non-bincode-compatible custom serde early (before SP1 runtime).
+    let json = include_str!(
+        "../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+    );
     let input: GuestInput = serde_json::from_str(json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 

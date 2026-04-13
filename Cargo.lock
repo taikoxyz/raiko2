@@ -10543,6 +10543,7 @@ dependencies = [
  "risc0-zkvm",
  "serde",
  "serde_json",
+ "serde_with 3.18.0",
  "sp1-sdk",
  "tokio",
  "tracing",

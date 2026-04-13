@@ -3,6 +3,7 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
+    gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1::{ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,9 @@ pub struct ProverConfig {
     /// Request sampling policy for `proof_type=zk_any`.
     #[serde(default)]
     pub zk_any: ZkAnyConfig,
+    /// Gaiko2 remote prover configuration.
+    #[serde(default)]
+    pub gaiko2: Gaiko2Config,
 }
 
 impl ProverConfig {
@@ -79,6 +83,20 @@ impl ProverConfig {
         self.boundless.validate()?;
         if self.risc0.execution_po2 == 0 {
             bail!("prover.risc0.execution_po2 must be greater than zero");
+        }
+        if matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Sgx,
+                runner: RunnerKind::Remote
+            }
+        ) {
+            if self.gaiko2.base_url.trim().is_empty() {
+                bail!("prover.gaiko2.base_url must not be empty");
+            }
+            if self.gaiko2.timeout_ms == 0 {
+                bail!("prover.gaiko2.timeout_ms must be greater than zero");
+            }
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
         if matches!(self.sp1.mode, raiko2_prover::sp1::ExecutionMode::Prove) && !self.sp1.verify {
@@ -156,6 +174,28 @@ impl Default for ZkAnyTargetConfig {
         Self {
             probability: 0.0,
             per_day: 0,
+        }
+    }
+}
+
+/// Gaiko2 remote prover configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Gaiko2Config {
+    pub base_url: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for Gaiko2Config {
+    fn default() -> Self {
+        let defaults = Gaiko2ProverConfig::default();
+        Self {
+            base_url: defaults.base_url,
+            timeout_ms: if defaults.timeout_ms == 0 {
+                300_000
+            } else {
+                defaults.timeout_ms
+            },
         }
     }
 }

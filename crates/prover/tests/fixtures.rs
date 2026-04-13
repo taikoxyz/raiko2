@@ -1,3 +1,4 @@
+#![cfg(feature = "risc0")]
 #![allow(missing_docs)]
 #![allow(clippy::redundant_pub_crate)]
 

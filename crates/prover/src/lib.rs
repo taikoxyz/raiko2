@@ -9,23 +9,33 @@
 //!
 //! - **RISC0**: RISC-V zkVM prover
 //! - **SP1**: Succinct zkVM prover
+//! - **Gaiko2**: remote geth-backed TEE prover
 //!
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use raiko2_prover::{risc0::Risc0Prover, sp1::Sp1Prover};
+//! use raiko2_prover::gaiko2::Gaiko2Prover;
+//! use raiko2_prover::risc0::Risc0Prover;
+//! use raiko2_prover::sp1::Sp1Prover;
 //!
 //! // Create RISC0 prover
 //! let risc0_prover = Risc0Prover::new(Default::default());
 //!
 //! // Create SP1 prover after loading the SP1 backend ELFs.
 //! let sp1_prover = Sp1Prover::new_with_backend(Default::default(), &sp1_backend)?;
+//! // Create a gaiko2 prover client
+//! let gaiko2_prover = Gaiko2Prover::new(Default::default());
 //! ```
 
+#[cfg(feature = "boundless")]
 pub mod boundless;
+pub mod gaiko2;
 pub mod native;
+#[cfg(feature = "risc0")]
 pub mod risc0;
+#[cfg(feature = "sp1")]
 pub mod sp1;
+#[cfg(feature = "sp1")]
 pub use sp1::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
@@ -39,7 +49,9 @@ use raiko2_primitives_shasta::{
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
+#[cfg(feature = "risc0")]
 use risc0_ethereum_contracts_boundless::encode_seal;
+#[cfg(feature = "risc0")]
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -76,6 +88,7 @@ pub struct BoundlessSubmissionResume {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProverProgress {
     BoundlessSubmission(BoundlessSubmissionProgress),
+    #[cfg(feature = "sp1")]
     Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
@@ -92,9 +105,12 @@ pub trait ProverProgressObserver: Send + Sync {
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 const B256_BYTES: usize = 32;
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() == B256_BYTES {
         Ok(B256::from_slice(public_values))
@@ -106,6 +122,7 @@ pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoRes
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() >= B256_BYTES {
         Ok(B256::from_slice(&public_values[..B256_BYTES]))
@@ -117,6 +134,7 @@ pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> Raiko
     }
 }
 
+#[cfg(any(feature = "risc0", feature = "boundless", test))]
 pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) -> String {
     let proof: Vec<u8> = (seal.to_vec(), image_id)
         .abi_encode()
@@ -126,6 +144,7 @@ pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) ->
     alloy_primitives::hex::encode_prefixed(proof)
 }
 
+#[cfg(any(feature = "risc0", feature = "boundless", test))]
 pub(crate) fn encode_risc0_aggregation_seal_payload(
     seal: &[u8],
     block_image_id: B256,
@@ -139,6 +158,7 @@ pub(crate) fn encode_risc0_aggregation_seal_payload(
     alloy_primitives::hex::encode_prefixed(proof)
 }
 
+#[cfg(feature = "risc0")]
 pub(crate) fn encode_risc0_proposal_proof_payload(
     receipt: &Risc0Receipt,
     image_id: B256,
@@ -149,6 +169,7 @@ pub(crate) fn encode_risc0_proposal_proof_payload(
     )
 }
 
+#[cfg(feature = "risc0")]
 pub(crate) fn encode_risc0_aggregation_proof_payload(
     receipt: &Risc0Receipt,
     block_image_id: B256,
@@ -160,6 +181,7 @@ pub(crate) fn encode_risc0_aggregation_proof_payload(
     )
 }
 
+#[cfg(feature = "boundless")]
 pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
     value
         .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())

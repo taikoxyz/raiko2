@@ -15,6 +15,7 @@ Hoodi-compatible v3 API.
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
+- Optional SGX route: `sgx/remote` for a configured Gaiko2 remote prover
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
@@ -85,6 +86,7 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
+- `sgx/remote` submits Shasta proposal proving to a configured Gaiko2 remote SGX prover.
 
 ## Repository Map
 

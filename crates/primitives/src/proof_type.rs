@@ -46,6 +46,7 @@ impl std::str::FromStr for ProofType {
         match s.trim().to_lowercase().as_str() {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
+            "sgx" => Ok(ProofType::Sgx),
             "risc0" => Ok(ProofType::Risc0),
             _ => Err(format!("Unknown proof type {s}")),
         }
@@ -59,6 +60,7 @@ impl TryFrom<u8> for ProofType {
         match value {
             0 => Ok(Self::Native),
             1 => Ok(Self::Sp1),
+            2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
             _ => Err(format!("Unknown proof type {value}")),
         }
@@ -97,14 +99,14 @@ mod tests {
     use super::ProofType;
 
     #[test]
-    fn rejects_sgx_variants_by_string() {
-        assert!("sgx".parse::<ProofType>().is_err());
+    fn accepts_sgx_variant_by_string() {
+        assert_eq!("sgx".parse::<ProofType>().unwrap(), ProofType::Sgx);
         assert!("sgxgeth".parse::<ProofType>().is_err());
     }
 
     #[test]
-    fn rejects_sgx_variants_by_u8() {
-        assert!(ProofType::try_from(2u8).is_err());
+    fn accepts_sgx_variant_by_u8() {
+        assert_eq!(ProofType::try_from(2u8).unwrap(), ProofType::Sgx);
         assert!(ProofType::try_from(4u8).is_err());
     }
 }

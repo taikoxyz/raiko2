@@ -134,6 +134,13 @@ pub(crate) fn boundless_prover_config(
     }
 }
 
+pub(crate) fn gaiko2_prover_config(config: &Config) -> raiko2_prover::gaiko2::Gaiko2Config {
+    raiko2_prover::gaiko2::Gaiko2Config {
+        base_url: config.prover.gaiko2.base_url.clone(),
+        timeout_ms: config.prover.gaiko2.timeout_ms,
+    }
+}
+
 #[cfg(feature = "redis-queue")]
 use raiko2_pipeline::PipelineKey;
 

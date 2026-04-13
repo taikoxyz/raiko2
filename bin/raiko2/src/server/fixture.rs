@@ -72,10 +72,12 @@ pub(crate) struct FixtureProvider {
 
 impl FixtureProvider {
     #[must_use]
-    pub(crate) fn from_repo_test_json() -> Self {
-        let raw =
-            include_str!("../../../../test/guest_inputs/shasta/fixture/proposals/proposal_3.json");
-        let mut input: GuestInput = serde_json::from_str(raw).expect("parse fixture GuestInput");
+    pub(crate) fn from_repo_shared_fixture() -> Self {
+        let raw = include_str!(
+            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+        );
+        let mut input: GuestInput =
+            serde_json::from_str(raw).expect("parse shared fixture json as GuestInput");
         if input.taiko.l1_ancestor_headers.is_empty() && input.taiko.l1_header.number != 0 {
             input.taiko.l1_ancestor_headers = vec![input.taiko.l1_header.clone()];
         }
@@ -553,7 +555,7 @@ where
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaNative,
         NativeProver,

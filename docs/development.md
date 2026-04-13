@@ -167,17 +167,20 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shas
 ## Guest Benchmarking
 
 `bench-guest` measures execution metadata, cycles, and wall time for guest runs.
+The checked-in sample input lives at
+`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json` and was
+generated from a real Shasta preflight.
 
 Typical workflow:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json --repeat 3
 ```
 
 Reuse prebuilt ELFs:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json --repeat 3
 ```
 
 If the checked-in SP1 ELF is stale, rebuild it with the benchmark feature:

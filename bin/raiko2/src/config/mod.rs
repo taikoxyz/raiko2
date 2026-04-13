@@ -410,6 +410,10 @@ mod tests {
                 .unwrap(),
             raiko2_pipeline::PipelineKey::ShastaRisc0Network
         );
+        assert_eq!(
+            "sgx/remote".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
+        );
         assert!("invalid".parse::<PipelineRoute>().is_err());
     }
 
@@ -441,6 +445,30 @@ mod tests {
 
         let err = config.prover.validate().expect_err("missing rpc url");
         assert!(err.to_string().contains("rpc_url"));
+    }
+
+    #[test]
+    fn test_sgx_remote_route_requires_gaiko2_base_url() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+
+        let err = config
+            .prover
+            .validate()
+            .expect_err("missing gaiko2 base url");
+        assert!(err.to_string().contains("gaiko2.base_url"));
+    }
+
+    #[test]
+    fn test_sgx_remote_route_accepts_configured_gaiko2() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.gaiko2.base_url = "http://127.0.0.1:8080".to_string();
+        config.prover.gaiko2.timeout_ms = 30_000;
+
+        assert!(config.prover.validate().is_ok());
     }
 
     #[test]

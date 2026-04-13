@@ -24,6 +24,12 @@ impl WitnessHeader {
     #[must_use]
     pub fn from_header(header: Header) -> Self {
         let hash = header.hash_slow();
+        Self::from_header_with_hash(header, hash)
+    }
+
+    /// Build a witness header from a decoded header and a precomputed block hash.
+    #[must_use]
+    pub const fn from_header_with_hash(header: Header, hash: B256) -> Self {
         Self {
             number: header.number,
             parent_hash: header.parent_hash,
@@ -57,13 +63,18 @@ impl WitnessHeader {
         }
     }
 
+    /// Drop the full header payload while preserving compact metadata in place.
+    pub fn compact_in_place(&mut self) {
+        self.header = None;
+    }
+
     /// Build a witness header from RLP-encoded bytes.
     ///
     /// # Errors
     ///
     /// Returns an error if the bytes do not decode into a valid header.
-    pub fn from_rlp(bytes: Bytes) -> Result<Self, alloy_rlp::Error> {
-        let mut slice = bytes.as_ref();
+    pub fn from_rlp(bytes: &[u8]) -> Result<Self, alloy_rlp::Error> {
+        let mut slice = bytes;
         Header::decode(&mut slice).map(Self::from_header)
     }
 
@@ -76,7 +87,8 @@ impl WitnessHeader {
     where
         T: Encodable,
     {
-        Self::from_rlp(alloy_rlp::encode(header).into())
+        let encoded = alloy_rlp::encode(header);
+        Self::from_rlp(encoded.as_ref())
     }
 
     /// Returns the full header when present.
@@ -113,7 +125,7 @@ struct WitnessHeaderBincode<'a> {
 #[serde(untagged)]
 enum WitnessHeaderHuman {
     Legacy(Bytes),
-    Full(WitnessHeaderSerde),
+    Full(Box<WitnessHeaderSerde>),
     Compact(WitnessHeaderCompactSerde),
 }
 
@@ -209,12 +221,9 @@ impl<'de> Deserialize<'de> for WitnessHeader {
         if deserializer.is_human_readable() {
             return match WitnessHeaderHuman::deserialize(deserializer)? {
                 WitnessHeaderHuman::Legacy(bytes) => {
-                    let mut slice = bytes.as_ref();
-                    let header = Header::decode(&mut slice)
-                        .map_err(|err| D::Error::custom(err.to_string()))?;
-                    Ok(Self::from_header(header))
+                    Self::from_rlp(bytes.as_ref()).map_err(|err| D::Error::custom(err.to_string()))
                 }
-                WitnessHeaderHuman::Full(value) => Ok(value.into()),
+                WitnessHeaderHuman::Full(value) => Ok((*value).into()),
                 WitnessHeaderHuman::Compact(value) => Ok(value.into()),
             };
         }
@@ -436,7 +445,7 @@ impl TryFrom<alloy_rpc_types_debug::ExecutionWitness> for ExecutionWitness {
         let headers = value
             .headers
             .into_iter()
-            .map(WitnessHeader::from_rlp)
+            .map(|bytes| WitnessHeader::from_rlp(bytes.as_ref()))
             .collect::<Result<_, _>>()?;
         let state = value
             .state
@@ -563,6 +572,7 @@ mod tests {
         let header = WitnessHeader::from_header(sample_header(7));
         let witness = ExecutionWitness {
             state: vec![WitnessStateNode::from_bytes(Bytes::from_static(b"state"))],
+            state_indices: Vec::new(),
             codes: vec![Bytes::from_static(b"code")],
             keys: vec![Bytes::from_static(b"key")],
             headers: vec![header],

@@ -678,7 +678,11 @@ where
         if canonical_parent_header.is_some() {
             canonical_parent_header = Some(block.header.clone());
         }
-        roll_proposal_ancestor_headers_in_place(&mut proposal_ancestor_headers, &block.header);
+        roll_proposal_ancestor_headers_in_place(
+            &mut proposal_ancestor_headers,
+            &block.header,
+            validated_hash,
+        );
     }
     bench_report_end("proposal_stateless_validation");
 

@@ -22,7 +22,7 @@ impl AncestorHashes {
     }
 
     fn get(&self, block_number: u64) -> Option<B256> {
-        let index = block_number.checked_sub(self.start_block_number)? as usize;
+        let index = usize::try_from(block_number.checked_sub(self.start_block_number)?).ok()?;
         self.hashes.get(index).copied()
     }
 }

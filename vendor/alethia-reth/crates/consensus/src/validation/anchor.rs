@@ -8,6 +8,16 @@ use reth_primitives_traits::{Block, BlockBody, RecoveredBlock, SignedTransaction
 use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_evm::alloy::TAIKO_GOLDEN_TOUCH_ADDRESS;
 
+fn validate_anchor_sender(sender: Address) -> Result<(), ConsensusError> {
+    if sender != Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS) {
+        return Err(ConsensusError::Other(format!(
+            "Anchor transaction sender must be the treasury address, got {sender}"
+        )));
+    }
+
+    Ok(())
+}
+
 pub use crate::anchor_constants::{
     ANCHOR_V1_SELECTOR, ANCHOR_V1_V2_GAS_LIMIT, ANCHOR_V2_SELECTOR, ANCHOR_V3_SELECTOR,
     ANCHOR_V3_V4_GAS_LIMIT, ANCHOR_V4_SELECTOR,
@@ -23,8 +33,7 @@ pub struct AnchorValidationContext {
     pub base_fee_per_gas: u64,
 }
 
-/// Validates a single anchor transaction against the current hardfork rules.
-pub fn validate_anchor_transaction(
+fn validate_anchor_transaction_base(
     anchor_transaction: &impl SignedTransaction,
     chain_spec: &TaikoChainSpec,
     ctx: AnchorValidationContext,
@@ -70,17 +79,22 @@ pub fn validate_anchor_transaction(
         )));
     }
 
+    Ok(())
+}
+
+/// Validates a single anchor transaction against the current hardfork rules.
+pub fn validate_anchor_transaction(
+    anchor_transaction: &impl SignedTransaction,
+    chain_spec: &TaikoChainSpec,
+    ctx: AnchorValidationContext,
+) -> Result<(), ConsensusError> {
+    validate_anchor_transaction_base(anchor_transaction, chain_spec, ctx)?;
+
     // Ensure the sender is the treasury address.
     let sender = anchor_transaction.try_recover().map_err(|err| {
         ConsensusError::Other(format!("Anchor transaction sender must be recoverable: {err}"))
     })?;
-    if sender != Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS) {
-        return Err(ConsensusError::Other(format!(
-            "Anchor transaction sender must be the treasury address, got {sender}"
-        )));
-    }
-
-    Ok(())
+    validate_anchor_sender(sender)
 }
 
 /// Validates the anchor transaction in the block.
@@ -95,8 +109,11 @@ where
         Some(tx) => tx,
         None => return Ok(()),
     };
+    let anchor_sender = block.senders().first().copied().ok_or_else(|| {
+        ConsensusError::Other("Recovered block is missing anchor transaction sender".into())
+    })?;
 
-    validate_anchor_transaction(
+    validate_anchor_transaction_base(
         anchor_transaction,
         chain_spec,
         AnchorValidationContext {
@@ -106,7 +123,9 @@ where
                 ConsensusError::Other("Block base fee per gas must be set".into())
             })?,
         },
-    )
+    )?;
+
+    validate_anchor_sender(anchor_sender)
 }
 
 /// Validates that transaction input starts with the expected call selector.

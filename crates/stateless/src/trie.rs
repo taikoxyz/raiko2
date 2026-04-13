@@ -27,6 +27,11 @@ pub trait StatelessTrie: core::fmt::Debug {
     /// Implementations may ignore `shared_state_nodes` when the witness already carries inline
     /// state. Proposal-mode callers use this to avoid embedding duplicate state node bytes in each
     /// witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the witness cannot be materialized into a valid trie or if the
+    /// pre-state root does not match.
     fn new_with_state_pool(
         witness: &ExecutionWitness,
         shared_state_nodes: &[WitnessStateNode],

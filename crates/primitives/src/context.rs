@@ -102,7 +102,7 @@ mod tests {
     fn test_proof_request_default() {
         let req = ProofRequest::default();
         assert_eq!(req.l1_chain_id, 1);
-        assert_eq!(req.l2_chain_id, 167000);
+        assert_eq!(req.l2_chain_id, 167_000);
         assert_eq!(req.proposal_id, 0);
         assert_eq!(req.l2_block_range, None);
         assert_eq!(req.shasta, None);
@@ -116,7 +116,7 @@ mod tests {
     fn test_proof_request_serialization() -> Result<(), Box<dyn std::error::Error>> {
         let req = ProofRequest {
             l1_chain_id: 1,
-            l2_chain_id: 167000,
+            l2_chain_id: 167_000,
             proposal_id: 123,
             l2_block_range: Some(L2BlockRange { start: 10, end: 12 }),
             shasta: Some(ShastaRequest {

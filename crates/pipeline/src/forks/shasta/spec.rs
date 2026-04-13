@@ -506,7 +506,7 @@ where
                 )));
             }
 
-            validate_block_with_witness_resources(
+            let validated_hash = validate_block_with_witness_resources(
                 stateless_input.block.clone(),
                 &stateless_input.witness,
                 &ancestor_headers,
@@ -518,6 +518,7 @@ where
             roll_proposal_ancestor_headers_in_place(
                 &mut ancestor_headers,
                 &stateless_input.block.header,
+                validated_hash,
             );
         }
 

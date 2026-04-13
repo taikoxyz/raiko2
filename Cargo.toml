@@ -20,7 +20,13 @@ members = [
     "bin/guest-launcher",
     "bin/preflight",
 ]
-exclude = ["guests/*"]
+exclude = [
+    "guests/*",
+    "vendor/rust-kzg-legacy/kzg",
+    "vendor/rust-kzg-legacy/kzg-bench",
+    "vendor/rust-kzg-legacy/zkcrypto",
+    "vendor/rust-kzg-legacy/zkcrypto/bls12_381",
+]
 
 [workspace.package]
 version = "0.1.0"

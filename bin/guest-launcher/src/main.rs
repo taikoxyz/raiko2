@@ -66,7 +66,7 @@ struct Args {
     /// Skip local simulation before submitting an SP1 network proof.
     #[arg(long, default_value_t = true)]
     sp1_skip_simulation: bool,
-    /// Cycle limit for SP1 network proving.
+    /// Cycle limit for SP1 proving.
     #[arg(long, default_value_t = 1_000_000_000_000)]
     sp1_cycle_limit: u64,
     /// Timeout in seconds when waiting for an SP1 network proof.
@@ -598,6 +598,7 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
                     let proof = prover
                         .prove(&pk, stdin)
                         .mode(args.proof_mode.into())
+                        .cycle_limit(sp1_config.cycle_limit)
                         .await
                         .context("prove failed")?;
                     report.wall_time_ms =
@@ -620,6 +621,7 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
                     let proof = prover
                         .prove(&pk, stdin)
                         .mode(args.proof_mode.into())
+                        .cycle_limit(sp1_config.cycle_limit)
                         .await
                         .context("prove failed")?;
                     report.wall_time_ms =

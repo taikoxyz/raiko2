@@ -630,7 +630,7 @@ mod tests {
     fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_mainnet".to_string(),
-            167000,
+            167_000,
             SpecId::CANCUN,
             Eip1559Constants::default(),
             true,
@@ -675,7 +675,7 @@ mod tests {
     fn converts_taiko_devnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_devnet".to_string(),
-            167001,
+            167_001,
             SpecId::CANCUN,
             Eip1559Constants::default(),
             true,
@@ -691,7 +691,7 @@ mod tests {
     fn converts_taiko_hoodi_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_hoodi".to_string(),
-            167013,
+            167_013,
             SpecId::CANCUN,
             Eip1559Constants::default(),
             true,

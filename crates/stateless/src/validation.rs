@@ -51,6 +51,11 @@ pub fn validate_block(
 ///
 /// This is the proposal-path variant used when a contiguous sequence of blocks shares a single
 /// rolling ancestor window rather than embedding the same headers inside each witness.
+///
+/// # Errors
+///
+/// Returns `StatelessValidationError` when ancestor headers are invalid, witness data is invalid,
+/// consensus checks fail, or the computed post-state root mismatches.
 #[inline]
 pub fn validate_block_with_ancestor_headers(
     block: Block,
@@ -73,6 +78,11 @@ pub fn validate_block_with_ancestor_headers(
 
 /// Performs stateless validation of a block using ancestor overrides and a proposal-level shared
 /// state node pool.
+///
+/// # Errors
+///
+/// Returns `StatelessValidationError` when ancestor headers are invalid, witness data is invalid,
+/// consensus checks fail, or the computed post-state root mismatches.
 #[inline]
 pub fn validate_block_with_witness_resources(
     block: Block,
@@ -94,13 +104,17 @@ pub fn validate_block_with_witness_resources(
     )
 }
 
-fn decode_recovered_block(block: Block) -> Result<RecoveredBlock<Block>, StatelessValidationError> {
+pub(crate) fn decode_recovered_block(
+    block: Block,
+) -> Result<RecoveredBlock<Block>, StatelessValidationError> {
     block
         .try_into_recovered()
         .map_err(|_| StatelessValidationError::SignerRecovery)
 }
 
-fn determine_pre_state_root(headers: &[WitnessHeader]) -> Result<B256, StatelessValidationError> {
+pub(crate) fn determine_pre_state_root(
+    headers: &[WitnessHeader],
+) -> Result<B256, StatelessValidationError> {
     match headers.last() {
         Some(prev_header) => prev_header
             .full_header()
@@ -110,6 +124,7 @@ fn determine_pre_state_root(headers: &[WitnessHeader]) -> Result<B256, Stateless
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_block<T>(
     current_block: &RecoveredBlock<Block>,
     witness: &ExecutionWitness,
@@ -234,7 +249,7 @@ impl TaikoBlockReader for WitnessTaikoBlockReader {
     }
 }
 
-fn validate_block_consensus(
+pub(crate) fn validate_block_consensus(
     chain_spec: &Arc<TaikoChainSpec>,
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
@@ -269,7 +284,7 @@ fn validate_block_consensus(
     Ok(())
 }
 
-fn compute_ancestor_hashes(
+pub(crate) fn compute_ancestor_hashes(
     current_block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<AncestorHashes, StatelessValidationError> {

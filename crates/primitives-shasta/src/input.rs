@@ -57,7 +57,7 @@ impl GuestInput {
     }
 
     #[must_use]
-    pub fn proposal_state_nodes(&self) -> &[WitnessStateNode] {
+    pub const fn proposal_state_nodes(&self) -> &[WitnessStateNode] {
         self.proposal_state_nodes.as_slice()
     }
 
@@ -92,7 +92,12 @@ impl GuestInput {
         let index_by_hash = proposal_state_nodes
             .iter()
             .enumerate()
-            .map(|(index, node)| (node.hash, index as u32))
+            .map(|(index, node)| {
+                (
+                    node.hash,
+                    u32::try_from(index).expect("proposal state pool index exceeds u32"),
+                )
+            })
             .collect::<B256Map<_>>();
 
         let witness_state_indices = self
@@ -141,24 +146,32 @@ pub fn roll_proposal_ancestor_headers(
     parent_header: &Header,
 ) -> Vec<WitnessHeader> {
     let mut next_headers = current_headers.to_vec();
-    roll_proposal_ancestor_headers_in_place(&mut next_headers, parent_header);
+    roll_proposal_ancestor_headers_in_place(
+        &mut next_headers,
+        parent_header,
+        parent_header.hash_slow(),
+    );
     next_headers
 }
 
 pub fn roll_proposal_ancestor_headers_in_place(
     current_headers: &mut Vec<WitnessHeader>,
     parent_header: &Header,
+    parent_hash: B256,
 ) {
     if let Some(last) = current_headers.last_mut()
         && last.full_header().is_some()
     {
-        *last = last.clone().into_compact();
+        last.compact_in_place();
     }
     if current_headers.len() == ANCESTOR_HEADER_WINDOW_LIMIT {
         current_headers.rotate_left(1);
         current_headers.pop();
     }
-    current_headers.push(WitnessHeader::from_header(parent_header.clone()));
+    current_headers.push(WitnessHeader::from_header_with_hash(
+        parent_header.clone(),
+        parent_hash,
+    ));
 }
 
 impl From<GuestInputSerde> for GuestInput {
@@ -187,7 +200,7 @@ impl Serialize for GuestInput {
     where
         S: Serializer,
     {
-        let mut serialized = GuestInputSerde {
+        let mut guest_input = GuestInputSerde {
             witnesses: self.witnesses.clone(),
             taiko: self.taiko.clone(),
             proposal_ancestor_headers: self.initial_proposal_ancestor_headers(),
@@ -195,23 +208,23 @@ impl Serialize for GuestInput {
             proof_carry_data: self.proof_carry_data.clone(),
         };
         let (proposal_state_nodes, witness_state_indices) = self.initial_proposal_state_pool();
-        serialized.proposal_state_nodes = proposal_state_nodes;
+        guest_input.proposal_state_nodes = proposal_state_nodes;
 
-        if !serialized.proposal_ancestor_headers.is_empty() {
-            for witness in &mut serialized.witnesses {
+        if !guest_input.proposal_ancestor_headers.is_empty() {
+            for witness in &mut guest_input.witnesses {
                 witness.witness.headers.clear();
             }
         }
-        if !serialized.proposal_state_nodes.is_empty() {
+        if !guest_input.proposal_state_nodes.is_empty() {
             for (witness, state_indices) in
-                serialized.witnesses.iter_mut().zip(witness_state_indices)
+                guest_input.witnesses.iter_mut().zip(witness_state_indices)
             {
                 witness.witness.state.clear();
                 witness.witness.state_indices = state_indices;
             }
         }
 
-        serialized.serialize(serializer)
+        guest_input.serialize(serializer)
     }
 }
 

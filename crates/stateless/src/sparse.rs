@@ -54,6 +54,14 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
     fn hash(&mut self) -> B256 {
         self.inner.hash()
     }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn rlp_nodes(&self) -> Vec<Bytes> {
+        self.inner.rlp_nodes()
+    }
 }
 
 /// Represents a sparse version of the Ethereum world state.
@@ -131,6 +139,35 @@ impl SparseState {
         };
 
         Ok(trie)
+    }
+
+    pub(super) fn state_node_count(&self) -> usize {
+        self.state.size()
+    }
+
+    pub(super) fn storage_trie_count(&self) -> usize {
+        self.storages.borrow().len()
+    }
+
+    pub(super) fn storage_node_count(&self) -> usize {
+        self.storages.borrow().values().map(RlpTrie::size).sum()
+    }
+
+    pub(super) fn materialized_witness_state_nodes(&self) -> Vec<WitnessStateNode> {
+        let mut nodes = self
+            .state
+            .rlp_nodes()
+            .into_iter()
+            .map(WitnessStateNode::from_bytes)
+            .collect::<Vec<_>>();
+        nodes.extend(
+            self.storages
+                .borrow()
+                .values()
+                .flat_map(RlpTrie::rlp_nodes)
+                .map(WitnessStateNode::from_bytes),
+        );
+        ExecutionWitness::canonicalize_state_nodes(nodes)
     }
 }
 

@@ -340,14 +340,13 @@ mod test {
 
     #[test]
     fn bincode_deserialize_kzg_settings_bin() -> Result<()> {
-        static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
         let start = std::time::Instant::now();
-        let deserialized_settings: KZGSettings =
-            bincode::deserialize(BIN).context("Failed to deserialize KZGSettings from binary")?;
+        let deserialized_settings: KZGSettings = bincode::deserialize(DEFAULT_KZG_SETTINGS_BIN)
+            .context("Failed to deserialize KZGSettings from binary")?;
         println!(
             "✓ bincode deserialized KZGSettings in {:.2}s ({} bytes)",
             start.elapsed().as_secs_f64(),
-            BIN.len()
+            DEFAULT_KZG_SETTINGS_BIN.len()
         );
 
         let blob_bytes = vec![0u8; BYTES_PER_BLOB];
@@ -358,9 +357,8 @@ mod test {
 
     #[test]
     fn bincode_settings_matches_embedded_settings_commit_proof_verify() -> Result<()> {
-        static BIN: &[u8] = include_bytes!("../../kzg_settings.bin");
-        let deserialized_settings: KZGSettings =
-            bincode::deserialize(BIN).context("Failed to deserialize KZGSettings from binary")?;
+        let deserialized_settings: KZGSettings = bincode::deserialize(DEFAULT_KZG_SETTINGS_BIN)
+            .context("Failed to deserialize KZGSettings from binary")?;
 
         let embedded_settings = get_kzg_settings().context("load embedded settings")?;
 

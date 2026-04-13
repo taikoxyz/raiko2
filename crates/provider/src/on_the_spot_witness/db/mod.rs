@@ -109,6 +109,10 @@ impl<D> PreflightDb<D> {
 
 impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
     /// Fetches all the EIP-1186 storage proofs from the `access_list` and stores them in the DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if proof fetching fails or the returned proof response is invalid.
     pub async fn add_access_list(&mut self, access_list: &AccessList) -> Result<()> {
         for AccessListItem {
             address,
@@ -130,6 +134,10 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
     ///
     /// This trace continues until it reaches a block number lower than the minimum
     /// number recorded in `self.block_hash_numbers`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if block fetching fails or any referenced ancestor block is missing.
     pub async fn ancestor_proof(
         &self,
         start_hash: B256,
@@ -170,6 +178,11 @@ impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {
 
     /// Returns the Merkle proofs (sparse [`MerkleTrie`]) for the state and all storage queries
     /// recorded by the [`RevmDatabase`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if block fetching fails, account proofs are missing, or any returned trie
+    /// proof is invalid.
     pub async fn state_proof(&mut self) -> Result<(MerkleTrie, AddressMap<MerkleTrie>)> {
         // if no accounts were accessed, use the state root of the corresponding block as is
         if self.accounts.is_empty() {

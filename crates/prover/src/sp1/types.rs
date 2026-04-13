@@ -247,7 +247,6 @@ impl Sp1ConfigOverrides {
         self.network_mode.is_some()
             || self.fulfillment_strategy.is_some()
             || self.skip_simulation.is_some()
-            || self.cycle_limit.is_some()
             || self.timeout_secs.is_some()
     }
 }
@@ -633,5 +632,27 @@ mod tests {
             )
             .expect_err("network overrides should require network prover");
         assert_eq!(err, Sp1ConfigError::NetworkOverridesRequireNetworkProver);
+    }
+
+    #[test]
+    fn resolve_request_config_allows_local_cycle_limit_override() {
+        let config = Sp1Config {
+            prover: ProverMode::Local,
+            cycle_limit: 1_000_000_000_000,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            cycle_limit: Some(251_290_908),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("local cycle_limit override should be accepted");
+        assert_eq!(resolved.prover, ProverMode::Local);
+        assert_eq!(resolved.cycle_limit, 251_290_908);
     }
 }

@@ -362,7 +362,7 @@ mod tests {
     use alloy_primitives::{Address, B256, Signature, TxKind, U256};
     use alloy_sol_types::{SolCall, sol};
     use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
-    use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs};
+    use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
     use raiko2_protocol_shasta::TaikoManifest;
     sol! {
@@ -400,14 +400,21 @@ mod tests {
         let chain_spec = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(167_000)
             .expect("supported taiko mainnet chain spec");
+        let mut parent_header = alloy_consensus::Header::default();
+        parent_header.number = 0;
+        parent_header.timestamp = 1;
+        parent_header.parent_hash = B256::from([8u8; 32]);
+        parent_header.state_root = B256::from([0x11; 32]);
+
         let mut witness = raiko2_primitives::StatelessInput {
             chain_spec,
             ..Default::default()
         };
         witness.block.header.number = 1;
         witness.block.header.timestamp = u64::MAX / 2;
-        witness.block.header.parent_hash = B256::from([9u8; 32]);
+        witness.block.header.parent_hash = parent_header.hash_slow();
         witness.block.header.state_root = B256::from([1u8; 32]);
+        witness.witness.headers = vec![WitnessHeader::from_header(parent_header)];
 
         let mut l1_header = alloy_consensus::Header::default();
         l1_header.number = 7;
@@ -468,6 +475,6 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("RISC0 proposal mock execution failed"));
         assert!(message.contains("stateless block validation failed at index 0"));
-        assert!(message.contains("missing required ancestor headers"));
+        assert!(message.contains("consensus validation failed: base fee missing"));
     }
 }

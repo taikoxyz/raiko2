@@ -8,11 +8,13 @@
 //! It validates blocks without requiring access to the full node state by
 //! using state proofs and witness data.
 
+mod analysis;
 mod sparse;
 mod trie;
 mod validation;
 mod witness_db;
 
+pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{

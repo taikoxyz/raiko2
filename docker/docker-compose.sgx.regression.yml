@@ -1,0 +1,130 @@
+name: raiko2-sgx-regression
+
+x-raiko2-sgx-common: &raiko2-sgx-common
+  build:
+    context: ..
+    dockerfile: Dockerfile.sgx
+  image: ${RAIKO2_SGX_IMAGE:-raiko2-sgx:local}
+  restart: unless-stopped
+  environment:
+    RUST_LOG: ${RUST_LOG:-info}
+    PCCS_HOST: ${PCCS_HOST:-host.docker.internal:8081}
+    GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
+    GRAMINE_ENCLAVE_KEY: /root/.config/gramine/enclave-key.pem
+    RAIKO2_SGX_CONFIG_DIR: /var/lib/raiko2/sgx/config
+    RAIKO2_SGX_SECRET_DIR: /var/lib/raiko2/sgx/secrets
+    RAIKO2_SGX_LISTEN_ADDR: 0.0.0.0:8080
+    RAIKO2_SGX_MODE: ${RAIKO2_SGX_MODE:-tee}
+    RAIKO2_SGX_FORK: ${RAIKO2_SGX_FORK:-shasta}
+    RAIKO2_SGX_INSTANCE_ID: ${RAIKO2_SGX_INSTANCE_ID:-}
+  devices:
+    - /dev/sgx_enclave:/dev/sgx_enclave
+    - /dev/sgx_provision:/dev/sgx_provision
+  volumes:
+    - ${RAIKO2_SGX_CONFIG_DIR_HOST:-./var/raiko2-sgx/config}:/var/lib/raiko2/sgx/config
+    - ${RAIKO2_SGX_SECRET_DIR_HOST:-./var/raiko2-sgx/secrets}:/var/lib/raiko2/sgx/secrets
+    - ${RAIKO2_SGX_GRAMINE_DIR_HOST:-${HOME}/.config/gramine}:/root/.config/gramine:ro
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+x-gaiko2-sgxgeth-common: &gaiko2-sgxgeth-common
+  image: ${GAIKO2_SGXGETH_IMAGE:-gaiko2-tee:latest}
+  restart: unless-stopped
+  environment:
+    GAIKO2_PROVING_MODE: tee
+    GAIKO2_TEE_TYPE: ${GAIKO2_TEE_TYPE:-ego}
+    GAIKO2_CONFIG_DIR: /var/lib/gaiko2/config
+    GAIKO2_SECRET_DIR: /var/lib/gaiko2/secrets
+    GAIKO2_PORT: "8080"
+    GAIKO2_FORK: ${GAIKO2_FORK:-shasta}
+    GAIKO2_INSTANCE_ID: ${GAIKO2_INSTANCE_ID:-}
+    PCCS_HOST: ${PCCS_HOST:-host.docker.internal:8081}
+  devices:
+    - /dev/sgx_enclave:/dev/sgx_enclave
+    - /dev/sgx_provision:/dev/sgx_provision
+  volumes:
+    - ${GAIKO2_CONFIG_DIR_HOST:-./var/gaiko2-sgxgeth/config}:/var/lib/gaiko2/config
+    - ${GAIKO2_SECRET_DIR_HOST:-./var/gaiko2-sgxgeth/secrets}:/var/lib/gaiko2/secrets
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  raiko2-sgx-init:
+    <<: *raiko2-sgx-common
+    container_name: raiko2-sgx-init
+    command:
+      - --init
+    restart: "no"
+    profiles:
+      - init
+
+  raiko2-sgx:
+    <<: *raiko2-sgx-common
+    container_name: raiko2-sgx
+    ports:
+      - "${RAIKO2_SGX_PUBLIC_PORT:-9090}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  gaiko2-sgxgeth-init:
+    <<: *gaiko2-sgxgeth-common
+    container_name: gaiko2-sgxgeth-init
+    command:
+      - --init
+    restart: "no"
+    profiles:
+      - init
+
+  gaiko2-sgxgeth:
+    <<: *gaiko2-sgxgeth-common
+    container_name: gaiko2-sgxgeth
+    ports:
+      - "${GAIKO2_SGXGETH_PUBLIC_PORT:-8090}:8080"
+
+  raiko2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        BIN_FEATURES: ${BIN_FEATURES:-}
+    image: ${RAIKO2_IMAGE:-raiko2:local}
+    container_name: raiko2
+    restart: unless-stopped
+    init: true
+    profiles:
+      - raiko2
+    depends_on:
+      - raiko2-sgx
+      - gaiko2-sgxgeth
+    environment:
+      RAIKO2_CONFIG: /etc/raiko2/config.toml
+      RAIKO2_HOST: 0.0.0.0
+      RAIKO2_PORT: 8080
+      RUST_LOG: ${RUST_LOG:-info}
+      RAIKO2_L1_RPC: ${RAIKO2_L1_RPC}
+      RAIKO2_L2_RPC: ${RAIKO2_L2_RPC}
+      RAIKO2_L1_CHAIN_ID: ${RAIKO2_L1_CHAIN_ID:-1}
+      RAIKO2_L2_CHAIN_ID: ${RAIKO2_L2_CHAIN_ID:-167000}
+      RAIKO2_PROVER: ${RAIKO2_PROVER:-sgx/remote}
+      RAIKO2_GAIKO2_BASE_URL: ${RAIKO2_REMOTE_PROVER_URL:-http://raiko2-sgx:8080}
+      RAIKO2_GAIKO2_TIMEOUT_MS: ${RAIKO2_GAIKO2_TIMEOUT_MS:-300000}
+      RAIKO2_QUEUE_BACKEND: ${RAIKO2_QUEUE_BACKEND:-memory}
+      RAIKO2_QUEUE_NAMESPACE: ${RAIKO2_QUEUE_NAMESPACE:-raiko2:docker}
+      RAIKO2_QUEUE_WORKERS: ${RAIKO2_QUEUE_WORKERS:-1}
+      RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS: ${RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS:-200}
+    volumes:
+      - ./config.compose.toml:/etc/raiko2/config.toml:ro
+    ports:
+      - "${RAIKO2_PUBLIC_PORT:-8080}:8080"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

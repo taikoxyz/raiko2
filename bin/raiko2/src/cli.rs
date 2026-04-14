@@ -35,6 +35,14 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_PROVER")]
     pub prover: Option<String>,
 
+    /// Remote SGX prover base URL used by the `sgx/remote` route
+    #[arg(long, env = "RAIKO2_GAIKO2_BASE_URL")]
+    pub gaiko2_base_url: Option<String>,
+
+    /// Remote SGX prover timeout in milliseconds used by the `sgx/remote` route
+    #[arg(long, env = "RAIKO2_GAIKO2_TIMEOUT_MS")]
+    pub gaiko2_timeout_ms: Option<u64>,
+
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,

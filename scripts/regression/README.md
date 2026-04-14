@@ -101,3 +101,27 @@ same request at the gaiko2 SGXGETH service instead of `raiko2-sgx-prover`.
 ## Outputs
 
 Artifacts are written under `test/regression/shasta/`.
+
+## SGX Regression Stack
+
+For SGX-backed API regression, start the dedicated compose stack first:
+
+```bash
+cp docker/.env.sgx.regression.sample docker/.env.sgx.regression
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile init up raiko2-sgx-init gaiko2-sgxgeth-init
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml up -d
+```
+
+That stack starts:
+
+- `raiko2-sgx-prover` for the `sgx` lane
+- `gaiko2-sgxgeth` for the `sgxgeth` lane
+
+If you also want a dockerized `raiko2`:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
+```
+
+The file-based regression harness in this directory still only supports `native` and `sp1`.
+Use the SGX stack for API-driven regression and remote-server smoke testing.

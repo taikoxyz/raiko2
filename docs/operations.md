@@ -199,6 +199,59 @@ Operator notes:
 - This compose file only covers the `sgx` lane. `sgxgeth` is served by external `gaiko2`
   infrastructure and is not built in this repository.
 
+## SGX Regression Stack
+
+For SGX regression work, use the unified compose stack:
+
+- [`docker/docker-compose.sgx.regression.yml`](../docker/docker-compose.sgx.regression.yml)
+- [`docker/.env.sgx.regression.sample`](../docker/.env.sgx.regression.sample)
+
+This stack is intentionally SGX-focused:
+
+- it starts `raiko2-sgx-prover` for the `sgx` lane
+- it starts an external `gaiko2` tee image for the `sgxgeth` lane
+- it can optionally start the `raiko2` main service under the `raiko2` profile
+- it does not build `../gaiko2` automatically; operators should pre-build or pull the
+  `GAIKO2_SGXGETH_IMAGE`
+
+Bootstrap both tee services:
+
+```bash
+cp docker/.env.sgx.regression.sample docker/.env.sgx.regression
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile init up raiko2-sgx-init gaiko2-sgxgeth-init
+```
+
+Start the two remote SGX services:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml up -d
+```
+
+Add the optional dockerized `raiko2` main service:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
+```
+
+Current limitation:
+
+- `raiko2` still targets one remote SGX backend at a time through `prover.gaiko2.base_url`
+- the compose stack starts both so operators can switch the target URL without restacking
+
+For a local `raiko2` CLI against the compose-managed SGX servers:
+
+```bash
+RAIKO2_CONFIG=docker/config.compose.toml \
+RAIKO2_PROVER=sgx/remote \
+RAIKO2_L1_RPC=http://127.0.0.1:8545 \
+RAIKO2_L2_RPC=http://127.0.0.1:9545 \
+RAIKO2_GAIKO2_BASE_URL=http://127.0.0.1:9090 \
+cargo run -r -p raiko2 -- --config docker/config.compose.toml
+```
+
+To compare against the `gaiko2` `sgxgeth` server instead, point `RAIKO2_GAIKO2_BASE_URL` at
+`http://127.0.0.1:8090`.
+
 ### Main-Service Wiring
 
 `raiko2` keeps the SGX path as a remote route. The dedicated `raiko2-sgx-prover` binary is the

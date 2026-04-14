@@ -79,6 +79,12 @@ impl Config {
             config.prover.guest_system = route.guest_system;
             config.prover.runner = route.runner;
         }
+        if let Some(base_url) = &cli.gaiko2_base_url {
+            config.prover.gaiko2.base_url.clone_from(base_url);
+        }
+        if let Some(timeout_ms) = cli.gaiko2_timeout_ms {
+            config.prover.gaiko2.timeout_ms = timeout_ms;
+        }
 
         if let Some(queue_backend) = &cli.queue_backend {
             config.queue.backend = queue_backend
@@ -168,7 +174,10 @@ mod tests {
     use crate::cli::Cli;
     use clap::Parser;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_temp_config(contents: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -179,6 +188,34 @@ mod tests {
         path.push(format!("raiko2-config-{nanos}.toml"));
         std::fs::write(&path, contents).expect("write temp config");
         path
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        #[allow(unsafe_code)]
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: tests serialize environment mutation through ENV_LOCK.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::set_var(self.key, previous) };
+            } else {
+                // SAFETY: tests serialize environment mutation through ENV_LOCK.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
     }
 
     #[test]
@@ -469,6 +506,46 @@ mod tests {
         config.prover.gaiko2.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sgx_remote_route_env_overrides_gaiko2_config() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "sgx"
+runner = "remote"
+
+[prover.gaiko2]
+base_url = "http://127.0.0.1:8080"
+timeout_ms = 300000
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+        let _base_url_guard = EnvVarGuard::set("RAIKO2_GAIKO2_BASE_URL", "http://127.0.0.1:19090");
+        let _timeout_guard = EnvVarGuard::set("RAIKO2_GAIKO2_TIMEOUT_MS", "12345");
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.prover.gaiko2.base_url, "http://127.0.0.1:19090");
+        assert_eq!(config.prover.gaiko2.timeout_ms, 12_345);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

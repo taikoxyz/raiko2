@@ -86,11 +86,12 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
-- `sgx/remote` submits Shasta proposal proving to a configured Gaiko2 remote SGX prover.
 - `sgx/remote` submits Shasta proving to the dedicated remote SGX runtime. This repo now ships
   `raiko2-sgx-prover` for the `sgx` lane; that runtime can run in `tee` or `native` mode
   without changing the remote API. Historical `sgxgeth` compatibility remains an external
   `gaiko2` service and is not a hosted v3 proof type.
+- `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
+  add a dockerized `raiko2` for regression work.
 
 ## Repository Map
 

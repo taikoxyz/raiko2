@@ -2281,6 +2281,7 @@ const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> Bat
         ProofType::Native => BatchProofType::Native,
         ProofType::Sp1 => BatchProofType::Sp1,
         ProofType::Sgx => BatchProofType::Sgx,
+        ProofType::SgxGeth => BatchProofType::SgxGeth,
         ProofType::Risc0 => BatchProofType::Risc0,
     }
 }

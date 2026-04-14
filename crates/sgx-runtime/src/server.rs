@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{FromRef, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, FromRef, State, rejection::JsonRejection},
     routing::{get, post},
 };
 
@@ -11,6 +11,8 @@ use crate::{
     aggregation::aggregate_request, config::ServiceConfig, proposal::prove_request,
     protocol::RequestFailure, tee::TeeProvider,
 };
+
+const MAX_REQUEST_BODY_BYTES: usize = 10_000 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct SgxProver<P> {
@@ -35,6 +37,7 @@ where
         .route("/health", get(health))
         .route("/prove/shasta", post(prove_shasta::<P>))
         .route("/prove/shasta-aggregate", post(prove_shasta_aggregate::<P>))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
 }
 
@@ -215,6 +218,34 @@ mod tests {
             },
         });
         let body = serde_json::to_vec(&request_fixture()).expect("request body");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/prove/shasta")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("prove response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn prove_shasta_route_accepts_large_valid_request_bodies() {
+        let app = router(SgxProver {
+            provider: FakeProvider,
+            service_config: ServiceConfig {
+                listen_addr: "127.0.0.1:0".to_string(),
+                fork: "shasta".to_string(),
+                instance_id: 99,
+            },
+        });
+        let mut body = vec![b' '; 3 * 1024 * 1024];
+        body.extend(serde_json::to_vec(&request_fixture()).expect("request body"));
 
         let response = app
             .oneshot(

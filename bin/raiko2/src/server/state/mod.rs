@@ -156,6 +156,8 @@ impl AppState {
                     scheduler_config.clone(),
                     Arc::clone(&runtime_observer),
                     PipelineKey::ShastaSgx,
+                    ProofType::Sgx,
+                    config.prover.gaiko2.base_url.clone(),
                 )
                 .await?;
                 gaiko2_engine
@@ -163,6 +165,26 @@ impl AppState {
                 factory.insert(
                     pair.key.clone(),
                     PipelineKey::ShastaSgx,
+                    Arc::new(gaiko2_engine),
+                );
+            }
+
+            if !config.prover.gaiko2.sgxgeth_base_url.trim().is_empty() {
+                let gaiko2_engine = build_gaiko2_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    PipelineKey::ShastaSgxGeth,
+                    ProofType::SgxGeth,
+                    config.prover.gaiko2.sgxgeth_base_url.clone(),
+                )
+                .await?;
+                gaiko2_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(
+                    pair.key.clone(),
+                    PipelineKey::ShastaSgxGeth,
                     Arc::new(gaiko2_engine),
                 );
             }
@@ -658,13 +680,15 @@ async fn build_gaiko2_engine(
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
     pipeline_key: PipelineKey,
+    proof_type: ProofType,
+    base_url: String,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let gaiko2_config = setup::gaiko2_prover_config(config);
+    let gaiko2_config = setup::gaiko2_prover_config(base_url, config.prover.gaiko2.timeout_ms);
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, ProofType::Sgx)?;
+            let context = setup::build_context(config, pair, proof_type)?;
             let spec = ShastaSpec::new(
                 pipeline_key,
                 Gaiko2Prover::new(gaiko2_config)?,
@@ -685,7 +709,7 @@ async fn build_gaiko2_engine(
                 type Gaiko2Output =
                     EngineOutput<<Gaiko2Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, ProofType::Sgx)?;
+                let context = setup::build_context(config, pair, proof_type)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
                 let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
                 let store =

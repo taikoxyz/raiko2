@@ -91,8 +91,12 @@ impl ProverConfig {
                 runner: RunnerKind::Remote
             }
         ) {
-            if self.gaiko2.base_url.trim().is_empty() {
-                bail!("prover.gaiko2.base_url must not be empty");
+            if self.gaiko2.base_url.trim().is_empty()
+                && self.gaiko2.sgxgeth_base_url.trim().is_empty()
+            {
+                bail!(
+                    "either prover.gaiko2.base_url or prover.gaiko2.sgxgeth_base_url must not be empty"
+                );
             }
             if self.gaiko2.timeout_ms == 0 {
                 bail!("prover.gaiko2.timeout_ms must be greater than zero");
@@ -183,6 +187,7 @@ impl Default for ZkAnyTargetConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct Gaiko2Config {
     pub base_url: String,
+    pub sgxgeth_base_url: String,
     pub timeout_ms: u64,
 }
 
@@ -191,6 +196,7 @@ impl Default for Gaiko2Config {
         let defaults = Gaiko2ProverConfig::default();
         Self {
             base_url: defaults.base_url,
+            sgxgeth_base_url: String::new(),
             timeout_ms: if defaults.timeout_ms == 0 {
                 300_000
             } else {

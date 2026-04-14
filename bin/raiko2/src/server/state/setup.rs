@@ -134,10 +134,13 @@ pub(crate) fn boundless_prover_config(
     }
 }
 
-pub(crate) fn gaiko2_prover_config(config: &Config) -> raiko2_prover::gaiko2::Gaiko2Config {
+pub(crate) fn gaiko2_prover_config(
+    base_url: String,
+    timeout_ms: u64,
+) -> raiko2_prover::gaiko2::Gaiko2Config {
     raiko2_prover::gaiko2::Gaiko2Config {
-        base_url: config.prover.gaiko2.base_url.clone(),
-        timeout_ms: config.prover.gaiko2.timeout_ms,
+        base_url,
+        timeout_ms,
     }
 }
 

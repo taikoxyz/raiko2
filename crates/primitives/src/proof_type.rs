@@ -26,6 +26,11 @@ pub enum ProofType {
     /// Uses the RISC0 prover to build the block.
     #[serde(alias = "RISC0")]
     Risc0 = 3u8,
+    /// # SgxGeth
+    ///
+    /// Uses the external gaiko2 SGX service lane for Shasta proving.
+    #[serde(alias = "SGXGETH")]
+    SgxGeth = 4u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -34,6 +39,7 @@ impl std::fmt::Display for ProofType {
             ProofType::Native => "native",
             ProofType::Sp1 => "sp1",
             ProofType::Sgx => "sgx",
+            ProofType::SgxGeth => "sgxgeth",
             ProofType::Risc0 => "risc0",
         })
     }
@@ -47,6 +53,7 @@ impl std::str::FromStr for ProofType {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
             "sgx" => Ok(ProofType::Sgx),
+            "sgxgeth" => Ok(ProofType::SgxGeth),
             "risc0" => Ok(ProofType::Risc0),
             _ => Err(format!("Unknown proof type {s}")),
         }
@@ -62,6 +69,7 @@ impl TryFrom<u8> for ProofType {
             1 => Ok(Self::Sp1),
             2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
+            4 => Ok(Self::SgxGeth),
             _ => Err(format!("Unknown proof type {value}")),
         }
     }
@@ -99,14 +107,15 @@ mod tests {
     use super::ProofType;
 
     #[test]
-    fn accepts_sgx_variant_by_string() {
+    fn accepts_sgx_variants_by_string() {
         assert_eq!("sgx".parse::<ProofType>().unwrap(), ProofType::Sgx);
-        assert!("sgxgeth".parse::<ProofType>().is_err());
+        assert_eq!("sgxgeth".parse::<ProofType>().unwrap(), ProofType::SgxGeth);
     }
 
     #[test]
-    fn accepts_sgx_variant_by_u8() {
+    fn accepts_sgx_variants_by_u8() {
         assert_eq!(ProofType::try_from(2u8).unwrap(), ProofType::Sgx);
-        assert!(ProofType::try_from(4u8).is_err());
+        assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::SgxGeth);
+        assert!(ProofType::try_from(5u8).is_err());
     }
 }

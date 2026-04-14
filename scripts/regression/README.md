@@ -123,5 +123,10 @@ If you also want a dockerized `raiko2`:
 docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
 ```
 
+The dockerized or local `raiko2` process can then target both remote lanes in the same stack:
+
+- `proof_type=sgx` -> `raiko2-sgx-prover`
+- `proof_type=sgxgeth` -> `gaiko2-sgxgeth`
+
 The file-based regression harness in this directory still only supports `native` and `sp1`.
 Use the SGX stack for API-driven regression and remote-server smoke testing.

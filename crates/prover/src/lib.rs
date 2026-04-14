@@ -283,6 +283,14 @@ pub fn validate_external_aggregate_proofs(
                     )));
                 }
             }
+            raiko2_pipeline::PipelineKey::ShastaSgx
+            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
+                if proof.input.is_none() || proof.extra_data.is_none() {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing SGX aggregation metadata"
+                    )));
+                }
+            }
             raiko2_pipeline::PipelineKey::ShastaSp1 => {
                 if proof.input.is_none()
                     || proof.extra_data.is_none()
@@ -457,6 +465,12 @@ mod tests {
         let route = "native/local"
             .parse::<PipelineRoute>()
             .expect("parse route");
+        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+    }
+
+    #[test]
+    fn aggregate_validator_accepts_sgx_remote_proof() {
+        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
         assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
     }
 

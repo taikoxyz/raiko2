@@ -196,7 +196,7 @@ fn zk_any_config_from_ballot(config: BallotConfig) -> Result<ZkAnyConfig, String
         match proof_type {
             ProofType::Sp1 => zk_any.sp1 = Some(target),
             ProofType::Risc0 => zk_any.risc0 = Some(target),
-            ProofType::Native | ProofType::Sgx => {
+            ProofType::Native | ProofType::Sgx | ProofType::SgxGeth => {
                 return Err(format!(
                     "proof type {proof_type} is not supported for zk_any"
                 ));
@@ -213,6 +213,7 @@ const fn ballot_key(proof_type: ProofType) -> &'static str {
         ProofType::Risc0 => "Risc0",
         ProofType::Native => "Native",
         ProofType::Sgx => "Sgx",
+        ProofType::SgxGeth => "SgxGeth",
     }
 }
 

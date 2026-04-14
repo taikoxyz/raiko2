@@ -233,10 +233,15 @@ Add the optional dockerized `raiko2` main service:
 docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
 ```
 
-Current limitation:
+The optional dockerized `raiko2` service is prewired with both remote URLs:
 
-- `raiko2` still targets one remote SGX backend at a time through `prover.gaiko2.base_url`
-- the compose stack starts both so operators can switch the target URL without restacking
+- `proof_type=sgx` uses `RAIKO2_GAIKO2_BASE_URL`
+- `proof_type=sgxgeth` uses `RAIKO2_GAIKO2_SGXGETH_BASE_URL`
+
+The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
+both SGX lanes can boot and prove without an onchain registration step. Replace them with the real
+registered instance ids, or mount the corresponding registration metadata, when you need
+chain-verifiable SGX proofs.
 
 For a local `raiko2` CLI against the compose-managed SGX servers:
 
@@ -246,11 +251,14 @@ RAIKO2_PROVER=sgx/remote \
 RAIKO2_L1_RPC=http://127.0.0.1:8545 \
 RAIKO2_L2_RPC=http://127.0.0.1:9545 \
 RAIKO2_GAIKO2_BASE_URL=http://127.0.0.1:9090 \
+RAIKO2_GAIKO2_SGXGETH_BASE_URL=http://127.0.0.1:8090 \
 cargo run -r -p raiko2 -- --config docker/config.compose.toml
 ```
 
-To compare against the `gaiko2` `sgxgeth` server instead, point `RAIKO2_GAIKO2_BASE_URL` at
-`http://127.0.0.1:8090`.
+Then choose the lane per request:
+
+- `proof_type=sgx` targets `raiko2-sgx-prover`
+- `proof_type=sgxgeth` targets the external `gaiko2` SGX server
 
 ### Main-Service Wiring
 

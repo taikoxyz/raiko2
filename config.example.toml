@@ -102,10 +102,11 @@ timeout_ms = 3600000
 # per_day = 8
 
 [prover.gaiko2]
-# For `sgx/remote`, point this at the dedicated SGX runtime (`raiko2-sgx-prover`) or the
-# current compatible remote service. That runtime may run in `tee` or `native` mode.
-# `sgxgeth` remains external to this repository.
+# For `proof_type=sgx`, point this at the dedicated SGX runtime (`raiko2-sgx-prover`). That
+# runtime may run in `tee` or `native` mode.
 base_url = "http://127.0.0.1:8081"
+# For `proof_type=sgxgeth`, point this at the external gaiko2 SGX server.
+sgxgeth_base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
 
 [prover.boundless.deployment]

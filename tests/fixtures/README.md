@@ -9,6 +9,13 @@
 
 It replaces the old untracked repo-root `test.json` workflow.
 
+`shasta_remote_request_fixture_chain_167013_block_42.json` is a checked-in minimal remote prover
+request fixture used by:
+
+- `crates/sgx-runtime/tests/dump_valid_request.rs`
+- manual `curl` smoke tests against `raiko2-sgx-prover`
+- devops startup/link testing for the `sgx/remote` lane
+
 ## Provenance
 
 This fixture was generated on 2026-04-13 from a real Taiko mainnet preflight using:
@@ -35,4 +42,10 @@ target/debug/preflight \
   --l2-end 5412416 \
   --proof-type native \
   --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json
+```
+
+Generate the SGX remote request fixture from the integration test:
+
+```bash
+cargo test -p raiko2-sgx-runtime --test dump_valid_request dump_valid_request_json -- --nocapture
 ```

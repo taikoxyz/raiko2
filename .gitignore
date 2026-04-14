@@ -13,3 +13,4 @@ core.[0-9]*
 regression.log
 test/regression/**/*.log
 scripts/regression/*.log
+docker/var/

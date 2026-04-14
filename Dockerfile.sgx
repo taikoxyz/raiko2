@@ -1,0 +1,69 @@
+# Dedicated Gramine-based image for the raiko2 SGX proving runtime.
+
+FROM rust:1.93.0-bookworm AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    clang \
+    libprotobuf-dev \
+    libssl-dev \
+    protobuf-compiler \
+    pkg-config \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY bin ./bin
+COPY config ./config
+COPY xtask ./xtask
+COPY vendor ./vendor
+
+RUN cargo +1.93.0 build --release -p raiko2-sgx-prover
+
+FROM gramineproject/gramine:1.8-jammy AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    RAIKO2_SGX_CONFIG_DIR=/var/lib/raiko2/sgx/config \
+    RAIKO2_SGX_SECRET_DIR=/var/lib/raiko2/sgx/secrets \
+    RAIKO2_SGX_LISTEN_ADDR=0.0.0.0:8080 \
+    RAIKO2_SGX_FORK=shasta \
+    GRAMINE_ENCLAVE_KEY=/root/.config/gramine/enclave-key.pem \
+    GRAMINE_LOG_LEVEL=error \
+    RUST_LOG=info
+
+WORKDIR /opt/raiko2-sgx
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    cracklib-runtime \
+    libsgx-dcap-default-qpl \
+    libsgx-dcap-ql \
+    libsgx-urts \
+    sgx-pck-id-retrieval-tool && \
+    apt-get clean all && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN sed -i 's/#default quoting type = ecdsa_256/default quoting type = ecdsa_256/' /etc/aesmd.conf && \
+    sed -i 's/,"use_secure_cert": true/,"use_secure_cert": false/' /etc/sgx_default_qcnl.conf
+
+RUN mkdir -p /opt/raiko2-sgx/bin /opt/raiko2-sgx/docker /var/lib/raiko2/sgx/config /var/lib/raiko2/sgx/secrets
+
+COPY --from=builder /app/target/release/raiko2-sgx-prover /opt/raiko2-sgx/bin/raiko2-sgx-prover
+COPY docker/raiko2-sgx-prover.manifest.template /opt/raiko2-sgx/docker/raiko2-sgx-prover.manifest.template
+COPY docker/sgx-entrypoint.sh /opt/raiko2-sgx/bin/entrypoint.sh
+COPY docker/sgx-bootstrap.sh /opt/raiko2-sgx/bin/sgx-bootstrap.sh
+
+RUN chmod +x /opt/raiko2-sgx/bin/raiko2-sgx-prover /opt/raiko2-sgx/bin/entrypoint.sh /opt/raiko2-sgx/bin/sgx-bootstrap.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/raiko2-sgx/bin/entrypoint.sh"]

@@ -15,7 +15,9 @@ members = [
     "crates/protocol-shasta",
     "crates/primitives-shasta",
     "crates/queue",
+    "crates/sgx-runtime",
     "bin/raiko2",
+    "bin/raiko2-sgx-prover",
     "bin/rpc-proxy",
     "bin/witness-check",
     "bin/guest-launcher",
@@ -64,6 +66,7 @@ raiko2-protocol-shasta = { path = "./crates/protocol-shasta" }
 raiko2-primitives-shasta = { path = "./crates/primitives-shasta" }
 raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
+raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
 taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", branch = "main", default-features = false }

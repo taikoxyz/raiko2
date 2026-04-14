@@ -1,6 +1,6 @@
 # Operations Guide
 
-This guide covers runtime configuration, Docker, release images, and Boundless operation.
+This guide covers runtime configuration, Docker, SGX operation, and Boundless operation.
 API contracts live in [API.md](API.md), and the canonical config shape lives in
 [`config.example.toml`](../config.example.toml).
 
@@ -84,6 +84,126 @@ Operational notes:
 - `proof_type = "risc0"` uses the same hosted RISC0 network prover path as proposal proving.
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.
+
+## SGX Runtime
+
+The `sgx` lane is operated as a separate remote service built from this repository:
+
+- binary: `raiko2-sgx-prover`
+- image: [`Dockerfile.sgx`](../Dockerfile.sgx)
+- compose: [`docker/docker-compose.sgx.yml`](../docker/docker-compose.sgx.yml)
+- env template: [`docker/.env.sgx.sample`](../docker/.env.sgx.sample)
+
+The SGX binary exposes:
+
+- `bootstrap`
+- `check`
+- `serve`
+
+Serving endpoints are:
+
+- `GET /health`
+- `POST /prove/shasta`
+- `POST /prove/shasta-aggregate`
+
+`bootstrap` and `check` are CLI lifecycle commands, not HTTP routes.
+
+The binary supports two runtime modes:
+
+- `tee` (default): Gramine-backed SGX mode with quote generation
+- `native`: operator/testing mode that reuses the fixed native signer, omits quotes, and keeps the
+  same remote HTTP surface
+
+### Local CLI
+
+Build and inspect the binary:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- --help
+```
+
+Bootstrap the SGX runtime:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  bootstrap
+```
+
+Check the lifecycle state:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  check
+```
+
+Run the SGX sign server:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  serve --listen-addr 0.0.0.0:8080 --instance-id 3131899904
+```
+
+If `--instance-id` is omitted, `serve` resolves it from `registered.json` using `--fork`.
+
+For operator/link testing without SGX, start the same remote surface in native mode:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode native \
+  serve --listen-addr 0.0.0.0:8080
+```
+
+Native mode treats `bootstrap` as a no-op, `check` as a lightweight no-op, and falls back to the
+mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
+
+You can smoke-test the live server with the checked-in fixture:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/prove/shasta \
+  -H 'content-type: application/json' \
+  --data-binary @tests/fixtures/shasta_remote_request_fixture_chain_167013_block_42.json
+```
+
+### Docker Compose
+
+Quickstart:
+
+```bash
+cp docker/.env.sgx.sample docker/.env.sgx
+$EDITOR docker/.env.sgx
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml --profile init up raiko2-sgx-init
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up raiko2-sgx
+```
+
+Operator notes:
+
+- The compose stack mounts SGX devices and a host Gramine key directory.
+- `raiko2-sgx-init` is a one-shot bootstrap job.
+- `raiko2-sgx` is the long-running sign server.
+- The container entrypoint signs the Gramine manifest on startup using the mounted enclave key.
+- Set `RAIKO2_SGX_MODE=native` to bypass Gramine for operator/link testing while keeping the same
+  `/prove/shasta*` server behavior.
+- This compose file is still SGX-oriented and mounts SGX devices by default. For native-mode runs
+  on a host without SGX devices, run the binary directly or trim the device mounts locally.
+- Either set `RAIKO2_SGX_INSTANCE_ID` directly or provide a `registered.json` mapping under the
+  mounted config directory and select it with `RAIKO2_SGX_FORK`.
+- This compose file only covers the `sgx` lane. `sgxgeth` is served by external `gaiko2`
+  infrastructure and is not built in this repository.
+
+### Main-Service Wiring
+
+`raiko2` keeps the SGX path as a remote route. The dedicated `raiko2-sgx-prover` binary is the
+runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from an external
+`gaiko2` SGX service.
 
 ## Source Releases
 

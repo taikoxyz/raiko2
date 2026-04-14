@@ -1,6 +1,7 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, Proof, StatelessInput};
+use raiko2_primitives_shasta::proof_carry_from_proof;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,17 @@ pub struct Gaiko2ShastaPayload {
     pub proof_carry_data: ProofCarryData,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Gaiko2ShastaAggregateRequest {
+    pub schema: String,
+    pub payload: Gaiko2ShastaAggregatePayload,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Gaiko2ShastaAggregatePayload {
+    pub proofs: Vec<Gaiko2AggregateProof>,
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Gaiko2ReplayBlock {
@@ -40,6 +52,39 @@ impl From<StatelessInput> for Gaiko2ReplayBlock {
             witness: value.witness,
             accounts: value.accounts,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Gaiko2AggregateProof {
+    pub input: String,
+    pub proof: String,
+    pub proof_carry_data: ProofCarryData,
+}
+
+impl Gaiko2AggregateProof {
+    pub fn from_proof(proof: &Proof) -> Result<Self, raiko2_primitives::RaikoError> {
+        let input = proof.input.ok_or_else(|| {
+            raiko2_primitives::RaikoError::InvalidRequestConfig(
+                "gaiko2 aggregation proof missing input".to_string(),
+            )
+        })?;
+        let proof_hex = proof.proof.clone().ok_or_else(|| {
+            raiko2_primitives::RaikoError::InvalidRequestConfig(
+                "gaiko2 aggregation proof missing proof bytes".to_string(),
+            )
+        })?;
+        let proof_carry_data = proof_carry_from_proof(proof)?.ok_or_else(|| {
+            raiko2_primitives::RaikoError::InvalidRequestConfig(
+                "gaiko2 aggregation proof missing shasta carry data".to_string(),
+            )
+        })?;
+
+        Ok(Self {
+            input: input.to_string(),
+            proof: proof_hex,
+            proof_carry_data,
+        })
     }
 }
 

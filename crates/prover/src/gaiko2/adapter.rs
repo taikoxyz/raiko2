@@ -1,8 +1,10 @@
-use raiko2_primitives::{RaikoError, RaikoResult, StatelessInput};
+use raiko2_primitives::{Proof, RaikoError, RaikoResult, StatelessInput};
 use raiko2_primitives_shasta::{GuestInput, roll_proposal_ancestor_headers_in_place};
 
 use crate::gaiko2::protocol::{
-    GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ReplayBlock, Gaiko2ShastaPayload, Gaiko2ShastaRequest,
+    GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2AggregateProof, Gaiko2ReplayBlock,
+    Gaiko2ShastaAggregatePayload, Gaiko2ShastaAggregateRequest, Gaiko2ShastaPayload,
+    Gaiko2ShastaRequest,
 };
 
 pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Gaiko2ShastaRequest> {
@@ -42,6 +44,26 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Gaiko2ShastaReques
             blocks,
             proof_carry_data: input.proof_carry_data.clone(),
         },
+    })
+}
+
+pub fn build_shasta_aggregate_request(
+    proofs: &[Proof],
+) -> RaikoResult<Gaiko2ShastaAggregateRequest> {
+    if proofs.is_empty() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "cannot build gaiko2 shasta aggregate request without proofs".to_string(),
+        ));
+    }
+
+    let proofs = proofs
+        .iter()
+        .map(Gaiko2AggregateProof::from_proof)
+        .collect::<RaikoResult<Vec<_>>>()?;
+
+    Ok(Gaiko2ShastaAggregateRequest {
+        schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+        payload: Gaiko2ShastaAggregatePayload { proofs },
     })
 }
 

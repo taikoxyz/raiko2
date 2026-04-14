@@ -14,10 +14,10 @@ use raiko2_primitives_shasta::GuestInput;
 use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
 
 use self::{
-    adapter::build_shasta_packet,
+    adapter::{build_shasta_aggregate_request, build_shasta_packet},
     protocol::{
         GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofResponse,
-        Gaiko2ProofStatus, Gaiko2ShastaRequest,
+        Gaiko2ProofResult, Gaiko2ProofStatus, Gaiko2ShastaRequest,
     },
 };
 
@@ -25,6 +25,7 @@ pub mod adapter;
 pub mod protocol;
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
+const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
 
 #[derive(Debug, Clone, Default)]
 pub struct Gaiko2Config {
@@ -43,6 +44,7 @@ impl Gaiko2Config {
 pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
+    aggregate_url: Url,
 }
 
 impl Gaiko2Prover {
@@ -59,6 +61,9 @@ impl Gaiko2Prover {
         let prove_url = base_url.join(SHASTA_PROPOSAL_PATH).map_err(|err| {
             RaikoError::InvalidRequestConfig(format!("invalid gaiko2 prove URL: {err}"))
         })?;
+        let aggregate_url = base_url.join(SHASTA_AGGREGATE_PATH).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!("invalid gaiko2 aggregate URL: {err}"))
+        })?;
         let client = Client::builder()
             .timeout(config.timeout())
             .build()
@@ -66,7 +71,11 @@ impl Gaiko2Prover {
                 RaikoError::InvalidRequestConfig(format!("failed to build gaiko2 client: {err}"))
             })?;
 
-        Ok(Self { client, prove_url })
+        Ok(Self {
+            client,
+            prove_url,
+            aggregate_url,
+        })
     }
 }
 
@@ -105,49 +114,9 @@ where
             )));
         }
 
-        let response = self
-            .client
-            .post(self.prove_url.clone())
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .body(input.to_vec())
-            .send()
-            .await
-            .map_err(|err| RaikoError::Guest(format!("gaiko2 request failed: {err}")))?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| RaikoError::Guest(format!("gaiko2 read failed: {err}")))?;
-        let envelope: Gaiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
-            RaikoError::Guest(format!(
-                "gaiko2 response decode failed (status {}): {err}",
-                status
-            ))
-        })?;
-
-        if envelope.schema != GAIKO2_PROOF_RESPONSE_SCHEMA {
-            return Err(RaikoError::Guest(format!(
-                "unsupported gaiko2 response schema: {}",
-                envelope.schema
-            )));
-        }
-
-        if !status.is_success() || envelope.status == Gaiko2ProofStatus::Error {
-            let error = envelope.error.ok_or_else(|| {
-                RaikoError::Guest(format!(
-                    "gaiko2 request failed with status {} and no error payload",
-                    status
-                ))
-            })?;
-            return Err(RaikoError::Guest(format!(
-                "gaiko2 {}: {}",
-                error.code, error.message
-            )));
-        }
-
-        let result = envelope.result.ok_or_else(|| {
-            RaikoError::Guest("gaiko2 response missing result payload".to_string())
-        })?;
+        let (envelope, result) = self
+            .post_request(self.prove_url.clone(), input.to_vec())
+            .await?;
         let input_hash = B256::from_str(&result.input).map_err(|err| {
             RaikoError::Guest(format!(
                 "invalid gaiko2 input hash '{}': {err}",
@@ -172,13 +141,95 @@ where
 
     async fn aggregate(
         &self,
-        _input: AggregationGuestInput,
+        input: AggregationGuestInput,
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        Err(RaikoError::InvalidRequestConfig(
-            "gaiko2 aggregation is not supported".to_string(),
-        ))
+        let packet = build_shasta_aggregate_request(&input.proofs)?;
+        if packet.schema != GAIKO2_SHASTA_REQUEST_SCHEMA {
+            return Err(RaikoError::Guest(format!(
+                "unsupported gaiko2 request schema: {}",
+                packet.schema
+            )));
+        }
+
+        let payload = serde_json::to_vec(&packet).map_err(|err| {
+            RaikoError::Guest(format!("failed to encode gaiko2 aggregate packet: {err}"))
+        })?;
+        let (envelope, result) = self
+            .post_request(self.aggregate_url.clone(), payload)
+            .await?;
+        let input_hash = B256::from_str(&result.input).map_err(|err| {
+            RaikoError::Guest(format!(
+                "invalid gaiko2 input hash '{}': {err}",
+                result.input
+            ))
+        })?;
+        let metadata = gaiko2_metadata(&envelope.schema, &result);
+
+        Ok(Proof {
+            proof: result.proof,
+            input: Some(input_hash),
+            quote: result.quote,
+            extra_data: Some(serde_json::json!({
+                "gaiko2": metadata,
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+impl Gaiko2Prover {
+    async fn post_request(
+        &self,
+        url: Url,
+        body: Vec<u8>,
+    ) -> RaikoResult<(Gaiko2ProofResponse, Gaiko2ProofResult)> {
+        let response = self
+            .client
+            .post(url)
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(body)
+            .send()
+            .await
+            .map_err(|err| RaikoError::Guest(format!("gaiko2 request failed: {err}")))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| RaikoError::Guest(format!("gaiko2 read failed: {err}")))?;
+        let envelope: Gaiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
+            RaikoError::Guest(format!(
+                "gaiko2 response decode failed (status {}): {err}",
+                status
+            ))
+        })?;
+
+        if envelope.schema != GAIKO2_PROOF_RESPONSE_SCHEMA {
+            return Err(RaikoError::Guest(format!(
+                "unsupported gaiko2 response schema: {}",
+                envelope.schema
+            )));
+        }
+
+        if !status.is_success() || envelope.status == Gaiko2ProofStatus::Error {
+            let error = envelope.error.as_ref().ok_or_else(|| {
+                RaikoError::Guest(format!(
+                    "gaiko2 request failed with status {} and no error payload",
+                    status
+                ))
+            })?;
+            return Err(RaikoError::Guest(format!(
+                "gaiko2 {}: {}",
+                error.code, error.message
+            )));
+        }
+
+        let result = envelope.result.clone().ok_or_else(|| {
+            RaikoError::Guest("gaiko2 response missing result payload".to_string())
+        })?;
+
+        Ok((envelope, result))
     }
 }
 

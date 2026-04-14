@@ -3,8 +3,8 @@
 use alloy_primitives::{Address, B256};
 use raiko2_prover::gaiko2::protocol::{
     GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofError,
-    Gaiko2ProofResponse, Gaiko2ProofResult, Gaiko2ReplayBlock, Gaiko2ShastaPayload,
-    Gaiko2ShastaRequest,
+    Gaiko2ProofResponse, Gaiko2ProofResult, Gaiko2ReplayBlock, Gaiko2ShastaAggregatePayload,
+    Gaiko2ShastaAggregateRequest, Gaiko2ShastaPayload, Gaiko2ShastaRequest,
 };
 
 #[test]
@@ -70,6 +70,36 @@ fn proof_response_roundtrip_preserves_success_payload() {
         "0xinput"
     );
     assert!(decoded.error.is_none());
+}
+
+#[test]
+fn shasta_aggregate_packet_roundtrip_preserves_schema_and_payload() {
+    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData::default();
+    proof_carry_data.chain_id = 167_013;
+    proof_carry_data.transition_input.proposal_id = 7;
+
+    let packet = Gaiko2ShastaAggregateRequest {
+        schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+        payload: Gaiko2ShastaAggregatePayload {
+            proofs: vec![raiko2_prover::gaiko2::protocol::Gaiko2AggregateProof {
+                input: format!("0x{}", hex::encode([0x11; 32])),
+                proof: "0xproof".to_string(),
+                proof_carry_data,
+            }],
+        },
+    };
+
+    let json = serde_json::to_string(&packet).expect("serialize request");
+    let decoded: Gaiko2ShastaAggregateRequest =
+        serde_json::from_str(&json).expect("deserialize request");
+
+    assert_eq!(decoded.schema, GAIKO2_SHASTA_REQUEST_SCHEMA);
+    assert_eq!(decoded.payload.proofs.len(), 1);
+    assert_eq!(
+        decoded.payload.proofs[0].input,
+        format!("0x{}", hex::encode([0x11; 32]))
+    );
+    assert_eq!(decoded.payload.proofs[0].proof_carry_data.chain_id, 167_013);
 }
 
 #[test]

@@ -57,10 +57,8 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Native
-        | BatchProofType::Boundless
-        | BatchProofType::Sgx
-        | BatchProofType::SgxGeth => {
+        BatchProofType::Sgx => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+        BatchProofType::Native | BatchProofType::Boundless | BatchProofType::SgxGeth => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()

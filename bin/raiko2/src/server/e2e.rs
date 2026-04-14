@@ -268,6 +268,19 @@ fn risc0_boundless_external_proof() -> Value {
     })
 }
 
+fn fixture_external_aggregate_proof() -> Proof {
+    Proof {
+        proof: Some(format!("0x{}", "11".repeat(89))),
+        input: Some(alloy_primitives::B256::ZERO),
+        extra_data: Some(json!({
+            "shasta": {
+                "proof_carry_data": {}
+            }
+        })),
+        ..Proof::default()
+    }
+}
+
 async fn drive_engine_to_idle<S>(engine: &Engine<S>)
 where
     S: raiko2_pipeline::PipelineSpec,
@@ -2584,6 +2597,75 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/network");
     assert_eq!(res["data"]["prover_type"], "network");
+}
+
+#[tokio::test]
+async fn e2e_sgx_batch_accepts_aggregate_requests() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [
+                {
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                },
+                {
+                    "proposal_id": 4,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [4],
+                    "last_anchor_block_number": 0
+                }
+            ],
+            "aggregate": true,
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(
+        res["data"]["task_id"].as_str().is_some(),
+        "missing task id: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sgx_accepts_aggregate_proof_requests() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                fixture_external_aggregate_proof(),
+                fixture_external_aggregate_proof()
+            ],
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(
+        res["data"]["task_id"].as_str().is_some(),
+        "missing task id: {res}"
+    );
 }
 
 #[tokio::test]

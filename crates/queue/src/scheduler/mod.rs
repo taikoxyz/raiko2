@@ -886,6 +886,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dependent_submitted_after_completed_dep_is_ready_immediately() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+
+        let a = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await?;
+
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready dependency"))?;
+        assert_eq!(lease.id, a);
+        sched.complete(lease, Ok("ok")).await?;
+
+        let b = sched
+            .submit(
+                test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "b",
+                },
+                vec![a],
+            )
+            .await?;
+
+        let ready = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected dependent to be ready"))?;
+        assert_eq!(ready.id, b);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dependent_submitted_after_failed_dep_is_failed_immediately() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+
+        let a = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await?;
+
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready dependency"))?;
+        assert_eq!(lease.id, a);
+        sched.complete(lease, Err("boom".to_string())).await?;
+
+        let b = sched
+            .submit(
+                test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "b",
+                },
+                vec![a],
+            )
+            .await?;
+
+        let state = sched
+            .get(b)
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected failed dependent"))?
+            .state;
+        assert!(matches!(state, TaskState::Failed { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failure_propagates_to_dependents() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 

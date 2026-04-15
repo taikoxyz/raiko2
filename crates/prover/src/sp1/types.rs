@@ -3,7 +3,7 @@ use raiko2_primitives::Proof;
 use serde::{Deserialize, Serialize};
 use sp1_sdk::{
     ExecutionReport, SP1ProofMode, SP1ProofWithPublicValues, SP1VerifyingKey,
-    network::{FulfillmentStrategy, NetworkMode},
+    network::FulfillmentStrategy,
 };
 use tracing::error;
 
@@ -334,15 +334,6 @@ impl std::fmt::Display for Sp1NetworkMode {
     }
 }
 
-impl From<Sp1NetworkMode> for NetworkMode {
-    fn from(value: Sp1NetworkMode) -> Self {
-        match value {
-            Sp1NetworkMode::Reserved => Self::Reserved,
-            Sp1NetworkMode::Mainnet => Self::Mainnet,
-        }
-    }
-}
-
 /// SP1 fulfillment strategy.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -422,7 +413,7 @@ impl Sp1NetworkMetadata {
 pub struct Sp1Response {
     /// Hex-encoded serialized proof
     pub proof: Option<String>,
-    /// Verifying key hash (bytes32)
+    /// Canonical 32-byte SP1 verifier digest as hex.
     pub vkey_hash: Option<String>,
     /// Public input commitment
     pub input: B256,
@@ -492,8 +483,9 @@ impl Sp1ExecutionMetadata {
             zkvm: "sp1".to_string(),
             mode: ExecutionMode::Execute.as_str().to_string(),
             public_values,
-            exit_code: execution_report.exit_code,
-            gas: execution_report.gas(),
+            // SP1 5.x does not expose an explicit exit code on successful execution.
+            exit_code: 0,
+            gas: execution_report.gas,
             total_instruction_count: execution_report.total_instruction_count(),
             total_syscall_count: execution_report.total_syscall_count(),
             touched_memory_addresses: execution_report.touched_memory_addresses,
@@ -522,7 +514,15 @@ impl Sp1ExecutionMetadata {
 
 impl From<Sp1Response> for Proof {
     fn from(value: Sp1Response) -> Self {
-        let quote = match value.sp1_proof.as_ref() {
+        let Sp1Response {
+            proof,
+            vkey_hash,
+            input,
+            sp1_proof,
+            vkey,
+            extra_data,
+        } = value;
+        let quote = match sp1_proof.as_ref() {
             Some(proof) => match serde_json::to_string(&proof.proof) {
                 Ok(serialized) => Some(serialized),
                 Err(err) => {
@@ -532,14 +532,24 @@ impl From<Sp1Response> for Proof {
             },
             None => None,
         };
+        let uuid = match vkey.as_ref() {
+            Some(vk) => match serde_json::to_string(vk) {
+                Ok(serialized) => Some(serialized),
+                Err(err) => {
+                    error!(error = %err, "failed to serialize sp1 verifying key");
+                    vkey_hash
+                }
+            },
+            None => vkey_hash,
+        };
 
         Self {
-            proof: value.proof,
+            proof,
             quote,
-            input: Some(value.input),
-            uuid: value.vkey_hash,
+            input: Some(input),
+            uuid,
             kzg_proof: None,
-            extra_data: value.extra_data,
+            extra_data,
         }
     }
 }

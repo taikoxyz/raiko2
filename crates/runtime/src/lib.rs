@@ -228,27 +228,7 @@ impl RuntimeManager {
                 let Some(row) = rows.next()? else {
                     return Ok(None);
                 };
-                let proof_ids_json: String = row.get(7)?;
-                let metadata_json: String = row.get(15)?;
-                Ok(Some(RuntimeTaskRecord {
-                    task_id: row.get(0)?,
-                    pipeline_key: row.get(1)?,
-                    route: row.get(2)?,
-                    guest_system: row.get(3)?,
-                    runner: row.get(4)?,
-                    task_kind: row.get(5)?,
-                    proposal_id: row.get(6)?,
-                    proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
-                    runner_status: RunnerStatus::from_db(row.get::<_, String>(8)?.as_str()),
-                    task_dir: row.get(9)?,
-                    image_ref: row.get(10)?,
-                    provider_request_id: row.get(11)?,
-                    remote_tx_hash: row.get(12)?,
-                    proof_path: row.get(13)?,
-                    error: row.get(14)?,
-                    metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
-                    updated_at: row.get(16)?,
-                }))
+                Ok(Some(runtime_task_record_from_row(row)?))
             })
             .await
             .context("failed to query runtime task")?;
@@ -262,9 +242,20 @@ impl RuntimeManager {
         &self,
         engine_task_id: &str,
     ) -> Result<Option<RuntimeTaskRecord>> {
+        let mut tasks = self.find_tasks_by_engine_task_id(engine_task_id).await?;
+        Ok(tasks.pop())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the matching task records cannot be loaded.
+    pub async fn find_tasks_by_engine_task_id(
+        &self,
+        engine_task_id: &str,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
         let conn = self.connection().await?;
         let engine_task_id = engine_task_id.to_string();
-        let row = conn
+        let tasks = conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
                     r"
@@ -280,38 +271,19 @@ impl RuntimeManager {
                             WHERE json_each.value = ?1
                         )
                         OR json_extract(metadata_json, '$.aggregate_task_id') = ?1
-                    LIMIT 1
+                    ORDER BY updated_at DESC, task_id ASC
                     ",
                 )?;
                 let mut rows = stmt.query(params![engine_task_id])?;
-                let Some(row) = rows.next()? else {
-                    return Ok(None);
-                };
-                let proof_ids_json: String = row.get(7)?;
-                let metadata_json: String = row.get(15)?;
-                Ok(Some(RuntimeTaskRecord {
-                    task_id: row.get(0)?,
-                    pipeline_key: row.get(1)?,
-                    route: row.get(2)?,
-                    guest_system: row.get(3)?,
-                    runner: row.get(4)?,
-                    task_kind: row.get(5)?,
-                    proposal_id: row.get(6)?,
-                    proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
-                    runner_status: RunnerStatus::from_db(row.get::<_, String>(8)?.as_str()),
-                    task_dir: row.get(9)?,
-                    image_ref: row.get(10)?,
-                    provider_request_id: row.get(11)?,
-                    remote_tx_hash: row.get(12)?,
-                    proof_path: row.get(13)?,
-                    error: row.get(14)?,
-                    metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
-                    updated_at: row.get(16)?,
-                }))
+                let mut matches = Vec::new();
+                while let Some(row) = rows.next()? {
+                    matches.push(runtime_task_record_from_row(row)?);
+                }
+                Ok(matches)
             })
             .await
             .context("failed to query runtime task by engine task id")?;
-        Ok(row)
+        Ok(tasks)
     }
 
     /// # Errors
@@ -371,6 +343,30 @@ pub struct RuntimeTaskRecord {
     pub error: Option<String>,
     pub metadata: serde_json::Value,
     pub updated_at: i64,
+}
+
+fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
+    let proof_ids_json: String = row.get(7)?;
+    let metadata_json: String = row.get(15)?;
+    Ok(RuntimeTaskRecord {
+        task_id: row.get(0)?,
+        pipeline_key: row.get(1)?,
+        route: row.get(2)?,
+        guest_system: row.get(3)?,
+        runner: row.get(4)?,
+        task_kind: row.get(5)?,
+        proposal_id: row.get(6)?,
+        proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
+        runner_status: RunnerStatus::from_db(row.get::<_, String>(8)?.as_str()),
+        task_dir: row.get(9)?,
+        image_ref: row.get(10)?,
+        provider_request_id: row.get(11)?,
+        remote_tx_hash: row.get(12)?,
+        proof_path: row.get(13)?,
+        error: row.get(14)?,
+        metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
+        updated_at: row.get(16)?,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -485,6 +481,45 @@ mod tests {
             .await?
             .expect("aggregate proof lookup");
         assert_eq!(aggregate.task_id, "task-public");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_lists_all_tasks_by_engine_task_id() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "raiko2-runtime-engine-lookup-all-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        for task_id in ["task-public-a", "task-public-b"] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    pipeline_key: "shasta-risc0-boundless".to_string(),
+                    route: "risc0/boundless".to_string(),
+                    guest_system: "risc0".to_string(),
+                    runner: "boundless".to_string(),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: vec!["shared-proposal-proof-task".to_string()],
+                    metadata: serde_json::json!({
+                        "aggregate_task_id": "shared-aggregate-proof-task",
+                    }),
+                })
+                .await?;
+        }
+
+        let shared = runtime
+            .find_tasks_by_engine_task_id("shared-proposal-proof-task")
+            .await?;
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared[0].task_id, "task-public-a");
+        assert_eq!(shared[1].task_id, "task-public-b");
 
         std::fs::remove_dir_all(root)?;
         Ok(())

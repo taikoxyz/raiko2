@@ -4,7 +4,7 @@ use alloy::{
     rpc::client::RpcClient,
 };
 use alloy_primitives::{Address, map::AddressMap};
-use raiko2_primitives::{ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -26,6 +26,8 @@ pub struct NetworkProvider {
     l2_client: RpcClient,
     l2_provider: DynProvider,
     http_client: reqwest::Client,
+    _l1_chain_spec: Option<ChainSpec>,
+    l2_chain_spec: Option<ChainSpec>,
 }
 
 impl NetworkProvider {
@@ -40,14 +42,20 @@ impl NetworkProvider {
     ///
     /// Returns an error if the RPC URL is invalid or the client cannot be constructed.
     pub fn new_with_config(rpc_url: &str, config: &RpcClientConfig) -> RaikoResult<Self> {
-        Self::new_pair_with_config(rpc_url, rpc_url, config)
+        Self::new_pair_with_chain_specs_and_config(rpc_url, rpc_url, None, None, config)
     }
 
     /// # Errors
     ///
     /// Returns an error if either RPC URL is invalid.
     pub fn new_pair(l1_rpc_url: &str, l2_rpc_url: &str) -> RaikoResult<Self> {
-        Self::new_pair_with_config(l1_rpc_url, l2_rpc_url, &RpcClientConfig::default())
+        Self::new_pair_with_chain_specs_and_config(
+            l1_rpc_url,
+            l2_rpc_url,
+            None,
+            None,
+            &RpcClientConfig::default(),
+        )
     }
 
     /// # Errors
@@ -56,6 +64,19 @@ impl NetworkProvider {
     pub fn new_pair_with_config(
         l1_rpc_url: &str,
         l2_rpc_url: &str,
+        config: &RpcClientConfig,
+    ) -> RaikoResult<Self> {
+        Self::new_pair_with_chain_specs_and_config(l1_rpc_url, l2_rpc_url, None, None, config)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if either RPC URL is invalid or a client cannot be constructed.
+    pub fn new_pair_with_chain_specs_and_config(
+        l1_rpc_url: &str,
+        l2_rpc_url: &str,
+        l1_chain_spec: Option<ChainSpec>,
+        l2_chain_spec: Option<ChainSpec>,
         config: &RpcClientConfig,
     ) -> RaikoResult<Self> {
         let l1_client = build_rpc_client(l1_rpc_url, config)?;
@@ -81,6 +102,8 @@ impl NetworkProvider {
             l2_client,
             l2_provider,
             http_client,
+            _l1_chain_spec: l1_chain_spec,
+            l2_chain_spec,
         })
     }
 }

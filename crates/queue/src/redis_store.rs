@@ -124,6 +124,37 @@ where
             .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize payload: {e}")))?;
 
         let mut conn = self.conn.lock().await;
+        let mut unresolved_deps = Vec::with_capacity(deps.len());
+        let mut initial_state = STATE_PENDING;
+        let mut failure_error = None;
+
+        for dep in deps {
+            let dep_state: Option<String> = conn
+                .hget(self.task_key(&dep)?, FIELD_STATE)
+                .await
+                .map_err(TaskStoreError::backend)?;
+            match dep_state.as_deref() {
+                Some(STATE_SUCCEEDED) => {}
+                Some(STATE_FAILED) => {
+                    initial_state = STATE_FAILED;
+                    failure_error = Some("dependency failed");
+                    unresolved_deps.clear();
+                    break;
+                }
+                Some(STATE_CANCELLED) => {
+                    initial_state = STATE_CANCELLED;
+                    unresolved_deps.clear();
+                    break;
+                }
+                _ => unresolved_deps.push(dep),
+            }
+        }
+
+        let remaining = if initial_state == STATE_PENDING {
+            unresolved_deps.len()
+        } else {
+            0
+        };
         let inserted: i64 = redis::Script::new(
             r#"
 local exists = redis.call('EXISTS', KEYS[1])
@@ -155,9 +186,9 @@ return 1
         .arg(FIELD_PRIORITY)
         .arg(prio.as_str())
         .arg(FIELD_STATE)
-        .arg(STATE_PENDING)
+        .arg(initial_state)
         .arg(FIELD_REMAINING)
-        .arg(deps.len() as i64)
+        .arg(remaining as i64)
         .arg(FIELD_PAYLOAD)
         .arg(payload)
         .arg(FIELD_ATTEMPT)
@@ -175,7 +206,17 @@ return 1
             return Ok(false);
         }
 
-        for dep in deps {
+        if let Some(error) = failure_error {
+            let _: () = redis::cmd("HSET")
+                .arg(&task_key)
+                .arg(FIELD_ERROR)
+                .arg(error)
+                .query_async(&mut *conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+        }
+
+        for dep in unresolved_deps {
             let dep_key = self.dependents_key(&dep)?;
             let _: () = redis::cmd("SADD")
                 .arg(dep_key)

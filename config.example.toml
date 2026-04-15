@@ -59,6 +59,8 @@ timeout_secs = 7200
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
+batch_quoted_mcycles = 1500
+batch_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 

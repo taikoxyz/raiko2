@@ -119,17 +119,33 @@ fn non_empty_str(value: &str) -> Option<String> {
 }
 
 fn default_sp1_docker_tag(root: &Path) -> Option<String> {
+    let workspace_lock_path = root.join("Cargo.lock");
+    if let Some(version) = lock_package_version(
+        &workspace_lock_path,
+        &[
+            "sp1-build",
+            "sp1-prover",
+            "sp1-core-executor",
+            "sp1-zkvm",
+            "sp1-sdk",
+        ],
+    ) {
+        return Some(format!("v{version}"));
+    }
+
     let lock_path = root.join("guests/sp1/Cargo.lock");
+    lock_package_version(&lock_path, &["sp1-zkvm", "sp1-sdk"]).map(|version| format!("v{version}"))
+}
+
+fn lock_package_version(lock_path: &Path, package_names: &[&str]) -> Option<String> {
     let contents = fs::read_to_string(lock_path).ok()?;
     let lock: CargoLockFile = toml::from_str(&contents).ok()?;
-    let version = lock
-        .package
-        .iter()
-        .find(|pkg| pkg.name == "sp1-zkvm")
-        .or_else(|| lock.package.iter().find(|pkg| pkg.name == "sp1-sdk"))?
-        .version
-        .clone();
-    Some(format!("v{version}"))
+    package_names.iter().find_map(|package_name| {
+        lock.package
+            .iter()
+            .find(|pkg| pkg.name == *package_name)
+            .map(|pkg| pkg.version.clone())
+    })
 }
 
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
@@ -422,7 +438,9 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     }
     let manifest_path = root.join("guests/sp1/Cargo.toml");
     let manifest = read_manifest(&manifest_path)?;
+    let export_dir = util::target_root(root).join("sp1-export");
     let output_dir = root.join("crates/guests/elf");
+    fs::create_dir_all(&export_dir)?;
     fs::create_dir_all(&output_dir)?;
 
     println!("[INFO] SP1 docker tag: {sp1_tag}");
@@ -431,63 +449,60 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
 
-    for bin in &manifest.bin {
-        println!("[INFO] Building {} (docker via cargo prove)...", bin.name);
-        let elf_name = format!("{}.elf", bin.name.replace('-', "_"));
+    println!("[INFO] Building SP1 guest binaries in a single cargo prove invocation...");
 
-        let mut cmd = Command::new("cargo");
-        cmd.current_dir(root.join("guests/sp1"));
-        cmd.arg("prove")
-            .arg("build")
-            .arg("--docker")
-            .arg("--tag")
-            .arg(&sp1_tag)
-            .arg("--ignore-rust-version");
-        if bench {
-            cmd.arg("--features").arg("bench");
-        }
-        cmd.arg("--binaries")
-            .arg(&bin.name)
-            .arg("--elf-name")
-            .arg(&elf_name)
-            .arg("--output-directory")
-            .arg(&output_dir)
-            .arg("--locked")
-            .arg("--workspace-directory")
-            .arg(root);
-
-        let rustflags =
-            env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
-        cmd.env(
-            "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
-            rustflags,
-        );
-
-        if let Ok(cc) = env::var("SP1_GUEST_CC")
-            && !cc.is_empty()
-        {
-            cmd.env("CC", cc);
-        }
-        if let Ok(cflags) = env::var("SP1_GUEST_CFLAGS")
-            && !cflags.is_empty()
-        {
-            cmd.env("CFLAGS", cflags);
-        }
-        if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
-            && !platform.is_empty()
-        {
-            cmd.env("DOCKER_DEFAULT_PLATFORM", platform);
-        }
-        if env::var("MOCK").ok().as_deref() == Some("1") {
-            cmd.env("SP1_PROVER", "mock");
-            println!("[INFO] SP1_PROVER=mock enabled");
-        }
-        if env::var("VERBOSE").ok().as_deref() == Some("1") {
-            println!("[WARN] VERBOSE=1 is ignored by cargo prove build");
-        }
-
-        util::run(cmd)?;
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(root.join("guests/sp1"));
+    cmd.arg("prove")
+        .arg("build")
+        .arg("--docker")
+        .arg("--tag")
+        .arg(&sp1_tag)
+        .arg("--ignore-rust-version");
+    if bench {
+        cmd.arg("--features").arg("bench");
     }
+    for bin in &manifest.bin {
+        cmd.arg("--binaries").arg(&bin.name);
+    }
+    cmd.arg("--output-directory")
+        .arg(&export_dir)
+        .arg("--locked")
+        .arg("--workspace-directory")
+        .arg(root);
+
+    let rustflags =
+        env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
+    cmd.env(
+        "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
+        rustflags,
+    );
+
+    if let Ok(cc) = env::var("SP1_GUEST_CC")
+        && !cc.is_empty()
+    {
+        cmd.env("CC", cc);
+    }
+    if let Ok(cflags) = env::var("SP1_GUEST_CFLAGS")
+        && !cflags.is_empty()
+    {
+        cmd.env("CFLAGS", cflags);
+    }
+    if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
+        && !platform.is_empty()
+    {
+        cmd.env("DOCKER_DEFAULT_PLATFORM", platform);
+    }
+    if env::var("MOCK").ok().as_deref() == Some("1") {
+        cmd.env("SP1_PROVER", "mock");
+        println!("[INFO] SP1_PROVER=mock enabled");
+    }
+    if env::var("VERBOSE").ok().as_deref() == Some("1") {
+        println!("[WARN] VERBOSE=1 is ignored by cargo prove build");
+    }
+
+    util::run(cmd)?;
+    export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");
     Ok(())
@@ -510,19 +525,21 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
 
+    let target_root = util::target_root(root);
+    let export_dir = target_root.join("sp1-export");
     let output_dir = root.join("crates/guests/elf");
+    fs::create_dir_all(&export_dir)?;
     fs::create_dir_all(&output_dir)?;
 
-    let target_root = util::target_root(root);
     let (container_target_dir, extra_mount) = match target_root.strip_prefix(root).ok() {
         Some(rel) => (PathBuf::from("/work").join(rel), None),
         None => (PathBuf::from("/target"), Some(target_root.clone())),
     };
 
-    let container_output_dir = output_dir
+    let container_export_dir = export_dir
         .strip_prefix(root)
         .map(|rel| PathBuf::from("/work").join(rel))
-        .unwrap_or_else(|_| PathBuf::from("/work/crates/guests/elf"));
+        .unwrap_or_else(|_| PathBuf::from("/work/target/sp1-export"));
 
     let rustflags =
         env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
@@ -559,17 +576,17 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         ))
         .arg("-e")
         .arg(format!(
-            "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
+            "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
         ));
 
     // Ensure crates with C/C++ sources (e.g. `c-kzg`, `blst`) cross-compile for the guest target.
     // Prefer the RISC-V bare-metal GCC toolchain: it provides a proper sysroot with standard headers.
     cmd.arg("-e")
-        .arg("CC_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
+        .arg("CC_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
     cmd.arg("-e")
-        .arg("CXX_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
+        .arg("CXX_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
     cmd.arg("-e")
-        .arg("AR_riscv64im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
+        .arg("AR_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
 
     if let Ok(cc) = env::var("SP1_GUEST_CC")
         && !cc.is_empty()
@@ -582,29 +599,41 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         cmd.arg("-e").arg(format!("CFLAGS={cflags}"));
     }
 
-    let mut script = String::from("set -eu\n");
+    let mut script = String::from("set -eu\ncargo prove build --ignore-rust-version ");
+    if bench {
+        script.push_str("--features bench ");
+    }
     for bin in &manifest.bin {
-        let elf_name = format!("{}.elf", bin.name.replace('-', "_"));
-        script.push_str("cargo prove build ");
-        script.push_str("--ignore-rust-version ");
-        if bench {
-            script.push_str("--features bench ");
-        }
         script.push_str("--binaries ");
         script.push_str(&bin.name);
-        script.push_str(" --elf-name ");
-        script.push_str(&elf_name);
-        script.push_str(" --output-directory ");
-        script.push_str(container_output_dir.to_string_lossy().as_ref());
-        script.push_str(" --locked --workspace-directory /work\n");
+        script.push(' ');
     }
+    script.push_str("--output-directory ");
+    script.push_str(container_export_dir.to_string_lossy().as_ref());
+    script.push_str(" --locked --workspace-directory /work\n");
 
     cmd.arg(image).arg("sh").arg("-lc").arg(script);
 
     println!("[INFO] Building SP1 guest package (toolchain image)...");
     util::run(cmd)?;
+    export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");
+    Ok(())
+}
+
+fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Path) -> Result<()> {
+    for bin in &manifest.bin {
+        let source = export_dir.join(&bin.name);
+        let destination = output_dir.join(format!("{}.elf", bin.name.replace('-', "_")));
+        fs::copy(&source, &destination)
+            .with_context(|| format!("export {source:?} -> {destination:?}"))?;
+        println!(
+            "[INFO] Exported {}",
+            destination.file_name().unwrap().to_string_lossy()
+        );
+    }
+
     Ok(())
 }
 

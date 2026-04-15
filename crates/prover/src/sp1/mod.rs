@@ -17,8 +17,8 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::GuestInput;
 use serde::Deserialize;
 use sp1_sdk::{
-    Elf, HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProverClient, ProvingKey as _,
-    SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin,
+    CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
 };
 use std::time::Duration;
 use tracing::info;
@@ -31,6 +31,39 @@ use crate::{
 /// SP1 Prover for Shasta proposal proofs.
 pub struct Sp1Prover {
     config: Sp1Config,
+}
+
+#[must_use]
+pub fn sp1_vk_uuid(vk: &SP1VerifyingKey) -> String {
+    serde_json::to_string(vk).expect("SP1 verifying key should serialize")
+}
+
+#[must_use]
+pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
+    alloy_primitives::hex::encode_prefixed(vk.hash_bytes())
+}
+
+pub fn sp1_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
+    if let Ok(vk) = serde_json::from_str::<SP1VerifyingKey>(raw) {
+        return Ok(vk.hash_u32());
+    }
+
+    let bytes =
+        alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex uuid: {err}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "expected 32 bytes or SP1 verifying key JSON, got {}",
+            bytes.len()
+        ));
+    }
+
+    let mut words = [0u32; 8];
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let mut word = [0u8; 4];
+        word.copy_from_slice(chunk);
+        words[index] = u32::from_be_bytes(word);
+    }
+    Ok(words)
 }
 
 impl Sp1Prover {
@@ -107,7 +140,7 @@ where
         stdin.write(&guest_input);
 
         // Use the proposal ELF selected by the configured backend.
-        let elf = Elf::from(backend.elf(ProofStage::Proposal)?);
+        let elf = backend.elf(ProofStage::Proposal)?;
         match effective_config.mode {
             ExecutionMode::Execute => {
                 if effective_config.prover == ProverMode::Network {
@@ -115,9 +148,13 @@ where
                         "sp1.mode=execute does not support sp1.prover=network".to_string(),
                     ));
                 }
-                let client = ProverClient::builder().light().build().await;
+                let client = match effective_config.prover {
+                    ProverMode::Mock => ProverClient::builder().mock().build(),
+                    ProverMode::Local => ProverClient::builder().cpu().build(),
+                    ProverMode::Network => unreachable!("network mode is rejected above"),
+                };
                 let (public_values, execution_report) =
-                    client.execute(elf, stdin).await.map_err(|e| {
+                    client.execute(elf, &stdin).run().map_err(|e| {
                         tracing::error!("Failed to execute SP1 proposal: {:?}", e);
                         RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
                     })?;
@@ -149,7 +186,7 @@ where
                 let proof_mode: SP1ProofMode = effective_config.recursion.into();
                 match effective_config.prover {
                     ProverMode::Mock => {
-                        let client = ProverClient::builder().mock().build().await;
+                        let client = ProverClient::builder().mock().build();
                         prove_proposal_with_client(
                             &client,
                             elf,
@@ -161,7 +198,7 @@ where
                         .await
                     }
                     ProverMode::Local => {
-                        let client = ProverClient::builder().cpu().build().await;
+                        let client = ProverClient::builder().cpu().build();
                         prove_proposal_with_client(
                             &client,
                             elf,
@@ -173,7 +210,7 @@ where
                         .await
                     }
                     ProverMode::Network => {
-                        let client = build_network_prover(&effective_config).await?;
+                        let client = build_network_prover(&effective_config)?;
                         prove_proposal_with_network_client(
                             &client,
                             elf,
@@ -212,12 +249,12 @@ where
 
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
-        let elf = Elf::from(backend.elf(ProofStage::Aggregation)?);
+        let elf = backend.elf(ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
             ProverMode::Mock => {
-                let client = ProverClient::builder().mock().build().await;
+                let client = ProverClient::builder().mock().build();
                 aggregate_with_client(
                     &client,
                     elf,
@@ -230,7 +267,7 @@ where
                 .await
             }
             ProverMode::Local => {
-                let client = ProverClient::builder().cpu().build().await;
+                let client = ProverClient::builder().cpu().build();
                 aggregate_with_client(
                     &client,
                     elf,
@@ -243,7 +280,7 @@ where
                 .await
             }
             ProverMode::Network => {
-                let client = build_network_prover(&effective_config).await?;
+                let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
                     elf,
@@ -265,37 +302,29 @@ struct NetworkProofRequestResult {
     proof: SP1ProofWithPublicValues,
 }
 
-async fn prove_proposal_with_client<C>(
-    client: &C,
-    elf: Elf,
+async fn prove_proposal_with_client(
+    client: &CpuProver,
+    elf: &[u8],
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
     guest_input: &GuestInput,
-) -> RaikoResult<Proof>
-where
-    C: sp1_sdk::Prover,
-{
-    let pk = client.setup(elf).await.map_err(|e| {
-        tracing::error!("Failed to setup SP1 proposal proving key: {:?}", e);
-        RaikoError::Guest(format!("SP1 proposal setup failed: {e}"))
-    })?;
+) -> RaikoResult<Proof> {
+    let (pk, vk) = client.setup(elf);
     let proof = client
-        .prove(&pk, stdin)
+        .prove(&pk, &stdin)
         .mode(proof_mode)
-        .await
+        .run()
         .map_err(|e| {
             tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
             RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
         })?;
 
     if verify {
-        client
-            .verify(&proof, pk.verifying_key(), None)
-            .map_err(|e| {
-                tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
-            })?;
+        client.verify(&proof, &vk).map_err(|e| {
+            tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
+        })?;
     }
 
     let public_values = proof.public_values.as_slice();
@@ -305,10 +334,10 @@ where
 
     Ok(Sp1Response {
         proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
-        vkey_hash: Some(pk.verifying_key().bytes32().clone()),
+        vkey_hash: Some(sp1_vk_digest(&vk)),
         input: input_hash,
         sp1_proof: Some(proof),
-        vkey: Some(pk.verifying_key().clone()),
+        vkey: Some(vk),
         extra_data: with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?,
     }
     .into())
@@ -316,27 +345,22 @@ where
 
 async fn prove_proposal_with_network_client(
     client: &NetworkProver,
-    elf: Elf,
+    elf: &[u8],
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     config: &Sp1Config,
     guest_input: &GuestInput,
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof> {
-    let pk = client.setup(elf).await.map_err(|e| {
-        tracing::error!("Failed to setup SP1 network proposal proving key: {:?}", e);
-        RaikoError::Guest(format!("SP1 proposal setup failed: {e}"))
-    })?;
+    let (pk, vk) = client.setup(elf);
     let request =
         request_network_proof(client, &pk, stdin, proof_mode, config, observer, "proposal").await?;
 
     if config.verify {
-        client
-            .verify(&request.proof, pk.verifying_key(), None)
-            .map_err(|e| {
-                tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
-            })?;
+        client.verify(&request.proof, &vk).map_err(|e| {
+            tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
+        })?;
     }
 
     let public_values = request.proof.public_values.as_slice();
@@ -350,10 +374,10 @@ async fn prove_proposal_with_network_client(
 
     Ok(Sp1Response {
         proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
-        vkey_hash: Some(pk.verifying_key().bytes32().clone()),
+        vkey_hash: Some(sp1_vk_digest(&vk)),
         input: input_hash,
         sp1_proof: Some(request.proof),
-        vkey: Some(pk.verifying_key().clone()),
+        vkey: Some(vk),
         extra_data: insert_sp1_metadata(
             base_extra_data,
             serde_json::json!({ "network": network_metadata }),
@@ -362,9 +386,9 @@ async fn prove_proposal_with_network_client(
     .into())
 }
 
-async fn aggregate_with_client<C, B>(
-    client: &C,
-    elf: Elf,
+async fn aggregate_with_client<B>(
+    client: &CpuProver,
+    elf: &[u8],
     backend: &B,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
@@ -372,18 +396,11 @@ async fn aggregate_with_client<C, B>(
     verify: bool,
 ) -> RaikoResult<Proof>
 where
-    C: sp1_sdk::Prover,
     B: ProverBackend,
 {
-    let proposal_elf = Elf::from(backend.elf(ProofStage::Proposal)?);
-    let proposal_pk = client.setup(proposal_elf).await.map_err(|e| {
-        tracing::error!(
-            "Failed to setup SP1 proposal verifying key for aggregation: {:?}",
-            e
-        );
-        RaikoError::Guest(format!("SP1 aggregation proposal setup failed: {e}"))
-    })?;
-    let verifier_key = proposal_pk.verifying_key().clone();
+    let proposal_elf = backend.elf(ProofStage::Proposal)?;
+    let (_, proposal_vk) = client.setup(proposal_elf);
+    let verifier_key = proposal_vk.clone();
 
     for proof in &input.proofs {
         if let Some(proof_hex) = &proof.proof {
@@ -408,26 +425,21 @@ where
         }
     }
 
-    let pk = client.setup(elf).await.map_err(|e| {
-        tracing::error!("Failed to setup SP1 aggregation proving key: {:?}", e);
-        RaikoError::Guest(format!("SP1 aggregation setup failed: {e}"))
-    })?;
+    let (pk, vk) = client.setup(elf);
     let proof = client
-        .prove(&pk, stdin)
+        .prove(&pk, &stdin)
         .mode(proof_mode)
-        .await
+        .run()
         .map_err(|e| {
             tracing::error!("Failed to generate SP1 aggregation proof: {:?}", e);
             RaikoError::Guest(format!("SP1 aggregation proof generation failed: {e}"))
         })?;
 
     if verify {
-        client
-            .verify(&proof, pk.verifying_key(), None)
-            .map_err(|e| {
-                tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
-            })?;
+        client.verify(&proof, &vk).map_err(|e| {
+            tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
+        })?;
     }
 
     let public_values = proof.public_values.as_slice();
@@ -437,10 +449,10 @@ where
 
     Ok(Sp1Response {
         proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
-        vkey_hash: Some(pk.verifying_key().bytes32().clone()),
+        vkey_hash: Some(sp1_vk_digest(&vk)),
         input: agg_input_hash,
         sp1_proof: Some(proof),
-        vkey: Some(pk.verifying_key().clone()),
+        vkey: Some(vk),
         extra_data: None,
     }
     .into())
@@ -448,7 +460,7 @@ where
 
 async fn aggregate_with_network_client<B>(
     client: &NetworkProver,
-    elf: Elf,
+    elf: &[u8],
     backend: &B,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
@@ -458,15 +470,9 @@ async fn aggregate_with_network_client<B>(
 where
     B: ProverBackend,
 {
-    let proposal_elf = Elf::from(backend.elf(ProofStage::Proposal)?);
-    let proposal_pk = client.setup(proposal_elf).await.map_err(|e| {
-        tracing::error!(
-            "Failed to setup SP1 proposal verifying key for aggregation: {:?}",
-            e
-        );
-        RaikoError::Guest(format!("SP1 aggregation proposal setup failed: {e}"))
-    })?;
-    let verifier_key = proposal_pk.verifying_key().clone();
+    let proposal_elf = backend.elf(ProofStage::Proposal)?;
+    let (_, proposal_vk) = client.setup(proposal_elf);
+    let verifier_key = proposal_vk.clone();
 
     for proof in &input.proofs {
         if let Some(proof_hex) = &proof.proof {
@@ -491,20 +497,15 @@ where
         }
     }
 
-    let pk = client.setup(elf).await.map_err(|e| {
-        tracing::error!("Failed to setup SP1 aggregation proving key: {:?}", e);
-        RaikoError::Guest(format!("SP1 aggregation setup failed: {e}"))
-    })?;
+    let (pk, vk) = client.setup(elf);
     let request =
         request_network_proof(client, &pk, stdin, proof_mode, config, None, "aggregation").await?;
 
     if config.verify {
-        client
-            .verify(&request.proof, pk.verifying_key(), None)
-            .map_err(|e| {
-                tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
-            })?;
+        client.verify(&request.proof, &vk).map_err(|e| {
+            tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
+        })?;
     }
 
     let public_values = request.proof.public_values.as_slice();
@@ -517,16 +518,16 @@ where
 
     Ok(Sp1Response {
         proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
-        vkey_hash: Some(pk.verifying_key().bytes32().clone()),
+        vkey_hash: Some(sp1_vk_digest(&vk)),
         input: agg_input_hash,
         sp1_proof: Some(request.proof),
-        vkey: Some(pk.verifying_key().clone()),
+        vkey: Some(vk),
         extra_data: insert_sp1_metadata(None, serde_json::json!({ "network": network_metadata }))?,
     }
     .into())
 }
 
-async fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
+fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
     let private_key = std::env::var("NETWORK_PRIVATE_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -535,15 +536,13 @@ async fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> 
                 "NETWORK_PRIVATE_KEY must be set for sp1.prover=network".to_string(),
             )
         })?;
-    let builder = ProverClient::builder()
-        .network_for(config.network_mode.into())
-        .private_key(&private_key);
+    let builder = ProverClient::builder().network().private_key(&private_key);
     let builder = if let Some(rpc_url) = config.rpc_url.as_deref() {
         builder.rpc_url(rpc_url)
     } else {
         builder
     };
-    Ok(builder.build().await)
+    Ok(builder.build())
 }
 
 async fn request_network_proof(
@@ -557,13 +556,13 @@ async fn request_network_proof(
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
     let request_id = client
-        .prove(pk, stdin)
+        .prove(pk, &stdin)
         .mode(proof_mode)
         .strategy(config.fulfillment_strategy.into())
         .skip_simulation(config.skip_simulation)
         .cycle_limit(config.cycle_limit)
         .timeout(timeout)
-        .request()
+        .request_async()
         .await
         .map_err(|e| {
             tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);

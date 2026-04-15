@@ -329,6 +329,58 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
 }
 
 #[tokio::test]
+async fn e2e_cancel_does_not_cancel_shared_engine_task_for_other_root_task() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+    let payload = json!({
+        "proposals": [{
+            "proposal_id": 3,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [3],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "native",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let first_id = first["data"]["task_id"]
+        .as_str()
+        .expect("first response task_id")
+        .to_string();
+
+    let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK);
+    let second_id = second["data"]["task_id"]
+        .as_str()
+        .expect("second response task_id")
+        .to_string();
+
+    let (status, first_task) = get_json(&app, &format!("/v3/tasks/{first_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second_task) = get_json(&app, &format!("/v3/tasks/{second_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first_task["data"]["proposals"][0]["task_id"],
+        second_task["data"]["proposals"][0]["task_id"]
+    );
+
+    let (status, cancelled) =
+        post_json(&app, &format!("/v3/tasks/{first_id}/cancel"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancelled["data"]["status"], "cancelled");
+
+    let (status, remaining) = get_json(&app, &format!("/v3/tasks/{second_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(remaining["data"]["status"], "pending");
+    assert_ne!(remaining["data"]["runtime"]["runner_status"], "cancelled");
+}
+
+#[tokio::test]
 async fn e2e_task_status_turns_proving_after_preflight_progress() {
     let config = base_config();
     let engine = native_fixture_engine();

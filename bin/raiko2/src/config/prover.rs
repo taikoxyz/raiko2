@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use raiko2_prover::{
-    boundless::{DeploymentConfig, OfferParamsConfig},
+    boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig},
     sp1::Sp1Config,
 };
 use serde::{Deserialize, Serialize};
@@ -218,6 +218,10 @@ pub struct BoundlessConfig {
     pub signer_key: String,
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
+    #[serde(default)]
+    pub batch_quoted_mcycles: Option<u32>,
+    #[serde(default)]
+    pub batch_quote_strategy: BatchQuoteStrategy,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_boundless_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -232,6 +236,10 @@ impl Default for BoundlessConfig {
             rpc_url: raiko2_prover::boundless::BoundlessConfig::default().rpc_url,
             signer_key: String::new(),
             deployment: raiko2_prover::boundless::BoundlessConfig::default().deployment,
+            batch_quoted_mcycles: raiko2_prover::boundless::BoundlessConfig::default()
+                .batch_quoted_mcycles,
+            batch_quote_strategy: raiko2_prover::boundless::BoundlessConfig::default()
+                .batch_quote_strategy,
             offer_params: raiko2_prover::boundless::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),

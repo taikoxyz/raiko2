@@ -7,6 +7,7 @@ use alloy_consensus::{
 };
 use alloy_primitives::B256;
 use alloy_sol_types::{SolCall, sol};
+use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
     ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs,
@@ -17,6 +18,11 @@ use raiko2_primitives_shasta::{
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    time::Instant,
+};
+use tracing::info;
 
 sol! {
     #[derive(Debug)]
@@ -28,6 +34,9 @@ sol! {
 
     function anchorV4(AnchorV4Checkpoint _checkpoint) external;
 }
+
+const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 10;
+const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 2;
 
 /// Shasta hardfork specification.
 #[derive(Debug)]
@@ -83,33 +92,52 @@ where
         ctx: &ProofContext,
         provider: &P,
     ) -> RaikoResult<GuestInput> {
+        let preflight_started_at = Instant::now();
         let proof_type = proof_type_from_context(ctx);
         let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
         let chain_spec = chain_spec_from_context(ctx);
-        let blocks = provider.batch_blocks(&block_numbers).await?;
-        let witnesses = provider.batch_witnesses(&block_numbers).await?;
+        let chunk_size = preflight_chunk_size();
+        let chunk_concurrency = preflight_chunk_concurrency();
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            block_count = block_numbers.len(),
+            chunk_size,
+            chunk_concurrency,
+            "starting shasta preflight"
+        );
+        let chunked_block_numbers = block_numbers
+            .chunks(chunk_size)
+            .map(<[u64]>::to_vec)
+            .collect::<Vec<_>>();
+        let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
+            stream::iter(chunked_block_numbers.into_iter().enumerate())
+                .map(|(chunk_index, chunk_block_numbers)| {
+                    let chain_spec = chain_spec.clone();
+                    async move {
+                        fetch_preflight_chunk(
+                            provider,
+                            chunk_index,
+                            &chunk_block_numbers,
+                            chain_spec,
+                        )
+                        .await
+                    }
+                })
+                .buffer_unordered(chunk_concurrency)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<RaikoResult<Vec<_>>>()?;
+        chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
 
-        // Collect signers for each block to fetch the touched accounts.
-        let mut all_signers = Vec::with_capacity(blocks.len());
-        for block in &blocks {
-            let mut signers = Vec::new();
-            for tx in block.body.transactions() {
-                if let Ok(signer) = tx.recover_signer() {
-                    signers.push(signer);
-                }
-            }
-            all_signers.push(signers);
-        }
-
-        let accounts = provider
-            .batch_accounts(&block_numbers, &all_signers)
-            .await?;
-
-        if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
-            return Err(RaikoError::InvalidRequestConfig(
-                "Provider returned mismatched input lengths".to_string(),
-            ));
-        }
+        let witnesses = chunk_results
+            .into_iter()
+            .flat_map(|(_, chunk)| chunk)
+            .collect::<Vec<_>>();
+        let blocks = witnesses
+            .iter()
+            .map(|witness| witness.block.clone())
+            .collect::<Vec<_>>();
 
         let proposal_event =
             resolve_shasta_proposal_event(ctx, provider, &chain_spec, &blocks).await?;
@@ -128,18 +156,6 @@ where
                 .await?;
         }
 
-        let witnesses = blocks
-            .into_iter()
-            .zip(witnesses)
-            .zip(accounts)
-            .map(|((block, witness), accounts)| StatelessInput {
-                block,
-                chain_spec: chain_spec.clone(),
-                witness,
-                accounts,
-            })
-            .collect::<Vec<_>>();
-
         validate_block_range(&witnesses, expected_proposal_id)?;
 
         let mut input = GuestInput {
@@ -152,8 +168,104 @@ where
         input.compact_proposal_witness_data();
         input.proof_carry_data =
             raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            block_count = block_numbers.len(),
+            elapsed_ms = preflight_started_at.elapsed().as_millis(),
+            "completed shasta preflight"
+        );
         Ok(input)
     }
+}
+
+fn preflight_chunk_size() -> usize {
+    std::env::var("PREFLIGHT_CHUNK_SIZE")
+        .or_else(|_| std::env::var("PREFETCH_CHUNK_SIZE"))
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PREFLIGHT_CHUNK_SIZE)
+}
+
+fn preflight_chunk_concurrency() -> usize {
+    std::env::var("PREFLIGHT_CHUNK_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY)
+}
+
+fn collect_block_signers(
+    block: &reth_ethereum_primitives::Block,
+) -> Vec<alloy_primitives::Address> {
+    let mut signers = Vec::new();
+    for tx in block.body.transactions() {
+        if let Ok(signer) = tx.recover_signer() {
+            signers.push(signer);
+        }
+    }
+    signers
+}
+
+async fn fetch_preflight_chunk<P: Provider>(
+    provider: &P,
+    chunk_index: usize,
+    block_numbers: &[u64],
+    chain_spec: ChainSpec,
+) -> RaikoResult<(usize, Vec<StatelessInput>)> {
+    let chunk_started_at = Instant::now();
+    info!(
+        chunk_index,
+        first_block = block_numbers.first().copied(),
+        last_block = block_numbers.last().copied(),
+        block_count = block_numbers.len(),
+        "starting shasta preflight chunk"
+    );
+    let blocks_and_witnesses_started_at = Instant::now();
+    let (blocks, witnesses): (
+        Vec<reth_ethereum_primitives::Block>,
+        Vec<raiko2_primitives::ExecutionWitness>,
+    ) = try_join(
+        provider.batch_blocks(block_numbers),
+        provider.batch_witnesses(block_numbers),
+    )
+    .await?;
+    let blocks_and_witnesses_elapsed_ms = blocks_and_witnesses_started_at.elapsed().as_millis();
+
+    let all_signers = blocks.iter().map(collect_block_signers).collect::<Vec<_>>();
+    let accounts_started_at = Instant::now();
+    let accounts = provider.batch_accounts(block_numbers, &all_signers).await?;
+    let accounts_elapsed_ms = accounts_started_at.elapsed().as_millis();
+
+    if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "Provider returned mismatched input lengths".to_string(),
+        ));
+    }
+
+    let witnesses = blocks
+        .into_iter()
+        .zip(witnesses)
+        .zip(accounts)
+        .map(|((block, witness), accounts)| StatelessInput {
+            block,
+            chain_spec: chain_spec.clone(),
+            witness,
+            accounts,
+        })
+        .collect::<Vec<_>>();
+
+    info!(
+        chunk_index,
+        first_block = block_numbers.first().copied(),
+        last_block = block_numbers.last().copied(),
+        block_count = block_numbers.len(),
+        blocks_and_witnesses_elapsed_ms,
+        accounts_elapsed_ms,
+        total_elapsed_ms = chunk_started_at.elapsed().as_millis(),
+        "completed shasta preflight chunk"
+    );
+    Ok((chunk_index, witnesses))
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
@@ -506,15 +618,33 @@ where
                 )));
             }
 
-            let validated_hash = validate_block_with_witness_resources(
-                stateless_input.block.clone(),
-                &stateless_input.witness,
-                &ancestor_headers,
-                input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
-                &taiko_chain_spec,
-                &evm_config,
-            )?;
+            let block_number = stateless_input.block.header.number;
+            let validated_hash = catch_unwind(AssertUnwindSafe(|| {
+                validate_block_with_witness_resources(
+                    stateless_input.block.clone(),
+                    &stateless_input.witness,
+                    &ancestor_headers,
+                    input.proposal_state_nodes(),
+                    stateless_input.accounts.clone(),
+                    &taiko_chain_spec,
+                    &evm_config,
+                )
+            }))
+            .map_err(|panic| {
+                let reason = if let Some(message) = panic.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = panic.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                RaikoError::stateless_validation_detailed(
+                    format!(
+                        "validation panicked at witness index {index}, block {block_number}: {reason}"
+                    ),
+                    Some(block_number),
+                )
+            })??;
             roll_proposal_ancestor_headers_in_place(
                 &mut ancestor_headers,
                 &stateless_input.block.header,

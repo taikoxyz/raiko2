@@ -127,6 +127,39 @@ struct TaskRecord<P, O, Id> {
     lease_until_ms: Option<u64>,
 }
 
+enum DependencyInsertState<Id> {
+    Pending {
+        remaining: usize,
+        unresolved_deps: Vec<TaskId<Id>>,
+    },
+    Failed,
+    Cancelled,
+}
+
+fn resolve_dependency_insert_state<P, O, Id>(
+    tasks: &HashMap<TaskId<Id>, TaskRecord<P, O, Id>>,
+    deps: Vec<TaskId<Id>>,
+) -> DependencyInsertState<Id>
+where
+    Id: Clone + Eq + Hash,
+{
+    let mut unresolved_deps = Vec::with_capacity(deps.len());
+
+    for dep in deps {
+        match tasks.get(&dep).map(|record| &record.state) {
+            Some(TaskState::Succeeded { .. }) => {}
+            Some(TaskState::Failed { .. }) => return DependencyInsertState::Failed,
+            Some(TaskState::Cancelled) => return DependencyInsertState::Cancelled,
+            _ => unresolved_deps.push(dep),
+        }
+    }
+
+    DependencyInsertState::Pending {
+        remaining: unresolved_deps.len(),
+        unresolved_deps,
+    }
+}
+
 impl<P, O, Id> MemoryStore<P, O, Id> {
     #[must_use]
     pub fn new() -> Self {
@@ -171,35 +204,63 @@ where
         deps: Vec<TaskId<Id>>,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
+        let dependency_state = resolve_dependency_insert_state(&g.tasks, deps);
         let should_reset = matches!(
             g.tasks.get(&id).map(|record| &record.state),
             Some(TaskState::Failed { .. } | TaskState::Cancelled)
         );
         if should_reset {
-            let remaining = deps.len();
+            let (remaining, next_state) = match &dependency_state {
+                DependencyInsertState::Pending { remaining, .. } => {
+                    (*remaining, TaskState::pending(*remaining))
+                }
+                DependencyInsertState::Failed => (
+                    0,
+                    TaskState::Failed {
+                        error: "dependency failed".to_string(),
+                        caused_by_dep: None,
+                    },
+                ),
+                DependencyInsertState::Cancelled => (0, TaskState::Cancelled),
+            };
             g.remaining.insert(id.clone(), remaining);
             if let Some(existing) = g.tasks.get_mut(&id) {
                 existing.payload = Some(payload);
                 existing.priority = prio;
                 existing.attempt = 0;
                 existing.lease_until_ms = None;
-                existing.state = TaskState::pending(remaining);
+                existing.state = next_state;
             }
             return Ok(true);
         }
         if g.tasks.contains_key(&id) {
             return Ok(false);
         }
-        let remaining = deps.len();
+        let (remaining, next_state) = match dependency_state {
+            DependencyInsertState::Pending {
+                remaining,
+                unresolved_deps,
+            } => {
+                for dep in unresolved_deps {
+                    g.dependents.entry(dep).or_default().push(id.clone());
+                }
+                (remaining, TaskState::pending(remaining))
+            }
+            DependencyInsertState::Failed => (
+                0,
+                TaskState::Failed {
+                    error: "dependency failed".to_string(),
+                    caused_by_dep: None,
+                },
+            ),
+            DependencyInsertState::Cancelled => (0, TaskState::Cancelled),
+        };
         g.remaining.insert(id.clone(), remaining);
-        for dep in deps {
-            g.dependents.entry(dep).or_default().push(id.clone());
-        }
         g.tasks.insert(
             id,
             TaskRecord {
                 payload: Some(payload),
-                state: TaskState::pending(remaining),
+                state: next_state,
                 priority: prio,
                 attempt: 0,
                 lease_until_ms: None,

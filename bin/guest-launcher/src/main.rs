@@ -19,13 +19,13 @@ use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
 use raiko2_prover::sp1::{
     ProverMode as Sp1ProverMode, Sp1Config, Sp1FulfillmentStrategy, Sp1NetworkMode,
+    sp1_image_id_words_from_uuid, sp1_vk_uuid,
 };
 use serde::Serialize;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    Elf, ExecutionReport, HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProverClient,
-    ProvingKey as _, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin,
-    SP1VerifyingKey,
+    ExecutionReport, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
 };
 
 #[derive(Parser)]
@@ -126,6 +126,13 @@ struct BenchCountEntry {
 }
 
 #[derive(Debug, Serialize)]
+struct BenchMemoryEntry {
+    label: String,
+    rss_kb: u64,
+    hwm_kb: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct BenchReport {
     stage: &'static str,
     mode: &'static str,
@@ -142,6 +149,7 @@ struct BenchReport {
     invocation_tracker: Vec<BenchCountEntry>,
     opcode_counts: Vec<BenchCountEntry>,
     syscall_counts: Vec<BenchCountEntry>,
+    memory_snapshots: Vec<BenchMemoryEntry>,
 }
 
 impl Mode {
@@ -257,9 +265,33 @@ fn count_entries(entries: impl Iterator<Item = (String, u64)>) -> Vec<BenchCount
     entries
 }
 
+fn current_memory_usage_kb() -> Option<(u64, u64)> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let mut rss_kb = None;
+    let mut hwm_kb = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            rss_kb = value.split_whitespace().next()?.parse::<u64>().ok();
+        } else if let Some(value) = line.strip_prefix("VmHWM:") {
+            hwm_kb = value.split_whitespace().next()?.parse::<u64>().ok();
+        }
+    }
+    Some((rss_kb?, hwm_kb?))
+}
+
+fn record_memory_snapshot(report: &mut BenchReport, label: &'static str) {
+    if let Some((rss_kb, hwm_kb)) = current_memory_usage_kb() {
+        report.memory_snapshots.push(BenchMemoryEntry {
+            label: label.to_string(),
+            rss_kb,
+            hwm_kb,
+        });
+    }
+}
+
 fn apply_execution_metadata(report: &mut BenchReport, execution_report: &ExecutionReport) {
-    report.exit_code = Some(execution_report.exit_code);
-    report.gas = execution_report.gas();
+    report.exit_code = Some(0);
+    report.gas = execution_report.gas;
     report.total_instruction_count = Some(execution_report.total_instruction_count());
     report.total_syscall_count = Some(execution_report.total_syscall_count());
     report.touched_memory_addresses = Some(execution_report.touched_memory_addresses);
@@ -308,11 +340,31 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
 
 async fn run_proposal(args: Args) -> Result<()> {
     let input_path = args.input.clone().context("missing --input")?;
+    let mut report = BenchReport {
+        stage: "proposal",
+        mode: args.mode.as_str(),
+        proof_mode: args.proof_mode.as_str(),
+        input: input_path.display().to_string(),
+        public_values: String::new(),
+        wall_time_ms: 0,
+        exit_code: None,
+        gas: None,
+        total_instruction_count: None,
+        total_syscall_count: None,
+        touched_memory_addresses: None,
+        cycle_tracker: Vec::new(),
+        invocation_tracker: Vec::new(),
+        opcode_counts: Vec::new(),
+        syscall_counts: Vec::new(),
+        memory_snapshots: Vec::new(),
+    };
+    record_memory_snapshot(&mut report, "proposal:start");
     let input = read_input(&input_path, args.proof_type)?;
+    record_memory_snapshot(&mut report, "proposal:after_read_input");
 
     match args.proof_type {
-        ProofType::Sp1 => run_sp1_proposal(args, input_path, input).await,
-        ProofType::Native => run_native_proposal(args, input_path, input).await,
+        ProofType::Sp1 => run_sp1_proposal(args, input_path, input, report).await,
+        ProofType::Native => run_native_proposal(args, input_path, input, report).await,
     }
 }
 
@@ -338,25 +390,17 @@ async fn run_aggregation(args: Args) -> Result<()> {
     let mut stdin = SP1Stdin::new();
     stdin.write(&aggregation_input);
 
-    let proposal_elf = Elf::from(
-        SP1_SHASTA_BACKEND
-            .elf(ProofStage::Proposal)
-            .context("load SP1 proposal ELF")?,
-    );
-    let elf = Elf::from(
-        SP1_SHASTA_BACKEND
-            .elf(ProofStage::Aggregation)
-            .context("load SP1 aggregation ELF")?,
-    );
+    let proposal_elf = SP1_SHASTA_BACKEND
+        .elf(ProofStage::Proposal)
+        .context("load SP1 proposal ELF")?;
+    let elf = SP1_SHASTA_BACKEND
+        .elf(ProofStage::Aggregation)
+        .context("load SP1 aggregation ELF")?;
     let start = Instant::now();
     let proof = match sp1_config.prover {
         Sp1ProverMode::Mock => {
-            let prover = ProverClient::builder().mock().build().await;
-            let proposal_pk = prover
-                .setup(proposal_elf)
-                .await
-                .context("setup SP1 proposal key")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let prover = ProverClient::builder().mock().build();
+            let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
                 match proof.proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -365,26 +409,19 @@ async fn run_aggregation(args: Args) -> Result<()> {
                     _ => anyhow::bail!("aggregation requires compressed proofs"),
                 }
             }
-            let pk = prover
-                .setup(elf)
-                .await
-                .context("setup SP1 aggregation key")?;
+            let (pk, vk) = prover.setup(elf);
             Sp1ProofOutput {
                 proof: prover
-                    .prove(&pk, stdin)
+                    .prove(&pk, &stdin)
                     .mode(args.proof_mode.into())
-                    .await
+                    .run()
                     .context("prove failed")?,
-                vkey: pk.verifying_key().clone(),
+                vkey: vk,
             }
         }
         Sp1ProverMode::Local => {
-            let prover = ProverClient::builder().cpu().build().await;
-            let proposal_pk = prover
-                .setup(proposal_elf)
-                .await
-                .context("setup SP1 proposal key")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let prover = ProverClient::builder().cpu().build();
+            let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
                 match proof.proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -393,26 +430,19 @@ async fn run_aggregation(args: Args) -> Result<()> {
                     _ => anyhow::bail!("aggregation requires compressed proofs"),
                 }
             }
-            let pk = prover
-                .setup(elf)
-                .await
-                .context("setup SP1 aggregation key")?;
+            let (pk, vk) = prover.setup(elf);
             Sp1ProofOutput {
                 proof: prover
-                    .prove(&pk, stdin)
+                    .prove(&pk, &stdin)
                     .mode(args.proof_mode.into())
-                    .await
+                    .run()
                     .context("prove failed")?,
-                vkey: pk.verifying_key().clone(),
+                vkey: vk,
             }
         }
         Sp1ProverMode::Network => {
-            let prover = build_sp1_network_prover(&sp1_config).await?;
-            let proposal_pk = prover
-                .setup(proposal_elf)
-                .await
-                .context("setup SP1 proposal key")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let prover = build_sp1_network_prover(&sp1_config)?;
+            let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
                 match proof.proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -421,10 +451,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
                     _ => anyhow::bail!("aggregation requires compressed proofs"),
                 }
             }
-            let pk = prover
-                .setup(elf)
-                .await
-                .context("setup SP1 aggregation key")?;
+            let (pk, _) = prover.setup(elf);
             request_network_proof(&prover, &pk, stdin, args.proof_mode.into(), &sp1_config)
                 .await
                 .context("prove failed")?
@@ -446,6 +473,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
         invocation_tracker: Vec::new(),
         opcode_counts: Vec::new(),
         syscall_counts: Vec::new(),
+        memory_snapshots: Vec::new(),
     };
 
     let output = build_sp1_proof_output(&proof.proof, proof.vkey(), None)?;
@@ -483,7 +511,7 @@ fn build_sp1_proof_output(
     Ok(Proof {
         proof: Some(hex::encode_prefixed(&proof_bytes)),
         input: Some(input_hash),
-        uuid: Some(vk.bytes32().to_string()),
+        uuid: Some(sp1_vk_uuid(vk)),
         extra_data,
         ..Default::default()
     })
@@ -501,15 +529,18 @@ impl Sp1ProofOutput {
     }
 }
 
-async fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
+fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
     let private_key = std::env::var("NETWORK_PRIVATE_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .context("NETWORK_PRIVATE_KEY must be set for sp1 network proving")?;
-    let builder = ProverClient::builder()
-        .network_for(config.network_mode.into())
-        .private_key(&private_key);
-    Ok(builder.build().await)
+    let builder = ProverClient::builder().network().private_key(&private_key);
+    let builder = if let Some(rpc_url) = config.rpc_url.as_deref() {
+        builder.rpc_url(rpc_url)
+    } else {
+        builder
+    };
+    Ok(builder.build())
 }
 
 async fn request_network_proof(
@@ -521,13 +552,13 @@ async fn request_network_proof(
 ) -> Result<Sp1ProofOutput> {
     let timeout = Duration::from_secs(config.timeout_secs);
     let request_id = prover
-        .prove(pk, stdin)
+        .prove(pk, &stdin)
         .mode(proof_mode)
         .strategy(config.fulfillment_strategy.into())
         .skip_simulation(config.skip_simulation)
         .cycle_limit(config.cycle_limit)
         .timeout(timeout)
-        .request()
+        .request_async()
         .await
         .context("request SP1 network proof")?;
     eprintln!("sp1 request_id: {request_id}");
@@ -537,48 +568,48 @@ async fn request_network_proof(
         .context("wait for SP1 network proof")?;
     Ok(Sp1ProofOutput {
         proof,
-        vkey: pk.verifying_key().clone(),
+        vkey: pk.vk.clone(),
     })
 }
 
-async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
+async fn run_sp1_proposal(
+    args: Args,
+    input_path: PathBuf,
+    input: GuestInput,
+    mut report: BenchReport,
+) -> Result<()> {
     let sp1_config = args.sp1_config()?;
+    record_memory_snapshot(&mut report, "proposal:before_stdin_write");
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
+    record_memory_snapshot(&mut report, "proposal:after_stdin_write");
 
-    let elf = Elf::from(
-        SP1_SHASTA_BACKEND
-            .elf(ProofStage::Proposal)
-            .context("load SP1 proposal ELF")?,
-    );
-
-    let mut report = BenchReport {
-        stage: "proposal",
-        mode: args.mode.as_str(),
-        proof_mode: args.proof_mode.as_str(),
-        input: input_path.display().to_string(),
-        public_values: String::new(),
-        wall_time_ms: 0,
-        exit_code: None,
-        gas: None,
-        total_instruction_count: None,
-        total_syscall_count: None,
-        touched_memory_addresses: None,
-        cycle_tracker: Vec::new(),
-        invocation_tracker: Vec::new(),
-        opcode_counts: Vec::new(),
-        syscall_counts: Vec::new(),
-    };
+    let elf = SP1_SHASTA_BACKEND
+        .elf(ProofStage::Proposal)
+        .context("load SP1 proposal ELF")?;
+    report.input = input_path.display().to_string();
+    record_memory_snapshot(&mut report, "proposal:after_load_elf");
 
     match args.mode {
         Mode::Execute => {
-            let prover = ProverClient::builder().light().build().await;
+            let prover = match sp1_config.prover {
+                Sp1ProverMode::Mock => ProverClient::builder().mock().build(),
+                Sp1ProverMode::Local => ProverClient::builder().cpu().build(),
+                Sp1ProverMode::Network => {
+                    anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
+                }
+            };
             let start = Instant::now();
-            let (public_values, execution_report) =
-                prover.execute(elf, stdin).await.context("execute failed")?;
+            record_memory_snapshot(&mut report, "proposal:before_execute_run");
+            let (public_values, execution_report) = prover
+                .execute(elf, &stdin)
+                .run()
+                .context("execute failed")?;
+            record_memory_snapshot(&mut report, "proposal:after_execute_run");
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = public_values.raw();
             apply_execution_metadata(&mut report, &execution_report);
+            record_memory_snapshot(&mut report, "proposal:after_apply_execution_metadata");
 
             println!("public_values: {}", report.public_values);
             if !execution_report.cycle_tracker.is_empty() {
@@ -593,54 +624,56 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
             let start = Instant::now();
             match sp1_config.prover {
                 Sp1ProverMode::Mock => {
-                    let prover = ProverClient::builder().mock().build().await;
-                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let prover = ProverClient::builder().mock().build();
+                    record_memory_snapshot(&mut report, "proposal:before_setup");
+                    let (pk, vk) = prover.setup(elf);
+                    record_memory_snapshot(&mut report, "proposal:after_setup");
                     let proof = prover
-                        .prove(&pk, stdin)
+                        .prove(&pk, &stdin)
                         .mode(args.proof_mode.into())
                         .cycle_limit(sp1_config.cycle_limit)
-                        .await
+                        .run()
                         .context("prove failed")?;
+                    record_memory_snapshot(&mut report, "proposal:after_prove_run");
                     report.wall_time_ms =
                         u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     report.public_values = proof.public_values.raw();
                     println!("public_values: {}", report.public_values);
 
                     if let Some(path) = &args.output {
-                        let output = build_sp1_proof_output(
-                            &proof,
-                            pk.verifying_key(),
-                            Some(&input.proof_carry_data),
-                        )?;
+                        let output =
+                            build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
                         write_proof_json(path, &output)?;
                     }
                 }
                 Sp1ProverMode::Local => {
-                    let prover = ProverClient::builder().cpu().build().await;
-                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let prover = ProverClient::builder().cpu().build();
+                    record_memory_snapshot(&mut report, "proposal:before_setup");
+                    let (pk, vk) = prover.setup(elf);
+                    record_memory_snapshot(&mut report, "proposal:after_setup");
                     let proof = prover
-                        .prove(&pk, stdin)
+                        .prove(&pk, &stdin)
                         .mode(args.proof_mode.into())
                         .cycle_limit(sp1_config.cycle_limit)
-                        .await
+                        .run()
                         .context("prove failed")?;
+                    record_memory_snapshot(&mut report, "proposal:after_prove_run");
                     report.wall_time_ms =
                         u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     report.public_values = proof.public_values.raw();
                     println!("public_values: {}", report.public_values);
 
                     if let Some(path) = &args.output {
-                        let output = build_sp1_proof_output(
-                            &proof,
-                            pk.verifying_key(),
-                            Some(&input.proof_carry_data),
-                        )?;
+                        let output =
+                            build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
                         write_proof_json(path, &output)?;
                     }
                 }
                 Sp1ProverMode::Network => {
-                    let prover = build_sp1_network_prover(&sp1_config).await?;
-                    let pk = prover.setup(elf).await.context("setup SP1 proposal key")?;
+                    let prover = build_sp1_network_prover(&sp1_config)?;
+                    record_memory_snapshot(&mut report, "proposal:before_setup");
+                    let (pk, _) = prover.setup(elf);
+                    record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output = request_network_proof(
                         &prover,
                         &pk,
@@ -650,6 +683,7 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
                     )
                     .await
                     .context("prove failed")?;
+                    record_memory_snapshot(&mut report, "proposal:after_network_proof");
                     report.wall_time_ms =
                         u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     report.public_values = output.proof.public_values.raw();
@@ -676,7 +710,12 @@ async fn run_sp1_proposal(args: Args, input_path: PathBuf, input: GuestInput) ->
     Ok(())
 }
 
-async fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput) -> Result<()> {
+async fn run_native_proposal(
+    args: Args,
+    input_path: PathBuf,
+    input: GuestInput,
+    mut report: BenchReport,
+) -> Result<()> {
     if args.mode == Mode::Execute {
         anyhow::bail!("native backend does not support --mode execute");
     }
@@ -693,6 +732,7 @@ async fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput)
         .prove(input, &serde_json::Value::Null, &backend)
         .await
         .context("native prove failed")?;
+    record_memory_snapshot(&mut report, "proposal:after_native_prove");
     let wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     write_proof_json(output_path, &proof)?;
@@ -702,26 +742,12 @@ async fn run_native_proposal(args: Args, input_path: PathBuf, input: GuestInput)
     }
 
     if let Some(path) = &args.json_out {
-        let report = BenchReport {
-            stage: "proposal",
-            mode: args.mode.as_str(),
-            proof_mode: args.proof_mode.as_str(),
-            input: input_path.display().to_string(),
-            public_values: proof
-                .input
-                .map(|h| format!("{h:#x}"))
-                .unwrap_or_else(String::new),
-            wall_time_ms,
-            exit_code: None,
-            gas: None,
-            total_instruction_count: None,
-            total_syscall_count: None,
-            touched_memory_addresses: None,
-            cycle_tracker: Vec::new(),
-            invocation_tracker: Vec::new(),
-            opcode_counts: Vec::new(),
-            syscall_counts: Vec::new(),
-        };
+        report.input = input_path.display().to_string();
+        report.public_values = proof
+            .input
+            .map(|h| format!("{h:#x}"))
+            .unwrap_or_else(String::new);
+        report.wall_time_ms = wall_time_ms;
         let contents = serde_json::to_string_pretty(&report).context("serialize bench report")?;
         fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     }
@@ -759,7 +785,13 @@ fn build_aggregation_inputs(
             .as_ref()
             .context("missing proof extra_data")?;
         let carry = decode_proof_carry_data(carry_value)?;
-        block_inputs.push(hash_shasta_subproof_input(&carry));
+        let expected_input = hash_shasta_subproof_input(&carry);
+        if let Some(input_hash) = proof.input
+            && input_hash != expected_input
+        {
+            anyhow::bail!("proof input hash does not match shasta carry data");
+        }
+        block_inputs.push(expected_input);
         proof_carry_data_vec.push(carry);
 
         let uuid = proof.uuid.as_deref().context("missing proof uuid")?;
@@ -791,18 +823,7 @@ fn build_aggregation_inputs(
 }
 
 fn parse_image_id_from_uuid(uuid: &str) -> Result<[u32; 8]> {
-    let raw = uuid.strip_prefix("0x").unwrap_or(uuid);
-    let bytes = hex::decode(raw).context("decode uuid hex")?;
-    if bytes.len() != 32 {
-        anyhow::bail!("invalid uuid length: {}", bytes.len());
-    }
-    let mut words = [0u32; 8];
-    for (idx, word) in words.iter_mut().enumerate() {
-        let start = idx * 4;
-        let end = start + 4;
-        *word = u32::from_be_bytes(bytes[start..end].try_into().unwrap());
-    }
-    Ok(words)
+    sp1_image_id_words_from_uuid(uuid).map_err(anyhow::Error::msg)
 }
 
 fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {

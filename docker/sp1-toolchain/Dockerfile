@@ -23,10 +23,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Default cross compiler for the guest target. This avoids relying on host toolchains and enables
-# building crates with C/C++ sources (e.g. `c-kzg`) under `riscv64im-succinct-zkvm-elf`.
-ENV CC_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-gcc -specs=picolibc.specs"
-ENV CXX_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.specs"
-ENV AR_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
+# building crates with C/C++ sources (e.g. `c-kzg`) under `riscv32im-succinct-zkvm-elf`.
+ENV CC_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-gcc -specs=picolibc.specs"
+ENV CXX_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.specs"
+ENV AR_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
 
 # Install cargo-prove to enable running `cargo prove build` inside this image.
 # By default, it matches the SP1 docker tag (e.g. v6.0.2).
@@ -34,8 +34,8 @@ ARG CARGO_PROVE_VERSION
 #
 # Security note: verify the downloaded release artifact checksum to mitigate supply-chain attacks.
 # Keep these checksums in sync with the cargo-prove release assets for the default SP1 docker tag.
-ARG CARGO_PROVE_SHA256_AMD64=8cc5ff2f307e1a5cf5d9823b792f0ff9989a9d5b3d72246dfcc8366c247ad547
-ARG CARGO_PROVE_SHA256_ARM64=4ec4c275effb970fd42c2a83afcc5c080a68476a6fe2811a2ce033be153a0e61
+ARG CARGO_PROVE_SHA256_AMD64=c13ec3316a1f0ee1c768e2d85231a043e589d80265a385c83cd57f5cbc0a7eec
+ARG CARGO_PROVE_SHA256_ARM64=1d750abe88d837ef3d7427fdf17cb2935f9655670d5616c0732c0e415ea28202
 ARG TARGETARCH
 RUN set -eux; \
     version="${CARGO_PROVE_VERSION:-${SP1_DOCKER_TAG}}"; \

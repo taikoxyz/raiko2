@@ -9,7 +9,12 @@ use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
 use reth_trie_common::HashedPostState;
 use risc0_ethereum_trie::CachedTrie;
-use std::{cell::RefCell, collections::hash_map::Entry, marker::PhantomData};
+use std::{
+    cell::RefCell,
+    collections::hash_map::Entry,
+    marker::PhantomData,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 
 use crate::trie::{StatelessTrie, StatelessTrieExt};
 
@@ -213,7 +218,15 @@ impl StatelessTrie for SparseState {
     /// Returns the `TrieAccount` that corresponds to the `Address`.
     fn account(&self, address: Address) -> Result<Option<TrieAccount>, ProviderError> {
         let hashed_address = keccak256(address);
-        match self.state.get(hashed_address)? {
+        let account = catch_unwind(AssertUnwindSafe(|| self.state.get(hashed_address))).map_err(
+            |_| {
+                ProviderError::TrieWitnessError(format!(
+                    "state trie unresolved while loading account {address} (hashed {hashed_address})"
+                ))
+            },
+        )??;
+
+        match account {
             None => Ok(None),
             Some(account) => {
                 // each time an account is accessed, check whether its storage trie already exists
@@ -239,9 +252,15 @@ impl StatelessTrie for SparseState {
         let storage_trie = storages.get(&keccak256(address)).ok_or_else(|| {
             ProviderError::TrieWitnessError(format!("storage trie missing for {address}"))
         })?;
-        Ok(storage_trie
-            .get(keccak256(B256::from(slot)))?
-            .unwrap_or(U256::ZERO))
+        let hashed_slot = keccak256(B256::from(slot));
+        let value = catch_unwind(AssertUnwindSafe(|| storage_trie.get(hashed_slot))).map_err(
+            |_| {
+                ProviderError::TrieWitnessError(format!(
+                    "storage trie unresolved while loading address {address} slot {slot} (hashed {hashed_slot})"
+                ))
+            },
+        )??;
+        Ok(value.unwrap_or(U256::ZERO))
     }
 
     /// Computes the new state root from the `HashedPostState`.

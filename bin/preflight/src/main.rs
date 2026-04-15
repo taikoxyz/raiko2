@@ -15,6 +15,10 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Optional chain spec JSON file merged over the built-in chain spec list.
+    #[arg(long)]
+    chain_spec_file: Option<PathBuf>,
+
     /// Upstream L2 RPC URL to fetch block/witness data.
     #[arg(long, env)]
     rpc_url: String,
@@ -103,11 +107,20 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let supported_chain_specs = load_supported_chain_specs(args.chain_spec_file.as_ref())?;
+    let l2_chain_spec = supported_chain_specs
+        .get_chain_spec_with_chain_id(args.l2_chain_id)
+        .context("Unsupported l2_chain_id")?;
+    let l1_chain_spec = supported_chain_specs
+        .get_chain_spec_with_chain_id(args.l1_chain_id)
+        .context("Unsupported l1_chain_id")?;
 
     let l1_rpc_url = args.l1_rpc_url.as_deref().unwrap_or(&args.rpc_url);
-    let provider = NetworkProvider::new_pair_with_config(
+    let provider = NetworkProvider::new_pair_with_chain_specs_and_config(
         l1_rpc_url,
         &args.rpc_url,
+        Some(l1_chain_spec.clone()),
+        Some(l2_chain_spec.clone()),
         &RpcClientConfig {
             timeout_ms: args.rpc_timeout_ms,
             concurrency_limit: args.rpc_concurrency_limit,
@@ -145,11 +158,7 @@ async fn main() -> Result<()> {
     };
 
     let mut ctx = ProofContext::new(request, ProverConfig::default());
-    if let Some(l2_chain_spec) =
-        SupportedChainSpecs::default().get_chain_spec_with_chain_id(args.l2_chain_id)
-    {
-        ctx.l2_chain_spec = l2_chain_spec.to_taiko_chain_spec()?;
-    }
+    ctx.l2_chain_spec = l2_chain_spec.to_taiko_chain_spec()?;
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 
@@ -161,6 +170,16 @@ async fn main() -> Result<()> {
         guest_input.witnesses.len(),
         start.elapsed().as_millis()
     );
+    if args.validate {
+        let validate_start = Instant::now();
+        pipeline.validate(&ctx, guest_input.clone())?;
+        eprintln!(
+            "validate: proposal_id={} blocks={} elapsed_ms={}",
+            args.proposal_id,
+            guest_input.witnesses.len(),
+            validate_start.elapsed().as_millis()
+        );
+    }
     write_json(&args.output, &guest_input, args.pretty)?;
     Ok(())
 }
@@ -174,4 +193,11 @@ fn write_json(path: &PathBuf, value: &GuestInput, pretty: bool) -> Result<()> {
     .context("serialize guest input")?;
     fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
     Ok(())
+}
+
+fn load_supported_chain_specs(chain_spec_file: Option<&PathBuf>) -> Result<SupportedChainSpecs> {
+    match chain_spec_file {
+        Some(path) => SupportedChainSpecs::merge_from_file(path.clone()),
+        None => Ok(SupportedChainSpecs::default()),
+    }
 }

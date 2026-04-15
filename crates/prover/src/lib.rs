@@ -36,11 +36,14 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
 };
+use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_ethereum_contracts_boundless::encode_seal;
 use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::sp1::sp1_image_id_words_from_uuid;
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
     /// # Errors
@@ -115,9 +118,6 @@ pub(crate) fn build_shasta_aggregation_input(
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
 
     for (index, proof) in proofs.iter().enumerate() {
-        let input = proof.input.ok_or_else(|| {
-            RaikoError::InvalidRequestConfig(format!("proof {index} missing input"))
-        })?;
         let carry = proof_carry_from_proof(proof)
             .map_err(|err| {
                 RaikoError::InvalidRequestConfig(format!(
@@ -127,7 +127,15 @@ pub(crate) fn build_shasta_aggregation_input(
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
             })?;
-        block_inputs.push(input);
+        let expected_input = hash_shasta_subproof_input(&carry);
+        if let Some(input_hash) = proof.input
+            && input_hash != expected_input
+        {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "proof {index} input hash does not match shasta carry data"
+            )));
+        }
+        block_inputs.push(expected_input);
         proof_carry_data_vec.push(carry);
     }
 
@@ -159,7 +167,7 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
         let Some(uuid) = proof.uuid.as_deref() else {
             continue;
         };
-        let words = parse_image_id_words(uuid).map_err(|err| {
+        let words = sp1_image_id_words_from_uuid(uuid).map_err(|err| {
             RaikoError::InvalidRequestConfig(format!("proof {index} invalid uuid/image id: {err}"))
         })?;
         match image_id {
@@ -175,22 +183,6 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
 
     Ok(image_id.unwrap_or([0; 8]))
 }
-
-fn parse_image_id_words(raw: &str) -> Result<[u32; 8], String> {
-    let bytes = alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex: {err}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("expected 32 bytes, got {}", bytes.len()));
-    }
-
-    let mut words = [0u32; 8];
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(chunk);
-        words[index] = u32::from_be_bytes(word);
-    }
-    Ok(words)
-}
-
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
 pub trait Prover<B>: Send + Sync

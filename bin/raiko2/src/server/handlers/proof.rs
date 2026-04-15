@@ -1084,10 +1084,15 @@ fn build_task_data(
 }
 
 async fn cancel_registered_tasks(
+    runtime: &raiko2_runtime::RuntimeManager,
     engine: &Arc<dyn EngineHandle>,
+    public_task_id: &str,
     metadata: &HoodiTaskMetadata,
 ) -> Result<(), ApiError> {
     for proposal in &metadata.proposals {
+        if has_other_live_task_reference(runtime, public_task_id, &proposal.task_id).await? {
+            continue;
+        }
         let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
             .map_err(|err| ApiError::internal(format!("invalid stored proposal task id: {err}")))?;
         for stage_task_id in proposal_task_chain_ids(&task_id) {
@@ -1096,6 +1101,9 @@ async fn cancel_registered_tasks(
     }
 
     if let Some(task_id) = &metadata.aggregate_task_id {
+        if has_other_live_task_reference(runtime, public_task_id, task_id).await? {
+            return Ok(());
+        }
         let task_id = decode_task_id::<EngineTaskKey>(task_id).map_err(|err| {
             ApiError::internal(format!("invalid stored aggregate task id: {err}"))
         })?;
@@ -1103,6 +1111,28 @@ async fn cancel_registered_tasks(
     }
 
     Ok(())
+}
+
+async fn has_other_live_task_reference(
+    runtime: &raiko2_runtime::RuntimeManager,
+    public_task_id: &str,
+    engine_task_id: &str,
+) -> Result<bool, ApiError> {
+    let records = runtime
+        .find_tasks_by_engine_task_id(engine_task_id)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to inspect runtime task references for cancellation: {err}"
+            ))
+        })?;
+    Ok(records.into_iter().any(|record| {
+        record.task_id != public_task_id
+            && matches!(
+                record.runner_status,
+                RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+            )
+    }))
 }
 
 fn root_runtime_view(
@@ -1304,7 +1334,7 @@ pub async fn cancel_task(
     let TaskLookup {
         metadata, engine, ..
     } = load_task_lookup(&state, &id).await?;
-    cancel_registered_tasks(&engine, &metadata).await?;
+    cancel_registered_tasks(&state.runtime, &engine, &id, &metadata).await?;
 
     state
         .runtime

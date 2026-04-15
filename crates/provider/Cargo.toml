@@ -41,6 +41,7 @@ tower.workspace = true
 # Alethia reth for Taiko chains
 alethia-reth-block.workspace = true
 alethia-reth-chainspec.workspace = true
+alethia-reth-primitives.workspace = true
 
 [dev-dependencies]
 clap.workspace = true

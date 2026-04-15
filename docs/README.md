@@ -25,3 +25,7 @@ This directory contains the contributor- and operator-facing documentation for `
 
 The files under [`plans/`](plans) are historical design and implementation notes. They are not the
 current source of truth.
+
+Latest dated assessment:
+
+- [2026-04-15 production readiness assessment](plans/2026-04-15-raiko2-production-readiness.md)

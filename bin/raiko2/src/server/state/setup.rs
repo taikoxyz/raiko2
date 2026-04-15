@@ -45,8 +45,14 @@ pub(crate) fn build_provider(
 ) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
     let _ = config;
-    NetworkProvider::new_pair_with_config(&pair.l1_rpc, &pair.l2_rpc, &rpc_config)
-        .map_err(|e| anyhow::anyhow!(e))
+    NetworkProvider::new_pair_with_chain_specs_and_config(
+        &pair.l1_rpc,
+        &pair.l2_rpc,
+        Some(pair.l1_spec.clone()),
+        Some(pair.l2_spec.clone()),
+        &rpc_config,
+    )
+    .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -128,6 +134,8 @@ pub(crate) fn boundless_prover_config(
         rpc_url: config.prover.boundless.rpc_url.clone(),
         signer_key: config.prover.boundless.signer_key.clone(),
         deployment: config.prover.boundless.deployment.clone(),
+        batch_quoted_mcycles: config.prover.boundless.batch_quoted_mcycles,
+        batch_quote_strategy: config.prover.boundless.batch_quote_strategy.clone(),
         offer_params: config.prover.boundless.offer_params.clone(),
         poll_interval_ms: config.prover.boundless.poll_interval_ms,
         timeout_ms: config.prover.boundless.timeout_ms,

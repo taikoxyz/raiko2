@@ -2,7 +2,7 @@ mod config;
 mod retry;
 mod types;
 
-pub use config::SchedulerConfig;
+pub use config::{SchedulerConfig, TaskExecutionPolicy};
 pub use retry::RetryPolicy;
 pub use types::{NewTask, TaskLease, TaskView};
 
@@ -102,6 +102,20 @@ where
         task: NewTask<P>,
         deps: Vec<TaskId<Id>>,
     ) -> Result<TaskId<Id>, TaskStoreError> {
+        self.submit_with_execution_policy(id, task, deps, self.config.execution_policy())
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn submit_with_execution_policy(
+        &self,
+        id: TaskId<Id>,
+        task: NewTask<P>,
+        deps: Vec<TaskId<Id>>,
+        execution_policy: TaskExecutionPolicy,
+    ) -> Result<TaskId<Id>, TaskStoreError> {
         // Normalize dependency list to avoid backend-specific behavior.
         //
         // Some stores may de-duplicate dependents (e.g. Redis sets) while still
@@ -116,7 +130,13 @@ where
 
         let inserted = self
             .store
-            .insert_task(id.clone(), task.payload, task.priority, deps)
+            .insert_task(
+                id.clone(),
+                task.payload,
+                task.priority,
+                deps,
+                execution_policy,
+            )
             .await?;
         if inserted && let Some(priority) = self.store.try_mark_ready(&id).await? {
             self.store.push_ready(priority, id.clone()).await?;
@@ -134,7 +154,7 @@ where
         worker: &str,
     ) -> Result<Option<TaskLease<P, Id>>, TaskStoreError> {
         for prio in [Priority::High, Priority::Medium, Priority::Low] {
-            if let Some((id, payload, priority, attempt)) =
+            if let Some((id, payload, priority, attempt, execution_policy)) =
                 self.store.pop_ready_and_take(prio, worker).await?
             {
                 return Ok(Some(TaskLease {
@@ -143,6 +163,7 @@ where
                     priority,
                     attempt,
                     worker: worker.to_string(),
+                    execution_policy,
                 }));
             }
         }
@@ -164,6 +185,7 @@ where
             priority,
             attempt,
             worker,
+            execution_policy,
         } = lease;
 
         let Some(current) = self.store.get_state(&id).await? else {
@@ -200,7 +222,7 @@ where
                     .await?;
             }
             Err(error) => {
-                if let Some(delay) = self.config.retry.retry_delay(attempt) {
+                if let Some(delay) = execution_policy.retry.retry_delay(attempt) {
                     self.store.put_payload(&id, payload).await?;
 
                     if delay == Duration::ZERO {
@@ -426,6 +448,7 @@ mod tests {
         state: TaskState<O, TestId>,
         priority: Priority,
         attempt: u32,
+        execution_policy: TaskExecutionPolicy,
     }
 
     impl<P, O> UniqueDependentsStore<P, O> {
@@ -453,6 +476,7 @@ mod tests {
             payload: P,
             prio: Priority,
             deps: Vec<TestTaskId>,
+            execution_policy: TaskExecutionPolicy,
         ) -> StoreResult<bool> {
             let mut guard = self.inner.lock().await;
             if guard.tasks.contains_key(&id) {
@@ -470,6 +494,7 @@ mod tests {
                     state: TaskState::pending(remaining),
                     priority: prio,
                     attempt: 0,
+                    execution_policy,
                 },
             );
             Ok(true)
@@ -567,7 +592,7 @@ mod tests {
             &self,
             id: &TestTaskId,
             worker: &str,
-        ) -> StoreResult<Option<(P, Priority, u32)>> {
+        ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
             let mut guard = self.inner.lock().await;
             let Some(record) = guard.tasks.get_mut(id) else {
                 return Ok(None);
@@ -585,7 +610,12 @@ mod tests {
                 worker: worker.to_string(),
                 attempt,
             };
-            Ok(Some((payload.clone(), record.priority, attempt)))
+            Ok(Some((
+                payload.clone(),
+                record.priority,
+                attempt,
+                record.execution_policy.clone(),
+            )))
         }
 
         async fn renew_lease(
@@ -655,8 +685,11 @@ mod tests {
             payload: P,
             prio: Priority,
             deps: Vec<TestTaskId>,
+            execution_policy: TaskExecutionPolicy,
         ) -> crate::StoreResult<bool> {
-            self.inner.insert_task(id, payload, prio, deps).await
+            self.inner
+                .insert_task(id, payload, prio, deps, execution_policy)
+                .await
         }
 
         async fn get_state(
@@ -705,7 +738,7 @@ mod tests {
             &self,
             _id: &TestTaskId,
             _worker: &str,
-        ) -> crate::StoreResult<Option<(P, Priority, u32)>> {
+        ) -> crate::StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
             Ok(None)
         }
 
@@ -713,7 +746,8 @@ mod tests {
             &self,
             prio: Priority,
             worker: &str,
-        ) -> crate::StoreResult<Option<(TestTaskId, P, Priority, u32)>> {
+        ) -> crate::StoreResult<Option<(TestTaskId, P, Priority, u32, TaskExecutionPolicy)>>
+        {
             self.inner.pop_ready_and_take(prio, worker).await
         }
 
@@ -1211,7 +1245,13 @@ mod tests {
     #[tokio::test]
     async fn memory_store_requeues_task_after_lease_expires() -> StoreResult<()> {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
-        let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(store);
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
+            store,
+            SchedulerConfig {
+                lease_duration: Duration::from_millis(1),
+                retry: RetryPolicy::None,
+            },
+        );
 
         let id = sched
             .submit(
@@ -1247,7 +1287,13 @@ mod tests {
     #[tokio::test]
     async fn stale_completion_is_ignored_after_task_is_reacquired() -> StoreResult<()> {
         let store = MemoryStore::with_lease(Duration::from_millis(1));
-        let sched: Scheduler<&'static str, &'static str, TestId> = Scheduler::new(store);
+        let sched: Scheduler<&'static str, &'static str, TestId> = Scheduler::with_config(
+            store,
+            SchedulerConfig {
+                lease_duration: Duration::from_millis(1),
+                retry: RetryPolicy::None,
+            },
+        );
 
         let id = sched
             .submit(
@@ -1359,6 +1405,52 @@ mod tests {
                 .state,
             TaskState::Failed { .. }
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_execution_policy_overrides_default_retry_behavior() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), TestId> = Scheduler::with_config(
+            MemoryStore::new(),
+            SchedulerConfig {
+                lease_duration: Duration::from_secs(60),
+                retry: RetryPolicy::Exponential {
+                    max_attempts: 5,
+                    base_delay: Duration::from_secs(1),
+                    max_delay: Duration::from_secs(30),
+                },
+            },
+        );
+        let execution_policy = TaskExecutionPolicy {
+            lease_duration: Duration::from_secs(600),
+            retry: RetryPolicy::None,
+        };
+
+        let id = sched
+            .submit_with_execution_policy(
+                test_id(9),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "custom",
+                },
+                vec![],
+                execution_policy.clone(),
+            )
+            .await?;
+
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready lease"))?;
+        assert_eq!(lease.id, id);
+        assert_eq!(lease.execution_policy, execution_policy);
+        sched.complete(lease, Err("boom".to_string())).await?;
+
+        let view = sched
+            .get(id)
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Failed { .. }));
         Ok(())
     }
 

@@ -1,0 +1,24 @@
+2026-04-15 21:18:36,412 - INFO - Starting discovery (range=None, count=2, proof_type=native, debug_witness=True)
+2026-04-15 21:18:36,412 - ERROR - Missing event_address (resolve from chain spec).
+2026-04-15 21:19:12,323 - INFO - Starting discovery (range=None, count=2, proof_type=native, debug_witness=True)
+2026-04-15 21:19:24,848 - INFO - latest proposal is 992
+2026-04-15 21:21:19,953 - INFO - Starting discovery (range=None, count=2, proof_type=native, debug_witness=True)
+2026-04-15 21:21:37,098 - INFO - latest proposal is 998
+2026-04-15 21:26:25,684 - INFO - Starting discovery (range=None, count=2, proof_type=native, debug_witness=True)
+2026-04-15 21:26:43,840 - INFO - latest proposal is 6831639
+2026-04-15 21:26:52,151 - INFO - found blocks for proposal 15714, start: 6831210, end: 6831401
+2026-04-15 21:26:52,498 - INFO - latest proposal is 6831643
+2026-04-15 21:26:59,891 - INFO - found blocks for proposal 15715, start: 6831402, end: 6831593
+2026-04-15 21:26:59,892 - INFO - Selected 2 proposals
+2026-04-15 22:09:40,147 - INFO - Starting discovery (range=None, count=1, proof_type=native, debug_witness=True)
+2026-04-15 22:09:52,144 - INFO - latest proposal is 6832933
+2026-04-15 22:09:59,993 - INFO - found blocks for proposal 15721, start: 6832554, end: 6832745
+2026-04-15 22:09:59,993 - INFO - Selected 1 proposals
+2026-04-15 22:20:05,405 - INFO - Starting discovery (range=None, count=1, proof_type=native, debug_witness=True)
+2026-04-15 22:20:18,026 - INFO - latest proposal is 6833246
+2026-04-15 22:20:25,129 - INFO - found blocks for proposal 15723, start: 6832938, end: 6833129
+2026-04-15 22:20:25,129 - INFO - Selected 1 proposals
+2026-04-15 23:18:07,688 - INFO - Starting discovery (range=None, count=1, proof_type=native, debug_witness=True)
+2026-04-15 23:18:20,102 - INFO - latest proposal is 6834987
+2026-04-15 23:18:28,085 - INFO - found blocks for proposal 15732, start: 6834666, end: 6834857
+2026-04-15 23:18:28,085 - INFO - Selected 1 proposals

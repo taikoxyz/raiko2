@@ -322,8 +322,70 @@ where
                     backend,
                     &input,
                     stdin,
-                    proof_mode,
                     &effective_config,
+                    None,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn aggregate_with_observer(
+        &self,
+        input: AggregationGuestInput,
+        config: &ProverConfig,
+        backend: &B,
+        observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
+    ) -> RaikoResult<Proof> {
+        let effective_config =
+            self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
+        info!(
+            "Starting SP1 aggregation proof generation with {} proofs...",
+            input.proofs.len()
+        );
+
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&aggregation_input);
+
+        let elf = backend.elf(ProofStage::Aggregation)?;
+        let proof_mode: SP1ProofMode = effective_config.recursion.into();
+
+        match effective_config.prover {
+            ProverMode::Mock => {
+                let client = ProverClient::builder().mock().build();
+                aggregate_with_client(
+                    &client,
+                    elf,
+                    backend,
+                    &input,
+                    stdin,
+                    proof_mode,
+                    effective_config.verify,
+                )
+            }
+            ProverMode::Local => {
+                let client = ProverClient::builder().cpu().build();
+                aggregate_with_client(
+                    &client,
+                    elf,
+                    backend,
+                    &input,
+                    stdin,
+                    proof_mode,
+                    effective_config.verify,
+                )
+            }
+            ProverMode::Network => {
+                let client = build_network_prover(&effective_config)?;
+                aggregate_with_network_client(
+                    &client,
+                    elf,
+                    backend,
+                    &input,
+                    stdin,
+                    &effective_config,
+                    observer,
                 )
                 .await
             }
@@ -335,6 +397,10 @@ where
 struct NetworkProofRequestResult {
     request_id: String,
     proof: SP1ProofWithPublicValues,
+}
+
+fn remote_verifier_program_vkey(vk: &SP1VerifyingKey) -> B256 {
+    B256::from_slice(&vk.bytes32_raw())
 }
 
 async fn verify_network_proposal_proof(
@@ -398,7 +464,7 @@ async fn verify_sp1_remote_contract(
 
     verifier
         .verifyProof(
-            B256::from_slice(&vk.hash_bytes()),
+            remote_verifier_program_vkey(vk),
             Bytes::from(public_values),
             Bytes::from(proof_bytes),
         )
@@ -571,8 +637,8 @@ async fn aggregate_with_network_client<B>(
     backend: &B,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
-    proof_mode: SP1ProofMode,
     config: &Sp1Config,
+    observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof>
 where
     B: ProverBackend,
@@ -605,8 +671,17 @@ where
     }
 
     let (pk, vk) = client.setup(elf);
-    let request =
-        request_network_proof(client, &pk, stdin, proof_mode, config, None, "aggregation").await?;
+    let proof_mode: SP1ProofMode = config.recursion.into();
+    let request = request_network_proof(
+        client,
+        &pk,
+        stdin,
+        proof_mode,
+        config,
+        observer,
+        "aggregation",
+    )
+    .await?;
 
     if config.verify {
         verify_network_aggregation_proof(config, &request.proof, &vk).await?;
@@ -659,6 +734,39 @@ async fn request_network_proof(
     stage: &str,
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
+    if let Some(observer) = observer.as_ref()
+        && let Some(request_id_string) = observer.load_sp1_network_request_id().await
+    {
+        let request_id = B256::from_str(&request_id_string).map_err(|e| {
+            RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
+        })?;
+        observer
+            .on_progress(&ProverProgress::Sp1NetworkSubmission(
+                Sp1NetworkSubmissionProgress {
+                    provider_request_id: request_id_string.clone(),
+                    network_mode: config.network_mode,
+                    fulfillment_strategy: config.fulfillment_strategy,
+                    skip_simulation: config.skip_simulation,
+                    cycle_limit: config.cycle_limit,
+                    timeout_secs: config.timeout_secs,
+                },
+            ))
+            .await;
+
+        let proof = client
+            .wait_proof(request_id, Some(timeout), None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to resume SP1 {stage} proof request: {:?}", e);
+                RaikoError::Guest(format!("SP1 {stage} network proof failed: {e}"))
+            })?;
+
+        return Ok(NetworkProofRequestResult {
+            request_id: request_id_string,
+            proof,
+        });
+    }
+
     let request_id = client
         .prove(pk, &stdin)
         .mode(proof_mode)
@@ -674,7 +782,7 @@ async fn request_network_proof(
         })?;
 
     let request_id_string = request_id.to_string();
-    if let Some(observer) = observer {
+    if let Some(observer) = observer.as_ref() {
         observer
             .on_progress(&ProverProgress::Sp1NetworkSubmission(
                 Sp1NetworkSubmissionProgress {
@@ -715,4 +823,25 @@ fn insert_sp1_metadata(
     };
     root.insert("sp1".to_string(), metadata);
     Ok(Some(extra_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_verifier_program_vkey;
+    use alloy_primitives::B256;
+    use raiko2_guests::sp1::shasta::PROPOSAL_ELF;
+    use sp1_sdk::{HashableKey, Prover as _, ProverClient};
+    use std::str::FromStr;
+
+    #[test]
+    fn remote_verifier_program_vkey_matches_contract_bytes32_encoding() {
+        let client = ProverClient::builder().mock().build();
+        let (_, vk) = client.setup(PROPOSAL_ELF);
+
+        let expected = B256::from_str(&vk.bytes32()).expect("valid bytes32 encoding");
+        let old_buggy = B256::from_slice(&vk.hash_bytes());
+
+        assert_eq!(remote_verifier_program_vkey(&vk), expected);
+        assert_ne!(remote_verifier_program_vkey(&vk), old_buggy);
+    }
 }

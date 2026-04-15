@@ -132,6 +132,12 @@ scripts/regression/prepare_regression.sh
 python scripts/regression/shasta_regression.py \
   --config scripts/regression/config/shasta_regression_devnet.json \
   --count 3
+
+python scripts/regression/shasta_regression.py \
+  --config scripts/regression/config/shasta_regression_devnet.json \
+  --count 3 \
+  --discover-only
 ```
 
 Artifacts are written under `test/regression/shasta/`.
+Use `--discover-only` when you need the latest completed proposal spans for live proof tests without re-deriving them from the latest tip by hand.

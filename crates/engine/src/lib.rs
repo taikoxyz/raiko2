@@ -27,11 +27,14 @@ use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
-use raiko2_prover::{Prover, ProverProgress, ProverProgressObserver};
+use raiko2_prover::{
+    Prover, ProverProgress, ProverProgressObserver,
+    sp1::{ProverMode as Sp1ProverMode, Sp1Config, Sp1RequestContext},
+};
 use raiko2_provider::Provider;
 use raiko2_queue::{
-    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskState,
-    TaskStoreError, TaskView,
+    MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
+    TaskState, TaskStoreError, TaskView,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -54,6 +57,7 @@ where
     scheduler: Scheduler<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>,
     context: ProofContext,
     observer: Option<Arc<dyn EngineObserver>>,
+    sp1_config: Option<Sp1Config>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +90,14 @@ pub trait EngineObserver: Send + Sync {
     async fn on_task_failed(&self, _id: &EngineTaskId, _task: &EngineTask, _error: &str) {}
 
     async fn on_task_cancelled(&self, _id: &EngineTaskId) {}
+
+    async fn load_sp1_network_request_id(
+        &self,
+        _id: &EngineTaskId,
+        _task: &EngineTask,
+    ) -> Option<String> {
+        None
+    }
 }
 
 struct EngineProgressObserver {
@@ -100,6 +112,12 @@ impl ProverProgressObserver for EngineProgressObserver {
         self.observer
             .on_task_progress(&self.task_id, &self.task, progress)
             .await;
+    }
+
+    async fn load_sp1_network_request_id(&self) -> Option<String> {
+        self.observer
+            .load_sp1_network_request_id(&self.task_id, &self.task)
+            .await
     }
 }
 
@@ -181,12 +199,35 @@ where
         Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
             + 'static,
     {
+        Self::with_store_scheduler_config_observer_and_sp1_config(
+            spec,
+            context,
+            store,
+            scheduler_config,
+            observer,
+            None,
+        )
+    }
+
+    pub fn with_store_scheduler_config_observer_and_sp1_config<Store>(
+        spec: S,
+        context: ProofContext,
+        store: Store,
+        scheduler_config: SchedulerConfig,
+        observer: Option<Arc<dyn EngineObserver>>,
+        sp1_config: Option<Sp1Config>,
+    ) -> Self
+    where
+        Store: raiko2_queue::TaskStore<EngineTask, EngineOutput<S::GuestInput>, EngineTaskKey>
+            + 'static,
+    {
         Self {
             inner: Arc::new(Inner {
                 spec,
                 scheduler: Scheduler::with_config(store, scheduler_config),
                 context,
                 observer,
+                sp1_config,
             }),
         }
     }
@@ -250,6 +291,78 @@ where
         })
     }
 
+    fn default_execution_policy(&self) -> TaskExecutionPolicy {
+        self.inner.scheduler.config().execution_policy()
+    }
+
+    fn sp1_effective_proposal_config(&self, request: &ProposalTaskRequest) -> Option<Sp1Config> {
+        let effective = self.inner.sp1_config.as_ref()?.resolve_request_config(
+            request.prover_config.sp1.as_ref(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        );
+        effective.ok()
+    }
+
+    fn sp1_effective_aggregation_config(
+        &self,
+        request: &AggregationTaskRequest,
+    ) -> Option<Sp1Config> {
+        self.inner
+            .sp1_config
+            .as_ref()?
+            .resolve_request_config(
+                request.prover_config.sp1.as_ref(),
+                Sp1RequestContext::Aggregation,
+            )
+            .ok()
+    }
+
+    fn network_prove_execution_policy(timeout_secs: u64) -> TaskExecutionPolicy {
+        TaskExecutionPolicy {
+            lease_duration: Duration::from_secs(timeout_secs)
+                .saturating_add(Duration::from_secs(30))
+                .max(Duration::from_secs(60)),
+            retry: RetryPolicy::None,
+        }
+    }
+
+    fn proposal_execution_policy(
+        &self,
+        request: &ProposalTaskRequest,
+        stage: ProposalStage,
+    ) -> TaskExecutionPolicy {
+        let default = self.default_execution_policy();
+        let Some(effective_config) = self.sp1_effective_proposal_config(request) else {
+            return default;
+        };
+        if effective_config.prover != Sp1ProverMode::Network {
+            return default;
+        }
+
+        match stage {
+            ProposalStage::Preflight | ProposalStage::Validation | ProposalStage::Encode => {
+                default.with_retry_limit(2)
+            }
+            ProposalStage::Prove => {
+                Self::network_prove_execution_policy(effective_config.timeout_secs)
+            }
+        }
+    }
+
+    fn aggregation_execution_policy(
+        &self,
+        request: &AggregationTaskRequest,
+    ) -> TaskExecutionPolicy {
+        let default = self.default_execution_policy();
+        let Some(effective_config) = self.sp1_effective_aggregation_config(request) else {
+            return default;
+        };
+        if effective_config.prover != Sp1ProverMode::Network {
+            return default;
+        }
+        Self::network_prove_execution_policy(effective_config.timeout_secs)
+    }
+
     /// # Errors
     ///
     /// Returns an error if the task store cannot enqueue required tasks.
@@ -273,7 +386,7 @@ where
         let preflight_task = self
             .inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 preflight_id,
                 NewTask {
                     priority: Priority::Low,
@@ -282,6 +395,7 @@ where
                     },
                 },
                 dependencies,
+                self.proposal_execution_policy(&request, ProposalStage::Preflight),
             )
             .await?;
 
@@ -289,7 +403,7 @@ where
         let validation_task = self
             .inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 validation_id,
                 NewTask {
                     priority: Priority::Low,
@@ -299,6 +413,7 @@ where
                     },
                 },
                 vec![preflight_task],
+                self.proposal_execution_policy(&request, ProposalStage::Validation),
             )
             .await?;
 
@@ -306,7 +421,7 @@ where
         let encode_task = self
             .inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 encode_id,
                 NewTask {
                     priority: Priority::Low,
@@ -316,13 +431,15 @@ where
                     },
                 },
                 vec![validation_task],
+                self.proposal_execution_policy(&request, ProposalStage::Encode),
             )
             .await?;
 
         let prove_id = self.proposal_task_id(request.clone(), ProposalStage::Prove);
+        let prove_execution_policy = self.proposal_execution_policy(&request, ProposalStage::Prove);
         self.inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 prove_id,
                 NewTask {
                     priority: Priority::Medium,
@@ -332,6 +449,7 @@ where
                     },
                 },
                 vec![encode_task],
+                prove_execution_policy,
             )
             .await
     }
@@ -422,9 +540,10 @@ where
         }
 
         let aggregate_id = self.aggregate_task_id(request.clone());
+        let aggregate_execution_policy = self.aggregation_execution_policy(&request);
         self.inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 aggregate_id,
                 NewTask {
                     priority: Priority::High,
@@ -434,6 +553,7 @@ where
                     },
                 },
                 proof_tasks,
+                aggregate_execution_policy,
             )
             .await
     }
@@ -454,9 +574,10 @@ where
         }
 
         let aggregate_id = self.aggregate_task_id(request.clone());
+        let aggregate_execution_policy = self.aggregation_execution_policy(&request);
         self.inner
             .scheduler
-            .submit(
+            .submit_with_execution_policy(
                 aggregate_id,
                 NewTask {
                     priority: Priority::High,
@@ -466,6 +587,7 @@ where
                     },
                 },
                 Vec::new(),
+                aggregate_execution_policy,
             )
             .await
     }
@@ -509,10 +631,8 @@ where
         let payload = lease.payload.clone();
         let renew_scheduler = self.inner.scheduler.clone();
         let renew_lease = lease.clone();
-        let renew_period = self
-            .inner
-            .scheduler
-            .config()
+        let renew_period = lease
+            .execution_policy
             .lease_duration
             .checked_div(2)
             .unwrap_or_else(|| Duration::from_secs(1))
@@ -876,7 +996,10 @@ mod tests {
         RaikoResult,
     };
     use raiko2_primitives_shasta::GuestInput;
-    use raiko2_prover::{GuestInputCodec, Prover};
+    use raiko2_prover::{
+        GuestInputCodec, Prover,
+        sp1::{ProverMode, Sp1Config, Sp1ConfigOverrides},
+    };
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
@@ -1108,6 +1231,28 @@ mod tests {
         }
     }
 
+    fn aggregation_request(request_id: &str) -> AggregationTaskRequest {
+        AggregationTaskRequest {
+            request_id: request_id.to_string(),
+            proposal_ids: vec![1, 2],
+            prover_config: ProverTaskConfig::default(),
+        }
+    }
+
+    fn sp1_test_engine(
+        scheduler_config: SchedulerConfig,
+        sp1_config: Sp1Config,
+    ) -> Engine<TestSpec<MockProver>> {
+        Engine::with_store_scheduler_config_observer_and_sp1_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            scheduler_config,
+            None,
+            Some(sp1_config),
+        )
+    }
+
     #[tokio::test]
     async fn submit_proposal_proof_runs_dependency_pipeline()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1277,6 +1422,100 @@ mod tests {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
         assert!(matches!(view.state, TaskState::Failed { .. }));
         Ok(())
+    }
+
+    #[test]
+    fn proposal_execution_policy_honors_request_level_sp1_network_overrides() {
+        let scheduler_config = SchedulerConfig {
+            lease_duration: Duration::from_secs(45),
+            retry: RetryPolicy::Exponential {
+                max_attempts: 5,
+                base_delay: Duration::from_secs(2),
+                max_delay: Duration::from_secs(10),
+            },
+        };
+        let global_sp1_config = Sp1Config {
+            prover: ProverMode::Local,
+            timeout_secs: 600,
+            ..Sp1Config::default()
+        };
+        let engine = sp1_test_engine(scheduler_config.clone(), global_sp1_config);
+
+        let local_request = proposal_request(1);
+        assert_eq!(
+            engine.proposal_execution_policy(&local_request, ProposalStage::Preflight),
+            scheduler_config.execution_policy()
+        );
+        assert_eq!(
+            engine.proposal_execution_policy(&local_request, ProposalStage::Prove),
+            scheduler_config.execution_policy()
+        );
+
+        let mut network_request = proposal_request(2);
+        network_request.prover_config.sp1 = Some(Sp1ConfigOverrides {
+            prover: Some(ProverMode::Network),
+            timeout_secs: Some(321),
+            ..Sp1ConfigOverrides::default()
+        });
+
+        assert_eq!(
+            engine.proposal_execution_policy(&network_request, ProposalStage::Preflight),
+            scheduler_config.execution_policy().with_retry_limit(2)
+        );
+        assert_eq!(
+            engine.proposal_execution_policy(&network_request, ProposalStage::Validation),
+            scheduler_config.execution_policy().with_retry_limit(2)
+        );
+        assert_eq!(
+            engine.proposal_execution_policy(&network_request, ProposalStage::Encode),
+            scheduler_config.execution_policy().with_retry_limit(2)
+        );
+        assert_eq!(
+            engine
+                .proposal_execution_policy(&network_request, ProposalStage::Prove)
+                .retry,
+            RetryPolicy::None
+        );
+        assert_eq!(
+            engine
+                .proposal_execution_policy(&network_request, ProposalStage::Prove)
+                .lease_duration,
+            Duration::from_secs(351)
+        );
+    }
+
+    #[test]
+    fn aggregation_execution_policy_uses_effective_sp1_timeout() {
+        let scheduler_config = SchedulerConfig {
+            lease_duration: Duration::from_secs(30),
+            retry: RetryPolicy::Fixed {
+                max_attempts: 4,
+                delay: Duration::from_secs(1),
+            },
+        };
+        let global_sp1_config = Sp1Config {
+            prover: ProverMode::Local,
+            timeout_secs: 120,
+            ..Sp1Config::default()
+        };
+        let engine = sp1_test_engine(scheduler_config.clone(), global_sp1_config);
+
+        let local_request = aggregation_request("agg-local");
+        assert_eq!(
+            engine.aggregation_execution_policy(&local_request),
+            scheduler_config.execution_policy()
+        );
+
+        let mut network_request = aggregation_request("agg-network");
+        network_request.prover_config.sp1 = Some(Sp1ConfigOverrides {
+            prover: Some(ProverMode::Network),
+            timeout_secs: Some(777),
+            ..Sp1ConfigOverrides::default()
+        });
+
+        let execution_policy = engine.aggregation_execution_policy(&network_request);
+        assert_eq!(execution_policy.retry, RetryPolicy::None);
+        assert_eq!(execution_policy.lease_duration, Duration::from_secs(807));
     }
 
     #[tokio::test]

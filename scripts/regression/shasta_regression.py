@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import sys
 import subprocess
 from typing import Dict, Iterable, List, Optional
 import requests
@@ -159,21 +160,38 @@ def discover_proposals_from_blocks(blocks: Iterable[Dict]) -> List[int]:
     return proposals
 
 
-def discover_latest_proposals_from_blocks(
-    blocks: Iterable[Dict], count: int
-) -> List[int]:
-    proposals: List[int] = []
-    last_id: Optional[int] = None
+def block_number_from_rpc_block(block: Dict) -> Optional[int]:
+    raw_number = block.get("number")
+    if isinstance(raw_number, int):
+        return raw_number
+    if isinstance(raw_number, str):
+        try:
+            return int(raw_number, 16) if raw_number.startswith("0x") else int(raw_number)
+        except ValueError:
+            return None
+    return None
+
+
+def discover_proposal_spans_from_blocks(blocks: Iterable[Dict]) -> List[Dict[str, int]]:
+    spans: List[Dict[str, int]] = []
     for block in blocks:
+        number = block_number_from_rpc_block(block)
         proposal_id = extract_proposal_id_from_extradata(block.get("extraData", ""))
-        if proposal_id is None:
+        if proposal_id is None or number is None:
             continue
-        if proposal_id != last_id:
-            proposals.append(proposal_id)
-            last_id = proposal_id
-        if len(proposals) >= count:
-            break
-    return list(reversed(proposals))
+        if not spans or spans[-1]["proposal_id"] != proposal_id:
+            spans.append(
+                {
+                    "proposal_id": proposal_id,
+                    "l2_start": number,
+                    "l2_end": number,
+                    "block_count": 1,
+                }
+            )
+            continue
+        spans[-1]["l2_end"] = number
+        spans[-1]["block_count"] += 1
+    return spans
 
 
 def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[Dict]:
@@ -225,19 +243,15 @@ def discover_proposals_from_l2_range(
     return discover_proposals_from_blocks(blocks)
 
 
-def discover_latest_proposals_from_l2(
-    rpc_url: str, count: int, timeout: int
-) -> List[int]:
-    latest = get_latest_l2_block_number(rpc_url, timeout)
+def discover_proposal_spans_from_l2_range(
+    rpc_url: str, start: int, end: int, timeout: int
+) -> List[Dict[str, int]]:
     blocks: List[Dict] = []
-    for num in range(latest, -1, -1):
+    for num in range(start, end + 1):
         block = get_l2_block(rpc_url, num, timeout)
         if block:
             blocks.append(block)
-        proposals = discover_latest_proposals_from_blocks(blocks, count)
-        if len(proposals) >= count:
-            return proposals
-    return discover_latest_proposals_from_blocks(blocks, count)
+    return discover_proposal_spans_from_blocks(blocks)
 
 
 def run_command(cmd: List[str]) -> subprocess.CompletedProcess:
@@ -501,6 +515,34 @@ def discover_latest_completed_proposals_from_l2(
     return proposals
 
 
+def discover_latest_completed_proposal_spans_from_l2(
+    rpc_url: str,
+    count: int,
+    timeout: int,
+    max_scan: int = MAX_SCAN_DEFAULT,
+) -> List[Dict[str, int]]:
+    proposal_ids = discover_latest_completed_proposals_from_l2(
+        rpc_url, count, timeout, max_scan
+    )
+    spans: List[Dict[str, int]] = []
+    for proposal_id in proposal_ids:
+        l2_range = derive_block_range_for_proposal(
+            rpc_url, proposal_id, timeout, max_scan
+        )
+        if l2_range is None:
+            continue
+        l2_start, l2_end = l2_range
+        spans.append(
+            {
+                "proposal_id": proposal_id,
+                "l2_start": l2_start,
+                "l2_end": l2_end,
+                "block_count": (l2_end - l2_start) + 1,
+            }
+        )
+    return spans
+
+
 def derive_block_range_for_proposal(
     rpc_url: str, proposal_id: int, timeout: int, lookback: int, step: int = 128
 ) -> Optional[tuple]:
@@ -613,6 +655,11 @@ def main() -> int:
         help="Most recent N completed proposals (max 5; skips current)",
     )
     parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Print resolved proposal spans as JSON and exit without running binaries",
+    )
+    parser.add_argument(
         "--aggregate", type=int, default=0, help="Aggregation group size (0=off)"
     )
     parser.add_argument("--out-dir", default="test/regression/shasta")
@@ -684,7 +731,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = setup_logger(out_dir / "regression.log")
 
-    if check_binaries(args.preflight_bin, args.guest_launcher_bin):
+    if not args.discover_only and check_binaries(
+        args.preflight_bin, args.guest_launcher_bin
+    ):
         logger.error(
             "Missing binaries. Run scripts/regression/prepare_regression.sh first."
         )
@@ -698,17 +747,8 @@ def main() -> int:
         debug_witness,
     )
 
-    preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
-    if not preflight_rpc:
+    if not l2_rpc:
         logger.error("Missing l2_rpc in config or chain spec lookup.")
-        return 2
-    if not l2_chain_id:
-        logger.error("Missing l2_chain_id in config or chain spec lookup.")
-        return 2
-    if not l1_chain_id:
-        l1_chain_id = 1
-    if not event_address:
-        logger.error("Missing event_address (resolve from chain spec).")
         return 2
     if not timeout:
         timeout = 10
@@ -732,25 +772,21 @@ def main() -> int:
             start_pid,
             end_pid,
         )
-        proposals = discover_proposals_from_l2_range(
+        selected = discover_proposal_spans_from_l2_range(
             l2_rpc, expanded_start, expanded_end, timeout
         )
         summary_range = f"{expanded_start}:{expanded_end}"
-        summary_proposals = [start_pid, end_pid]
-        base_range = (expanded_start, expanded_end)
+        summary_proposals = [span["proposal_id"] for span in selected]
     elif args.count:
-        proposals = discover_latest_completed_proposals_from_l2(
+        selected = discover_latest_completed_proposal_spans_from_l2(
             l2_rpc, args.count, timeout, MAX_SCAN_DEFAULT
         )
         summary_range = None
-        summary_proposals = None
-        base_range = None
+        summary_proposals = [span["proposal_id"] for span in selected]
     else:
         logger.error("Either --range or --count must be provided.")
         return 2
 
-    logger.info("Discovered %s proposals", len(proposals))
-    selected = select_all_proposals(proposals)
     logger.info("Selected %s proposals", len(selected))
     summary = {
         "timestamp": int(time.time()),
@@ -758,6 +794,7 @@ def main() -> int:
             "range": args.range_value,
             "resolved_range": summary_range,
             "resolved_proposals": summary_proposals,
+            "resolved_spans": selected,
             "count": args.count,
             "aggregate": args.aggregate,
             "proof_type": proof_type,
@@ -767,6 +804,24 @@ def main() -> int:
         "failures": [],
         "errors": {},
     }
+
+    if args.discover_only:
+        json.dump(summary["inputs"], sys.stdout, indent=2)
+        print()
+        return 0
+
+    preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
+    if not preflight_rpc:
+        logger.error("Missing l2_rpc in config or chain spec lookup.")
+        return 2
+    if not l2_chain_id:
+        logger.error("Missing l2_chain_id in config or chain spec lookup.")
+        return 2
+    if not l1_chain_id:
+        l1_chain_id = 1
+    if not event_address:
+        logger.error("Missing event_address (resolve from chain spec).")
+        return 2
 
     guest_mode = "prove" if proof_type == "native" else "execute"
     proof_mode = "plonk"
@@ -781,24 +836,12 @@ def main() -> int:
         guest_mode = "prove"
         proof_mode = "compressed"
 
-    for idx, proposal_id in enumerate(selected, start=1):
+    for idx, span in enumerate(selected, start=1):
+        proposal_id = span["proposal_id"]
         logger.info(format_progress(idx, len(selected), "preflight", proposal_id))
         paths = output_paths(out_dir, proposal_id)
-        # Derive L2 block range for this proposal. If a range was specified, reuse it;
-        # otherwise attempt to derive from L2 by scanning backwards.
-        l2_range = None
-        if base_range:
-            l2_range = base_range
-        if l2_range is None:
-            l2_range = derive_block_range_for_proposal(
-                l2_rpc, proposal_id, timeout, MAX_SCAN_DEFAULT
-            )
-        if l2_range is None:
-            logger.error("Could not derive L2 block range for proposal %s", proposal_id)
-            summary["failures"].append(proposal_id)
-            summary["errors"][str(proposal_id)] = "missing l2 range"
-            continue
-        l2_start, l2_end = l2_range
+        l2_start = span["l2_start"]
+        l2_end = span["l2_end"]
 
         preflight = run_preflight(
             args.preflight_bin,

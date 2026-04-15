@@ -4,7 +4,9 @@
 use std::process::Command;
 use std::time::Duration;
 
-use raiko2_queue::{NewTask, Priority, RedisStore, Scheduler, TaskId, TaskState};
+use raiko2_queue::{
+    NewTask, Priority, RedisStore, RetryPolicy, Scheduler, SchedulerConfig, TaskId, TaskState,
+};
 use testcontainers::{
     GenericImage,
     core::{IntoContainerPort, WaitFor},
@@ -175,7 +177,13 @@ async fn redis_store_requeues_task_after_lease_expires() -> Result<(), Box<dyn s
     let store =
         RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_millis(50))
             .await?;
-    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
+    let sched: Scheduler<String, String, u64> = Scheduler::with_config(
+        store,
+        SchedulerConfig {
+            lease_duration: Duration::from_millis(50),
+            retry: RetryPolicy::None,
+        },
+    );
 
     let id = sched
         .submit(

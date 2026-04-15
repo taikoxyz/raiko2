@@ -27,7 +27,7 @@ pub struct ProposalTaskRequest {
     pub prover_config: ProverTaskConfig,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalStage {
     Preflight,
     Validation,

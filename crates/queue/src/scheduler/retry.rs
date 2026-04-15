@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RetryPolicy {
     None,
     Fixed {

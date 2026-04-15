@@ -117,19 +117,26 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(discover_proposals_from_blocks(blocks), [1, 2])
 
 
-class TestLatestDiscovery(unittest.TestCase):
-    def test_discover_latest_proposals_from_blocks(self):
-        from shasta_regression import discover_latest_proposals_from_blocks
+class TestProposalSpanDiscovery(unittest.TestCase):
+    def test_discover_proposal_spans_from_blocks(self):
+        from shasta_regression import discover_proposal_spans_from_blocks
 
         blocks = [
-            {"number": 1, "extraData": "0x4b000000000001"},
-            {"number": 2, "extraData": "0x4b000000000001"},
-            {"number": 3, "extraData": "0x4b000000000002"},
-            {"number": 4, "extraData": "0x4b000000000002"},
-            {"number": 5, "extraData": "0x4b000000000003"},
+            {"number": "0x1", "extraData": "0x4b000000000001"},
+            {"number": "0x2", "extraData": "0x4b000000000001"},
+            {"number": "0x3", "extraData": "0x4b000000000002"},
+            {"number": "0x4", "extraData": "0x4b000000000002"},
+            {"number": "0x5", "extraData": "0x4b000000000003"},
         ]
-        latest = discover_latest_proposals_from_blocks(list(reversed(blocks)), count=2)
-        self.assertEqual(latest, [2, 3])
+        spans = discover_proposal_spans_from_blocks(blocks)
+        self.assertEqual(
+            spans,
+            [
+                {"proposal_id": 1, "l2_start": 1, "l2_end": 2, "block_count": 2},
+                {"proposal_id": 2, "l2_start": 3, "l2_end": 4, "block_count": 2},
+                {"proposal_id": 3, "l2_start": 5, "l2_end": 5, "block_count": 1},
+            ],
+        )
 
 
 class TestChainSpecLookup(unittest.TestCase):
@@ -434,6 +441,31 @@ class TestCompletedProposalDiscovery(unittest.TestCase):
                     "http://rpc", count=2, timeout=1, max_scan=20
                 )
         self.assertEqual(proposals, [1, 2])
+
+
+class TestCompletedProposalSpanDiscovery(unittest.TestCase):
+    def test_discover_latest_completed_proposal_spans(self):
+        from shasta_regression import discover_latest_completed_proposal_spans_from_l2
+
+        with mock.patch(
+            "shasta_regression.discover_latest_completed_proposals_from_l2",
+            return_value=[1, 2],
+        ):
+            with mock.patch(
+                "shasta_regression.derive_block_range_for_proposal",
+                side_effect=[(0, 3), (4, 6)],
+            ):
+                spans = discover_latest_completed_proposal_spans_from_l2(
+                    "http://rpc", count=2, timeout=1, max_scan=20
+                )
+
+        self.assertEqual(
+            spans,
+            [
+                {"proposal_id": 1, "l2_start": 0, "l2_end": 3, "block_count": 4},
+                {"proposal_id": 2, "l2_start": 4, "l2_end": 6, "block_count": 3},
+            ],
+        )
 
 
 if __name__ == "__main__":

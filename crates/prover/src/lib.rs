@@ -73,6 +73,10 @@ pub enum ProverProgress {
 #[async_trait::async_trait]
 pub trait ProverProgressObserver: Send + Sync {
     async fn on_progress(&self, progress: &ProverProgress);
+
+    async fn load_sp1_network_request_id(&self) -> Option<String> {
+        None
+    }
 }
 
 const B256_BYTES: usize = 32;

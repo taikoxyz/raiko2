@@ -220,6 +220,7 @@ impl Args {
             cycle_limit: self.sp1_cycle_limit,
             timeout_secs: self.sp1_timeout_secs,
             rpc_url: None,
+            remote_verify: None,
         };
         config
             .validate()

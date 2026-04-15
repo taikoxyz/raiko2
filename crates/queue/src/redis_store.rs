@@ -1,6 +1,6 @@
 use crate::{
-    Priority, StoreResult, TaskId, TaskState, TaskStore, TaskStoreError, decode_task_id,
-    encode_task_id,
+    Priority, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStore, TaskStoreError,
+    decode_task_id, encode_task_id,
 };
 use async_trait::async_trait;
 use redis::AsyncCommands;
@@ -19,6 +19,8 @@ const FIELD_NEXT_READY_AT_MS: &str = "next_ready_at_ms";
 const FIELD_CAUSED_BY: &str = "caused_by_dep";
 const FIELD_WORKER: &str = "worker";
 const FIELD_LEASE_UNTIL_MS: &str = "lease_until_ms";
+const FIELD_LEASE_DURATION_MS: &str = "lease_duration_ms";
+const FIELD_EXECUTION_POLICY: &str = "execution_policy";
 
 const STATE_PENDING: &str = "pending";
 const STATE_READY: &str = "ready";
@@ -105,6 +107,16 @@ fn now_millis() -> u64 {
     .unwrap_or_default()
 }
 
+fn execution_policy_lease_duration_ms(execution_policy: &TaskExecutionPolicy) -> u64 {
+    u64::try_from(
+        execution_policy
+            .lease_duration
+            .as_millis()
+            .min(u128::from(u64::MAX)),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for RedisStore<P, O, Id>
 where
@@ -118,10 +130,14 @@ where
         payload: P,
         prio: Priority,
         deps: Vec<TaskId<Id>>,
+        execution_policy: TaskExecutionPolicy,
     ) -> StoreResult<bool> {
         let task_key = self.task_key(&id)?;
+        let lease_duration_ms = execution_policy_lease_duration_ms(&execution_policy);
         let payload = bincode::serialize(&payload)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize payload: {e}")))?;
+        let execution_policy = bincode::serialize(&execution_policy)
+            .map_err(|e| TaskStoreError::corrupt_msg(format!("serialize execution policy: {e}")))?;
 
         let mut conn = self.conn.lock().await;
         let mut unresolved_deps = Vec::with_capacity(deps.len());
@@ -193,6 +209,10 @@ return 1
         .arg(payload)
         .arg(FIELD_ATTEMPT)
         .arg(0i64)
+        .arg(FIELD_LEASE_DURATION_MS)
+        .arg(lease_duration_ms as i64)
+        .arg(FIELD_EXECUTION_POLICY)
+        .arg(execution_policy)
         .arg(FIELD_OUTPUT)
         .arg(FIELD_ERROR)
         .arg(FIELD_NEXT_READY_AT_MS)
@@ -582,12 +602,11 @@ return redis.call('HGET', KEYS[1], ARGV[5])
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32)>> {
+    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
         let ready_key = self.ready_key(prio);
         let running_key = self.running_key();
 
-        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
-        let lease_until_ms = now_millis().saturating_add(lease_ms);
+        let default_lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         let script = redis::Script::new(
             r#"
 while true do
@@ -599,13 +618,16 @@ while true do
   local task_key = ARGV[1] .. id
   local state = redis.call('HGET', task_key, ARGV[2])
   if state == ARGV[3] then
-    redis.call('HSET', task_key, ARGV[2], ARGV[4], ARGV[5], ARGV[6], ARGV[7], ARGV[8])
+    local lease_duration_ms = tonumber(redis.call('HGET', task_key, ARGV[12]) or ARGV[13])
+    local lease_until_ms = tonumber(ARGV[8]) + lease_duration_ms
+    redis.call('HSET', task_key, ARGV[2], ARGV[4], ARGV[5], ARGV[6], ARGV[7], lease_until_ms)
     local attempt = redis.call('HINCRBY', task_key, ARGV[9], 1)
-    redis.call('ZADD', KEYS[2], ARGV[8], id)
+    redis.call('ZADD', KEYS[2], lease_until_ms, id)
 
     local payload = redis.call('HGET', task_key, ARGV[10])
     local priority = redis.call('HGET', task_key, ARGV[11])
-    return {id, payload, priority, attempt}
+    local execution_policy = redis.call('HGET', task_key, ARGV[14])
+    return {id, payload, priority, attempt, execution_policy}
   end
 end
 "#,
@@ -622,15 +644,18 @@ end
             .arg(FIELD_WORKER)
             .arg(worker)
             .arg(FIELD_LEASE_UNTIL_MS)
-            .arg(lease_until_ms as i64)
+            .arg(now_millis() as i64)
             .arg(FIELD_ATTEMPT)
             .arg(FIELD_PAYLOAD)
             .arg(FIELD_PRIORITY)
+            .arg(FIELD_LEASE_DURATION_MS)
+            .arg(default_lease_ms as i64)
+            .arg(FIELD_EXECUTION_POLICY)
             .invoke_async(&mut *conn)
             .await
             .map_err(TaskStoreError::backend)?;
 
-        let Some((id, payload_bytes, prio, attempt)) = result else {
+        let Some((id, payload_bytes, prio, attempt, execution_policy_bytes)) = result else {
             return Ok(None);
         };
         let id = self.decode_id(&id)?;
@@ -638,20 +663,29 @@ end
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
         let prio = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
-        Ok(Some((id, payload, prio, attempt.max(0) as u32)))
+        let execution_policy: TaskExecutionPolicy = bincode::deserialize(&execution_policy_bytes)
+            .map_err(|e| {
+            TaskStoreError::corrupt_msg(format!("deserialize execution policy: {e}"))
+        })?;
+        Ok(Some((
+            id,
+            payload,
+            prio,
+            attempt.max(0) as u32,
+            execution_policy,
+        )))
     }
 
     async fn take_ready(
         &self,
         id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, Priority, u32)>> {
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
         let task_key = self.task_key(id)?;
         let running_key = self.running_key();
         let encoded = self.encode_id(id)?;
 
-        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
-        let lease_until_ms = now_millis().saturating_add(lease_ms);
+        let default_lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
         let script = redis::Script::new(
             r#"
 local state = redis.call('HGET', KEYS[1], ARGV[1])
@@ -659,13 +693,16 @@ if state ~= ARGV[2] then
   return nil
 end
 
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[3], ARGV[4], ARGV[5], ARGV[9], ARGV[10])
+local lease_duration_ms = tonumber(redis.call('HGET', KEYS[1], ARGV[12]) or ARGV[13])
+local lease_until_ms = tonumber(ARGV[10]) + lease_duration_ms
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[3], ARGV[4], ARGV[5], ARGV[9], lease_until_ms)
 local attempt = redis.call('HINCRBY', KEYS[1], ARGV[8], 1)
-redis.call('ZADD', KEYS[2], ARGV[10], ARGV[11])
+redis.call('ZADD', KEYS[2], lease_until_ms, ARGV[11])
 
 local payload = redis.call('HGET', KEYS[1], ARGV[6])
 local priority = redis.call('HGET', KEYS[1], ARGV[7])
-return {payload, priority, attempt}
+local execution_policy = redis.call('HGET', KEYS[1], ARGV[14])
+return {payload, priority, attempt, execution_policy}
 "#,
         );
 
@@ -682,20 +719,32 @@ return {payload, priority, attempt}
             .arg(FIELD_PRIORITY)
             .arg(FIELD_ATTEMPT)
             .arg(FIELD_LEASE_UNTIL_MS)
-            .arg(lease_until_ms as i64)
+            .arg(now_millis() as i64)
             .arg(encoded)
+            .arg(FIELD_LEASE_DURATION_MS)
+            .arg(default_lease_ms as i64)
+            .arg(FIELD_EXECUTION_POLICY)
             .invoke_async(&mut *conn)
             .await
             .map_err(TaskStoreError::backend)?;
 
-        let Some((payload_bytes, prio, attempt)) = result else {
+        let Some((payload_bytes, prio, attempt, execution_policy_bytes)) = result else {
             return Ok(None);
         };
         let payload: P = bincode::deserialize(&payload_bytes)
             .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
         let prio = Priority::parse(prio.as_str())
             .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
-        Ok(Some((payload, prio, attempt.max(0) as u32)))
+        let execution_policy: TaskExecutionPolicy = bincode::deserialize(&execution_policy_bytes)
+            .map_err(|e| {
+            TaskStoreError::corrupt_msg(format!("deserialize execution policy: {e}"))
+        })?;
+        Ok(Some((
+            payload,
+            prio,
+            attempt.max(0) as u32,
+            execution_policy,
+        )))
     }
 
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {
@@ -715,8 +764,7 @@ return {payload, priority, attempt}
         let task_key = self.task_key(id)?;
         let running_key = self.running_key();
         let encoded = self.encode_id(id)?;
-        let lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
-        let lease_until_ms = now_millis().saturating_add(lease_ms);
+        let default_lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
 
         let script = redis::Script::new(
             r#"
@@ -735,8 +783,10 @@ if not current_attempt or tonumber(current_attempt) ~= tonumber(ARGV[6]) then
   return 0
 end
 
-redis.call('HSET', KEYS[1], ARGV[7], ARGV[8])
-redis.call('ZADD', KEYS[2], ARGV[8], ARGV[9])
+local lease_duration_ms = tonumber(redis.call('HGET', KEYS[1], ARGV[10]) or ARGV[11])
+local lease_until_ms = tonumber(ARGV[8]) + lease_duration_ms
+redis.call('HSET', KEYS[1], ARGV[7], lease_until_ms)
+redis.call('ZADD', KEYS[2], lease_until_ms, ARGV[9])
 return 1
 "#,
         );
@@ -752,8 +802,10 @@ return 1
             .arg(FIELD_ATTEMPT)
             .arg(attempt as i64)
             .arg(FIELD_LEASE_UNTIL_MS)
-            .arg(lease_until_ms as i64)
+            .arg(now_millis() as i64)
             .arg(encoded)
+            .arg(FIELD_LEASE_DURATION_MS)
+            .arg(default_lease_ms as i64)
             .invoke_async(&mut *conn)
             .await
             .map_err(TaskStoreError::backend)?;

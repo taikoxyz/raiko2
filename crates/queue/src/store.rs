@@ -1,4 +1,4 @@
-use crate::{Priority, TaskId, TaskState};
+use crate::{Priority, TaskExecutionPolicy, TaskId, TaskState};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -68,6 +68,7 @@ where
         payload: P,
         prio: Priority,
         deps: Vec<TaskId<Id>>,
+        execution_policy: TaskExecutionPolicy,
     ) -> StoreResult<bool>;
     async fn get_state(&self, id: &TaskId<Id>) -> StoreResult<Option<TaskState<O, Id>>>;
     async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()>;
@@ -81,20 +82,22 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, Priority, u32)>>;
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>>;
     async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32)>> {
+    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
-            if let Some((payload, priority, attempt)) = self.take_ready(&id, worker).await? {
-                return Ok(Some((id, payload, priority, attempt)));
+            if let Some((payload, priority, attempt, execution_policy)) =
+                self.take_ready(&id, worker).await?
+            {
+                return Ok(Some((id, payload, priority, attempt, execution_policy)));
             }
         }
     }
@@ -126,6 +129,7 @@ struct TaskRecord<P, O, Id> {
     priority: Priority,
     attempt: u32,
     lease_until_ms: Option<u64>,
+    execution_policy: TaskExecutionPolicy,
 }
 
 enum DependencyInsertState<Id> {
@@ -210,6 +214,7 @@ where
         payload: P,
         prio: Priority,
         deps: Vec<TaskId<Id>>,
+        execution_policy: TaskExecutionPolicy,
     ) -> StoreResult<bool> {
         let mut g = self.inner.lock().await;
         let dependency_state = resolve_dependency_insert_state(&g.tasks, deps);
@@ -238,6 +243,7 @@ where
                 existing.attempt = 0;
                 existing.lease_until_ms = None;
                 existing.state = next_state;
+                existing.execution_policy = execution_policy;
             }
             return Ok(true);
         }
@@ -272,6 +278,7 @@ where
                 priority: prio,
                 attempt: 0,
                 lease_until_ms: None,
+                execution_policy,
             },
         );
 
@@ -368,7 +375,7 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, Priority, u32)>> {
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
         let mut g = self.inner.lock().await;
         let Some(record) = g.tasks.get_mut(id) else {
             return Ok(None);
@@ -386,10 +393,16 @@ where
             worker: worker.to_string(),
             attempt,
         };
+        let lease_duration = record.execution_policy.lease_duration.max(self.lease);
         let lease_ms =
-            u64::try_from(self.lease.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+            u64::try_from(lease_duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
-        Ok(Some((payload, record.priority, attempt)))
+        Ok(Some((
+            payload,
+            record.priority,
+            attempt,
+            record.execution_policy.clone(),
+        )))
     }
 
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {
@@ -419,8 +432,9 @@ where
             return Ok(false);
         }
 
+        let lease_duration = record.execution_policy.lease_duration.max(self.lease);
         let lease_ms =
-            u64::try_from(self.lease.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+            u64::try_from(lease_duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
         record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
         Ok(true)
     }

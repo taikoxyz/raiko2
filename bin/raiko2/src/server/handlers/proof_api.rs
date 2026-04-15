@@ -69,6 +69,15 @@ struct SubmissionPlan {
     aggregate: Option<PlannedAggregateTask>,
 }
 
+type ExternalAggregateSubmission = (
+    ResolvedNetworkPair,
+    CanonicalProofRoute,
+    Vec<raiko2_primitives::Proof>,
+    String,
+    EngineTaskId,
+    AggregationTaskRequest,
+);
+
 struct TaskLookup {
     record: raiko2_runtime::RuntimeTaskRecord,
     metadata: HoodiTaskMetadata,
@@ -542,17 +551,7 @@ fn validate_external_proofs(
 fn build_external_aggregate_submission(
     state: &AppState,
     req: AggregateProofRequest,
-) -> Result<
-    (
-        ResolvedNetworkPair,
-        CanonicalProofRoute,
-        Vec<raiko2_primitives::Proof>,
-        String,
-        EngineTaskId,
-        AggregationTaskRequest,
-    ),
-    ApiError,
-> {
+) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
     let pair = resolved_pair(state, &req.network, &req.l1_network)?;
     let prover_config = augment_system_prover_config(

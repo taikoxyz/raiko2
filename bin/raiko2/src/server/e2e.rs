@@ -1305,7 +1305,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "native/local");
     assert_eq!(res["data"]["status"], "proving");
-    assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
+    assert_eq!(res["data"]["runtime"]["runner_status"], "running");
     assert_eq!(res["data"]["runtime"]["active_stage"], "prove");
     assert_eq!(
         res["data"]["runtime"]["last_event"],

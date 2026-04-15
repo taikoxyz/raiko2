@@ -64,6 +64,12 @@ impl RuntimeObserver {
         }
         Ok(())
     }
+
+    async fn load_root_record(&self, id: &EngineTaskId) -> Result<Option<RuntimeTaskRecord>> {
+        let root_id = Self::root_task_id(id);
+        let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
+        self.runtime.find_task_by_engine_task_id(&root_id).await
+    }
 }
 
 #[async_trait]
@@ -98,6 +104,14 @@ impl EngineObserver for RuntimeObserver {
             .update_root_records(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
+                record.provider_request_id = match progress {
+                    ProverProgress::BoundlessSubmission(submission) => {
+                        Some(submission.provider_request_id.clone())
+                    }
+                    ProverProgress::Sp1NetworkSubmission(submission) => {
+                        Some(submission.provider_request_id.clone())
+                    }
+                };
                 let task_id = encode_task_id(id).context("failed to encode progress task id")?;
                 update_task_metadata(record, |metadata| {
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -230,6 +244,37 @@ impl EngineObserver for RuntimeObserver {
             );
         }
     }
+
+    async fn load_sp1_network_request_id(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<String> {
+        let record = match task {
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => {
+                self.load_root_record(id).await.ok().flatten()
+            }
+            EngineTask::Preflight { .. }
+            | EngineTask::Validate { .. }
+            | EngineTask::Encode { .. } => None,
+        }?;
+
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let task_id = encode_task_id(id).ok()?;
+        match task {
+            EngineTask::ProveProposal { .. } => metadata
+                .proposal_runtime(&task_id)
+                .and_then(|runtime| runtime.provider_request_id.clone()),
+            EngineTask::Aggregate { .. } => record.provider_request_id.or_else(|| {
+                metadata
+                    .aggregate_runtime()
+                    .and_then(|runtime| runtime.provider_request_id.clone())
+            }),
+            EngineTask::Preflight { .. }
+            | EngineTask::Validate { .. }
+            | EngineTask::Encode { .. } => None,
+        }
+    }
 }
 
 fn update_task_metadata<F>(record: &mut RuntimeTaskRecord, mutator: F) -> Result<()>
@@ -279,7 +324,7 @@ fn now_ts() -> i64 {
 mod tests {
     use super::*;
     use crate::server::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata};
-    use raiko2_engine::ProposalTaskRequest;
+    use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_prover::{
@@ -475,6 +520,189 @@ mod tests {
         assert_eq!(runtime_entry.sp1_skip_simulation, Some(true));
         assert_eq!(runtime_entry.sp1_cycle_limit, Some(1_000_000_000_000));
         assert_eq!(runtime_entry.sp1_timeout_secs, Some(3_600));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_loads_proposal_request_id_from_task_metadata_only() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sp1-load-proposal",
+        ))?);
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSp1,
+            request: proposal_request(),
+            stage: ProposalStage::Prove,
+        });
+        let other_request = ProposalTaskRequest {
+            proposal_id: 43,
+            ..proposal_request()
+        };
+        let other_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSp1,
+            request: other_request.clone(),
+            stage: ProposalStage::Prove,
+        });
+        let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
+        let encoded_other_task_id = encode_task_id(&other_task_id).expect("encode other task");
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_sp1_load".to_string(),
+                pipeline_key: "shasta-sp1-network".to_string(),
+                route: "sp1/network".to_string(),
+                guest_system: "sp1".to_string(),
+                runner: "network".to_string(),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(42),
+                proof_ids: vec![encoded_task_id.clone(), encoded_other_task_id.clone()],
+                metadata: serde_json::to_value(HoodiTaskMetadata {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    network: "taiko_dev".to_string(),
+                    l1_network: "ethereum".to_string(),
+                    proof_type: ProofType::Sp1,
+                    execution_mode: Some(ExecutionMode::Prove),
+                    aggregate_requested: false,
+                    proposals: vec![
+                        HoodiProposalTask {
+                            proposal_id: 42,
+                            checkpoint: None,
+                            l1_inclusion_block_number: 1,
+                            l2_block_numbers: vec![42],
+                            last_anchor_block_number: 0,
+                            task_id: encoded_task_id.clone(),
+                        },
+                        HoodiProposalTask {
+                            proposal_id: 43,
+                            checkpoint: None,
+                            l1_inclusion_block_number: 1,
+                            l2_block_numbers: vec![43],
+                            last_anchor_block_number: 0,
+                            task_id: encoded_other_task_id.clone(),
+                        },
+                    ],
+                    aggregate_task_id: None,
+                    runtime: HoodiRuntimeMetadata::default(),
+                })?,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_progress(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+                &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    provider_request_id: "0xsp1-proposal".to_string(),
+                    network_mode: Sp1NetworkMode::Reserved,
+                    fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                    skip_simulation: true,
+                    cycle_limit: 1_000_000_000_000,
+                    timeout_secs: 3_600,
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            observer
+                .load_sp1_network_request_id(
+                    &proposal_task_id,
+                    &EngineTask::ProveProposal {
+                        request: proposal_request(),
+                        input_task: proposal_task_id.clone(),
+                    },
+                )
+                .await
+                .as_deref(),
+            Some("0xsp1-proposal")
+        );
+        assert_eq!(
+            observer
+                .load_sp1_network_request_id(
+                    &other_task_id,
+                    &EngineTask::ProveProposal {
+                        request: other_request,
+                        input_task: other_task_id.clone(),
+                    },
+                )
+                .await,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_loads_aggregate_request_id_from_root_record() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-sp1-load-aggregate",
+        ))?);
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-42".to_string(),
+            proposal_ids: vec![42, 43],
+            prover_config: Default::default(),
+        };
+        let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline: PipelineKey::ShastaSp1,
+            request: aggregate_request.clone(),
+        });
+        let encoded_task_id = encode_task_id(&aggregate_task_id).expect("encode aggregate task");
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_sp1_aggregate".to_string(),
+                pipeline_key: "shasta-sp1-network".to_string(),
+                route: "sp1/network".to_string(),
+                guest_system: "sp1".to_string(),
+                runner: "network".to_string(),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: None,
+                proof_ids: vec![encoded_task_id],
+                metadata: serde_json::to_value(HoodiTaskMetadata {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    network: "taiko_dev".to_string(),
+                    l1_network: "ethereum".to_string(),
+                    proof_type: ProofType::Sp1,
+                    execution_mode: Some(ExecutionMode::Prove),
+                    aggregate_requested: true,
+                    proposals: vec![],
+                    aggregate_task_id: Some(encode_task_id(&aggregate_task_id)?),
+                    runtime: HoodiRuntimeMetadata::default(),
+                })?,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_progress(
+                &aggregate_task_id,
+                &EngineTask::Aggregate {
+                    request: aggregate_request.clone(),
+                    source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                },
+                &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
+                    provider_request_id: "0xsp1-aggregate".to_string(),
+                    network_mode: Sp1NetworkMode::Reserved,
+                    fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
+                    skip_simulation: true,
+                    cycle_limit: 1_000_000_000_000,
+                    timeout_secs: 3_600,
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            observer
+                .load_sp1_network_request_id(
+                    &aggregate_task_id,
+                    &EngineTask::Aggregate {
+                        request: aggregate_request,
+                        source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                    },
+                )
+                .await
+                .as_deref(),
+            Some("0xsp1-aggregate")
+        );
         Ok(())
     }
 }

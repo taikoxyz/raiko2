@@ -12,7 +12,9 @@ mod runtime;
 mod server;
 mod validation;
 
-pub use prover::{GuestSystem, PipelineRoute, ProverConfig, RunnerKind};
+pub use prover::{
+    GuestSystem, PipelineRoute, ProverConfig, RunnerKind, ZkAnyConfig, ZkAnyTargetConfig,
+};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
 pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;

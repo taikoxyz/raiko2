@@ -1,15 +1,18 @@
 //! HTTP app wiring.
 
-use axum::Router;
+use axum::{Router, extract::DefaultBodyLimit};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::AppState;
 use super::routes;
 
+const API_BODY_LIMIT_BYTES: usize = 1 << 20;
+
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(routes::api_routes())
+        .layer(DefaultBodyLimit::max(API_BODY_LIMIT_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()

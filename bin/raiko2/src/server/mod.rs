@@ -7,6 +7,7 @@ mod net;
 mod ready;
 mod routes;
 mod run;
+mod sampling;
 mod state;
 mod task_metadata;
 

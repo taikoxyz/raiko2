@@ -3,7 +3,7 @@
 //! These tests exercise the HTTP handlers + engine orchestration without relying on
 //! external RPC endpoints. A minimal JSON-RPC server is spun up only for `/ready`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Router,
@@ -25,6 +25,7 @@ use super::fixture::{
     app_with_engine, app_with_native_fixture_engine, base_config, native_fixture_engine,
     risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc, unique_runtime_root,
 };
+use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata};
 use crate::config::{GuestSystem, RunnerKind};
@@ -63,6 +64,40 @@ async fn post_json(app: &Router, uri: &str, payload: Value) -> (StatusCode, Valu
     read_json(res).await
 }
 
+fn sp1_fixture_app() -> (
+    Router,
+    raiko2_engine::Engine<super::fixture::Sp1FixtureSpec>,
+) {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    (app::build_router(state), engine)
+}
+
+fn sp1_external_proof(proof_hex: String) -> Value {
+    json!({
+        "proof": proof_hex,
+        "input": format!("{:#066x}", 0),
+        "uuid": "fixture-sp1-vk",
+        "extra_data": {
+            "sp1": {
+                "proof_carry_data": {
+                    "chain_id": 167001
+                }
+            }
+        }
+    })
+}
+
 async fn drive_engine_to_idle<S>(engine: &Engine<S>)
 where
     S: raiko2_pipeline::PipelineSpec,
@@ -81,15 +116,21 @@ where
 
 #[tokio::test]
 async fn e2e_ready_ok_with_matching_chain_id() {
-    let chain_id = 167_001;
-    let (l2_rpc, handle) = match spawn_chain_id_rpc(chain_id).await {
+    let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
         Ok(value) => value,
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(err) => panic!("bind mock rpc listener: {err}"),
+        Err(err) => panic!("bind mock l1 rpc listener: {err}"),
+    };
+    let (l2_rpc, l2_handle) = match spawn_chain_id_rpc(167_001).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l2 rpc listener: {err}"),
     };
 
     let mut config = base_config();
+    config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
 
     let state = AppState {
         config: Arc::new(config),
@@ -98,6 +139,7 @@ async fn e2e_ready_ok_with_matching_chain_id() {
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-runtime"))
                 .expect("runtime manager"),
         ),
+        zk_any_sampler,
     };
     let app = app::build_router(state);
 
@@ -106,8 +148,104 @@ async fn e2e_ready_ok_with_matching_chain_id() {
     assert_eq!(body["status"], "ok");
     assert_eq!(body["reth"]["ok"], true);
     assert_eq!(body["queue"]["ok"], true);
+    assert_eq!(body["prover"]["ok"], true);
 
-    handle.abort();
+    l1_handle.abort();
+    l2_handle.abort();
+}
+
+#[tokio::test]
+async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
+    let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(11_155_111).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l1 rpc listener: {err}"),
+    };
+    let (l2_rpc, l2_handle) = match spawn_chain_id_rpc(167_001).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l2 rpc listener: {err}"),
+    };
+
+    let mut config = base_config();
+    config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
+    config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(StaticPipelineFactory::default()),
+        runtime: Arc::new(
+            RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-l1-mismatch-runtime"))
+                .expect("runtime manager"),
+        ),
+        zk_any_sampler,
+    };
+    let app = app::build_router(state);
+
+    let (status, body) = get_json(&app, "/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["reth"]["ok"], false);
+    assert!(
+        body["reth"]["error"]
+            .as_str()
+            .expect("reth error")
+            .contains("l1 chain_id mismatch")
+    );
+
+    l1_handle.abort();
+    l2_handle.abort();
+}
+
+#[tokio::test]
+async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
+    let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l1 rpc listener: {err}"),
+    };
+    let (l2_rpc, l2_handle) = match spawn_chain_id_rpc(167_001).await {
+        Ok(value) => value,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(err) => panic!("bind mock l2 rpc listener: {err}"),
+    };
+
+    let mut config = base_config();
+    config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
+    config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
+    config.prover.guest_system = GuestSystem::Risc0;
+    config.prover.runner = RunnerKind::Boundless;
+    config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
+    config.prover.boundless.signer_key = "not-a-private-key".to_string();
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(StaticPipelineFactory::default()),
+        runtime: Arc::new(
+            RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-boundless-runtime"))
+                .expect("runtime manager"),
+        ),
+        zk_any_sampler,
+    };
+    let app = app::build_router(state);
+
+    let (status, body) = get_json(&app, "/ready").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["reth"]["ok"], true);
+    assert_eq!(body["queue"]["ok"], true);
+    assert_eq!(body["prover"]["ok"], false);
+    assert!(
+        body["prover"]["error"]
+            .as_str()
+            .expect("prover error")
+            .contains("boundless signer_key is invalid")
+    );
+
+    l1_handle.abort();
+    l2_handle.abort();
 }
 
 #[tokio::test]
@@ -147,6 +285,128 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
     assert!(
         res["data"].get("error").is_none(),
         "unexpected error: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
+    let mut config = base_config();
+    config.prover.zk_any = Default::default();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaNative,
+        engine,
+    );
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["status"], "ok");
+    assert_eq!(res["proof_type"], "native");
+    assert_eq!(res["data"]["status"], "zk_any_not_drawn");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+}
+
+#[tokio::test]
+async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
+    let mut config = base_config();
+    config.prover.zk_any.sp1 = Some(crate::config::ZkAnyTargetConfig {
+        probability: 1.0,
+        per_day: 0,
+    });
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["proof_type"], "sp1");
+    assert_eq!(res["data"]["status"], "registered");
+    let id = res["data"]["task_id"]
+        .as_str()
+        .expect("response task_id")
+        .to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["status"], "completed");
+}
+
+#[tokio::test]
+async fn e2e_zk_any_rejects_prover_args() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum",
+            "sp1": {
+                "mode": "execute"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res["message"],
+        "proof_type=zk_any does not support prover_args"
     );
 }
 
@@ -223,6 +483,96 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
             .as_str()
             .is_some(),
         "missing public values: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_aggregate_sp1_external_proofs_completes_from_fixture() {
+    let (app, engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let id = res["data"]["task_id"]
+        .as_str()
+        .expect("response task_id")
+        .to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["aggregate"]["status"], "completed");
+    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_aggregate_rejects_zk_any() {
+    let (app, _engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res["message"],
+        "proof_type=zk_any is not supported for aggregate requests"
+    );
+}
+
+#[tokio::test]
+async fn e2e_aggregate_route_rejects_oversized_sp1_external_proof_payload() {
+    let (app, _engine) = sp1_fixture_app();
+    let large_hex = format!("0x{}", "aa".repeat(600_000));
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof(large_hex),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "bad_request");
+    assert!(
+        res["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "{res}"
     );
 }
 
@@ -425,7 +775,7 @@ async fn e2e_task_status_turns_proving_after_preflight_progress() {
 }
 
 #[tokio::test]
-async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
+async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime_store() {
     let config = base_config();
     let engine = native_fixture_engine();
     let state = app_with_engine(
@@ -512,7 +862,6 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
         .await
         .expect("read task")
         .expect("task exists");
-    record.runner_status = RunnerStatus::Running;
     record.updated_at = updated_at;
     state
         .runtime
@@ -558,6 +907,14 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_engine_state() {
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],
         false
     );
+
+    let runtime_task = state
+        .runtime
+        .get_task("task_runtime_fallback")
+        .await
+        .expect("read runtime task")
+        .expect("runtime task exists");
+    assert_eq!(runtime_task.runner_status, RunnerStatus::Allocated);
 }
 
 #[tokio::test]
@@ -625,6 +982,6 @@ async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
         .await
         .expect("read runtime task")
         .expect("runtime task exists");
-    assert_eq!(runtime_task.runner_status, RunnerStatus::Failed);
-    assert_eq!(runtime_task.error.as_deref(), Some(error));
+    assert_eq!(runtime_task.runner_status, RunnerStatus::Allocated);
+    assert_eq!(runtime_task.error, None);
 }

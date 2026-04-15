@@ -47,11 +47,11 @@ execution_po2 = 20
 mode = "prove"
 prover = "network"
 recursion = "plonk"
-verify = true
+verify = false
 network_mode = "reserved"
 fulfillment_strategy = "reserved"
 skip_simulation = true
-cycle_limit = 1000000000000
+cycle_limit = 1000000000
 timeout_secs = 7200
 # rpc_url = "https://rpc.production.succinct.xyz"
 
@@ -63,6 +63,18 @@ batch_quoted_mcycles = 1500
 batch_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+
+# Optional request sampling policy for proof_type=zk_any.
+# When disabled or not drawn, the server returns data.status = "zk_any_not_drawn"
+# and does not register a task.
+#
+# [prover.zk_any.sp1]
+# probability = 0.20
+# per_day = 100
+#
+# [prover.zk_any.risc0]
+# probability = 0.30
+# per_day = 0
 
 [prover.boundless.deployment]
 deployment_type = "base"

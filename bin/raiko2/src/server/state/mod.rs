@@ -25,7 +25,7 @@ use raiko2_prover::{
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::RuntimeManager;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(feature = "redis-queue")]
@@ -41,12 +41,15 @@ type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
+use super::sampling::ZkAnySampler;
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
+    pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
 }
 
 impl AppState {
@@ -121,10 +124,13 @@ impl AppState {
             );
         }
 
+        let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+
         Ok(Self {
             config: Arc::new(config),
             pipelines: Arc::new(factory),
             runtime,
+            zk_any_sampler,
         })
     }
 }

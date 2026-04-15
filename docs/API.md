@@ -40,6 +40,12 @@ GET /ready
 
 Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`.
 
+The response reports:
+
+- configured L1/L2 RPC chain-ID readiness for every allowed pair
+- queue backend readiness
+- prerequisite readiness for the configured default prover route
+
 ## Submit Shasta Batch Proof
 
 ```http
@@ -70,11 +76,11 @@ proposal-stage tasks and an optional aggregation task.
     "mode": "prove",
     "prover": "network",
     "recursion": "plonk",
-    "verify": true,
+    "verify": false,
     "network_mode": "reserved",
     "fulfillment_strategy": "reserved",
     "skip_simulation": true,
-    "cycle_limit": 1000000000000,
+    "cycle_limit": 1000000000,
     "timeout_secs": 7200
   },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -97,7 +103,15 @@ proposal-stage tasks and an optional aggregation task.
   - `native -> native/local`
   - `sp1 -> sp1/local`
   - `risc0 -> risc0/<server default runner>`
+  - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> 400`
+- `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
+- `proof_type=zk_any` uses the server-side ballot policy and first proposal seed
+  `keccak("proposal:{proposal_id}/{l1_inclusion_block_number}")`.
+- When a `zk_any` request is not drawn, the server returns HTTP 200 with:
+  - `proof_type = "native"`
+  - `data.status = "zk_any_not_drawn"`
+  - no `task_id`
 - Optional request-scoped prover config may be passed as flattened keys. For `sp1`, the
   canonical shape is a nested `sp1` object with:
   - `mode`: `prove` or `execute`
@@ -118,6 +132,7 @@ proposal-stage tasks and an optional aggregation task.
 - `network` and `l1_network` must match an explicitly configured allowed pair.
 - flattened `prover_args` are accepted, but they must not override route or spec selection keys
   such as `proof_type`, `network`, `l1_network`, `guest_system`, or `runner`.
+- `proof_type=zk_any` does not accept request-scoped prover args.
 - `NETWORK_PRIVATE_KEY` must be present in the server environment when `sp1.prover=network` is
   used. `sp1.rpc_url` is an operator config file setting only; it is not accepted in request
   overrides.
@@ -131,6 +146,18 @@ proposal-stage tasks and an optional aggregation task.
   "data": {
     "status": "registered",
     "task_id": "task_..."
+  }
+}
+```
+
+Example not-drawn response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "native",
+  "data": {
+    "status": "zk_any_not_drawn"
   }
 }
 ```
@@ -171,6 +198,7 @@ Registers an aggregation task for already-produced canonical proof objects.
 
 - `proofs` must contain at least two entries.
 - Only canonical `Proof` objects are accepted.
+- `proof_type=zk_any` is not supported for aggregate requests.
 - Required metadata depends on the selected route:
   - `native`: `input` + `extra_data`
   - `sp1`: `input` + `uuid` + `extra_data`
@@ -238,8 +266,8 @@ original request.
           "image_ref": "0ximage",
           "deployment": "base",
           "offchain": false,
-          "quoted_mcycles_count": 6000,
-          "evaluated_mcycles_count": 12345
+          "quoted_mcycles_count": 1500,
+          "evaluated_mcycles_count": 1188
         }
       }
     ],
@@ -263,7 +291,8 @@ aggregate task exists, it becomes `proposals.len()`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
   `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
-  `evaluated_mcycles_count`.
+  `evaluated_mcycles_count`. `quoted_mcycles_count` is the submitted market quote;
+  `evaluated_mcycles_count` is the local user-cycle estimate used to derive it.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`.
 - `engine_state_present=false` means the HTTP response is serving the last runtime
@@ -295,8 +324,10 @@ All API errors use the hoodi-style envelope:
 ## Configuration Notes
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
-- `rpc.pairs[*].l2_rpc` must point to a witness-capable endpoint that supports
+- `rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
-- If the upstream L2 does not expose `debug_executionWitness`, deploy `zeth-rpc-proxy` as a
-  compatibility layer and point `rpc.pairs[*].l2_rpc` at that proxy.
-- Built-in `SupportedChainSpecs::default()` is the only spec source in this version.
+- For supported Taiko chain specs, the provider can fall back to on-the-spot witness
+  construction when `debug_executionWitness` is unavailable, but that path is materially slower.
+- If the upstream L2 does not expose `debug_executionWitness` and you need predictable latency,
+  deploy `zeth-rpc-proxy` as a compatibility layer and point `rpc.pairs[*].l2_rpc` at that
+  proxy.

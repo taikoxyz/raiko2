@@ -18,19 +18,30 @@ the canonical production service?”
 
 ## Why It Is Not Ready Yet
 
-The remaining blockers are operational and product-hardening blockers:
+The remaining blockers are narrower than they were earlier in the week. The largest early
+control-plane gaps have been reduced, but the service is still not ready to be called the single
+production path.
 
-- readiness checks are too shallow and do not represent real proving-route health
-- task status semantics are not yet clean enough for production operations
-- docs/config/defaults still drift from live behavior
+Remaining blockers:
+
+- task status semantics are improved, but not yet fully canonical
 - SP1 production posture is not fully closed yet
-- aggregate functionality is proven underneath, but not yet fully closed at the hosted API layer
+- hosted aggregate functionality is much closer, but not yet fully closed on the canonical live
+  path
 - the currently working path depends on a specific external Taiko L2 endpoint strategy
 - the current state still lives in a large unmerged change set
 
+Recent hardening already completed:
+
+- `/ready` now checks configured L1/L2 RPC chain IDs, queue readiness, and default prover-route
+  prerequisites
+- `/v3/tasks` no longer mutates runtime state during reads
+- public docs/config examples have been updated to match current behavior, including Boundless
+  quote settings and `zk_any` sampling
+
 ## Baseline ETA
 
-**About 2 weeks of engineering time**
+**About 1 week of engineering time**
 
 This estimate assumes:
 
@@ -54,5 +65,6 @@ We should only call `raiko2` production ready when all of the following are true
 Use this wording for now:
 
 > `raiko2` has validated the primary end-to-end proving paths and is in the final production
-> hardening phase. The remaining work is operational readiness, state-model cleanup, route closure,
-> and documentation/config alignment. Baseline estimate: about 2 weeks.
+> hardening phase. The remaining work is final route closure, canonical task-state cleanup, SP1
+> verification posture, endpoint strategy, and merged/live validation. Baseline estimate: about
+> 1 week.

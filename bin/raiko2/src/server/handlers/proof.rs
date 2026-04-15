@@ -1,3 +1,4 @@
+use alloy_primitives::keccak256;
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -53,6 +54,7 @@ pub(crate) enum HoodiProofType {
     Sp1,
     Risc0,
     Sgx,
+    ZkAny,
 }
 
 impl HoodiProofType {
@@ -62,6 +64,7 @@ impl HoodiProofType {
             Self::Sp1 => "sp1",
             Self::Risc0 => "risc0",
             Self::Sgx => "sgx",
+            Self::ZkAny => "zk_any",
         }
     }
 
@@ -70,7 +73,16 @@ impl HoodiProofType {
             Self::Native => Some(ProofType::Native),
             Self::Sp1 => Some(ProofType::Sp1),
             Self::Risc0 => Some(ProofType::Risc0),
-            Self::Sgx => None,
+            Self::Sgx | Self::ZkAny => None,
+        }
+    }
+
+    const fn from_canonical(proof_type: ProofType) -> Self {
+        match proof_type {
+            ProofType::Native => Self::Native,
+            ProofType::Sp1 => Self::Sp1,
+            ProofType::Sgx => Self::Sgx,
+            ProofType::Risc0 => Self::Risc0,
         }
     }
 }
@@ -129,7 +141,8 @@ pub(crate) struct HoodiSuccess<T> {
 #[derive(Serialize)]
 pub(crate) struct RegistrationData {
     status: &'static str,
-    task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -261,6 +274,11 @@ struct TaskMetadataParams {
     aggregate_task_id: Option<String>,
 }
 
+enum BatchProofDecision {
+    Selected(HoodiProofType),
+    NotDrawn,
+}
+
 fn default_risc0_runner(state: &AppState) -> RunnerKind {
     match state.config.prover.route() {
         PipelineRoute {
@@ -283,6 +301,11 @@ fn route_for_proof_type(
         }
         HoodiProofType::Sgx => {
             return Err(ApiError::bad_request("proof_type=sgx is not supported"));
+        }
+        HoodiProofType::ZkAny => {
+            return Err(ApiError::bad_request(
+                "proof_type=zk_any must be resolved before route selection",
+            ));
         }
     };
 
@@ -405,6 +428,11 @@ fn validate_batch_request(state: &AppState, req: &ShastaProofRequest) -> Result<
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
+    if matches!(req.proof_type, HoodiProofType::ZkAny) && !req.prover_args.is_empty() {
+        return Err(ApiError::bad_request(
+            "proof_type=zk_any does not support prover_args",
+        ));
+    }
     let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
     if sp1_args.is_some() && !matches!(req.proof_type, HoodiProofType::Sp1) {
         return Err(ApiError::bad_request(
@@ -436,6 +464,11 @@ fn validate_aggregate_request(
     state: &AppState,
     req: &AggregateProofRequest,
 ) -> Result<(), ApiError> {
+    if matches!(req.proof_type, HoodiProofType::ZkAny) {
+        return Err(ApiError::bad_request(
+            "proof_type=zk_any is not supported for aggregate requests",
+        ));
+    }
     if req.proofs.len() < 2 {
         return Err(ApiError::bad_request(
             "proofs must contain at least 2 entries",
@@ -814,17 +847,63 @@ async fn enqueue_aggregate_from_proofs(
 }
 
 fn registration_response(
-    proof_type: HoodiProofType,
-    public_task_id: String,
+    proof_type: &str,
+    status: &'static str,
+    public_task_id: Option<String>,
 ) -> Json<HoodiSuccess<RegistrationData>> {
     Json(HoodiSuccess {
         status: "ok",
-        proof_type: proof_type.as_str().to_string(),
+        proof_type: proof_type.to_string(),
         data: RegistrationData {
-            status: "registered",
+            status,
             task_id: public_task_id,
         },
     })
+}
+
+fn registered_response(
+    proof_type: HoodiProofType,
+    public_task_id: String,
+) -> Json<HoodiSuccess<RegistrationData>> {
+    registration_response(proof_type.as_str(), "registered", Some(public_task_id))
+}
+
+fn zk_any_not_drawn_response() -> Json<HoodiSuccess<RegistrationData>> {
+    registration_response(HoodiProofType::Native.as_str(), "zk_any_not_drawn", None)
+}
+
+fn shasta_zk_any_seed(req: &ShastaProofRequest) -> Result<alloy_primitives::B256, ApiError> {
+    let Some(first_proposal) = req.proposals.first() else {
+        return Err(ApiError::bad_request("proposals must not be empty"));
+    };
+    Ok(keccak256(
+        format!(
+            "proposal:{}/{}",
+            first_proposal.proposal_id, first_proposal.l1_inclusion_block_number
+        )
+        .as_bytes(),
+    ))
+}
+
+fn decide_batch_proof_type(
+    state: &AppState,
+    req: &ShastaProofRequest,
+) -> Result<BatchProofDecision, ApiError> {
+    if !matches!(req.proof_type, HoodiProofType::ZkAny) {
+        return Ok(BatchProofDecision::Selected(req.proof_type));
+    }
+
+    let seed = shasta_zk_any_seed(req)?;
+    let mut sampler = state
+        .zk_any_sampler
+        .lock()
+        .map_err(|_| ApiError::internal("failed to lock zk_any sampler"))?;
+    let selected = sampler
+        .draw(seed)
+        .map(HoodiProofType::from_canonical)
+        .map(BatchProofDecision::Selected)
+        .unwrap_or(BatchProofDecision::NotDrawn);
+    Ok(selected)
 }
 
 fn prepare_aggregate_task(
@@ -855,7 +934,9 @@ const fn runner_status_to_proof_status(
         RuntimeRunnerStatus::Cancelled => ProofStatus::Cancelled,
         RuntimeRunnerStatus::Failed => ProofStatus::Failed,
         RuntimeRunnerStatus::Completed => ProofStatus::Completed,
-        RuntimeRunnerStatus::Running if has_runtime_progress => ProofStatus::Proving,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running if has_runtime_progress => {
+            ProofStatus::Proving
+        }
         RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running => ProofStatus::Pending,
     }
 }
@@ -1071,10 +1152,15 @@ fn build_task_data(
         task_id: id,
         route: record.route.clone(),
         execution_mode: metadata.execution_mode_str(),
-        status: root_state.status,
+        status: root_state.status.clone(),
         network: metadata.network.clone(),
         l1_network: metadata.l1_network.clone(),
-        runtime: root_runtime_view(record, metadata, root_engine_state_present),
+        runtime: root_runtime_view(
+            record,
+            metadata,
+            &root_state.status,
+            root_engine_state_present,
+        ),
         current_index: root_state.current_index,
         proposals,
         aggregate,
@@ -1138,10 +1224,11 @@ async fn has_other_live_task_reference(
 fn root_runtime_view(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &HoodiTaskMetadata,
+    root_status: &ProofStatus,
     engine_state_present: bool,
 ) -> HoodiRootRuntimeView {
     HoodiRootRuntimeView {
-        runner_status: record.runner_status,
+        runner_status: runtime_status_from_proof_status(root_status),
         active_stage: metadata.runtime.active_stage.clone(),
         last_event: metadata.runtime.last_event.clone(),
         updated_at: record.updated_at,
@@ -1190,14 +1277,29 @@ pub async fn request_batch_shasta_proof(
 ) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
     validate_batch_request(&state, &req)?;
+    let effective_proof_type = match decide_batch_proof_type(&state, &req)? {
+        BatchProofDecision::Selected(proof_type) => proof_type,
+        BatchProofDecision::NotDrawn => {
+            return Ok(zk_any_not_drawn_response());
+        }
+    };
     let SubmissionContext {
         pair,
         selection,
         engine,
         proof_type,
-    } = resolve_submission_context(&state, &req.network, &req.l1_network, req.proof_type)?;
+    } = resolve_submission_context(&state, &req.network, &req.l1_network, effective_proof_type)?;
     let prover_args_json = validate_prover_args(&req.prover_args)?;
     let sp1_args = parse_sp1_prover_args(&req.prover_args)?;
+    if matches!(effective_proof_type, HoodiProofType::Sp1) {
+        validate_sp1_request(
+            &state.config.prover.sp1,
+            sp1_args.as_ref(),
+            Sp1RequestContext::ProposalBatch {
+                aggregate: req.aggregate,
+            },
+        )?;
+    }
     let public_task_id = generate_public_task_id();
 
     info!(
@@ -1223,7 +1325,7 @@ pub async fn request_batch_shasta_proof(
             network: req.network.clone(),
             l1_network: req.l1_network.clone(),
             proof_type,
-            execution_mode: execution_mode_for_sp1(req.proof_type, sp1_args.as_ref()),
+            execution_mode: execution_mode_for_sp1(effective_proof_type, sp1_args.as_ref()),
             aggregate_requested: req.aggregate,
             proposals: proposal_tasks.clone(),
             aggregate_task_id: aggregate_task_id.clone(),
@@ -1239,7 +1341,7 @@ pub async fn request_batch_shasta_proof(
     )
     .await?;
 
-    Ok(registration_response(req.proof_type, public_task_id))
+    Ok(registered_response(effective_proof_type, public_task_id))
 }
 
 pub async fn request_aggregation_proof(
@@ -1274,7 +1376,7 @@ pub async fn request_aggregation_proof(
 
     register_aggregate_task(&state, &public_task_id, &selection, metadata).await?;
 
-    Ok(registration_response(req.proof_type, public_task_id))
+    Ok(registered_response(req.proof_type, public_task_id))
 }
 
 pub async fn get_task(
@@ -1299,17 +1401,6 @@ pub async fn get_task(
         metadata.has_runtime_progress(),
         record.error.as_deref(),
     );
-
-    state
-        .runtime
-        .sync_status(
-            &id,
-            runtime_status_from_proof_status(&root_state.status),
-            root_state.error.clone(),
-            None,
-        )
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to sync runtime status: {err}")))?;
     let data = build_task_data(
         id,
         &record,

@@ -1,6 +1,6 @@
 //! Shared fixture-backed local server harness.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Header;
@@ -36,6 +36,7 @@ use tracing::info;
 use super::AppState;
 use super::app;
 use super::net;
+use super::sampling::ZkAnySampler;
 use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
 use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
@@ -629,6 +630,7 @@ where
 {
     let mut factory = StaticPipelineFactory::default();
     factory.insert(network_pair.to_string(), pipeline_key, Arc::new(engine));
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
     AppState {
         config: Arc::new(config),
         pipelines: Arc::new(factory),
@@ -636,6 +638,7 @@ where
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-runtime"))
                 .expect("runtime manager"),
         ),
+        zk_any_sampler,
     }
 }
 
@@ -693,6 +696,7 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
         "raiko2-fixture-runtime",
     ))?);
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
     let observer = engine_observer(Arc::clone(&runtime));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
@@ -727,6 +731,7 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         config: Arc::new(config),
         pipelines: Arc::new(factory),
         runtime,
+        zk_any_sampler,
     })
 }
 

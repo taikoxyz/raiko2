@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig},
     sp1::Sp1Config,
@@ -134,6 +135,9 @@ pub struct ProverConfig {
     /// Boundless runner configuration.
     #[serde(default)]
     pub boundless: BoundlessConfig,
+    /// Request sampling policy for proof_type=zk_any.
+    #[serde(default)]
+    pub zk_any: ZkAnyConfig,
 }
 
 impl ProverConfig {
@@ -177,8 +181,79 @@ impl ProverConfig {
             bail!("prover.risc0.execution_po2 must be greater than zero");
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
+        self.zk_any.validate()?;
 
         Ok(())
+    }
+}
+
+/// Server-side request sampling configuration for `proof_type=zk_any`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ZkAnyConfig {
+    pub sp1: Option<ZkAnyTargetConfig>,
+    pub risc0: Option<ZkAnyTargetConfig>,
+}
+
+impl ZkAnyConfig {
+    pub fn validate(&self) -> Result<()> {
+        let mut total_probability = 0.0f64;
+
+        for (proof_type, target) in self.targets() {
+            if !target.probability.is_finite() {
+                bail!("prover.zk_any.{proof_type}.probability must be finite");
+            }
+            if !(0.0..=1.0).contains(&target.probability) {
+                bail!("prover.zk_any.{proof_type}.probability must be between 0 and 1");
+            }
+            total_probability += target.probability;
+        }
+
+        if total_probability > 1.0 {
+            bail!("prover.zk_any total probability must be less than or equal to 1");
+        }
+
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn targets(&self) -> Vec<(&'static str, &ZkAnyTargetConfig)> {
+        let mut targets = Vec::new();
+        if let Some(sp1) = self.sp1.as_ref() {
+            targets.push(("sp1", sp1));
+        }
+        if let Some(risc0) = self.risc0.as_ref() {
+            targets.push(("risc0", risc0));
+        }
+        targets
+    }
+
+    #[must_use]
+    pub fn sampling_entries(&self) -> Vec<(ProofType, ZkAnyTargetConfig)> {
+        let mut entries = Vec::new();
+        if let Some(sp1) = self.sp1.as_ref() {
+            entries.push((ProofType::Sp1, sp1.clone()));
+        }
+        if let Some(risc0) = self.risc0.as_ref() {
+            entries.push((ProofType::Risc0, risc0.clone()));
+        }
+        entries
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ZkAnyTargetConfig {
+    pub probability: f64,
+    pub per_day: u64,
+}
+
+impl Default for ZkAnyTargetConfig {
+    fn default() -> Self {
+        Self {
+            probability: 0.0,
+            per_day: 0,
+        }
     }
 }
 
@@ -257,4 +332,67 @@ const fn default_boundless_poll_interval_ms() -> u64 {
 
 const fn default_boundless_timeout_ms() -> u64 {
     3_600_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
+
+    #[test]
+    fn zk_any_config_rejects_probability_above_one() {
+        let config = ZkAnyConfig {
+            sp1: Some(ZkAnyTargetConfig {
+                probability: 1.1,
+                per_day: 0,
+            }),
+            risc0: None,
+        };
+
+        assert!(
+            config
+                .validate()
+                .expect_err("invalid probability should fail")
+                .to_string()
+                .contains("prover.zk_any.sp1.probability")
+        );
+    }
+
+    #[test]
+    fn zk_any_config_rejects_total_probability_above_one() {
+        let config = ZkAnyConfig {
+            sp1: Some(ZkAnyTargetConfig {
+                probability: 0.6,
+                per_day: 0,
+            }),
+            risc0: Some(ZkAnyTargetConfig {
+                probability: 0.5,
+                per_day: 0,
+            }),
+        };
+
+        assert!(
+            config
+                .validate()
+                .expect_err("invalid probability sum should fail")
+                .to_string()
+                .contains("total probability")
+        );
+    }
+
+    #[test]
+    fn prover_config_accepts_valid_zk_any_policy() {
+        let mut config = ProverConfig::default();
+        config.zk_any = ZkAnyConfig {
+            sp1: Some(ZkAnyTargetConfig {
+                probability: 0.3,
+                per_day: 100,
+            }),
+            risc0: Some(ZkAnyTargetConfig {
+                probability: 0.4,
+                per_day: 0,
+            }),
+        };
+
+        config.validate().expect("valid zk_any policy");
+    }
 }

@@ -105,18 +105,42 @@ Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
 - Runtime state and task workdirs are stored under `./data/runtime` by default.
-- Proposal requests quote `6000` mcycles and aggregation requests quote `200` mcycles.
+- Proposal requests use `prover.boundless.batch_quoted_mcycles` when it is set. Otherwise,
+  `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
+  mcycles with a `2000` mcycle floor.
+- Aggregation requests quote `200` mcycles.
 - The local dry-run validates guest execution and prepares the request journal.
+
+Optional `zk_any` request sampling is configured at the server level:
+
+```toml
+[prover.zk_any.sp1]
+probability = 0.20
+per_day = 100
+
+[prover.zk_any.risc0]
+probability = 0.30
+per_day = 0
+```
+
+When a client submits `proof_type = "zk_any"` to `/v3/proof/batch/shasta`, the server draws once
+at admission time and either routes the request to `sp1` / `risc0` or returns
+`data.status = "zk_any_not_drawn"` without registering a task.
 
 ## RPC and Witness Expectations
 
-`rpc.pairs[*].l2_rpc` must point to a witness-capable endpoint that supports
-`debug_executionWitness`.
+`rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
+`debug_executionWitness` for the best latency envelope.
 
-If the upstream L2 does not expose that method, place [`zeth-rpc-proxy`](../bin/rpc-proxy) in
-front of it and point `rpc.pairs[*].l2_rpc` at the proxy instead.
+For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
+the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
+
+If the upstream L2 does not expose that method and you need predictable proving latency, place
+[`zeth-rpc-proxy`](../bin/rpc-proxy) in front of it and point `rpc.pairs[*].l2_rpc` at the
+proxy instead.
 
 ## Health and Readiness
 
 - `GET /health`: basic process health
-- `GET /ready`: route and RPC readiness across configured `(network, l1_network)` pairs
+- `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
+  for the configured default prover route

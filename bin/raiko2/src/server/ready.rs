@@ -1,8 +1,11 @@
-use crate::config::{Config, QueueBackend, QueueConfig};
+use crate::config::{Config, GuestSystem, QueueBackend, QueueConfig, RunnerKind};
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
+use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
+use raiko2_prover::sp1::ProverMode as Sp1ProverMode;
 use raiko2_provider::rpc::build_rpc_client;
 use serde::Serialize;
+use url::Url;
 
 #[derive(Debug, Serialize)]
 pub struct ReadyCheck {
@@ -30,12 +33,14 @@ impl ReadyCheck {
 #[derive(Debug, Serialize)]
 pub struct ReadyResponse {
     pub status: &'static str,
+    /// Legacy field name retained for compatibility; this covers configured L1/L2 RPC readiness.
     pub reth: ReadyCheck,
     pub queue: ReadyCheck,
+    pub prover: ReadyCheck,
 }
 
 pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
-    let reth = match check_reth(config).await {
+    let reth = match check_rpc_pairs(config).await {
         Ok(()) => ReadyCheck::ok(),
         Err(err) => ReadyCheck::err(&err),
     };
@@ -58,17 +63,29 @@ pub async fn evaluate_readiness(config: &Config) -> ReadyResponse {
         }
     };
 
-    let status = if reth.ok && queue.ok { "ok" } else { "error" };
+    let prover = match check_prover(config) {
+        Ok(()) => ReadyCheck::ok(),
+        Err(err) => ReadyCheck::err(&err),
+    };
+
+    let status = if reth.ok && queue.ok && prover.ok {
+        "ok"
+    } else {
+        "error"
+    };
 
     ReadyResponse {
         status,
         reth,
         queue,
+        prover,
     }
 }
 
 pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
-    check_reth(config).await.context("reth readiness failed")?;
+    check_rpc_pairs(config)
+        .await
+        .context("reth readiness failed")?;
     #[cfg(feature = "redis-queue")]
     check_queue(config)
         .await
@@ -76,27 +93,106 @@ pub async fn ensure_startup_ready(config: &Config) -> Result<()> {
 
     #[cfg(not(feature = "redis-queue"))]
     check_queue(config).context("queue readiness failed")?;
+    check_prover(config).context("prover readiness failed")?;
     Ok(())
 }
 
-async fn check_reth(config: &Config) -> Result<()> {
+async fn check_rpc_pairs(config: &Config) -> Result<()> {
+    let client_config = config.rpc.provider_client_config();
     for pair in config.rpc.resolved_pairs()? {
-        let rpc_client = build_rpc_client(&pair.l2_rpc, &config.rpc.provider_client_config())
-            .with_context(|| format!("failed to build RPC client for {}", pair.key))?;
-        let provider = ProviderBuilder::new().connect_client(rpc_client);
-        let chain_id = provider
-            .get_chain_id()
-            .await
-            .with_context(|| format!("eth_chainId failed for {}", pair.key))?;
-        if chain_id != pair.l2_chain_id() {
-            bail!(
-                "l2 chain_id mismatch for {}: expected {}, got {}",
-                pair.key,
-                pair.l2_chain_id(),
-                chain_id
-            );
-        }
+        check_rpc_chain_id(
+            "l1",
+            &pair.key,
+            &pair.l1_rpc,
+            pair.l1_chain_id(),
+            &client_config,
+        )
+        .await?;
+        check_rpc_chain_id(
+            "l2",
+            &pair.key,
+            &pair.l2_rpc,
+            pair.l2_chain_id(),
+            &client_config,
+        )
+        .await?;
     }
+    Ok(())
+}
+
+async fn check_rpc_chain_id(
+    kind: &str,
+    pair_key: &str,
+    rpc_url: &str,
+    expected_chain_id: u64,
+    client_config: &raiko2_provider::RpcClientConfig,
+) -> Result<()> {
+    let rpc_client = build_rpc_client(rpc_url, client_config)
+        .with_context(|| format!("failed to build {kind} RPC client for {pair_key}"))?;
+    let provider = ProviderBuilder::new().connect_client(rpc_client);
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .with_context(|| format!("{kind} eth_chainId failed for {pair_key}"))?;
+    if chain_id != expected_chain_id {
+        bail!(
+            "{kind} chain_id mismatch for {pair_key}: expected {expected_chain_id}, got {chain_id}"
+        );
+    }
+    Ok(())
+}
+
+fn check_prover(config: &Config) -> Result<()> {
+    config
+        .prover
+        .validate()
+        .context("configured prover route is invalid")?;
+
+    match (config.prover.guest_system, config.prover.runner) {
+        (GuestSystem::Risc0, RunnerKind::Boundless) => check_boundless_prover(config),
+        (GuestSystem::Sp1, RunnerKind::Local) => check_sp1_prover(config),
+        _ => Ok(()),
+    }
+}
+
+fn check_boundless_prover(config: &Config) -> Result<()> {
+    let boundless = &config.prover.boundless;
+    Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;
+    let _: PrivateKeySigner = boundless
+        .signer_key
+        .parse()
+        .context("boundless signer_key is invalid")?;
+
+    if let Some(order_stream_url) = boundless
+        .deployment
+        .as_ref()
+        .and_then(|deployment| deployment.overrides.as_ref())
+        .and_then(|overrides| overrides.get("order_stream_url"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Url::parse(order_stream_url)
+            .context("boundless deployment overrides.order_stream_url is not a valid URL")?;
+    }
+
+    Ok(())
+}
+
+fn check_sp1_prover(config: &Config) -> Result<()> {
+    let sp1 = &config.prover.sp1;
+    sp1.validate().map_err(anyhow::Error::msg)?;
+
+    if sp1.prover == Sp1ProverMode::Network {
+        let private_key = std::env::var("NETWORK_PRIVATE_KEY")
+            .context("NETWORK_PRIVATE_KEY must be set for sp1.prover=network")?;
+        let _: PrivateKeySigner = private_key
+            .parse()
+            .context("NETWORK_PRIVATE_KEY is invalid")?;
+    }
+
+    if let Some(rpc_url) = sp1.rpc_url.as_deref() {
+        Url::parse(rpc_url).context("sp1.rpc_url is not a valid URL")?;
+    }
+
     Ok(())
 }
 

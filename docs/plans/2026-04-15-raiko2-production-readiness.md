@@ -17,7 +17,7 @@ However, the project is **not yet production ready** under a strict operator-fac
 The remaining work is not “make proving possible”; it is “make the service safe to operate as the
 single canonical production path.”
 
-Baseline estimate from the current state: **about 2 weeks of engineering time**.
+Baseline estimate from the current state: **about 1 week of engineering time**.
 
 This estimate is intentionally strict:
 
@@ -89,41 +89,51 @@ The current working tree is large, but the main service path still compiles:
 
 This is necessary, but not sufficient, for readiness.
 
-## Why This Is Not Yet Production Ready
+### 5. Readiness, task-status semantics, and public config/docs have materially improved
 
-### 1. The current readiness model is too shallow
+The most obvious operator-facing control-plane gaps are no longer in their earlier state.
 
-`GET /ready` currently checks only:
+Recent hardening completed in the current tree:
 
-- L2 RPC `eth_chainId`
-- queue availability
+- `GET /ready` now checks:
+  - configured L1 and L2 RPC chain IDs for each allowed pair
+  - queue backend readiness
+  - prerequisite readiness for the configured default proving route
+- `GET /v3/tasks` is now read-only and no longer mutates runtime state while serving queries
+- root task runtime status is derived consistently from the summarized task state instead of
+  mixing stale stored values with query-time side effects
+- public docs and config examples now reflect current live defaults, including:
+  - Boundless batch quote controls
+  - current SP1 operator settings
+  - `zk_any` sampling on `/v3/proof/batch/shasta`
 
-Code path:
+Relevant code and docs:
 
 - `bin/raiko2/src/server/ready.rs`
+- `bin/raiko2/src/server/handlers/proof.rs`
+- `config.example.toml`
+- `docs/API.md`
+- `docs/operations.md`
 
-This is not enough for the current system shape. It does **not** tell an operator whether:
+## Why This Is Not Yet Production Ready
 
-- the selected proving route is actually usable
-- Boundless credentials and deployment settings are valid
-- SP1 network proving is correctly configured
-- external proving dependencies are reachable
-- the currently configured `(network, l1_network)` pair is fit for end-to-end proving
+### 1. Runtime and task status semantics are improved, but not yet fully canonical
 
-Current consequence:
+The most dangerous query-time side effects are gone, but the system still does not have a single
+fully authoritative operator-facing task-state model.
 
-- control-plane readiness can report “ok” while proving is still operationally broken
+What is better now:
 
-### 2. Runtime and task status semantics are still not clean enough
+- `/v3/tasks` no longer writes back into runtime storage
+- root response status is derived more consistently
+- cancellation behavior for shared underlying engine tasks is safer
 
-The task lifecycle currently mixes:
+What is still missing:
 
-- engine stage state
-- runtime observer state
-- route-specific runtime metadata
-
-This area has been improved recently, including cancellation safety for shared engine tasks, but it
-has not yet been fully hardened into a single production-safe status model.
+- one explicit canonical task-state contract across engine state, runtime observer state, and
+  route-specific metadata
+- clearer operator guarantees about which state fields are authoritative during retries, external
+  proof submission, and partial failure scenarios
 
 Relevant code areas:
 
@@ -133,31 +143,11 @@ Relevant code areas:
 
 Production implication:
 
-- operators can still observe misleading or incomplete task-state signals
-- support/debug workflows are more expensive than they should be
+- operators can reason about the system much better than before, but there is still room for
+  ambiguity under edge conditions
+- support/debug workflows are still more expensive than they should be
 
-### 3. Public docs, config defaults, and live behavior are still drifting
-
-Recent behavior changes are real, but not fully reflected in the public operator docs.
-
-Examples:
-
-- `config.example.toml` now exposes Boundless batch quote controls:
-  - `batch_quoted_mcycles = 1500`
-  - `batch_quote_strategy = "raiko_agent"`
-- `docs/operations.md` still states:
-  - “Proposal requests quote `6000` mcycles”
-- `docs/API.md` still shows historical SP1 examples such as:
-  - `verify = true`
-  - `cycle_limit = 1000000000000`
-
-These are not harmless documentation nits. They directly affect:
-
-- operator configuration
-- live quote expectations
-- production incident debugging
-
-### 4. SP1 live success still depends on a reduced verification posture
+### 2. SP1 live success still depends on a reduced verification posture
 
 Recent successful SP1 live runs used:
 
@@ -172,26 +162,24 @@ Evidence:
 That proves the proposal proving path works, but it does **not** yet prove the final production
 verification posture is fully locked.
 
-### 5. Aggregate route behavior is not yet production-closed at the HTTP service surface
+### 3. Aggregate route behavior is better, but not yet fully production-closed
 
-The underlying aggregation logic works, but the hosted route still needs final productization.
+The underlying aggregation logic works, and the hosted route is now in a much better place than
+when this assessment started.
 
 What is verified:
 
-- `guest-launcher` can aggregate external proofs successfully
-- live route registration for aggregate tasks exists
+- external-proof aggregation works successfully underneath
+- `/v3/proof/aggregate` accepts canonical external proofs on the hosted route
+- request body handling is explicitly aligned with old `raiko` API limits
 
 What is not yet proven to production standard:
 
-- end-to-end `/v3/proof/aggregate` behavior for large real proof payloads
-- body-size, validation, and operator ergonomics at the hosted route boundary
+- full live hosted-route success from the canonical deployed service, not just fixture or offline
+  paths
+- final operator guidance around payload expectations and failure handling for real external proofs
 
-Evidence of route incompleteness:
-
-- `target/compare/latest-proposals2669-2670-sp1-aggregate-from-tasks-status-4.json`
-  still shows the aggregate task in `pending`
-
-### 6. The service still depends on an external Taiko L2 endpoint for the working production path
+### 4. The service still depends on an external Taiko L2 endpoint for the working production path
 
 Recent successful latest-proposal runs rely on:
 
@@ -205,7 +193,7 @@ Operational consequence:
 - production readiness still depends on a single external L2 witness-capable endpoint being healthy
 - endpoint strategy, fallback policy, and operational ownership are not yet fully documented
 
-### 7. The current work is still sitting in a large unmerged diff
+### 5. The current work is still sitting in an unmerged, multi-area diff
 
 Current local diff touches proving, provider, pipeline, queue/runtime, guest build tooling, guest
 ELFs, and docs/config surfaces.
@@ -235,47 +223,44 @@ Those are no longer the practical center of risk.
 
 The current blocker profile is instead:
 
-- control-plane readiness is weaker than proving capability
-- task/runtime semantics still need production hardening
-- public docs/config do not yet match live behavior
-- aggregate route productization is incomplete
-- SP1 verification posture and endpoint strategy still need final closure
+- task/runtime semantics still need final canonicalization
+- SP1 verification posture is not fully closed
+- hosted aggregate route still needs final live proof-path validation
+- external endpoint strategy and ownership still need closure
 
 In short:
 
 - **old blocker:** “can the system prove?”
-- **current blocker:** “can operators safely run and reason about the proving service?”
+- **current blocker:** “is the validated branch-ready capability also operationally hardened enough
+  to be the single production path?”
 
-## Baseline ETA: 2 Weeks
+## Baseline ETA: 1 Week
 
 This is a **single baseline estimate**, not an optimistic target.
 
-### Work package A — Merge and normalize the current tree (2 to 3 days)
+### Work package A — Merge and normalize the current tree (1 to 2 days)
 
 Required outcomes:
 
 - split or otherwise make the current diff reviewable
-- align docs/config/example files with real live behavior
-- remove stale statements from `docs/API.md` and `docs/operations.md`
 - ensure the readiness assessment itself does not drift from repo truth
 
 Why it matters:
 
 - without this, the repo has capability but no trustworthy operator-facing contract
 
-### Work package B — Productionize runtime status and readiness semantics (2 to 3 days)
+### Work package B — Finalize runtime/task-state semantics (1 to 2 days)
 
 Required outcomes:
 
 - define one authoritative task-state story for operators
 - make `/v3/tasks` output consistent and predictable
-- upgrade `/ready` so it reflects real route readiness, not just chain ID and queue connectivity
 
 Why it matters:
 
 - this is the difference between “works in successful samples” and “safe to operate”
 
-### Work package C — Close the proving-route product gaps (2 to 3 days)
+### Work package C — Close the remaining proving-route product gaps (2 to 3 days)
 
 Required outcomes:
 
@@ -287,7 +272,7 @@ Why it matters:
 
 - recent samples prove capability, but not complete route-hardening
 
-### Work package D — Regression, runbook, and release validation (3 to 5 days)
+### Work package D — Regression, runbook, and release validation (2 to 3 days)
 
 Required outcomes:
 
@@ -312,7 +297,7 @@ Why it matters:
 
 3. **Readiness and task-state semantics are trustworthy**
    - `/ready` covers actual proving dependencies
-   - `/v3/tasks` does not present contradictory states
+   - `/v3/tasks` no longer presents contradictory or weakly-authoritative states
 
 4. **Docs and config are aligned**
    - `docs/API.md`
@@ -333,6 +318,7 @@ Do **not** describe `raiko2` as production ready today.
 A more accurate statement is:
 
 > `raiko2` has validated end-to-end proving capability on the primary latest-proposal paths for
-> both `SP1` and `RISC0`, and external-proof `SP1` aggregation is working. The remaining work is
-> production hardening: status semantics, readiness depth, route closure, docs/config alignment,
-> and merged/live validation. Baseline estimate: about 2 weeks.
+> both `SP1` and `RISC0`, and external-proof `SP1` aggregation is working. The largest early
+> control-plane gaps are now reduced. The remaining work is final production hardening: canonical
+> task-state semantics, SP1 verification posture, hosted aggregate closure, endpoint strategy, and
+> merged/live validation. Baseline estimate: about 1 week.

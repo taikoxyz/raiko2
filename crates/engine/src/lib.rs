@@ -17,7 +17,7 @@ pub mod worker;
 
 pub use tasks::{
     AggregationSource, AggregationTaskRequest, EncodedGuestInput, EngineTaskId, EngineTaskKey,
-    ProposalStage, ProposalTaskRequest,
+    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 
 use std::sync::Arc;
@@ -198,33 +198,40 @@ where
         ctx.request.shasta = Some(ShastaRequest {
             l1_inclusion_block_number: request.l1_inclusion_block_number,
             last_anchor_block_number: request.last_anchor_block_number,
+            checkpoint: request.checkpoint,
         });
         ctx.request
             .blob_proof_type
             .clone_from(&request.blob_proof_type);
         ctx.request.prover.clone_from(&request.prover);
         ctx.request.graffiti.clone_from(&request.graffiti);
-        Self::merge_prover_args(&mut ctx.config, request);
+        Self::apply_prover_config(&mut ctx.config, &request.prover_config);
         ctx
     }
 
-    fn merge_prover_args(config: &mut serde_json::Value, request: &ProposalTaskRequest) {
+    fn context_for_aggregation(&self, request: &AggregationTaskRequest) -> ProofContext {
+        let mut ctx = self.inner.context.clone();
+        Self::apply_prover_config(&mut ctx.config, &request.prover_config);
+        ctx
+    }
+
+    fn apply_prover_config(config: &mut serde_json::Value, request: &ProverTaskConfig) {
         if !config.is_object() {
             *config = serde_json::json!({});
         }
 
-        let Some(raw) = &request.prover_args_json else {
-            return;
-        };
-        let Ok(serde_json::Value::Object(parsed)) = serde_json::from_str::<serde_json::Value>(raw)
-        else {
-            return;
-        };
         let Some(config) = config.as_object_mut() else {
             return;
         };
-        for (key, value) in parsed {
-            config.insert(key, value);
+        if let Some(sp1) = &request.sp1
+            && let Ok(value) = serde_json::to_value(sp1)
+        {
+            config.insert("sp1".to_string(), value);
+        }
+        if let Some(sp1_system) = &request.sp1_system
+            && let Ok(value) = serde_json::to_value(sp1_system)
+        {
+            config.insert("sp1_system".to_string(), value);
         }
     }
 
@@ -373,6 +380,7 @@ where
                 .collect::<Vec<_>>()
                 .join("-"),
             proposal_ids,
+            prover_config: ProverTaskConfig::default(),
         };
         self.submit_aggregation_proof_from_tasks(request, proof_tasks)
             .await
@@ -481,6 +489,13 @@ where
             observer.on_task_cancelled(&id).await;
         }
         Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task store cannot delete the task.
+    pub async fn remove(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
+        self.inner.scheduler.remove(id).await
     }
 
     /// # Errors
@@ -766,6 +781,7 @@ where
                 input_task,
             } => self.prove_proposal(task_id, request, input_task).await,
             EngineTask::Aggregate { request, source } => {
+                let ctx = self.context_for_aggregation(&request);
                 let progress_task = EngineTask::Aggregate {
                     request: request.clone(),
                     source: source.clone(),
@@ -786,7 +802,7 @@ where
                     .prover()
                     .aggregate_with_observer(
                         AggregationGuestInput { proofs },
-                        &self.inner.context.config,
+                        &ctx.config,
                         self.inner.spec.backend(),
                         self.inner.observer.as_ref().map(|observer| {
                             Arc::new(EngineProgressObserver {
@@ -864,7 +880,9 @@ mod tests {
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
-    use crate::tasks::{AggregationTaskRequest, EngineOutput, ProposalTaskRequest};
+    use crate::tasks::{
+        AggregationTaskRequest, EngineOutput, ProposalTaskRequest, ProverTaskConfig,
+    };
     use crate::{Engine, EngineTaskId, EngineTaskKey, ProposalStage};
 
     struct MockProver;
@@ -1082,10 +1100,11 @@ mod tests {
             l2_block_range: None,
             l1_inclusion_block_number: 0,
             last_anchor_block_number: 0,
+            checkpoint: None,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
-            prover_args_json: None,
+            prover_config: ProverTaskConfig::default(),
         }
     }
 
@@ -1156,6 +1175,7 @@ mod tests {
                 request: AggregationTaskRequest {
                     request_id: "1-2".to_string(),
                     proposal_ids: vec![1, 2],
+                    prover_config: ProverTaskConfig::default(),
                 },
             })
         );

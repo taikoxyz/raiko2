@@ -9846,10 +9846,10 @@ dependencies = [
 name = "raiko2-prover"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "alloy-consensus",
  "alloy-primitives",
  "alloy-signer-local",
- "alloy-sol-types",
  "async-trait",
  "bincode",
  "boundless-market",
@@ -17847,12 +17847,18 @@ checksum = "0637d3a5566a82fa5214bae89087bc8c9fb94cd8e8a3c07feb691bb8d9c632db"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "clap",
+ "raiko2-guests",
  "risc0-binfmt",
  "risc0-zkos-v1compat",
+ "risc0-zkvm",
  "serde",
  "serde_json",
+ "sha2",
+ "sp1-sdk",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
 ]
 

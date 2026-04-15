@@ -1,4 +1,4 @@
-use raiko2_primitives::{ProofType, proof_type::lowercase};
+use raiko2_primitives::{ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
@@ -25,6 +25,8 @@ pub(crate) struct HoodiTaskMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HoodiProposalTask {
     pub(crate) proposal_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checkpoint: Option<ShastaCheckpoint>,
     pub(crate) l1_inclusion_block_number: u64,
     pub(crate) l2_block_numbers: Vec<u64>,
     pub(crate) last_anchor_block_number: u64,

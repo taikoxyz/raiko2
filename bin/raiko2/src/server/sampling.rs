@@ -1,6 +1,6 @@
 use alloy_primitives::B256;
 use raiko2_primitives::ProofType;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::time::{Duration, SystemTime};
 
 use crate::config::{ZkAnyConfig, ZkAnyTargetConfig};
@@ -58,13 +58,13 @@ impl ZkAnySampler {
     #[must_use]
     fn draw_candidate(&self, seed: B256) -> Option<ProofType> {
         let draw_seed =
-            u128::from_le_bytes(seed.as_slice()[16..32].try_into().expect("slice length"));
+            u32::from_le_bytes(seed.as_slice()[28..32].try_into().expect("slice length"));
+        let draw_ratio = f64::from(draw_seed) / f64::from(u32::MAX);
         let mut cumulative_probability = 0.0f64;
 
         for (proof_type, target) in &self.entries {
             cumulative_probability += target.probability;
-            let threshold = (cumulative_probability * u128::MAX as f64).round() as u128;
-            if draw_seed < threshold {
+            if draw_ratio < cumulative_probability {
                 return Some(*proof_type);
             }
         }
@@ -85,17 +85,13 @@ impl ZkAnySampler {
             return true;
         }
 
-        let min_interval =
-            Duration::from_secs(((24.0 * 3600.0) / target.per_day as f64).round().max(0.0) as u64);
+        let min_interval = Duration::from_secs((86_400 + (target.per_day / 2)) / target.per_day);
 
-        let should_draw = target
-            .last_draw_at
-            .map(|last_draw_at| {
-                now.duration_since(last_draw_at)
-                    .map(|elapsed| elapsed >= min_interval)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(true);
+        let should_draw = target.last_draw_at.is_none_or(|last_draw_at| {
+            now.duration_since(last_draw_at)
+                .map(|elapsed| elapsed >= min_interval)
+                .unwrap_or(false)
+        });
 
         if should_draw {
             target.last_draw_at = Some(now);
@@ -105,8 +101,8 @@ impl ZkAnySampler {
     }
 
     fn cache_result(&mut self, seed: B256, result: Option<ProofType>) {
-        if self.cached_results.contains_key(&seed) {
-            self.cached_results.insert(seed, result);
+        if let Entry::Occupied(mut entry) = self.cached_results.entry(seed) {
+            entry.insert(result);
             self.cached_order.retain(|candidate| *candidate != seed);
             self.cached_order.push_back(seed);
             return;
@@ -124,7 +120,7 @@ impl ZkAnySampler {
 }
 
 impl SamplingTargetState {
-    fn from_config(config: &ZkAnyTargetConfig) -> Self {
+    const fn from_config(config: &ZkAnyTargetConfig) -> Self {
         Self {
             probability: config.probability,
             per_day: config.per_day,

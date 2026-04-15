@@ -8,10 +8,12 @@ mod types;
 pub use types::{
     ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
     Sp1ExecutionMetadata, Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode,
-    Sp1NetworkSubmissionProgress, Sp1RequestContext, Sp1Response,
+    Sp1NetworkSubmissionProgress, Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1Response,
+    Sp1SystemConfig,
 };
 
-use alloy_primitives::Bytes;
+use alloy::{providers::ProviderBuilder, sol};
+use alloy_primitives::{Address, B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
@@ -20,13 +22,27 @@ use sp1_sdk::{
     CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
     SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
 };
+use std::str::FromStr;
 use std::time::Duration;
 use tracing::info;
+use url::Url;
 
 use crate::{
     GuestInputCodec, ProverProgress, ProverProgressObserver, build_shasta_aggregation_input,
     parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
+
+sol!(
+    #[sol(rpc)]
+    #[allow(dead_code)]
+    contract ISP1Verifier {
+        function verifyProof(
+            bytes32 programVKey,
+            bytes publicValues,
+            bytes proofBytes
+        ) external view;
+    }
+);
 
 /// SP1 Prover for Shasta proposal proofs.
 pub struct Sp1Prover {
@@ -34,6 +50,11 @@ pub struct Sp1Prover {
 }
 
 #[must_use]
+/// Returns a stable JSON representation of an SP1 verifying key.
+///
+/// # Panics
+///
+/// Panics if the verifying key cannot be serialized to JSON.
 pub fn sp1_vk_uuid(vk: &SP1VerifyingKey) -> String {
     serde_json::to_string(vk).expect("SP1 verifying key should serialize")
 }
@@ -43,6 +64,12 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
     alloy_primitives::hex::encode_prefixed(vk.hash_bytes())
 }
 
+/// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
+///
+/// # Errors
+///
+/// Returns an error when the input is neither valid SP1 verifying key JSON nor a 32-byte hex
+/// payload.
 pub fn sp1_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
     if let Ok(vk) = serde_json::from_str::<SP1VerifyingKey>(raw) {
         return Ok(vk.hash_u32());
@@ -84,9 +111,21 @@ impl Sp1Prover {
             })?,
             None => Sp1ConfigOverrides::default(),
         };
-        self.config
+        let system = match config.get("sp1_system") {
+            Some(value) => Some(Sp1SystemConfig::deserialize(value).map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to parse internal 'sp1_system' config: {e}"
+                ))
+            })?),
+            None => None,
+        };
+        let effective = self
+            .config
             .resolve_request_config(Some(&overrides), context)
-            .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))
+            .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))?;
+        Ok(system
+            .as_ref()
+            .map_or(effective.clone(), |system| system.applied_to(&effective)))
     }
 }
 
@@ -190,24 +229,22 @@ where
                         prove_proposal_with_client(
                             &client,
                             elf,
-                            stdin,
+                            &stdin,
                             proof_mode,
                             effective_config.verify,
                             &guest_input,
                         )
-                        .await
                     }
                     ProverMode::Local => {
                         let client = ProverClient::builder().cpu().build();
                         prove_proposal_with_client(
                             &client,
                             elf,
-                            stdin,
+                            &stdin,
                             proof_mode,
                             effective_config.verify,
                             &guest_input,
                         )
-                        .await
                     }
                     ProverMode::Network => {
                         let client = build_network_prover(&effective_config)?;
@@ -264,7 +301,6 @@ where
                     proof_mode,
                     effective_config.verify,
                 )
-                .await
             }
             ProverMode::Local => {
                 let client = ProverClient::builder().cpu().build();
@@ -277,7 +313,6 @@ where
                     proof_mode,
                     effective_config.verify,
                 )
-                .await
             }
             ProverMode::Network => {
                 let client = build_network_prover(&effective_config)?;
@@ -302,17 +337,92 @@ struct NetworkProofRequestResult {
     proof: SP1ProofWithPublicValues,
 }
 
-async fn prove_proposal_with_client(
+async fn verify_network_proposal_proof(
+    config: &Sp1Config,
+    proof: &SP1ProofWithPublicValues,
+    vk: &SP1VerifyingKey,
+) -> RaikoResult<()> {
+    let input_hash = parse_shasta_proposal_input_hash(proof.public_values.as_slice())?;
+    verify_sp1_remote_contract(
+        config,
+        vk,
+        input_hash.as_slice().to_vec(),
+        proof.bytes(),
+        "proposal",
+    )
+    .await
+}
+
+async fn verify_network_aggregation_proof(
+    config: &Sp1Config,
+    proof: &SP1ProofWithPublicValues,
+    vk: &SP1VerifyingKey,
+) -> RaikoResult<()> {
+    verify_sp1_remote_contract(
+        config,
+        vk,
+        proof.public_values.as_slice().to_vec(),
+        proof.bytes(),
+        "aggregation",
+    )
+    .await
+}
+
+async fn verify_sp1_remote_contract(
+    config: &Sp1Config,
+    vk: &SP1VerifyingKey,
+    public_values: Vec<u8>,
+    proof_bytes: Vec<u8>,
+    stage: &str,
+) -> RaikoResult<()> {
+    let remote_verify = config.remote_verify.as_ref().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "sp1.prover=network with sp1.verify=true requires internal remote verifier configuration"
+                .to_string(),
+        )
+    })?;
+    let rpc_url = Url::parse(&remote_verify.rpc_url).map_err(|e| {
+        RaikoError::InvalidRequestConfig(format!(
+            "invalid SP1 remote verifier rpc_url '{}': {e}",
+            remote_verify.rpc_url
+        ))
+    })?;
+    let verifier_address = Address::from_str(&remote_verify.verifier_address).map_err(|e| {
+        RaikoError::InvalidRequestConfig(format!(
+            "invalid SP1 remote verifier address '{}': {e}",
+            remote_verify.verifier_address
+        ))
+    })?;
+    let provider = ProviderBuilder::new().connect_http(rpc_url);
+    let verifier = ISP1Verifier::new(verifier_address, provider);
+
+    verifier
+        .verifyProof(
+            B256::from_slice(&vk.hash_bytes()),
+            Bytes::from(public_values),
+            Bytes::from(proof_bytes),
+        )
+        .call()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to remotely verify SP1 {stage} proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 {stage} remote verification failed: {e}"))
+        })?;
+
+    Ok(())
+}
+
+fn prove_proposal_with_client(
     client: &CpuProver,
     elf: &[u8],
-    stdin: SP1Stdin,
+    stdin: &SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
     guest_input: &GuestInput,
 ) -> RaikoResult<Proof> {
     let (pk, vk) = client.setup(elf);
     let proof = client
-        .prove(&pk, &stdin)
+        .prove(&pk, stdin)
         .mode(proof_mode)
         .run()
         .map_err(|e| {
@@ -357,10 +467,7 @@ async fn prove_proposal_with_network_client(
         request_network_proof(client, &pk, stdin, proof_mode, config, observer, "proposal").await?;
 
     if config.verify {
-        client.verify(&request.proof, &vk).map_err(|e| {
-            tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
-            RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
-        })?;
+        verify_network_proposal_proof(config, &request.proof, &vk).await?;
     }
 
     let public_values = request.proof.public_values.as_slice();
@@ -386,7 +493,7 @@ async fn prove_proposal_with_network_client(
     .into())
 }
 
-async fn aggregate_with_client<B>(
+fn aggregate_with_client<B>(
     client: &CpuProver,
     elf: &[u8],
     backend: &B,
@@ -502,10 +609,7 @@ where
         request_network_proof(client, &pk, stdin, proof_mode, config, None, "aggregation").await?;
 
     if config.verify {
-        client.verify(&request.proof, &vk).map_err(|e| {
-            tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
-            RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
-        })?;
+        verify_network_aggregation_proof(config, &request.proof, &vk).await?;
     }
 
     let public_values = request.proof.public_values.as_slice();

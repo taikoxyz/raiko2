@@ -1,8 +1,17 @@
 use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineKey, PipelineStageResult};
-use raiko2_primitives::{L2BlockRange, Proof};
+use raiko2_primitives::{L2BlockRange, Proof, ShastaCheckpoint};
+use raiko2_prover::sp1::{Sp1ConfigOverrides, Sp1SystemConfig};
 use raiko2_queue::TaskId;
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProverTaskConfig {
+    #[serde(default)]
+    pub sp1: Option<Sp1ConfigOverrides>,
+    #[serde(default)]
+    pub sp1_system: Option<Sp1SystemConfig>,
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposalTaskRequest {
@@ -10,10 +19,12 @@ pub struct ProposalTaskRequest {
     pub l2_block_range: Option<L2BlockRange>,
     pub l1_inclusion_block_number: u64,
     pub last_anchor_block_number: u64,
+    pub checkpoint: Option<ShastaCheckpoint>,
     pub blob_proof_type: Option<String>,
     pub prover: Option<String>,
     pub graffiti: Option<String>,
-    pub prover_args_json: Option<String>,
+    #[serde(default)]
+    pub prover_config: ProverTaskConfig,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +39,8 @@ pub enum ProposalStage {
 pub struct AggregationTaskRequest {
     pub request_id: String,
     pub proposal_ids: Vec<u64>,
+    #[serde(default)]
+    pub prover_config: ProverTaskConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -123,10 +136,11 @@ mod tests {
             l2_block_range: None,
             l1_inclusion_block_number: 0,
             last_anchor_block_number: 0,
+            checkpoint: None,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
-            prover_args_json: None,
+            prover_config: ProverTaskConfig::default(),
         }
     }
 
@@ -184,6 +198,7 @@ mod tests {
                     request: AggregationTaskRequest {
                         request_id: "agg-1".to_string(),
                         proposal_ids: vec![1, 2],
+                        prover_config: ProverTaskConfig::default(),
                     },
                 }),
                 NewTask {
@@ -192,6 +207,7 @@ mod tests {
                         request: AggregationTaskRequest {
                             request_id: "agg-1".to_string(),
                             proposal_ids: vec![1, 2],
+                            prover_config: ProverTaskConfig::default(),
                         },
                         source: AggregationSource::ProofTasks(vec![a1.clone(), a2.clone()]),
                     },

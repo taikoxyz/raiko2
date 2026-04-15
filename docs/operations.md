@@ -25,9 +25,11 @@ Or select the config path through the environment:
 RAIKO2_CONFIG=./config.toml ./target/release/raiko2
 ```
 
-CLI flags and environment variables override values loaded from the file. `--l1-rpc` and
-`--l2-rpc` remain available as overrides, but they only apply when the config defines exactly one
-`rpc.pairs` entry.
+CLI flags and explicitly supported environment variables override values loaded from the file.
+`--l1-rpc` and `--l2-rpc` remain available as overrides, but they only apply when the config
+defines exactly one `rpc.pairs` entry.
+
+When `--l2-rpc` overrides a single configured pair, it also overrides `rpc.pairs[*].l2_witness_rpc`.
 
 ## Docker Compose
 
@@ -57,6 +59,26 @@ To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 - `sp1/local`
 
 Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`.
+
+## Hosted Aggregate Route
+
+The hosted API accepts external proposal proofs through:
+
+```http
+POST /v3/proof/aggregate
+POST /proof/aggregate
+```
+
+This route expects already-produced proposal proofs and registers an aggregation task directly.
+It does not support `proof_type = "zk_any"`.
+
+Operational notes:
+
+- `proof_type = "sp1"` requires proofs that include the SP1 aggregation metadata expected by the
+  canonical aggregation path.
+- `proof_type = "risc0"` uses the same hosted Boundless path as proposal proving.
+- The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
+  widen it ad hoc at the route level.
 
 ## Release Images
 
@@ -127,20 +149,46 @@ When a client submits `proof_type = "zk_any"` to `/v3/proof/batch/shasta`, the s
 at admission time and either routes the request to `sp1` / `risc0` or returns
 `data.status = "zk_any_not_drawn"` without registering a task.
 
+## SP1 Hosted Posture
+
+For hosted proof submission, `sp1.mode = "prove"` now requires `sp1.verify = true`.
+
+This is enforced in two places:
+
+- config validation for the server default route
+- request validation for hosted `sp1` batch and aggregate requests
+
+Hosted `sp1.prover = "network"` verification is enabled per RPC pair, not globally. Set both:
+
+- `rpc.pairs[*].sp1_verifier_rpc_url`
+- `rpc.pairs[*].sp1_verifier_address`
+
+to turn on remote verifier-contract checks for that pair. Leave them unset to keep a line closed
+without changing the rest of the endpoint posture.
+
+`verify = false` is no longer a supported hosted-API posture for production operation.
+
 ## RPC and Witness Expectations
 
 `rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
 `debug_executionWitness` for the best latency envelope.
 
+`rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
+while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
+
+`rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
+settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
+verifier contract used after a network proof is fulfilled.
+
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
 
 If the upstream L2 does not expose that method and you need predictable proving latency, place
-[`zeth-rpc-proxy`](../bin/rpc-proxy) in front of it and point `rpc.pairs[*].l2_rpc` at the
-proxy instead.
+[`zeth-rpc-proxy`](../bin/rpc-proxy) in front of it and point `rpc.pairs[*].l2_witness_rpc` at
+the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
 
 ## Health and Readiness
 
 - `GET /health`: basic process health
 - `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
-  for the configured default prover route
+  for the hosted proving capabilities exposed by the endpoint

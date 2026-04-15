@@ -73,31 +73,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Enable tracing subscriber for debug/pretty log output.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
-        )
-        .init();
+    init_tracing();
 
     let args = Args::parse();
-
     let mut metrics = RunMetrics::new(args.metrics);
-
-    let url = reqwest::Url::parse(&args.rpc_url).context("Invalid rpc_url")?;
-    let rpc_client = RpcClient::builder().http(url);
-    let rpc_provider = ProviderBuilder::new().connect_client(rpc_client);
-
-    let chain_id = if let Some(chain_id) = args.chain_id {
-        chain_id
-    } else {
-        let start = Instant::now();
-        let res = rpc_provider.get_chain_id().await;
-        metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
-        res.context("eth_chainId failed")?
-    };
-
+    let rpc_provider = build_rpc_provider(&args)?;
+    let chain_id = resolve_chain_id(&args, &rpc_provider, &mut metrics).await?;
     let supported_chain_specs = load_supported_chain_specs(args.chain_spec_file.as_ref())?;
     let chain_spec = supported_chain_specs
         .get_chain_spec_with_chain_id(chain_id)
@@ -116,10 +97,88 @@ async fn main() -> Result<()> {
         &args.rpc_url,
         None,
         Some(chain_spec.clone()),
+        None,
         &raiko2_provider::RpcClientConfig::default(),
     )?;
+    let mut validation_env = ValidationEnv {
+        chain_spec: &taiko_chain_spec,
+        evm_config: &evm_config,
+        metrics: &mut metrics,
+    };
+    let (blocks, witnesses, accounts) =
+        fetch_inputs(&provider, args.block_number, validation_env.metrics).await?;
+    validation_env.metrics.set_block_stats(&blocks);
 
-    let block_numbers = vec![args.block_number];
+    for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
+        if maybe_validate_with_golden_touch(
+            &args,
+            &rpc_provider,
+            &block,
+            &witness,
+            &callers,
+            &mut validation_env,
+        )
+        .await?
+        {
+            continue;
+        }
+
+        let start = Instant::now();
+        let block_hash =
+            validate_block_captured(block, &witness, callers, &taiko_chain_spec, &evm_config)
+                .context("Stateless validation failed")?;
+        validation_env
+            .metrics
+            .observe("stateless.validate_block", start.elapsed(), 1);
+        println!("stateless validation ok: {block_hash:?}");
+    }
+
+    validation_env
+        .metrics
+        .print_summary(chain_id, args.block_number);
+    Ok(())
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
+        )
+        .init();
+}
+
+fn build_rpc_provider(args: &Args) -> Result<impl AlloyProvider> {
+    let url = reqwest::Url::parse(&args.rpc_url).context("Invalid rpc_url")?;
+    let rpc_client = RpcClient::builder().http(url);
+    Ok(ProviderBuilder::new().connect_client(rpc_client))
+}
+
+async fn resolve_chain_id<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    metrics: &mut RunMetrics,
+) -> Result<u64> {
+    if let Some(chain_id) = args.chain_id {
+        return Ok(chain_id);
+    }
+
+    let start = Instant::now();
+    let res = rpc_provider.get_chain_id().await;
+    metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
+    res.context("eth_chainId failed")
+}
+
+async fn fetch_inputs(
+    provider: &NetworkProvider,
+    block_number: u64,
+    metrics: &mut RunMetrics,
+) -> Result<(
+    Vec<Block>,
+    Vec<ExecutionWitness>,
+    Vec<alloy_primitives::map::AddressMap<TrieAccount>>,
+)> {
+    let block_numbers = vec![block_number];
     let blocks = {
         let start = Instant::now();
         let res = provider.batch_blocks(&block_numbers).await;
@@ -153,58 +212,66 @@ async fn main() -> Result<()> {
         bail!("Provider returned mismatched input lengths");
     }
 
-    metrics.set_block_stats(&blocks);
+    Ok((blocks, witnesses, accounts))
+}
 
-    for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
-        if args.diagnose_golden_touch || args.supplement_golden_touch_proof {
-            let parent_block_number = block
-                .header
-                .number
-                .checked_sub(1)
-                .context("cannot diagnose golden-touch proof for genesis block")?;
-            let proof =
-                fetch_account_proof(&rpc_provider, GOLDEN_TOUCH_ADDRESS, parent_block_number)
-                    .await
-                    .context("fetch golden-touch account proof")?;
-            print_golden_touch_coverage(&witness, &proof);
+struct ValidationEnv<'a> {
+    chain_spec: &'a std::sync::Arc<TaikoChainSpec>,
+    evm_config: &'a alethia_reth_block::config::TaikoEvmConfig,
+    metrics: &'a mut RunMetrics,
+}
 
-            if args.supplement_golden_touch_proof {
-                let mut supplemented_witness = witness.clone();
-                supplemented_witness.state.extend(
-                    proof
-                        .account_proof
-                        .iter()
-                        .cloned()
-                        .map(WitnessStateNode::from_bytes),
-                );
-                supplemented_witness.state =
-                    ExecutionWitness::canonicalize_state_nodes(supplemented_witness.state);
-
-                let start = Instant::now();
-                let block_hash = validate_block_captured(
-                    block.clone(),
-                    &supplemented_witness,
-                    callers.clone(),
-                    &taiko_chain_spec,
-                    &evm_config,
-                )
-                .context("Stateless validation failed after supplementing golden-touch proof")?;
-                metrics.observe("stateless.validate_block.supplemented", start.elapsed(), 1);
-                println!("stateless validation ok after supplement: {block_hash:?}");
-                continue;
-            }
-        }
-
-        let start = Instant::now();
-        let block_hash =
-            validate_block_captured(block, &witness, callers, &taiko_chain_spec, &evm_config)
-                .context("Stateless validation failed")?;
-        metrics.observe("stateless.validate_block", start.elapsed(), 1);
-        println!("stateless validation ok: {block_hash:?}");
+async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    block: &Block,
+    witness: &ExecutionWitness,
+    callers: &alloy_primitives::map::AddressMap<TrieAccount>,
+    validation_env: &mut ValidationEnv<'_>,
+) -> Result<bool> {
+    if !args.diagnose_golden_touch && !args.supplement_golden_touch_proof {
+        return Ok(false);
     }
 
-    metrics.print_summary(chain_id, args.block_number);
-    Ok(())
+    let parent_block_number = block
+        .header
+        .number
+        .checked_sub(1)
+        .context("cannot diagnose golden-touch proof for genesis block")?;
+    let proof = fetch_account_proof(rpc_provider, GOLDEN_TOUCH_ADDRESS, parent_block_number)
+        .await
+        .context("fetch golden-touch account proof")?;
+    print_golden_touch_coverage(witness, &proof);
+
+    if !args.supplement_golden_touch_proof {
+        return Ok(false);
+    }
+
+    let mut supplemented_witness = witness.clone();
+    supplemented_witness.state.extend(
+        proof
+            .account_proof
+            .iter()
+            .cloned()
+            .map(WitnessStateNode::from_bytes),
+    );
+    supplemented_witness.state =
+        ExecutionWitness::canonicalize_state_nodes(supplemented_witness.state);
+
+    let start = Instant::now();
+    let block_hash = validate_block_captured(
+        block.clone(),
+        &supplemented_witness,
+        callers.clone(),
+        validation_env.chain_spec,
+        validation_env.evm_config,
+    )
+    .context("Stateless validation failed after supplementing golden-touch proof")?;
+    validation_env
+        .metrics
+        .observe("stateless.validate_block.supplemented", start.elapsed(), 1);
+    println!("stateless validation ok after supplement: {block_hash:?}");
+    Ok(true)
 }
 
 async fn fetch_account_proof<P: AlloyProvider>(
@@ -228,7 +295,7 @@ fn print_golden_touch_coverage(witness: &ExecutionWitness, proof: &EIP1186Accoun
     let missing = proof
         .account_proof
         .iter()
-        .map(|node| alloy_primitives::keccak256(node))
+        .map(alloy_primitives::keccak256)
         .filter(|hash| !witness_hashes.contains(hash))
         .collect::<Vec<_>>();
 

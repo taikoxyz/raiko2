@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_provider::{
@@ -5,6 +6,7 @@ use raiko2_provider::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::str::FromStr;
 
 const fn default_rpc_timeout_ms() -> u64 {
     60_000
@@ -34,6 +36,9 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
         l2_rpc: None,
+        l2_witness_rpc: None,
+        sp1_verifier_rpc_url: None,
+        sp1_verifier_address: None,
     }]
 }
 
@@ -54,6 +59,12 @@ pub struct NetworkPairConfig {
     pub l1_rpc: Option<String>,
     #[serde(default)]
     pub l2_rpc: Option<String>,
+    #[serde(default)]
+    pub l2_witness_rpc: Option<String>,
+    #[serde(default)]
+    pub sp1_verifier_rpc_url: Option<String>,
+    #[serde(default)]
+    pub sp1_verifier_address: Option<String>,
 }
 
 impl NetworkPairConfig {
@@ -71,6 +82,9 @@ pub struct ResolvedNetworkPair {
     pub l1_network: String,
     pub l1_rpc: String,
     pub l2_rpc: String,
+    pub l2_witness_rpc: String,
+    pub sp1_verifier_rpc_url: Option<String>,
+    pub sp1_verifier_address: Option<String>,
     pub l1_spec: ChainSpec,
     pub l2_spec: ChainSpec,
 }
@@ -185,6 +199,34 @@ impl RpcConfig {
                     pair.l2_rpc
                 );
             }
+            if !is_valid_url(&pair.l2_witness_rpc) {
+                bail!(
+                    "{}: l2_witness_rpc = '{}'",
+                    validation::INVALID_RPC_URL,
+                    pair.l2_witness_rpc
+                );
+            }
+            match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
+                (Some(rpc_url), Some(address)) => {
+                    if !is_valid_url(rpc_url) {
+                        bail!(
+                            "{}: sp1_verifier_rpc_url = '{}'",
+                            validation::INVALID_RPC_URL,
+                            rpc_url
+                        );
+                    }
+                    if Address::from_str(address).is_err() {
+                        bail!("invalid sp1_verifier_address = '{address}'");
+                    }
+                }
+                (None, None) => {}
+                (Some(_), None) => {
+                    bail!("sp1_verifier_address must be set when sp1_verifier_rpc_url is set");
+                }
+                (None, Some(_)) => {
+                    bail!("sp1_verifier_rpc_url must be set when sp1_verifier_address is set");
+                }
+            }
             if !pair.l2_spec.is_taiko() {
                 bail!("rpc pair {} must target a Taiko L2 network", pair.key);
             }
@@ -240,13 +282,17 @@ fn resolve_pair(
     let l1_spec = known_specs
         .get_chain_spec(&pair.l1_network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
+    let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 
     Ok(ResolvedNetworkPair {
         key: pair.key(),
         network: pair.network.clone(),
         l1_network: pair.l1_network.clone(),
         l1_rpc: pair.l1_rpc.clone().unwrap_or_else(|| l1_spec.rpc.clone()),
-        l2_rpc: pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone()),
+        l2_rpc: l2_rpc.clone(),
+        l2_witness_rpc: pair.l2_witness_rpc.clone().unwrap_or(l2_rpc),
+        sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
+        sp1_verifier_address: pair.sp1_verifier_address.clone(),
         l1_spec,
         l2_spec,
     })

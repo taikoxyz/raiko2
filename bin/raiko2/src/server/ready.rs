@@ -1,4 +1,4 @@
-use crate::config::{Config, GuestSystem, QueueBackend, QueueConfig, RunnerKind};
+use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfig, RunnerKind};
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
@@ -25,9 +25,26 @@ impl ReadyCheck {
     fn err(err: &anyhow::Error) -> Self {
         Self {
             ok: false,
-            error: Some(err.to_string()),
+            error: Some(format_error_chain(err)),
         }
     }
+}
+
+fn format_error_chain(err: &anyhow::Error) -> String {
+    let mut chain = err.chain();
+    let Some(root) = chain.next() else {
+        return String::new();
+    };
+
+    let mut message = root.to_string();
+    for source in chain {
+        let source = source.to_string();
+        if !source.is_empty() {
+            message.push_str(": ");
+            message.push_str(&source);
+        }
+    }
+    message
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +133,16 @@ async fn check_rpc_pairs(config: &Config) -> Result<()> {
             &client_config,
         )
         .await?;
+        if pair.l2_witness_rpc != pair.l2_rpc {
+            check_rpc_chain_id(
+                "l2_witness",
+                &pair.key,
+                &pair.l2_witness_rpc,
+                pair.l2_chain_id(),
+                &client_config,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -146,13 +173,26 @@ fn check_prover(config: &Config) -> Result<()> {
     config
         .prover
         .validate()
-        .context("configured prover route is invalid")?;
+        .context("configured proving capabilities are invalid")?;
 
-    match (config.prover.guest_system, config.prover.runner) {
-        (GuestSystem::Risc0, RunnerKind::Boundless) => check_boundless_prover(config),
-        (GuestSystem::Sp1, RunnerKind::Local) => check_sp1_prover(config),
+    check_risc0_capability(config).context("risc0 capability is invalid")?;
+    check_sp1_capability(config).context("sp1 capability is invalid")?;
+
+    Ok(())
+}
+
+fn check_risc0_capability(config: &Config) -> Result<()> {
+    match config.prover.route() {
+        PipelineRoute {
+            guest_system: GuestSystem::Risc0,
+            runner: RunnerKind::Boundless,
+        } => check_boundless_prover(config),
         _ => Ok(()),
     }
+}
+
+fn check_sp1_capability(config: &Config) -> Result<()> {
+    check_sp1_prover(config)
 }
 
 fn check_boundless_prover(config: &Config) -> Result<()> {

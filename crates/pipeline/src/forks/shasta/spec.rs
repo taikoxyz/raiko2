@@ -853,6 +853,7 @@ mod tests {
             shasta: Some(ShastaRequest {
                 l1_inclusion_block_number,
                 last_anchor_block_number,
+                checkpoint: None,
             }),
             proof_type: ProofType::Native,
             ..Default::default()

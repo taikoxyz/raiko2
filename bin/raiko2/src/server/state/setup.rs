@@ -50,6 +50,7 @@ pub(crate) fn build_provider(
         &pair.l2_rpc,
         Some(pair.l1_spec.clone()),
         Some(pair.l2_spec.clone()),
+        Some(&pair.l2_witness_rpc),
         &rpc_config,
     )
     .map_err(|e| anyhow::anyhow!(e))

@@ -29,6 +29,9 @@ pub(crate) struct ReleaseImageArgs {
 
     #[arg(long, default_value = DEFAULT_CONTAINER)]
     pub(crate) container: String,
+
+    #[arg(long, default_value_t = false)]
+    pub(crate) force_rebuild_guests: bool,
 }
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
@@ -42,10 +45,15 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     let image_ref = format!("{}:{}", args.repository, args.tag);
 
     println!(
-        "[INFO] Rebuilding guest ELFs for backend `{}` before image release...",
+        "[INFO] Preparing guest ELFs for backend `{}` before image release...",
         backend_name(args.backend)
     );
-    build_guest::build(root, args.backend, false, None, true)?;
+    if args.force_rebuild_guests {
+        println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
+        build_guest::build(root, args.backend, false, None, true)?;
+    } else {
+        build_guest::ensure_release_guest_elves(root, args.backend, false, None, true)?;
+    }
 
     println!("[INFO] Building runtime image `{image_ref}`...");
     let mut build_cmd = Command::new("docker");

@@ -25,6 +25,7 @@ secp256k1.workspace = true
 url.workspace = true
 
 # Alloy types
+alloy.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
 
@@ -42,7 +43,6 @@ default = []
 [dev-dependencies]
 httpmock = "0.7"
 alloy-consensus.workspace = true
-alloy-sol-types.workspace = true
 reth-ethereum-primitives.workspace = true
 risc0-binfmt = "=3.0.3"
 risc0-zkos-v1compat = "2.2.1"

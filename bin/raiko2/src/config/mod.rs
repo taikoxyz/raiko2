@@ -53,7 +53,10 @@ impl Config {
             override_single_rpc_pair(&mut config.rpc, |pair| pair.l1_rpc = Some(l1_rpc.clone()))?;
         }
         if let Some(l2_rpc) = &cli.l2_rpc {
-            override_single_rpc_pair(&mut config.rpc, |pair| pair.l2_rpc = Some(l2_rpc.clone()))?;
+            override_single_rpc_pair(&mut config.rpc, |pair| {
+                pair.l2_rpc = Some(l2_rpc.clone());
+                pair.l2_witness_rpc = Some(l2_rpc.clone());
+            })?;
         }
         if let Some(timeout_ms) = cli.rpc_timeout_ms {
             config.rpc.client.timeout_ms = timeout_ms;
@@ -212,6 +215,9 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
+                l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
             }],
             ..Default::default()
         };
@@ -226,12 +232,60 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
                 l2_rpc: Some("http://localhost:9545".to_string()),
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
             }],
             ..Default::default()
         };
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("l1_rpc"));
+    }
+
+    #[test]
+    fn test_rpc_config_rejects_partial_sp1_verifier_pair() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_hoodi".to_string(),
+                l1_network: "hoodi".to_string(),
+                l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
+                sp1_verifier_address: None,
+            }],
+            ..Default::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sp1_verifier_address must be set")
+        );
+    }
+
+    #[test]
+    fn test_rpc_config_accepts_complete_sp1_verifier_pair() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_hoodi".to_string(),
+                l1_network: "hoodi".to_string(),
+                l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
+                sp1_verifier_address: Some(
+                    "0x0000000000000000000000000000000000000001".to_string(),
+                ),
+            }],
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -417,6 +471,7 @@ maintenance_interval_ms = 200
             .expect("resolved pair");
         assert_eq!(pair.l1_rpc, "http://34.46.244.179:8545");
         assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
+        assert_eq!(pair.l2_witness_rpc, "http://34.172.70.130:8545");
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);

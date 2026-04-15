@@ -295,6 +295,15 @@ where
     /// # Errors
     ///
     /// Returns `TaskStoreError` if the underlying store fails.
+    pub async fn remove(&self, id: TaskId<Id>) -> Result<(), TaskStoreError> {
+        let _ = self.store.remove_task(&id).await?;
+        self.notify.notify_one();
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if the underlying store fails.
     pub async fn get(&self, id: TaskId<Id>) -> Result<Option<TaskView<O, Id>>, TaskStoreError> {
         let Some((state, priority)) = self.store.get_view(&id).await? else {
             return Ok(None);
@@ -620,6 +629,20 @@ mod tests {
         async fn requeue_expired_leases(&self, _now_ms: u64, _limit: usize) -> StoreResult<usize> {
             Ok(0)
         }
+
+        async fn remove_task(&self, id: &TestTaskId) -> StoreResult<bool> {
+            let mut guard = self.inner.lock().await;
+            let existed = guard.tasks.remove(id).is_some();
+            guard.remaining.remove(id);
+            guard.dependents.remove(id);
+            for dependents in guard.dependents.values_mut() {
+                dependents.remove(id);
+            }
+            guard.ready_high.retain(|queued| queued != id);
+            guard.ready_medium.retain(|queued| queued != id);
+            guard.ready_low.retain(|queued| queued != id);
+            Ok(existed)
+        }
     }
 
     #[async_trait::async_trait]
@@ -721,6 +744,10 @@ mod tests {
             limit: usize,
         ) -> crate::StoreResult<usize> {
             self.inner.requeue_expired_leases(now_ms, limit).await
+        }
+
+        async fn remove_task(&self, id: &TestTaskId) -> crate::StoreResult<bool> {
+            self.inner.remove_task(id).await
         }
     }
 

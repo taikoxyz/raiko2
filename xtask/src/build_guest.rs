@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -7,7 +8,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::Backend;
 use crate::util;
@@ -108,6 +110,54 @@ struct CargoLockPackage {
     version: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct GuestBuildFingerprint {
+    backend: String,
+    bench: bool,
+    fingerprint: String,
+}
+
+pub(crate) fn ensure_release_guest_elves(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    update_image_ids_flag: bool,
+) -> Result<()> {
+    match backend {
+        Backend::Risc0 => ensure_release_backend(
+            root,
+            Backend::Risc0,
+            bench,
+            sp1_docker_tag,
+            update_image_ids_flag,
+        ),
+        Backend::Sp1 => ensure_release_backend(
+            root,
+            Backend::Sp1,
+            bench,
+            sp1_docker_tag,
+            update_image_ids_flag,
+        ),
+        Backend::All => {
+            ensure_release_backend(
+                root,
+                Backend::Risc0,
+                bench,
+                sp1_docker_tag,
+                update_image_ids_flag,
+            )?;
+            ensure_release_backend(
+                root,
+                Backend::Sp1,
+                bench,
+                sp1_docker_tag,
+                update_image_ids_flag,
+            )
+        }
+    }
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -146,6 +196,221 @@ fn lock_package_version(lock_path: &Path, package_names: &[&str]) -> Option<Stri
             .find(|pkg| pkg.name == *package_name)
             .map(|pkg| pkg.version.clone())
     })
+}
+
+fn ensure_release_backend(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    update_image_ids_flag: bool,
+) -> Result<()> {
+    let backend_key = match backend {
+        Backend::Risc0 => "risc0",
+        Backend::Sp1 => "sp1",
+        Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
+    };
+    let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag)?;
+    let fingerprint_path = guest_fingerprint_path(root, backend_key);
+
+    if guest_outputs_exist(root, backend)?
+        && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
+    {
+        println!("[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild.");
+        return Ok(());
+    }
+
+    println!(
+        "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
+    );
+    build(root, backend, bench, sp1_docker_tag, update_image_ids_flag)?;
+    write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
+    Ok(())
+}
+
+fn guest_fingerprint_path(root: &Path, backend_key: &str) -> PathBuf {
+    util::target_root(root)
+        .join("xtask/guest-fingerprints")
+        .join(format!("{backend_key}.json"))
+}
+
+fn matches_existing_fingerprint(
+    fingerprint_path: &Path,
+    backend_key: &str,
+    bench: bool,
+    fingerprint: &str,
+) -> Result<bool> {
+    if !fingerprint_path.exists() {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(fingerprint_path)
+        .with_context(|| format!("read guest fingerprint {fingerprint_path:?}"))?;
+    let existing: GuestBuildFingerprint = serde_json::from_str(&contents)
+        .with_context(|| format!("parse guest fingerprint {fingerprint_path:?}"))?;
+    Ok(existing.backend == backend_key
+        && existing.bench == bench
+        && existing.fingerprint == fingerprint)
+}
+
+fn write_guest_fingerprint(
+    fingerprint_path: &Path,
+    backend_key: &str,
+    bench: bool,
+    fingerprint: &str,
+) -> Result<()> {
+    if let Some(parent) = fingerprint_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create guest fingerprint directory {parent:?}"))?;
+    }
+    let payload = GuestBuildFingerprint {
+        backend: backend_key.to_string(),
+        bench,
+        fingerprint: fingerprint.to_string(),
+    };
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .with_context(|| format!("serialize guest fingerprint {fingerprint_path:?}"))?;
+    fs::write(fingerprint_path, bytes)
+        .with_context(|| format!("write guest fingerprint {fingerprint_path:?}"))
+}
+
+fn guest_outputs_exist(root: &Path, backend: Backend) -> Result<bool> {
+    for output in expected_guest_outputs(root, backend)? {
+        if !output.exists() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>> {
+    let mut outputs = Vec::new();
+    match backend {
+        Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0")?),
+        Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1")?),
+        Backend::All => {
+            outputs.extend(expected_backend_outputs(root, "risc0")?);
+            outputs.extend(expected_backend_outputs(root, "sp1")?);
+        }
+    }
+    Ok(outputs)
+}
+
+fn expected_backend_outputs(root: &Path, backend_key: &str) -> Result<Vec<PathBuf>> {
+    let manifest = read_manifest(&root.join(format!("guests/{backend_key}/Cargo.toml")))?;
+    Ok(manifest
+        .bin
+        .iter()
+        .map(|bin| {
+            root.join("crates/guests/elf")
+                .join(format!("{}.elf", bin.name.replace('-', "_")))
+        })
+        .collect())
+}
+
+fn compute_guest_fingerprint(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hash_tagged_bytes(&mut hasher, "bench", if bench { b"1" } else { b"0" });
+
+    match backend {
+        Backend::Risc0 => compute_backend_fingerprint(root, &mut hasher, "risc0", None)?,
+        Backend::Sp1 => compute_backend_fingerprint(
+            root,
+            &mut hasher,
+            "sp1",
+            Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
+        )?,
+        Backend::All => unreachable!("fingerprints are computed per concrete backend"),
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn compute_backend_fingerprint(
+    root: &Path,
+    hasher: &mut Sha256,
+    backend_key: &str,
+    sp1_tag: Option<String>,
+) -> Result<()> {
+    hash_tagged_bytes(hasher, "backend", backend_key.as_bytes());
+    if let Some(tag) = sp1_tag {
+        hash_tagged_bytes(hasher, "sp1_docker_tag", tag.as_bytes());
+    }
+
+    let mut paths = vec![
+        root.join("rust-toolchain.toml"),
+        root.join("xtask/Cargo.toml"),
+        root.join("xtask/src/build_guest.rs"),
+        root.join("xtask/src/util.rs"),
+        root.join("guests/common/Cargo.toml"),
+        root.join("guests/common/Cargo.lock"),
+        root.join(format!("guests/{backend_key}/Cargo.toml")),
+        root.join(format!("guests/{backend_key}/Cargo.lock")),
+        root.join(format!("docker/{backend_key}-toolchain/Dockerfile")),
+    ];
+    collect_files_recursively(&root.join("guests/common/src"), &mut paths)?;
+    collect_files_recursively(&root.join(format!("guests/{backend_key}/src")), &mut paths)?;
+    paths.sort();
+
+    for path in paths {
+        hash_file(root, hasher, &path)?;
+    }
+    Ok(())
+}
+
+fn collect_files_recursively(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("read directory {dir:?}"))? {
+        let entry = entry.with_context(|| format!("read entry under {dir:?}"))?;
+        let path = entry.path();
+        if entry
+            .file_type()
+            .with_context(|| format!("read file type for {path:?}"))?
+            .is_dir()
+        {
+            collect_files_recursively(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(root: &Path, hasher: &mut Sha256, path: &Path) -> Result<()> {
+    let relative = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    hash_tagged_bytes(hasher, "path", relative.as_bytes());
+
+    let mut file =
+        fs::File::open(path).with_context(|| format!("open fingerprint input {path:?}"))?;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read fingerprint input {path:?}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(())
+}
+
+fn hash_tagged_bytes(hasher: &mut Sha256, tag: &str, bytes: &[u8]) {
+    hasher.update(tag.as_bytes());
+    hasher.update([0]);
+    hasher.update(bytes.len().to_le_bytes());
+    hasher.update(bytes);
+    hasher.update([0xff]);
 }
 
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
@@ -720,4 +985,43 @@ fn read_manifest(path: &Path) -> Result<CargoManifest> {
     let manifest: CargoManifest =
         toml::from_str(&contents).with_context(|| format!("parse manifest {path:?}"))?;
     Ok(manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn sp1_guest_fingerprint_changes_with_docker_tag() {
+        let root = util::repo_root();
+        let v1 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4")).unwrap();
+        let v2 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5")).unwrap();
+        assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn guest_fingerprint_round_trip_matches() {
+        let temp_root = temp_test_dir();
+        let fingerprint_path = temp_root.join("fingerprint.json");
+        write_guest_fingerprint(&fingerprint_path, "sp1", false, "abc123").unwrap();
+
+        assert!(matches_existing_fingerprint(&fingerprint_path, "sp1", false, "abc123").unwrap());
+        assert!(!matches_existing_fingerprint(&fingerprint_path, "sp1", false, "def456").unwrap());
+        assert!(
+            !matches_existing_fingerprint(&fingerprint_path, "risc0", false, "abc123").unwrap()
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    fn temp_test_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("raiko2-xtask-test-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 }

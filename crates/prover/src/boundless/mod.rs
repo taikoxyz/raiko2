@@ -42,13 +42,9 @@ const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
 const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const AGGREGATION_QUOTED_MCYCLES: u32 = 200;
 
-const fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
+fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     let mcycles = user_cycles.div_ceil(MILLION_CYCLES);
-    if mcycles > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        mcycles as u32
-    }
+    u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,17 +90,12 @@ pub struct DeploymentConfig {
     pub overrides: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchQuoteStrategy {
+    #[default]
     RaikoAgent,
     Evaluated,
-}
-
-impl Default for BatchQuoteStrategy {
-    fn default() -> Self {
-        Self::RaikoAgent
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

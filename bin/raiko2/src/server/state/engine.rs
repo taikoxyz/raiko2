@@ -1,6 +1,7 @@
 use raiko2_engine::{
     AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest,
 };
+use raiko2_primitives::Proof;
 use raiko2_queue::{TaskState, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
@@ -26,13 +27,14 @@ pub trait EngineHandle: Send + Sync {
     fn submit_aggregation_proof_from_proofs(
         &self,
         request: AggregationTaskRequest,
-        proofs: Vec<raiko2_primitives::Proof>,
+        proofs: Vec<Proof>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>>;
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
 }
 
 fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineStatusView {
@@ -114,7 +116,7 @@ where
     fn submit_aggregation_proof_from_proofs(
         &self,
         request: AggregationTaskRequest,
-        proofs: Vec<raiko2_primitives::Proof>,
+        proofs: Vec<Proof>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
         Box::pin(async move {
             self.submit_aggregation_proof_from_proofs(request, proofs)
@@ -134,6 +136,10 @@ where
 
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
+    }
+
+    fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+        Box::pin(async move { self.remove(id).await })
     }
 }
 
@@ -171,10 +177,11 @@ mod tests {
                     l2_block_range: None,
                     l1_inclusion_block_number: 0,
                     last_anchor_block_number: 0,
+                    checkpoint: None,
                     blob_proof_type: None,
                     prover: None,
                     graffiti: None,
-                    prover_args_json: None,
+                    prover_config: Default::default(),
                 },
                 stage: ProposalStage::Prove,
             }),

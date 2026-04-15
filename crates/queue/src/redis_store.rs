@@ -884,4 +884,82 @@ return moved
 
         Ok(moved.max(0) as usize)
     }
+
+    async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool> {
+        let encoded = self.encode_id(id)?;
+        let task_key = self.task_key(id)?;
+        let dependents_key = self.dependents_key(id)?;
+        let ready_high = self.ready_key(Priority::High);
+        let ready_medium = self.ready_key(Priority::Medium);
+        let ready_low = self.ready_key(Priority::Low);
+        let scheduled_key = self.scheduled_key();
+        let running_key = self.running_key();
+        let pattern = format!("{}:dependents:*", self.namespace);
+
+        let mut conn = self.conn.lock().await;
+        let existed: i64 = redis::cmd("EXISTS")
+            .arg(&task_key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+
+        let _: () = redis::pipe()
+            .cmd("DEL")
+            .arg(&task_key)
+            .arg(&dependents_key)
+            .ignore()
+            .cmd("LREM")
+            .arg(&ready_high)
+            .arg(0)
+            .arg(&encoded)
+            .ignore()
+            .cmd("LREM")
+            .arg(&ready_medium)
+            .arg(0)
+            .arg(&encoded)
+            .ignore()
+            .cmd("LREM")
+            .arg(&ready_low)
+            .arg(0)
+            .arg(&encoded)
+            .ignore()
+            .cmd("ZREM")
+            .arg(&scheduled_key)
+            .arg(&encoded)
+            .ignore()
+            .cmd("ZREM")
+            .arg(&running_key)
+            .arg(&encoded)
+            .ignore()
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+
+        let mut cursor = 0u64;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(128)
+                .query_async(&mut *conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+            for key in keys {
+                let _: () = redis::cmd("SREM")
+                    .arg(key)
+                    .arg(&encoded)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(existed == 1)
+    }
 }

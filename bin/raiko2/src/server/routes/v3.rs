@@ -16,6 +16,20 @@ pub fn routes() -> Router<AppState> {
             "/v3/proof/aggregate",
             post(handlers::request_aggregation_proof),
         )
+        .route("/v3/proof/report", get(handlers::report_proofs))
+        .route("/v3/proof/list", get(handlers::list_proofs))
+        .route("/v3/proof/prune", post(handlers::prune_proofs))
+        .route(
+            "/proof/batch/shasta",
+            post(handlers::request_batch_shasta_proof),
+        )
+        .route(
+            "/proof/aggregate",
+            post(handlers::request_aggregation_proof),
+        )
+        .route("/proof/report", get(handlers::report_proofs))
+        .route("/proof/list", get(handlers::list_proofs))
+        .route("/proof/prune", post(handlers::prune_proofs))
         .route("/v3/tasks/{id}", get(handlers::get_task))
         .route("/v3/tasks/{id}/cancel", post(handlers::cancel_task))
 }

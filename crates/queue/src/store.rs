@@ -102,6 +102,7 @@ where
     async fn schedule(&self, id: TaskId<Id>, not_before_ms: u64) -> StoreResult<()>;
     async fn promote_scheduled(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
     async fn requeue_expired_leases(&self, now_ms: u64, limit: usize) -> StoreResult<usize>;
+    async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool>;
 }
 
 pub struct MemoryStore<P, O, Id> {
@@ -187,6 +188,13 @@ impl<P, O, Id> Default for MemoryStore<P, O, Id> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn retain_task_id<Id>(queue: &mut VecDeque<TaskId<Id>>, target: &TaskId<Id>)
+where
+    Id: Clone + Eq + Hash,
+{
+    queue.retain(|queued| queued != target);
 }
 
 #[async_trait]
@@ -511,6 +519,36 @@ where
         }
 
         Ok(expired.len())
+    }
+
+    async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        if g.tasks.remove(id).is_none() {
+            return Ok(false);
+        }
+
+        g.remaining.remove(id);
+        g.dependents.remove(id);
+
+        for dependents in g.dependents.values_mut() {
+            dependents.retain(|dependent| dependent != id);
+        }
+
+        retain_task_id(&mut g.ready_high, id);
+        retain_task_id(&mut g.ready_med, id);
+        retain_task_id(&mut g.ready_low, id);
+
+        let scheduled_keys = g.scheduled.keys().copied().collect::<Vec<_>>();
+        for key in scheduled_keys {
+            if let Some(queue) = g.scheduled.get_mut(&key) {
+                retain_task_id(queue, id);
+                if queue.is_empty() {
+                    g.scheduled.remove(&key);
+                }
+            }
+        }
+
+        Ok(true)
     }
 }
 

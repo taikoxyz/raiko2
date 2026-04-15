@@ -130,6 +130,18 @@ where
         _provider: &P,
     ) -> RaikoResult<Self::Input> {
         let mut input = self.provider.cloned_input();
+        if let Some(shasta) = ctx.request.shasta {
+            input.taiko.prover_data.last_anchor_block_number =
+                Some(shasta.last_anchor_block_number);
+            input.taiko.prover_data.checkpoint =
+                shasta
+                    .checkpoint
+                    .map(|checkpoint| raiko2_protocol_shasta::shasta::Checkpoint {
+                        blockNumber: checkpoint.block_number.try_into().expect("checkpoint fits"),
+                        blockHash: checkpoint.block_hash,
+                        stateRoot: checkpoint.state_root,
+                    });
+        }
         if let Some(data_sources) = ctx.config.get("shasta_data_sources") {
             input.taiko.data_sources =
                 serde_json::from_value(data_sources.clone()).map_err(|err| {
@@ -471,11 +483,15 @@ pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
     config.prover.guest_system = GuestSystem::Risc0;
     config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = raiko2_prover::sp1::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         l1_rpc: Some("http://localhost:8545".to_string()),
         l2_rpc: Some("http://localhost:9545".to_string()),
+        l2_witness_rpc: None,
+        sp1_verifier_rpc_url: None,
+        sp1_verifier_address: None,
     }];
     config
 }
@@ -548,13 +564,28 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
     risc0_fixture_engine_with_observer(context_config, None)
 }
 
+#[cfg(test)]
+pub(crate) fn risc0_boundless_fixture_engine(
+    context_config: serde_json::Value,
+) -> Risc0FixtureEngine {
+    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Boundless, None)
+}
+
 fn risc0_fixture_engine_with_observer(
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
+    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0, observer)
+}
+
+fn risc0_fixture_engine_for_pipeline(
+    context_config: serde_json::Value,
+    pipeline_key: PipelineKey,
+    observer: Option<Arc<dyn EngineObserver>>,
+) -> Risc0FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
     let spec = FixtureSpec::new(
-        PipelineKey::ShastaRisc0,
+        pipeline_key,
         FixtureRisc0Prover,
         RISC0_SHASTA_BACKEND,
         provider,

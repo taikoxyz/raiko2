@@ -135,7 +135,7 @@ pub struct ProverConfig {
     /// Boundless runner configuration.
     #[serde(default)]
     pub boundless: BoundlessConfig,
-    /// Request sampling policy for proof_type=zk_any.
+    /// Request sampling policy for `proof_type=zk_any`.
     #[serde(default)]
     pub zk_any: ZkAnyConfig,
 }
@@ -181,6 +181,9 @@ impl ProverConfig {
             bail!("prover.risc0.execution_po2 must be greater than zero");
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
+        if matches!(self.sp1.mode, raiko2_prover::sp1::ExecutionMode::Prove) && !self.sp1.verify {
+            bail!("prover.sp1.verify must be true when prover.sp1.mode=prove");
+        }
         self.zk_any.validate()?;
 
         Ok(())
@@ -394,5 +397,20 @@ mod tests {
         };
 
         config.validate().expect("valid zk_any policy");
+    }
+
+    #[test]
+    fn prover_config_rejects_sp1_prove_without_verification() {
+        let mut config = ProverConfig::default();
+        config.sp1.mode = raiko2_prover::sp1::ExecutionMode::Prove;
+        config.sp1.verify = false;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("invalid sp1 production posture should fail")
+                .to_string()
+                .contains("prover.sp1.verify must be true")
+        );
     }
 }

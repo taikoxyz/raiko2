@@ -1,9 +1,10 @@
 # Raiko2 runtime image for Docker and Docker Compose deployments.
 # This image intentionally excludes SGX-specific setup.
 
-FROM rust:1.93.0-bookworm AS builder
+FROM rust:1.93.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
+ARG CARGO_CHEF_VERSION=0.1.77
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
@@ -19,7 +20,29 @@ RUN apt-get update && \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+RUN cargo install --locked cargo-chef --version ${CARGO_CHEF_VERSION}
+
 WORKDIR /app
+
+FROM chef AS planner
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY bin ./bin
+COPY xtask ./xtask
+COPY vendor ./vendor
+COPY config ./config
+COPY config.example.toml ./
+COPY test.json ./
+
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY vendor ./vendor
+COPY --from=planner /app/recipe.json ./recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates

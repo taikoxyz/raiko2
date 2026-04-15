@@ -242,8 +242,11 @@ impl RuntimeManager {
         &self,
         engine_task_id: &str,
     ) -> Result<Option<RuntimeTaskRecord>> {
-        let mut tasks = self.find_tasks_by_engine_task_id(engine_task_id).await?;
-        Ok(tasks.pop())
+        Ok(self
+            .find_tasks_by_engine_task_id(engine_task_id)
+            .await?
+            .into_iter()
+            .next())
     }
 
     /// # Errors
@@ -306,6 +309,65 @@ impl RuntimeManager {
         }
         record.updated_at = now_ts();
         self.upsert_task(&record).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if runtime task records cannot be loaded.
+    pub async fn list_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
+        let conn = self.connection().await?;
+        let tasks = conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    r"
+                    SELECT
+                        task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                        proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                        remote_tx_hash, proof_path, error, metadata_json, updated_at
+                    FROM runtime_tasks
+                    ORDER BY updated_at DESC, task_id ASC
+                    ",
+                )?;
+                let mut rows = stmt.query([])?;
+                let mut tasks = Vec::new();
+                while let Some(row) = rows.next()? {
+                    tasks.push(runtime_task_record_from_row(row)?);
+                }
+                Ok(tasks)
+            })
+            .await
+            .context("failed to list runtime tasks")?;
+        Ok(tasks)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task record or workspace cannot be deleted.
+    pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
+        let Some(record) = self.get_task(task_id).await? else {
+            return Ok(false);
+        };
+
+        let conn = self.connection().await?;
+        let task_id = task_id.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                "DELETE FROM runtime_tasks WHERE task_id = ?1",
+                params![task_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to delete runtime task")?;
+
+        let task_dir = PathBuf::from(&record.task_dir);
+        if task_dir.exists() {
+            fs::remove_dir_all(&task_dir).with_context(|| {
+                format!("failed to remove task workspace {}", task_dir.display())
+            })?;
+        }
+
+        Ok(true)
     }
 }
 

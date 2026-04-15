@@ -185,7 +185,7 @@ fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) 
 #[cfg(test)]
 mod tests {
     use super::NativeProver;
-    use crate::Prover;
+    use crate::{Prover, hash_shasta_subproof_input};
     use alloy_primitives::{Address, B256, keccak256};
     use raiko2_pipeline::NativeBackend;
     use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
@@ -272,7 +272,7 @@ mod tests {
             ..ProofCarryData::default()
         };
         let proofs = vec![Proof {
-            input: Some(B256::ZERO),
+            input: Some(hash_shasta_subproof_input(&proof_carry)),
             extra_data: Some(encode_proof_carry_data(&proof_carry).expect("encode carry data")),
             ..Proof::default()
         }];

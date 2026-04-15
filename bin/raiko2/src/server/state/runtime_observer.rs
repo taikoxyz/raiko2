@@ -46,19 +46,23 @@ impl RuntimeObserver {
         }
     }
 
-    async fn update_root_record<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
+    async fn update_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
     where
-        F: FnOnce(&mut RuntimeTaskRecord, i64) -> Result<()>,
+        F: Fn(&mut RuntimeTaskRecord, i64) -> Result<()>,
     {
         let root_id = Self::root_task_id(id);
         let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
-        let Some(mut record) = self.runtime.find_task_by_engine_task_id(&root_id).await? else {
-            return Ok(());
-        };
+        let mut records = self.runtime.find_tasks_by_engine_task_id(&root_id).await?;
+        if records.is_empty() {
+            anyhow::bail!("runtime task not registered for engine task {root_id}");
+        }
         let updated_at = now_ts();
-        mutator(&mut record, updated_at)?;
-        record.updated_at = updated_at;
-        self.runtime.upsert_task(&record).await
+        for record in &mut records {
+            mutator(record, updated_at)?;
+            record.updated_at = updated_at;
+            self.runtime.upsert_task(record).await?;
+        }
+        Ok(())
     }
 }
 
@@ -67,8 +71,8 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
         if let Err(err) = self
-            .update_root_record(id, |record, updated_at| {
-                record.runner_status = RunnerStatus::Running;
+            .update_root_records(id, |record, updated_at| {
+                record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
                 update_task_metadata(record, |metadata| {
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -91,8 +95,8 @@ impl EngineObserver for RuntimeObserver {
     ) {
         let stage = Self::stage_name(task);
         let result = self
-            .update_root_record(id, |record, updated_at| {
-                record.runner_status = RunnerStatus::Running;
+            .update_root_records(id, |record, updated_at| {
+                record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
                 let task_id = encode_task_id(id).context("failed to encode progress task id")?;
                 update_task_metadata(record, |metadata| {
@@ -148,7 +152,7 @@ impl EngineObserver for RuntimeObserver {
         let stage = Self::stage_name(task);
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                self.update_root_record(id, |record, updated_at| {
+                self.update_root_records(id, |record, updated_at| {
                     record.runner_status = RunnerStatus::Completed;
                     record.error = None;
                     record.proof_path = Some(write_proof_file(record, proof)?);
@@ -162,8 +166,8 @@ impl EngineObserver for RuntimeObserver {
                 .await
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
-                self.update_root_record(id, |record, updated_at| {
-                    record.runner_status = RunnerStatus::Running;
+                self.update_root_records(id, |record, updated_at| {
+                    record.runner_status = RunnerStatus::Allocated;
                     record.error = None;
                     update_task_metadata(record, |metadata| {
                         metadata.runtime.active_stage =
@@ -190,7 +194,7 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
         let stage = Self::stage_name(task);
         if let Err(err) = self
-            .update_root_record(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Failed;
                 record.error = Some(error.to_string());
                 update_task_metadata(record, |metadata| {
@@ -208,7 +212,7 @@ impl EngineObserver for RuntimeObserver {
 
     async fn on_task_cancelled(&self, id: &EngineTaskId) {
         if let Err(err) = self
-            .update_root_record(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at| {
                 record.runner_status = RunnerStatus::Cancelled;
                 record.error = None;
                 update_task_metadata(record, |metadata| {
@@ -300,10 +304,11 @@ mod tests {
             l2_block_range: None,
             l1_inclusion_block_number: 1,
             last_anchor_block_number: 0,
+            checkpoint: None,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
-            prover_args_json: None,
+            prover_config: Default::default(),
         }
     }
 
@@ -337,6 +342,7 @@ mod tests {
                     aggregate_requested: false,
                     proposals: vec![HoodiProposalTask {
                         proposal_id: 42,
+                        checkpoint: None,
                         l1_inclusion_block_number: 1,
                         l2_block_numbers: vec![42],
                         last_anchor_block_number: 0,
@@ -418,6 +424,7 @@ mod tests {
                     aggregate_requested: false,
                     proposals: vec![HoodiProposalTask {
                         proposal_id: 42,
+                        checkpoint: None,
                         l1_inclusion_block_number: 1,
                         l2_block_numbers: vec![42],
                         last_anchor_block_number: 0,

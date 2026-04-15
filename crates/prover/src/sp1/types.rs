@@ -1,11 +1,13 @@
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use raiko2_primitives::Proof;
 use serde::{Deserialize, Serialize};
 use sp1_sdk::{
     ExecutionReport, SP1ProofMode, SP1ProofWithPublicValues, SP1VerifyingKey,
     network::FulfillmentStrategy,
 };
+use std::str::FromStr;
 use tracing::error;
+use url::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sp1RequestContext {
@@ -21,6 +23,10 @@ pub enum Sp1ConfigError {
     CycleLimitMustBePositive,
     TimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
+    RemoteVerifyRpcUrlMustNotBeEmpty,
+    RemoteVerifyRpcUrlInvalid(String),
+    RemoteVerifyAddressMustNotBeEmpty,
+    RemoteVerifyAddressInvalid(String),
     ExecuteModeDoesNotSupportNetworkProver,
     MainnetRequiresAuction(Sp1FulfillmentStrategy),
     ReservedRequiresReservedOrHosted(Sp1FulfillmentStrategy),
@@ -43,6 +49,21 @@ impl std::fmt::Display for Sp1ConfigError {
                 f.write_str("sp1.timeout_secs must be greater than 0")
             }
             Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
+            Self::RemoteVerifyRpcUrlMustNotBeEmpty => {
+                f.write_str("sp1.remote_verify.rpc_url must not be empty")
+            }
+            Self::RemoteVerifyRpcUrlInvalid(url) => {
+                write!(f, "sp1.remote_verify.rpc_url is invalid: {url}")
+            }
+            Self::RemoteVerifyAddressMustNotBeEmpty => {
+                f.write_str("sp1.remote_verify.verifier_address must not be empty")
+            }
+            Self::RemoteVerifyAddressInvalid(address) => {
+                write!(
+                    f,
+                    "sp1.remote_verify.verifier_address is invalid: {address}"
+                )
+            }
             Self::ExecuteModeDoesNotSupportNetworkProver => {
                 f.write_str("sp1.mode=execute does not support sp1.prover=network")
             }
@@ -94,6 +115,9 @@ pub struct Sp1Config {
     /// Optional override for the Succinct network RPC URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
+    /// Optional remote verifier contract configuration for hosted SP1 verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_verify: Option<Sp1RemoteVerifyConfig>,
 }
 
 const fn default_true() -> bool {
@@ -125,12 +149,27 @@ impl Default for Sp1Config {
             cycle_limit: default_cycle_limit(),
             timeout_secs: default_timeout_secs(),
             rpc_url: None,
+            remote_verify: None,
         }
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct Sp1RemoteVerifyConfig {
+    pub rpc_url: String,
+    pub verifier_address: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct Sp1SystemConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_verify: Option<Sp1RemoteVerifyConfig>,
+}
+
 /// Request-scoped SP1 overrides accepted via `prover_args.sp1`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct Sp1ConfigOverrides {
     #[serde(default)]
@@ -169,6 +208,7 @@ impl Sp1Config {
             cycle_limit: overrides.cycle_limit.unwrap_or(self.cycle_limit),
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
             rpc_url: self.rpc_url.clone(),
+            remote_verify: self.remote_verify.clone(),
         }
     }
 
@@ -218,6 +258,20 @@ impl Sp1Config {
         {
             return Err(Sp1ConfigError::RpcUrlMustNotBeEmpty);
         }
+        if let Some(remote_verify) = &self.remote_verify {
+            if remote_verify.rpc_url.trim().is_empty() {
+                return Err(Sp1ConfigError::RemoteVerifyRpcUrlMustNotBeEmpty);
+            }
+            Url::parse(&remote_verify.rpc_url).map_err(|_| {
+                Sp1ConfigError::RemoteVerifyRpcUrlInvalid(remote_verify.rpc_url.clone())
+            })?;
+            if remote_verify.verifier_address.trim().is_empty() {
+                return Err(Sp1ConfigError::RemoteVerifyAddressMustNotBeEmpty);
+            }
+            Address::from_str(&remote_verify.verifier_address).map_err(|_| {
+                Sp1ConfigError::RemoteVerifyAddressInvalid(remote_verify.verifier_address.clone())
+            })?;
+        }
         if self.mode == ExecutionMode::Execute && self.prover == ProverMode::Network {
             return Err(Sp1ConfigError::ExecuteModeDoesNotSupportNetworkProver);
         }
@@ -251,8 +305,19 @@ impl Sp1ConfigOverrides {
     }
 }
 
+impl Sp1SystemConfig {
+    #[must_use]
+    pub fn applied_to(&self, config: &Sp1Config) -> Sp1Config {
+        let mut config = config.clone();
+        if let Some(remote_verify) = &self.remote_verify {
+            config.remote_verify = Some(remote_verify.clone());
+        }
+        config
+    }
+}
+
 /// SP1 proof recursion mode.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum RecursionMode {
     /// Core proof (no recursion).
@@ -275,7 +340,7 @@ impl From<RecursionMode> for SP1ProofMode {
 }
 
 /// SP1 proposal execution mode.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionMode {
     /// Execute the guest without producing a proof.

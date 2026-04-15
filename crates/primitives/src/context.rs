@@ -1,5 +1,6 @@
 //! Proof context for raiko2.
 
+use alloy_primitives::B256;
 use std::sync::Arc;
 
 use crate::ProofType;
@@ -23,6 +24,14 @@ impl L2BlockRange {
     }
 }
 
+/// Shasta checkpoint committed by the client for the final proven block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ShastaCheckpoint {
+    pub block_number: u64,
+    pub block_hash: B256,
+    pub state_root: B256,
+}
+
 /// Shasta-specific request metadata required during preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ShastaRequest {
@@ -30,6 +39,9 @@ pub struct ShastaRequest {
     pub l1_inclusion_block_number: u64,
     /// The previously committed anchor block number.
     pub last_anchor_block_number: u64,
+    /// Optional checkpoint expected by the caller for the final witness block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<ShastaCheckpoint>,
 }
 
 /// Proof request parameters.
@@ -122,6 +134,7 @@ mod tests {
             shasta: Some(ShastaRequest {
                 l1_inclusion_block_number: 456,
                 last_anchor_block_number: 455,
+                checkpoint: None,
             }),
             proof_type: ProofType::Sp1,
             blob_proof_type: Some("kzg".to_string()),

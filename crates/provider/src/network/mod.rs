@@ -24,7 +24,8 @@ pub struct NetworkProvider {
     _l1_client: RpcClient,
     l1_provider: DynProvider,
     l2_client: RpcClient,
-    l2_provider: DynProvider,
+    l2_witness_client: RpcClient,
+    l2_witness_provider: DynProvider,
     http_client: reqwest::Client,
     _l1_chain_spec: Option<ChainSpec>,
     l2_chain_spec: Option<ChainSpec>,
@@ -42,7 +43,7 @@ impl NetworkProvider {
     ///
     /// Returns an error if the RPC URL is invalid or the client cannot be constructed.
     pub fn new_with_config(rpc_url: &str, config: &RpcClientConfig) -> RaikoResult<Self> {
-        Self::new_pair_with_chain_specs_and_config(rpc_url, rpc_url, None, None, config)
+        Self::new_pair_with_chain_specs_and_config(rpc_url, rpc_url, None, None, None, config)
     }
 
     /// # Errors
@@ -52,6 +53,7 @@ impl NetworkProvider {
         Self::new_pair_with_chain_specs_and_config(
             l1_rpc_url,
             l2_rpc_url,
+            None,
             None,
             None,
             &RpcClientConfig::default(),
@@ -66,7 +68,7 @@ impl NetworkProvider {
         l2_rpc_url: &str,
         config: &RpcClientConfig,
     ) -> RaikoResult<Self> {
-        Self::new_pair_with_chain_specs_and_config(l1_rpc_url, l2_rpc_url, None, None, config)
+        Self::new_pair_with_chain_specs_and_config(l1_rpc_url, l2_rpc_url, None, None, None, config)
     }
 
     /// # Errors
@@ -77,6 +79,7 @@ impl NetworkProvider {
         l2_rpc_url: &str,
         l1_chain_spec: Option<ChainSpec>,
         l2_chain_spec: Option<ChainSpec>,
+        l2_witness_rpc_url: Option<&str>,
         config: &RpcClientConfig,
     ) -> RaikoResult<Self> {
         let l1_client = build_rpc_client(l1_rpc_url, config)?;
@@ -84,8 +87,9 @@ impl NetworkProvider {
             .connect_client(l1_client.clone())
             .erased();
         let l2_client = build_rpc_client(l2_rpc_url, config)?;
-        let l2_provider = ProviderBuilder::new()
-            .connect_client(l2_client.clone())
+        let l2_witness_client = build_rpc_client(l2_witness_rpc_url.unwrap_or(l2_rpc_url), config)?;
+        let l2_witness_provider = ProviderBuilder::new()
+            .connect_client(l2_witness_client.clone())
             .erased();
         let mut http_client_builder = reqwest::Client::builder();
         if config.timeout_ms > 0 {
@@ -100,7 +104,8 @@ impl NetworkProvider {
             _l1_client: l1_client,
             l1_provider,
             l2_client,
-            l2_provider,
+            l2_witness_client,
+            l2_witness_provider,
             http_client,
             _l1_chain_spec: l1_chain_spec,
             l2_chain_spec,

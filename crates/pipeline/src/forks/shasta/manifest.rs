@@ -43,7 +43,17 @@ impl ShastaManifestBuilder {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
             parent_transition_hash: None,
-            checkpoint: None,
+            checkpoint: ctx.request.shasta.and_then(|shasta| {
+                shasta.checkpoint.and_then(|checkpoint| {
+                    checkpoint.block_number.try_into().ok().map(|block_number| {
+                        raiko2_protocol_shasta::shasta::Checkpoint {
+                            blockNumber: block_number,
+                            blockHash: checkpoint.block_hash,
+                            stateRoot: checkpoint.state_root,
+                        }
+                    })
+                })
+            }),
             last_anchor_block_number: ctx
                 .request
                 .shasta

@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         &args.rpc_url,
         Some(l1_chain_spec.clone()),
         Some(l2_chain_spec.clone()),
+        None,
         &RpcClientConfig {
             timeout_ms: args.rpc_timeout_ms,
             concurrency_limit: args.rpc_concurrency_limit,
@@ -147,6 +148,7 @@ async fn main() -> Result<()> {
         shasta: Some(ShastaRequest {
             l1_inclusion_block_number: args.l1_inclusion_block_number,
             last_anchor_block_number: args.last_anchor_block_number,
+            checkpoint: None,
         }),
         proof_type: args
             .proof_type

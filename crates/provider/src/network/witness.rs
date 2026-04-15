@@ -47,13 +47,11 @@ fn taiko_system_proof_targets(chain_id: u64) -> TaikoSystemProofTargets {
     }
 
     if let Some(chain_spec) = SupportedChainSpecs::default().get_chain_spec_with_chain_id(chain_id)
+        && let Some(l2_contract) = chain_spec.l2_contract
+        && !account_only.contains(&l2_contract)
+        && !storage_backed.contains(&l2_contract)
     {
-        if let Some(l2_contract) = chain_spec.l2_contract
-            && !account_only.contains(&l2_contract)
-            && !storage_backed.contains(&l2_contract)
-        {
-            storage_backed.push(l2_contract);
-        }
+        storage_backed.push(l2_contract);
     }
 
     TaikoSystemProofTargets {
@@ -138,7 +136,7 @@ impl NetworkProvider {
                 async move {
                     let witness = execution_witness(
                         evm_config,
-                        &self.l2_provider,
+                        &self.l2_witness_provider,
                         block_number.into(),
                     )
                     .await
@@ -200,7 +198,7 @@ impl NetworkProvider {
         let batch_size = system_proof_batch_size();
 
         for chunk in requests.chunks(batch_size) {
-            let mut batch = self.l2_client.new_batch();
+            let mut batch = self.l2_witness_client.new_batch();
             let mut pending = Vec::with_capacity(chunk.len());
 
             for request in chunk {
@@ -317,7 +315,7 @@ impl NetworkProvider {
             .collect::<Vec<_>>()
             .chunks(batch_size)
         {
-            let mut batch = self.l2_client.new_batch();
+            let mut batch = self.l2_witness_client.new_batch();
             let mut pending = Vec::with_capacity(indexed_chunk.len());
 
             for &(index, block_number) in indexed_chunk {
@@ -393,7 +391,7 @@ impl NetworkProvider {
         block_numbers: &[u64],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         let started_at = Instant::now();
-        let chain_id = self.l2_provider.get_chain_id().await.map_err(|e| {
+        let chain_id = self.l2_witness_provider.get_chain_id().await.map_err(|e| {
             RaikoError::RPC(format!("eth_chainId failed while fetching witnesses: {e}"))
         })?;
         let resolved_l2_chain_spec = self.resolved_l2_chain_spec(chain_id);
@@ -403,7 +401,7 @@ impl NetworkProvider {
             });
 
         let system_proof_targets = resolved_l2_chain_spec
-            .filter(|chain_spec| chain_spec.is_taiko())
+            .filter(ChainSpec::is_taiko)
             .map_or_else(TaikoSystemProofTargets::default, |_| {
                 taiko_system_proof_targets(chain_id)
             });

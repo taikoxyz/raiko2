@@ -3,7 +3,8 @@ use crate::server::state::{EngineHandle, PipelineFactory};
 use crate::server::task_metadata::HoodiTaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
-use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
+use raiko2_pipeline::PipelineKey;
+use raiko2_queue::{TaskStoreError, encode_task_id};
 use raiko2_runtime::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -116,6 +117,7 @@ pub(crate) async fn cancel_registered_tasks(
     runtime: &RuntimeManager,
     engine: &Arc<dyn EngineHandle>,
     public_task_id: &str,
+    pipeline_key: PipelineKey,
     metadata: &HoodiTaskMetadata,
 ) -> Result<()> {
     let mut errors = Vec::new();
@@ -124,8 +126,9 @@ pub(crate) async fn cancel_registered_tasks(
         if has_other_live_task_reference(runtime, public_task_id, &proposal.task_id).await? {
             continue;
         }
-        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
-            .with_context(|| format!("invalid stored proposal task id {}", proposal.task_id))?;
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
         for stage_task_id in proposal_task_chain_ids(&task_id) {
             if let Err(err) = engine.cancel(stage_task_id.clone()).await {
                 let encoded = encode_task_id(&stage_task_id)
@@ -138,8 +141,16 @@ pub(crate) async fn cancel_registered_tasks(
     if let Some(task_id) = &metadata.aggregate_task_id
         && !has_other_live_task_reference(runtime, public_task_id, task_id).await?
     {
-        let task_id = decode_task_id::<EngineTaskKey>(task_id)
-            .with_context(|| format!("invalid stored aggregate task id {task_id}"))?;
+        let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) else {
+            return if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "failed to cancel one or more child tasks: {}",
+                    errors.join("; ")
+                ))
+            };
+        };
         if let Err(err) = engine.cancel(task_id.clone()).await {
             let encoded =
                 encode_task_id(&task_id).unwrap_or_else(|_| "<invalid-task-id>".to_string());
@@ -163,7 +174,7 @@ pub(crate) async fn has_other_task_reference(
     engine_task_id: &str,
 ) -> Result<bool> {
     let records = runtime
-        .find_tasks_by_engine_task_id(engine_task_id)
+        .find_tasks_by_task_ref(engine_task_id)
         .await
         .with_context(|| {
             format!("failed to inspect runtime task references for {engine_task_id}")
@@ -179,7 +190,7 @@ pub(crate) async fn has_other_live_task_reference(
     engine_task_id: &str,
 ) -> Result<bool> {
     let records = runtime
-        .find_tasks_by_engine_task_id(engine_task_id)
+        .find_tasks_by_task_ref(engine_task_id)
         .await
         .with_context(|| {
             format!("failed to inspect runtime task references for {engine_task_id}")
@@ -195,12 +206,14 @@ pub(crate) async fn has_other_live_task_reference(
 
 pub(crate) async fn remove_task_children(
     engine: &Arc<dyn EngineHandle>,
+    pipeline_key: PipelineKey,
     metadata: &HoodiTaskMetadata,
     removed_engine_task_ids: &mut HashSet<String>,
 ) -> Result<()> {
     for proposal in &metadata.proposals {
-        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
-            .with_context(|| format!("invalid stored proposal task id {}", proposal.task_id))?;
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
         for stage_task_id in proposal_task_chain_ids(&task_id) {
             let encoded = encode_task_id(&stage_task_id)
                 .context("failed to encode proposal stage task id")?;
@@ -213,9 +226,7 @@ pub(crate) async fn remove_task_children(
         }
     }
 
-    if let Some(task_id) = &metadata.aggregate_task_id {
-        let task_id = decode_task_id::<EngineTaskKey>(task_id)
-            .with_context(|| format!("invalid stored aggregate task id {task_id}"))?;
+    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
         let encoded = encode_task_id(&task_id).context("failed to encode aggregate task id")?;
         if removed_engine_task_ids.insert(encoded) {
             engine
@@ -232,13 +243,15 @@ pub(crate) async fn remove_task_children_if_unreferenced(
     runtime: &RuntimeManager,
     engine: &Arc<dyn EngineHandle>,
     public_task_id: &str,
+    pipeline_key: PipelineKey,
     metadata: &HoodiTaskMetadata,
 ) -> Result<ChildCleanupOutcome> {
     let mut outcome = ChildCleanupOutcome::default();
 
     for proposal in &metadata.proposals {
-        let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
-            .with_context(|| format!("invalid stored proposal task id {}", proposal.task_id))?;
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
         let stage_task_ids = proposal_task_chain_ids(&task_id);
         if has_other_task_reference(runtime, public_task_id, &proposal.task_id).await? {
             outcome.skipped_shared_children += stage_task_ids.len();
@@ -255,9 +268,7 @@ pub(crate) async fn remove_task_children_if_unreferenced(
     if let Some(task_id) = &metadata.aggregate_task_id {
         if has_other_task_reference(runtime, public_task_id, task_id).await? {
             outcome.skipped_shared_children += 1;
-        } else {
-            let task_id = decode_task_id::<EngineTaskKey>(task_id)
-                .with_context(|| format!("invalid stored aggregate task id {task_id}"))?;
+        } else if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
             engine
                 .remove(task_id)
                 .await
@@ -317,8 +328,14 @@ async fn cleanup_expired_root_task(
     let engine = pipelines
         .get(&metadata.network_pair, record.pipeline_key)
         .ok_or_else(|| anyhow!("pipeline not available: {}", record.pipeline_key.as_str()))?;
-    let outcome =
-        remove_task_children_if_unreferenced(runtime, &engine, &record.task_id, &metadata).await?;
+    let outcome = remove_task_children_if_unreferenced(
+        runtime,
+        &engine,
+        &record.task_id,
+        record.pipeline_key,
+        &metadata,
+    )
+    .await?;
     runtime
         .remove_task(&record.task_id)
         .await
@@ -636,6 +653,7 @@ mod tests {
             runtime.as_ref(),
             &engine_handle,
             "live-root",
+            PipelineKey::ShastaRisc0,
             &metadata_for_task(&proposal_task_id),
         )
         .await?;
@@ -682,6 +700,13 @@ mod tests {
     }
 
     fn metadata_for_task(proposal_task_id: &str) -> HoodiTaskMetadata {
+        let request = match decode_task_id::<EngineTaskKey>(proposal_task_id)
+            .expect("decode proposal task id")
+            .0
+        {
+            EngineTaskKey::Proposal { request, .. } => request,
+            EngineTaskKey::Aggregate { .. } => unreachable!("expected proposal task id"),
+        };
         HoodiTaskMetadata {
             network_pair: "taiko_dev/ethereum".to_string(),
             network: "taiko_dev".to_string(),
@@ -696,8 +721,10 @@ mod tests {
                 l2_block_numbers: vec![1],
                 last_anchor_block_number: 0,
                 task_id: proposal_task_id.to_string(),
+                request: Some(request),
             }],
             aggregate_task_id: None,
+            aggregate_request: None,
             runtime: HoodiRuntimeMetadata::default(),
         }
     }

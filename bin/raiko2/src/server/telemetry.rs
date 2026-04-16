@@ -97,7 +97,12 @@ pub(crate) struct MetricContext {
 }
 
 impl MetricContext {
-    pub(crate) fn new(route: String, proof_type: ProofType, pair: String, aggregate: bool) -> Self {
+    pub(crate) const fn new(
+        route: String,
+        proof_type: ProofType,
+        pair: String,
+        aggregate: bool,
+    ) -> Self {
         Self {
             route,
             proof_type,

@@ -31,7 +31,9 @@ use super::fixture::{
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
-use super::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata};
+use super::task_metadata::{
+    HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata, HoodiTaskRuntimeMetadata,
+};
 use crate::config::{GuestSystem, RunnerKind};
 use raiko2_runtime::RuntimeManager;
 
@@ -729,8 +731,10 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
             l2_block_numbers: vec![3],
             last_anchor_block_number: 0,
             task_id: encoded_task_id,
+            request: Some(proposal_request),
         }],
         aggregate_task_id: None,
+        aggregate_request: None,
         runtime: HoodiRuntimeMetadata::default(),
     };
     let canonical_proposals = vec![json!({
@@ -1268,6 +1272,154 @@ async fn e2e_aggregate_sp1_external_proofs_completes_from_fixture() {
     assert_eq!(res["data"]["status"], "completed");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_aggregate_request_accepts_legacy_aggregation_ids() {
+    let (app, engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "aggregation_ids": [10, 11],
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let id = res["data"]["task_id"]
+        .as_str()
+        .expect("response task_id")
+        .to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["aggregate"]["status"], "completed");
+    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_duplicate_aggregate_post_reuses_same_root_task() {
+    let (app, _engine) = sp1_fixture_app();
+    let payload = json!({
+        "aggregation_ids": [10, 11],
+        "proofs": [
+            sp1_external_proof("0xfixture-proof-a".to_string()),
+            sp1_external_proof("0xfixture-proof-b".to_string())
+        ],
+        "proof_type": "sp1",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = first["data"]["task_id"]
+        .as_str()
+        .expect("first task id")
+        .to_string();
+
+    let (status, second) = post_json(&app, "/v3/proof/aggregate", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(second["data"]["status"], "registered");
+    assert_eq!(second["data"]["task_id"], first_id);
+}
+
+#[tokio::test]
+async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_progress() {
+    let config = base_config();
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let app = app::build_router(state.clone());
+    let payload = json!({
+        "aggregation_ids": [10, 11],
+        "proofs": [
+            sp1_external_proof("0xfixture-proof-a".to_string()),
+            sp1_external_proof("0xfixture-proof-b".to_string())
+        ],
+        "proof_type": "sp1",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let task_id = first["data"]["task_id"]
+        .as_str()
+        .expect("first task id")
+        .to_string();
+
+    let mut record = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+    let mut metadata: HoodiTaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
+    metadata.runtime.active_stage = Some("aggregate".to_string());
+    metadata.runtime.last_event = Some("submission_registered".to_string());
+    metadata.runtime.aggregate = Some(HoodiTaskRuntimeMetadata {
+        updated_at: 1,
+        provider_request_id: Some("0xsp1-aggregate".to_string()),
+        ..HoodiTaskRuntimeMetadata::default()
+    });
+    record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let (status, second) = post_json(&app, "/v3/proof/aggregate", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(second["data"]["status"], "work_in_progress");
+    assert_eq!(second["data"]["task_id"], task_id);
+}
+
+#[tokio::test]
+async fn e2e_duplicate_aggregate_post_returns_completed_legacy_proof() {
+    let (app, engine) = sp1_fixture_app();
+    let payload = json!({
+        "aggregation_ids": [10, 11],
+        "proofs": [
+            sp1_external_proof("0xfixture-proof-a".to_string()),
+            sp1_external_proof("0xfixture-proof-b".to_string())
+        ],
+        "proof_type": "sp1",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let task_id = first["data"]["task_id"]
+        .as_str()
+        .expect("first task id")
+        .to_string();
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, second) = post_json(&app, "/v3/proof/aggregate", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(second["data"]["status"], "completed");
+    assert_eq!(second["data"]["task_id"], task_id);
+    assert!(second["data"]["proof"]["proof"].is_string(), "{second}");
+    assert_eq!(second["data"]["proof"]["kzg_proof"], "");
+    assert_eq!(second["data"]["proof"]["quote"], "");
 }
 
 #[tokio::test]
@@ -1819,8 +1971,20 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             l2_block_numbers: vec![3],
             last_anchor_block_number: 0,
             task_id: encoded_task_id.clone(),
+            request: Some(ProposalTaskRequest {
+                proposal_id: 3,
+                l2_block_range: None,
+                l1_inclusion_block_number: 1,
+                last_anchor_block_number: 0,
+                checkpoint: None,
+                blob_proof_type: None,
+                prover: None,
+                graffiti: None,
+                prover_config: Default::default(),
+            }),
         }],
         aggregate_task_id: None,
+        aggregate_request: None,
         runtime: HoodiRuntimeMetadata {
             active_stage: Some("prove".to_string()),
             last_event: Some("submission_registered".to_string()),

@@ -12,8 +12,8 @@ repeatable sequence:
 
 1. confirm environment and current live state
 2. show worktree risk
-3. check whether guest registration is needed
-4. build and push the runtime image
+3. build and push the runtime image
+4. check whether guest registration is needed
 5. update the GKE deployment and wait for rollout
 6. run passive smoke checks
 7. report the exact outcome
@@ -82,26 +82,7 @@ Default policy is `warn + allow`:
 
 Never hide unrelated local modifications.
 
-### 3. Register Check
-
-Before building the image, run the dry-run `register-image` command from the production profile.
-
-Interpret the result this way:
-
-- no pending registrations: continue automatically
-- pending registrations exist: stop the automatic flow and report exactly what needs registration
-
-Default behavior is `check`, not `apply`.
-
-For `apply`:
-
-- require explicit user intent
-- verify the configured private-key environment variable exists first
-- if the env var is missing, stop and report that `register-image --apply` is blocked
-
-Never broadcast registration transactions by default.
-
-### 4. Release Image
+### 3. Release Image
 
 Generate a default tag in the format `tolba-YYYYMMDD-HHMM` unless the user provides one.
 
@@ -112,7 +93,30 @@ Use the canonical `xtask release-image` entrypoint with:
 - production namespace/deployment/container
 
 Capture the pushed digest from the command output. If image build or push fails, stop immediately
-and do not attempt `kubectl set image`.
+and do not attempt registration or `kubectl set image`.
+
+### 4. Register Check
+
+After building the image, run the dry-run `register-image` command from the production profile.
+`xtask release-image` prepares the checked-in guest ELFs first, so registration must be evaluated
+against those final artifacts, not against a pre-build snapshot.
+
+Interpret the result this way:
+
+- no pending registrations: continue automatically
+- pending registrations exist: stop the automatic flow before rollout and report exactly what needs
+  registration
+
+Default behavior is `check`, not `apply`.
+
+For `apply`:
+
+- require explicit user intent
+- resolve `PRIVATE_KEY` from the repo-root `.env` first
+- if `.env` does not provide it, fall back to the current process environment
+- if neither source provides it, stop and report that `register-image --apply` is blocked
+
+Never broadcast registration transactions by default.
 
 ### 5. GKE Rollout
 
@@ -165,7 +169,7 @@ Stop and escalate instead of improvising when any of these happen:
 
 - cluster context does not match the production profile
 - `register-image` reports pending work and the user has not asked to apply it
-- the private-key env var is missing for `register-image --apply`
+- `PRIVATE_KEY` is unavailable from both the repo-root `.env` and the current environment for `register-image --apply`
 - `xtask release-image` fails
 - `kubectl rollout status` fails
 - `/ready` fails

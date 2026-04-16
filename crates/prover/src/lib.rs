@@ -30,6 +30,7 @@ pub use sp1::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
 
+use alloy::sol_types::SolValue;
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
@@ -101,10 +102,46 @@ pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> B256 
     }
 }
 
-pub(crate) fn encode_risc0_proof_payload(receipt: &Risc0Receipt) -> String {
+pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) -> String {
+    let proof: Vec<u8> = (seal.to_vec(), image_id)
+        .abi_encode()
+        .into_iter()
+        .skip(32)
+        .collect();
+    alloy_primitives::hex::encode_prefixed(proof)
+}
+
+pub(crate) fn encode_risc0_aggregation_seal_payload(
+    seal: &[u8],
+    block_image_id: B256,
+    aggregation_image_id: B256,
+) -> String {
+    let proof: Vec<u8> = (seal.to_vec(), block_image_id, aggregation_image_id)
+        .abi_encode()
+        .into_iter()
+        .skip(32)
+        .collect();
+    alloy_primitives::hex::encode_prefixed(proof)
+}
+
+pub(crate) fn encode_risc0_proposal_proof_payload(
+    receipt: &Risc0Receipt,
+    image_id: B256,
+) -> String {
     encode_seal(receipt).map_or_else(
         |_| alloy_primitives::hex::encode_prefixed(&receipt.journal.bytes),
-        alloy_primitives::hex::encode_prefixed,
+        |seal| encode_risc0_proposal_seal_payload(&seal, image_id),
+    )
+}
+
+pub(crate) fn encode_risc0_aggregation_proof_payload(
+    receipt: &Risc0Receipt,
+    block_image_id: B256,
+    aggregation_image_id: B256,
+) -> String {
+    encode_seal(receipt).map_or_else(
+        |_| alloy_primitives::hex::encode_prefixed(&receipt.journal.bytes),
+        |seal| encode_risc0_aggregation_seal_payload(&seal, block_image_id, aggregation_image_id),
     )
 }
 
@@ -305,10 +342,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-        validate_external_aggregate_proofs,
+        decode_hex_payload, encode_risc0_aggregation_seal_payload,
+        encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
+        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
+    use alloy_sol_types::SolValue;
     use raiko2_pipeline::PipelineRoute;
     use raiko2_primitives::Proof;
 
@@ -415,5 +454,37 @@ mod tests {
         };
 
         assert!(validate_external_aggregate_proofs(route, &[proof]).is_ok());
+    }
+
+    #[test]
+    fn risc0_proposal_payload_encodes_seal_and_image_id() {
+        let seal = vec![0x11, 0x22, 0x33];
+        let image_id = B256::repeat_byte(0xaa);
+
+        let encoded =
+            decode_hex_payload(Some(&encode_risc0_proposal_seal_payload(&seal, image_id)));
+        let expected: Vec<u8> = (seal, image_id).abi_encode().into_iter().skip(32).collect();
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn risc0_aggregation_payload_encodes_seal_and_both_image_ids() {
+        let seal = vec![0x44, 0x55, 0x66];
+        let block_image_id = B256::repeat_byte(0xbb);
+        let aggregation_image_id = B256::repeat_byte(0xcc);
+
+        let encoded = decode_hex_payload(Some(&encode_risc0_aggregation_seal_payload(
+            &seal,
+            block_image_id,
+            aggregation_image_id,
+        )));
+        let expected: Vec<u8> = (seal, block_image_id, aggregation_image_id)
+            .abi_encode()
+            .into_iter()
+            .skip(32)
+            .collect();
+
+        assert_eq!(encoded, expected);
     }
 }

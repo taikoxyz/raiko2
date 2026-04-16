@@ -11,25 +11,13 @@ kubectl -n tolba-raiko2-host get pods -l app=raiko2 -o wide
 git status --short
 ```
 
-## 2. Check Whether Register Is Needed
-
-```bash
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
-```
-
-Apply only when explicitly requested and when `PRIVATE_KEY` is present:
-
-```bash
-PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
-```
-
-## 3. Generate Default Tag
+## 2. Generate Default Tag
 
 ```bash
 date +tolba-%Y%m%d-%H%M
 ```
 
-## 4. Build And Push The Runtime Image
+## 3. Build And Push The Runtime Image
 
 ```bash
 cargo run -r -p xtask -- release-image all \
@@ -41,6 +29,33 @@ cargo run -r -p xtask -- release-image all \
 ```
 
 Capture the pushed digest from the command output.
+
+## 4. Check Whether Register Is Needed
+
+Run this after `release-image`, because `xtask release-image` refreshes the checked-in guest ELF
+artifacts before packaging the runtime image.
+
+```bash
+cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
+```
+
+Resolve `PRIVATE_KEY` from the repo-root `.env` first. If `.env` does not provide it, fall back to
+the current process environment.
+
+Preferred apply flow:
+
+```bash
+set -a
+[ -f .env ] && . ./.env
+set +a
+cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+```
+
+Fallback apply flow when `.env` does not define `PRIVATE_KEY`:
+
+```bash
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+```
 
 ## 5. Roll Out The New Digest
 

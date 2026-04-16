@@ -75,7 +75,8 @@ It does not support `proof_type = "zk_any"`.
 Operational notes:
 
 - `proof_type = "sp1"` requires proofs that include the SP1 aggregation metadata expected by the
-  canonical aggregation path.
+  canonical aggregation path. Hosted SP1 batch proposal proving emits Compressed proofs, and the
+  hosted aggregation route emits a Plonk proof.
 - `proof_type = "risc0"` uses the same hosted Boundless path as proposal proving.
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.

@@ -97,7 +97,6 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   "sp1": {
     "mode": "prove",
     "prover": "network",
-    "recursion": "plonk",
     "verify": true,
     "network_mode": "reserved",
     "fulfillment_strategy": "reserved",
@@ -130,6 +129,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the same draw is
   reused for both proposal proving and aggregation.
+- Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
+- Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
   - `proof_type = "native"`
   - `data.status = "zk_any_not_drawn"`
@@ -231,6 +232,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 
 ```json
 {
+  "aggregation_ids": [42, 43],
   "proofs": [
     {
       "proof": "0x...",
@@ -255,10 +257,13 @@ Registers an aggregation root task from externally supplied proposal proofs.
 
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
+- `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
 - `proof_type=sp1` requires each proof to include `proof`, `input`, `uuid`, and `extra_data`.
+- Hosted `proof_type=sp1` aggregate requests expect Compressed proposal proofs and emit a Plonk
+  aggregation proof.
 - `proof_type=risc0` on the hosted Boundless route requires each proof to include `quote`.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires pair-level SP1 verifier config on the
@@ -276,6 +281,10 @@ Registers an aggregation root task from externally supplied proposal proofs.
   }
 }
 ```
+
+Repeated `POST /v3/proof/aggregate` with the same logical request is idempotent. It reuses the
+existing root task and returns the same legacy-compatible `registered` / `work_in_progress` /
+`completed + proof` / terminal `error` response semantics as `POST /v3/proof/batch/shasta`.
 
 ## Report All Root Tasks
 

@@ -1,5 +1,6 @@
 mod bench_guest;
 mod build_guest;
+mod latest_proposal_request;
 mod register_image;
 mod release_image;
 mod util;
@@ -21,6 +22,9 @@ enum Cmd {
 
     /// Run guest benchmarks following the PR #9 workflow.
     BenchGuest(Box<bench_guest::BenchGuestArgs>),
+
+    /// Build a `/v3/proof/batch/shasta` request for the latest onchain proposal.
+    LatestProposalRequest(latest_proposal_request::LatestProposalRequestArgs),
 
     /// Build guest ELFs, build/push the runtime image, and print the rollout command.
     ReleaseImage(release_image::ReleaseImageArgs),
@@ -44,6 +48,7 @@ async fn main() -> Result<()> {
     match args.cmd {
         Cmd::BuildGuest(args) => build_guest::run(&root, args),
         Cmd::BenchGuest(args) => bench_guest::run(&root, *args),
+        Cmd::LatestProposalRequest(args) => latest_proposal_request::run(&root, args).await,
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
     }

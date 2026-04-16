@@ -24,6 +24,7 @@ use sp1_sdk::{
 };
 use std::str::FromStr;
 use std::time::Duration;
+use tokio::time::timeout;
 use tracing::info;
 use url::Url;
 
@@ -106,7 +107,7 @@ impl Sp1Prover {
     fn resolve_config_for_request(
         &self,
         config: &ProverConfig,
-        context: Sp1RequestContext,
+        fallback_context: Sp1RequestContext,
     ) -> RaikoResult<Sp1Config> {
         let overrides = match config.get("sp1") {
             Some(value) => Sp1ConfigOverrides::deserialize(value).map_err(|e| {
@@ -124,7 +125,7 @@ impl Sp1Prover {
         };
         let effective = self
             .config
-            .resolve_request_config(Some(&overrides), context)
+            .resolve_request_config(Some(&overrides), fallback_context)
             .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))?;
         Ok(system
             .as_ref()
@@ -406,17 +407,46 @@ fn remote_verifier_program_vkey(vk: &SP1VerifyingKey) -> B256 {
     B256::from_slice(&vk.bytes32_raw())
 }
 
+fn sp1_proof_mode_name(proof: &SP1ProofWithPublicValues) -> &'static str {
+    match &proof.proof {
+        SP1Proof::Core(_) => "core",
+        SP1Proof::Compressed(_) => "compressed",
+        SP1Proof::Plonk(_) => "plonk",
+        SP1Proof::Groth16(_) => "groth16",
+    }
+}
+
+// Old `raiko` only ran remote contract verification when the proof could be encoded into
+// onchain verifier bytes. Shasta proposal proofs used for aggregation are `Compressed`, so they
+// must skip this path.
+fn remote_verifier_proof_bytes(proof: &SP1ProofWithPublicValues) -> Option<Vec<u8>> {
+    match &proof.proof {
+        SP1Proof::Plonk(_) | SP1Proof::Groth16(_) => {
+            let proof_bytes = proof.bytes();
+            (!proof_bytes.is_empty()).then_some(proof_bytes)
+        }
+        SP1Proof::Core(_) | SP1Proof::Compressed(_) => None,
+    }
+}
+
 async fn verify_network_proposal_proof(
     config: &Sp1Config,
     proof: &SP1ProofWithPublicValues,
     vk: &SP1VerifyingKey,
 ) -> RaikoResult<()> {
+    let Some(proof_bytes) = remote_verifier_proof_bytes(proof) else {
+        tracing::info!(
+            proof_mode = sp1_proof_mode_name(proof),
+            "Skipping SP1 proposal remote verification for non-onchain proof mode"
+        );
+        return Ok(());
+    };
     let input_hash = parse_shasta_proposal_input_hash(proof.public_values.as_slice())?;
     verify_sp1_remote_contract(
         config,
         vk,
         input_hash.as_slice().to_vec(),
-        proof.bytes(),
+        proof_bytes,
         "proposal",
     )
     .await
@@ -427,11 +457,18 @@ async fn verify_network_aggregation_proof(
     proof: &SP1ProofWithPublicValues,
     vk: &SP1VerifyingKey,
 ) -> RaikoResult<()> {
+    let Some(proof_bytes) = remote_verifier_proof_bytes(proof) else {
+        tracing::info!(
+            proof_mode = sp1_proof_mode_name(proof),
+            "Skipping SP1 aggregation remote verification for non-onchain proof mode"
+        );
+        return Ok(());
+    };
     verify_sp1_remote_contract(
         config,
         vk,
         proof.public_values.as_slice().to_vec(),
-        proof.bytes(),
+        proof_bytes,
         "aggregation",
     )
     .await
@@ -464,19 +501,49 @@ async fn verify_sp1_remote_contract(
     })?;
     let provider = ProviderBuilder::new().connect_http(rpc_url);
     let verifier = ISP1Verifier::new(verifier_address, provider);
+    let verify_timeout = Duration::from_secs(config.timeout_secs);
+    let verify_started = std::time::Instant::now();
 
-    verifier
-        .verifyProof(
-            remote_verifier_program_vkey(vk),
-            Bytes::from(public_values),
-            Bytes::from(proof_bytes),
-        )
-        .call()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to remotely verify SP1 {stage} proof: {:?}", e);
-            RaikoError::Guest(format!("SP1 {stage} remote verification failed: {e}"))
-        })?;
+    tracing::info!(
+        stage,
+        rpc_url = %remote_verify.rpc_url,
+        verifier_address = %remote_verify.verifier_address,
+        timeout_secs = config.timeout_secs,
+        "Starting SP1 remote verification"
+    );
+
+    timeout(
+        verify_timeout,
+        verifier
+            .verifyProof(
+                remote_verifier_program_vkey(vk),
+                Bytes::from(public_values),
+                Bytes::from(proof_bytes),
+            )
+            .call(),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!(
+            stage,
+            elapsed_ms = verify_started.elapsed().as_millis(),
+            "Timed out while remotely verifying SP1 proof"
+        );
+        RaikoError::Guest(format!(
+            "SP1 {stage} remote verification timed out after {}s",
+            config.timeout_secs
+        ))
+    })?
+    .map_err(|e| {
+        tracing::error!("Failed to remotely verify SP1 {stage} proof: {:?}", e);
+        RaikoError::Guest(format!("SP1 {stage} remote verification failed: {e}"))
+    })?;
+
+    tracing::info!(
+        stage,
+        elapsed_ms = verify_started.elapsed().as_millis(),
+        "SP1 remote verification succeeded"
+    );
 
     Ok(())
 }
@@ -756,6 +823,13 @@ async fn request_network_proof(
             ))
             .await;
 
+        let wait_started = std::time::Instant::now();
+        tracing::info!(
+            stage,
+            request_id = %request_id_string,
+            timeout_secs = config.timeout_secs,
+            "Resuming SP1 network proof wait"
+        );
         let proof = client
             .wait_proof(request_id, Some(timeout), None)
             .await
@@ -763,6 +837,13 @@ async fn request_network_proof(
                 tracing::error!("Failed to resume SP1 {stage} proof request: {:?}", e);
                 RaikoError::Guest(format!("SP1 {stage} network proof failed: {e}"))
             })?;
+        tracing::info!(
+            stage,
+            request_id = %request_id_string,
+            proof_mode = sp1_proof_mode_name(&proof),
+            elapsed_ms = wait_started.elapsed().as_millis(),
+            "SP1 network proof received"
+        );
 
         return Ok(NetworkProofRequestResult {
             request_id: request_id_string,
@@ -800,6 +881,13 @@ async fn request_network_proof(
             .await;
     }
 
+    let wait_started = std::time::Instant::now();
+    tracing::info!(
+        stage,
+        request_id = %request_id_string,
+        timeout_secs = config.timeout_secs,
+        "Waiting for SP1 network proof"
+    );
     let proof = client
         .wait_proof(request_id, Some(timeout), None)
         .await
@@ -807,6 +895,13 @@ async fn request_network_proof(
             tracing::error!("Failed to wait for SP1 {stage} proof: {:?}", e);
             RaikoError::Guest(format!("SP1 {stage} network proof failed: {e}"))
         })?;
+    tracing::info!(
+        stage,
+        request_id = %request_id_string,
+        proof_mode = sp1_proof_mode_name(&proof),
+        elapsed_ms = wait_started.elapsed().as_millis(),
+        "SP1 network proof received"
+    );
 
     Ok(NetworkProofRequestResult {
         request_id: request_id_string,
@@ -830,11 +925,11 @@ fn insert_sp1_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::remote_verifier_program_vkey;
+    use super::{remote_verifier_program_vkey, remote_verifier_proof_bytes};
     use alloy_primitives::B256;
     use raiko2_guests::sp1::shasta::PROPOSAL_ELF;
     use raiko2_primitives_shasta::instance::words_to_bytes_le;
-    use sp1_sdk::{HashableKey, Prover as _, ProverClient};
+    use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
     use std::str::FromStr;
 
     #[test]
@@ -855,5 +950,34 @@ mod tests {
         let words = super::sp1_image_id_words_from_uuid(&expected.to_string()).expect("image id");
 
         assert_eq!(B256::from(words_to_bytes_le(&words)), expected);
+    }
+
+    #[test]
+    fn remote_verifier_proof_bytes_matches_legacy_raiko_semantics() {
+        let client = ProverClient::builder().mock().build();
+        let (pk, _) = client.setup(PROPOSAL_ELF);
+
+        let core = SP1ProofWithPublicValues::create_mock_proof(
+            &pk,
+            sp1_sdk::SP1PublicValues::new(),
+            SP1ProofMode::Core,
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+        );
+        let compressed = SP1ProofWithPublicValues::create_mock_proof(
+            &pk,
+            sp1_sdk::SP1PublicValues::new(),
+            SP1ProofMode::Compressed,
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+        );
+        let plonk = SP1ProofWithPublicValues::create_mock_proof(
+            &pk,
+            sp1_sdk::SP1PublicValues::new(),
+            SP1ProofMode::Plonk,
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+        );
+
+        assert!(remote_verifier_proof_bytes(&core).is_none());
+        assert!(remote_verifier_proof_bytes(&compressed).is_none());
+        assert!(remote_verifier_proof_bytes(&plonk).is_none());
     }
 }

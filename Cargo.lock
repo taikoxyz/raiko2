@@ -17917,9 +17917,17 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "anyhow",
  "clap",
  "raiko2-guests",
+ "raiko2-pipeline",
+ "raiko2-primitives",
+ "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
+ "raiko2-provider",
+ "reth-ethereum-primitives",
  "risc0-binfmt",
  "risc0-zkos-v1compat",
  "risc0-zkvm",

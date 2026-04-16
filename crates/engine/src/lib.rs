@@ -998,7 +998,7 @@ mod tests {
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_prover::{
         GuestInputCodec, Prover,
-        sp1::{ProverMode, Sp1Config, Sp1ConfigOverrides},
+        sp1::{ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides},
     };
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
@@ -1533,6 +1533,24 @@ mod tests {
                 .proposal_execution_policy(&network_request, ProposalStage::Prove)
                 .lease_duration,
             Duration::from_secs(351)
+        );
+    }
+
+    #[test]
+    fn proposal_prove_execution_uses_compressed_sp1_config() {
+        let scheduler_config = SchedulerConfig {
+            lease_duration: Duration::from_secs(45),
+            retry: RetryPolicy::None,
+        };
+        let engine = sp1_test_engine(scheduler_config, Sp1Config::default());
+        let request = proposal_request(7);
+
+        assert_eq!(
+            engine
+                .sp1_effective_proposal_config(&request)
+                .expect("effective sp1 config")
+                .recursion,
+            RecursionMode::Compressed
         );
     }
 

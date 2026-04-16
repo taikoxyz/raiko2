@@ -222,7 +222,18 @@ impl Sp1Config {
     ) -> Result<Self, Sp1ConfigError> {
         let empty_overrides = Sp1ConfigOverrides::default();
         let overrides = overrides.unwrap_or(&empty_overrides);
-        let effective_config = self.merged_with(overrides);
+        let mut effective_config = self.merged_with(overrides);
+        match context {
+            Sp1RequestContext::ProposalBatch { .. }
+                if effective_config.mode == ExecutionMode::Prove =>
+            {
+                effective_config.recursion = RecursionMode::Compressed;
+            }
+            Sp1RequestContext::Aggregation => {
+                effective_config.recursion = RecursionMode::Plonk;
+            }
+            Sp1RequestContext::ProposalBatch { .. } => {}
+        }
         if overrides.has_network_overrides() && effective_config.prover != ProverMode::Network {
             return Err(Sp1ConfigError::NetworkOverridesRequireNetworkProver);
         }
@@ -622,7 +633,7 @@ impl From<Sp1Response> for Proof {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionMode, ProverMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
+        ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
         Sp1FulfillmentStrategy, Sp1NetworkMode, Sp1RequestContext,
     };
 
@@ -729,5 +740,65 @@ mod tests {
             .expect("local cycle_limit override should be accepted");
         assert_eq!(resolved.prover, ProverMode::Local);
         assert_eq!(resolved.cycle_limit, 251_290_908);
+    }
+
+    #[test]
+    fn resolve_request_config_forces_compressed_for_proposal_prove() {
+        let config = Sp1Config {
+            recursion: RecursionMode::Plonk,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            recursion: Some(RecursionMode::Core),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("proposal prove should resolve");
+        assert_eq!(resolved.recursion, RecursionMode::Compressed);
+    }
+
+    #[test]
+    fn resolve_request_config_forces_plonk_for_aggregation() {
+        let config = Sp1Config {
+            recursion: RecursionMode::Compressed,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            recursion: Some(RecursionMode::Core),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(Some(&overrides), Sp1RequestContext::Aggregation)
+            .expect("aggregation should resolve");
+        assert_eq!(resolved.recursion, RecursionMode::Plonk);
+    }
+
+    #[test]
+    fn resolve_request_config_keeps_execute_mode_open_for_non_aggregate_proposals() {
+        let config = Sp1Config {
+            recursion: RecursionMode::Plonk,
+            mode: ExecutionMode::Execute,
+            prover: ProverMode::Local,
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            recursion: Some(RecursionMode::Core),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("non-aggregate execute should resolve");
+        assert_eq!(resolved.mode, ExecutionMode::Execute);
+        assert_eq!(resolved.recursion, RecursionMode::Core);
     }
 }

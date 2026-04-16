@@ -36,7 +36,7 @@ sol! {
 }
 
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 10;
-const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 2;
+const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 64;
 
 /// Shasta hardfork specification.
 #[derive(Debug)]

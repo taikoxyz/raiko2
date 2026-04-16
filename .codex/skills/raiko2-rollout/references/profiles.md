@@ -18,7 +18,8 @@ This skill currently supports one production profile only.
 
 - `xtask register-image` profile: `hoodi-shasta`
 - Default backend: `all`
-- Default private-key env var: `PRIVATE_KEY`
+- Preferred private-key source: repo-root `.env`
+- Fallback private-key env var: `PRIVATE_KEY`
 
 ### Passive Smoke Target
 

@@ -115,7 +115,7 @@ lock_collateral = "20"
 [queue]
 backend = "memory"
 namespace = "raiko2:queue"
-workers = 1
+workers = 3
 maintenance_interval_ms = 200
 # redis_url = "redis://localhost:6379/"
 

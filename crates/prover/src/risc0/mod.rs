@@ -10,7 +10,7 @@ pub use types::{Risc0Config, Risc0ExecutionMetadata, Risc0Response};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{GuestInput, instance::words_to_bytes_le};
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
     default_executor, default_prover, get_prover_server,
@@ -18,8 +18,9 @@ use risc0_zkvm::{
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, build_shasta_aggregation_input, encode_risc0_proof_payload,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    GuestInputCodec, build_shasta_aggregation_input, encode_risc0_aggregation_proof_payload,
+    encode_risc0_proposal_proof_payload, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -286,7 +287,10 @@ where
 
             Ok::<Proof, RaikoError>(
                 Risc0Response {
-                    proof: encode_risc0_proof_payload(&receipt),
+                    proof: encode_risc0_proposal_proof_payload(
+                        &receipt,
+                        B256::from_slice(image_id.as_bytes()),
+                    ),
                     receipt: receipt_json,
                     image_id: Self::image_id_hex(image_id),
                     input: input_hash,
@@ -323,6 +327,7 @@ where
                 prover.config.execution_po2,
             )?;
             let image_id = Self::compute_image_id(&elf)?;
+            let block_image_id = B256::from(words_to_bytes_le(&aggregation_input.image_id));
             let (receipt, extra_data) = prover.execute_proof(
                 env,
                 &elf,
@@ -340,7 +345,11 @@ where
 
             Ok::<Proof, RaikoError>(
                 Risc0Response {
-                    proof: encode_risc0_proof_payload(&receipt),
+                    proof: encode_risc0_aggregation_proof_payload(
+                        &receipt,
+                        block_image_id,
+                        B256::from_slice(image_id.as_bytes()),
+                    ),
                     receipt: receipt_json,
                     image_id: Self::image_id_hex(image_id),
                     input: agg_input_hash,

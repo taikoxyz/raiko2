@@ -65,6 +65,30 @@ curl http://127.0.0.1:8087/v3/tasks/<task_id>
 `sp1.mode=execute` completes without a zk proof and stores the execution report under
 `proposals[].extra_data.sp1`.
 
+## Generate A Latest Proposal Request
+
+Use the new `xtask` helper to discover the latest onchain Shasta proposal and emit a ready-to-post
+`/v3/proof/batch/shasta` JSON body.
+
+Print a mainnet request to stdout:
+
+```bash
+cargo run -r -p xtask -- latest-proposal-request --profile taiko-mainnet
+```
+
+Write a Hoodi request to a file with explicit RPC overrides:
+
+```bash
+cargo run -r -p xtask -- latest-proposal-request \
+  --profile taiko-hoodi \
+  --l1-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
+  --l2-rpc-url http://34.172.70.130:8545 \
+  -o target/latest-proposal/hoodi.json
+```
+
+The helper scans recent L1 `Proposed` logs to find the newest proposal, then scans recent L2 block
+headers to recover the contiguous `l2_block_numbers` range for that proposal.
+
 ## Build Guest ELFs
 
 Guest programs live under `guests/` as standalone crates. Use `just` by default:

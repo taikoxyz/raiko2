@@ -7,8 +7,8 @@ Confirm all of these before reporting success:
 - Kubernetes context matches `tolba-prod`
 - current deployment revision and image were captured before rollout
 - dirty worktree state was shown
-- `register-image` dry-run was executed
 - pushed image digest was captured
+- `register-image` dry-run was executed after `release-image`
 - `kubectl set image` and `kubectl rollout status` both succeeded
 - new deployment revision was captured
 - at least one new pod is `Ready`
@@ -41,21 +41,24 @@ The image was built from the current worktree, not a single clean commit.
 When dry-run shows pending registrations:
 
 - stop the automatic rollout flow
+- keep the built image tag and digest in the report
 - report the exact backend/object list that needs registration
-- say whether `PRIVATE_KEY` is available
+- say whether `PRIVATE_KEY` is available from repo-root `.env` or the current environment
 - do not apply automatically unless the user explicitly asks for it
 
 Use this report shape:
 
 ```text
-Rollout paused before image build.
+Rollout paused after image build and before rollout.
+
+Built image: <tag> <digest>
 
 Register check found pending registrations for:
 - <item-1>
 - <item-2>
 
 Apply requested: no
-PRIVATE_KEY present: yes | no
+PRIVATE_KEY source: .env | env | unavailable
 Next step required: explicit confirmation before running register-image --apply
 ```
 

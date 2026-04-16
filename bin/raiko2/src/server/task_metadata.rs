@@ -1,8 +1,14 @@
+use alloy_primitives::{hex, keccak256};
+use raiko2_engine::{
+    AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
+};
+use raiko2_pipeline::PipelineKey;
 use raiko2_primitives::{ProofType, ShastaCheckpoint, proof_type::lowercase};
 use raiko2_prover::{
     BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
     Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
 };
+use raiko2_queue::decode_task_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -17,7 +23,10 @@ pub(crate) struct HoodiTaskMetadata {
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
     pub(crate) proposals: Vec<HoodiProposalTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) aggregate_request: Option<AggregationTaskRequest>,
     #[serde(default)]
     pub(crate) runtime: HoodiRuntimeMetadata,
 }
@@ -31,6 +40,8 @@ pub(crate) struct HoodiProposalTask {
     pub(crate) l2_block_numbers: Vec<u64>,
     pub(crate) last_anchor_block_number: u64,
     pub(crate) task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<ProposalTaskRequest>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -105,6 +116,25 @@ impl HoodiTaskMetadata {
 
     pub(crate) const fn aggregate_runtime(&self) -> Option<&HoodiTaskRuntimeMetadata> {
         self.runtime.aggregate.as_ref()
+    }
+
+    pub(crate) fn aggregate_engine_task_id(
+        &self,
+        pipeline_key: PipelineKey,
+    ) -> Option<EngineTaskId> {
+        self.aggregate_request
+            .clone()
+            .map(|request| {
+                EngineTaskId::new(EngineTaskKey::Aggregate {
+                    pipeline: pipeline_key,
+                    request,
+                })
+            })
+            .or_else(|| {
+                self.aggregate_task_id
+                    .as_deref()
+                    .and_then(decode_legacy_aggregate_task_id)
+            })
     }
 
     pub(crate) fn upsert_proposal_runtime(
@@ -192,6 +222,110 @@ impl HoodiTaskMetadata {
     }
 }
 
+impl HoodiProposalTask {
+    pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> Option<EngineTaskId> {
+        self.request
+            .clone()
+            .map(|request| {
+                EngineTaskId::new(EngineTaskKey::Proposal {
+                    pipeline: pipeline_key,
+                    request,
+                    stage: ProposalStage::Prove,
+                })
+            })
+            .or_else(|| decode_legacy_proposal_task_id(&self.task_id))
+    }
+}
+
+pub(crate) fn proposal_task_ref(
+    pipeline_key: PipelineKey,
+    request: &ProposalTaskRequest,
+) -> String {
+    stable_task_ref("proposal", pipeline_key, request)
+}
+
+pub(crate) fn aggregate_task_ref(
+    pipeline_key: PipelineKey,
+    request: &AggregationTaskRequest,
+) -> String {
+    stable_task_ref("aggregate", pipeline_key, request)
+}
+
+pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
+    match &task_id.0 {
+        EngineTaskKey::Proposal {
+            pipeline,
+            request,
+            stage,
+        } => stable_stage_ref(*pipeline, request, *stage),
+        EngineTaskKey::Aggregate { pipeline, request } => aggregate_task_ref(*pipeline, request),
+    }
+}
+
+fn decode_legacy_proposal_task_id(raw: &str) -> Option<EngineTaskId> {
+    match decode_task_id::<EngineTaskKey>(raw).ok()?.0 {
+        EngineTaskKey::Proposal {
+            pipeline,
+            request,
+            stage: _,
+        } => Some(EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request,
+            stage: ProposalStage::Prove,
+        })),
+        EngineTaskKey::Aggregate { .. } => None,
+    }
+}
+
+fn decode_legacy_aggregate_task_id(raw: &str) -> Option<EngineTaskId> {
+    let task_id = decode_task_id::<EngineTaskKey>(raw).ok()?;
+    matches!(task_id.0, EngineTaskKey::Aggregate { .. }).then_some(task_id)
+}
+
+fn stable_task_ref<T>(kind: &str, pipeline_key: PipelineKey, request: &T) -> String
+where
+    T: Serialize,
+{
+    let payload = serde_json::json!({
+        "kind": kind,
+        "pipeline_key": pipeline_key.as_str(),
+        "request": request,
+    });
+    stable_ref("task", &payload)
+}
+
+fn stable_stage_ref(
+    pipeline_key: PipelineKey,
+    request: &ProposalTaskRequest,
+    stage: ProposalStage,
+) -> String {
+    let payload = serde_json::json!({
+        "kind": "proposal_stage",
+        "pipeline_key": pipeline_key.as_str(),
+        "request": request,
+        "stage": stage_name(stage),
+    });
+    stable_ref("stage", &payload)
+}
+
+fn stable_ref(prefix: &str, payload: &serde_json::Value) -> String {
+    let encoded =
+        serde_json::to_vec(payload).expect("internal task reference serialization should not fail");
+    format!(
+        "{prefix}_{}",
+        hex::encode_prefixed(keccak256(encoded).as_slice())
+    )
+}
+
+const fn stage_name(stage: ProposalStage) -> &'static str {
+    match stage {
+        ProposalStage::Preflight => "preflight",
+        ProposalStage::Validation => "validation",
+        ProposalStage::Encode => "encode",
+        ProposalStage::Prove => "prove",
+    }
+}
+
 impl HoodiTaskRuntimeMetadata {
     fn apply_boundless_submission(
         &mut self,
@@ -225,7 +359,9 @@ impl HoodiTaskRuntimeMetadata {
 
 impl HoodiStageTimingMetadata {
     fn duration_secs(&self, finished_at_ms: i64) -> f64 {
-        finished_at_ms.saturating_sub(self.started_at_ms) as f64 / 1_000.0
+        let elapsed_ms =
+            u64::try_from(finished_at_ms.saturating_sub(self.started_at_ms)).unwrap_or_default();
+        std::time::Duration::from_millis(elapsed_ms).as_secs_f64()
     }
 }
 
@@ -244,6 +380,7 @@ mod tests {
             aggregate_requested: false,
             proposals: Vec::new(),
             aggregate_task_id: None,
+            aggregate_request: None,
             runtime: HoodiRuntimeMetadata::default(),
         };
         let json = serde_json::to_value(&metadata).expect("serialize metadata");
@@ -264,6 +401,7 @@ mod tests {
             aggregate_requested: false,
             proposals: Vec::new(),
             aggregate_task_id: None,
+            aggregate_request: None,
             runtime: HoodiRuntimeMetadata::default(),
         };
 

@@ -49,9 +49,11 @@ pub(crate) struct BatchShastaRequest {
     pub(super) prover_args: PublicProverArgs,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AggregateProofRequest {
+    #[serde(default)]
+    pub(super) aggregation_ids: Vec<u64>,
     pub(super) proofs: Vec<Proof>,
     pub(super) proof_type: HoodiProofType,
     #[serde(default)]
@@ -79,7 +81,7 @@ pub(super) struct ShastaProposal {
     pub(super) last_anchor_block_number: u64,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct PublicProverArgs {
     pub(super) native: Option<Value>,

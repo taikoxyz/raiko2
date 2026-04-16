@@ -114,7 +114,7 @@ pub struct QueueConfig {
 }
 
 const fn default_queue_workers() -> usize {
-    1
+    3
 }
 
 impl Default for QueueConfig {

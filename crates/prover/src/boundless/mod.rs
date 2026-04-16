@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use alloy_primitives::{
-    Bytes, U256,
+    B256, Bytes, U256,
     utils::{parse_ether, parse_units},
 };
 use alloy_signer_local::PrivateKeySigner;
@@ -34,8 +34,8 @@ use url::Url;
 
 use crate::{
     BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver, RISC0_SEAL_PAYLOAD_KIND,
-    decode_hex_payload, parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-    with_shasta_extra_data,
+    decode_hex_payload, encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -450,6 +450,7 @@ impl BoundlessProver {
         submission: &Submission,
         proof_type: &'static str,
         image_id: Digest,
+        block_image_id: Option<Digest>,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
         proposal_carry_data: Option<&ProofCarryData>,
@@ -566,8 +567,28 @@ impl BoundlessProver {
                         }
                         _ => Some(stage_metadata),
                     };
+                    let proof = match proof_type {
+                        "proposal" => encode_risc0_proposal_seal_payload(
+                            &seal,
+                            B256::from_slice(image_id.as_bytes()),
+                        ),
+                        _ => encode_risc0_aggregation_seal_payload(
+                            &seal,
+                            B256::from_slice(
+                                block_image_id
+                                    .ok_or_else(|| {
+                                        RaikoError::Guest(
+                                            "missing block image id for aggregation proof"
+                                                .to_string(),
+                                        )
+                                    })?
+                                    .as_bytes(),
+                            ),
+                            B256::from_slice(image_id.as_bytes()),
+                        ),
+                    };
                     return Ok(Proof {
-                        proof: Some(alloy_primitives::hex::encode_prefixed(seal)),
+                        proof: Some(proof),
                         input: Some(input_hash),
                         quote: receipt_json,
                         uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
@@ -589,6 +610,7 @@ impl BoundlessProver {
         proof_type: &'static str,
         input: Bytes,
         elf: &[u8],
+        block_image_id: Option<Digest>,
         proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
@@ -636,6 +658,7 @@ impl BoundlessProver {
             &submission,
             proof_type,
             program.image_id,
+            block_image_id,
             quoted_mcycles_count,
             evaluated_mcycles_count,
             proposal_carry_data.as_ref(),
@@ -678,6 +701,7 @@ where
             "proposal",
             input,
             &elf,
+            None,
             Some(guest_input.proof_carry_data),
             None,
         ))
@@ -700,6 +724,7 @@ where
             "proposal",
             input,
             &elf,
+            None,
             Some(guest_input.proof_carry_data),
             observer,
         ))
@@ -730,6 +755,7 @@ where
             "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
+            Some(proposal_image_id),
             None,
             None,
         ))
@@ -761,6 +787,7 @@ where
             "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
+            Some(proposal_image_id),
             None,
             observer,
         ))

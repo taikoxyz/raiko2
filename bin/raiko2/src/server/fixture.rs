@@ -23,6 +23,7 @@ use raiko2_prover::{
     native::NativeProver,
     sp1::{
         ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigOverrides, Sp1RequestContext,
+        Sp1SystemConfig,
     },
 };
 use raiko2_provider::Provider;
@@ -291,7 +292,7 @@ impl FixtureSp1Prover {
     fn resolve_config(
         &self,
         config: &ProverConfig,
-        context: Sp1RequestContext,
+        fallback_context: Sp1RequestContext,
     ) -> RaikoResult<Sp1Config> {
         let overrides = match config.get("sp1") {
             Some(value) => Sp1ConfigOverrides::deserialize(value).map_err(|e| {
@@ -299,8 +300,21 @@ impl FixtureSp1Prover {
             })?,
             None => Sp1ConfigOverrides::default(),
         };
+        let system = match config.get("sp1_system") {
+            Some(value) => Some(Sp1SystemConfig::deserialize(value).map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to parse internal 'sp1_system' config: {e}"
+                ))
+            })?),
+            None => None,
+        };
         self.config
-            .resolve_request_config(Some(&overrides), context)
+            .resolve_request_config(Some(&overrides), fallback_context)
+            .map(|config| {
+                system
+                    .as_ref()
+                    .map_or(config.clone(), |system| system.applied_to(&config))
+            })
             .map_err(|err| RaikoError::InvalidRequestConfig(err.to_string()))
     }
 }

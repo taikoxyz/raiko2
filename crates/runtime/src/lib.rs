@@ -297,8 +297,15 @@ impl RuntimeManager {
         &self,
         engine_task_id: &str,
     ) -> Result<Option<RuntimeTaskRecord>> {
+        self.find_task_by_task_ref(engine_task_id).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the task record cannot be loaded.
+    pub async fn find_task_by_task_ref(&self, task_ref: &str) -> Result<Option<RuntimeTaskRecord>> {
         Ok(self
-            .find_tasks_by_engine_task_id(engine_task_id)
+            .find_tasks_by_task_ref(task_ref)
             .await?
             .into_iter()
             .next())
@@ -311,8 +318,15 @@ impl RuntimeManager {
         &self,
         engine_task_id: &str,
     ) -> Result<Vec<RuntimeTaskRecord>> {
+        self.find_tasks_by_task_ref(engine_task_id).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the matching task records cannot be loaded.
+    pub async fn find_tasks_by_task_ref(&self, task_ref: &str) -> Result<Vec<RuntimeTaskRecord>> {
         let conn = self.connection().await?;
-        let engine_task_id = engine_task_id.to_string();
+        let task_ref = task_ref.to_string();
         let tasks = conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
@@ -333,7 +347,7 @@ impl RuntimeManager {
                     ORDER BY updated_at DESC, task_id ASC
                     ",
                 )?;
-                let mut rows = stmt.query(params![engine_task_id])?;
+                let mut rows = stmt.query(params![task_ref])?;
                 let mut matches = Vec::new();
                 while let Some(row) = rows.next()? {
                     matches.push(runtime_task_record_from_row(row)?);
@@ -341,7 +355,7 @@ impl RuntimeManager {
                 Ok(matches)
             })
             .await
-            .context("failed to query runtime task by engine task id")?;
+            .context("failed to query runtime task by task reference")?;
         Ok(tasks)
     }
 

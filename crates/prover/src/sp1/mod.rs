@@ -416,6 +416,60 @@ fn sp1_proof_mode_name(proof: &SP1ProofWithPublicValues) -> &'static str {
     }
 }
 
+fn encode_sp1_onchain_payload(segments: &[String], proof_bytes: &[u8]) -> String {
+    let mut payload = String::from("0x");
+    for segment in segments {
+        payload.push_str(segment.strip_prefix("0x").unwrap_or(segment));
+    }
+    payload.push_str(&alloy_primitives::hex::encode(proof_bytes));
+    payload
+}
+
+pub fn encode_sp1_proposal_proof_payload(
+    proof: &SP1ProofWithPublicValues,
+    vk: &SP1VerifyingKey,
+) -> Option<String> {
+    let proof_bytes = remote_verifier_proof_bytes(proof)?;
+    Some(encode_sp1_onchain_payload(&[vk.bytes32()], &proof_bytes))
+}
+
+pub fn encode_sp1_aggregation_proof_payload(
+    proof: &SP1ProofWithPublicValues,
+    aggregation_vk: &SP1VerifyingKey,
+    block_vk: &SP1VerifyingKey,
+) -> Option<String> {
+    let proof_bytes = remote_verifier_proof_bytes(proof)?;
+    Some(encode_sp1_onchain_payload(
+        &[
+            aggregation_vk.bytes32(),
+            alloy_primitives::hex::encode_prefixed(block_vk.hash_bytes()),
+        ],
+        &proof_bytes,
+    ))
+}
+
+pub fn load_sp1_subproof_for_aggregation(proof: &Proof) -> RaikoResult<SP1Proof> {
+    if let Some(quote) = proof.quote.as_deref() {
+        return serde_json::from_str::<SP1Proof>(quote)
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize SP1 proof quote: {e}")));
+    }
+
+    if let Some(proof_hex) = proof.proof.as_deref() {
+        let proof_bytes = alloy_primitives::hex::decode(proof_hex)
+            .map_err(|e| RaikoError::Guest(format!("Failed to decode proof hex: {e}")))?;
+        let legacy: SP1ProofWithPublicValues = bincode::deserialize(&proof_bytes).map_err(|e| {
+            RaikoError::Guest(format!(
+                "Failed to deserialize legacy SP1ProofWithPublicValues: {e}"
+            ))
+        })?;
+        return Ok(legacy.proof);
+    }
+
+    Err(RaikoError::Guest(
+        "Aggregation requires SP1 quote or legacy proof bytes".to_string(),
+    ))
+}
+
 // Old `raiko` only ran remote contract verification when the proof could be encoded into
 // onchain verifier bytes. Shasta proposal proofs used for aggregation are `Compressed`, so they
 // must skip this path.
@@ -575,11 +629,9 @@ fn prove_proposal_with_client(
 
     let public_values = proof.public_values.as_slice();
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
-    let proof_bytes = bincode::serialize(&proof)
-        .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
 
     Ok(Sp1Response {
-        proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
+        proof: encode_sp1_proposal_proof_payload(&proof, &vk),
         vkey_hash: Some(sp1_vk_digest(&vk)),
         input: input_hash,
         sp1_proof: Some(proof),
@@ -608,15 +660,13 @@ async fn prove_proposal_with_network_client(
 
     let public_values = request.proof.public_values.as_slice();
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
-    let proof_bytes = bincode::serialize(&request.proof)
-        .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
     let base_extra_data = with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
 
     Ok(Sp1Response {
-        proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
+        proof: encode_sp1_proposal_proof_payload(&request.proof, &vk),
         vkey_hash: Some(sp1_vk_digest(&vk)),
         input: input_hash,
         sp1_proof: Some(request.proof),
@@ -646,24 +696,14 @@ where
     let verifier_key = proposal_vk.clone();
 
     for proof in &input.proofs {
-        if let Some(proof_hex) = &proof.proof {
-            let proof_bytes = alloy_primitives::hex::decode(proof_hex)
-                .map_err(|e| RaikoError::Guest(format!("Failed to decode proof hex: {e}")))?;
-            let sp1_proof_with_pv: SP1ProofWithPublicValues = bincode::deserialize(&proof_bytes)
-                .map_err(|e| {
-                    RaikoError::Guest(format!(
-                        "Failed to deserialize SP1ProofWithPublicValues: {e}"
-                    ))
-                })?;
-            match sp1_proof_with_pv.proof {
-                SP1Proof::Compressed(reduce_proof) => {
-                    stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
-                }
-                _ => {
-                    return Err(RaikoError::Guest(
-                        "Aggregation requires Compressed proofs".to_string(),
-                    ));
-                }
+        match load_sp1_subproof_for_aggregation(proof)? {
+            SP1Proof::Compressed(reduce_proof) => {
+                stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
+            }
+            _ => {
+                return Err(RaikoError::Guest(
+                    "Aggregation requires Compressed proofs".to_string(),
+                ));
             }
         }
     }
@@ -687,11 +727,9 @@ where
 
     let public_values = proof.public_values.as_slice();
     let agg_input_hash = parse_shasta_aggregation_input_hash(public_values);
-    let proof_bytes = bincode::serialize(&proof)
-        .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
 
     Ok(Sp1Response {
-        proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
+        proof: encode_sp1_aggregation_proof_payload(&proof, &vk, &proposal_vk),
         vkey_hash: Some(sp1_vk_digest(&vk)),
         input: agg_input_hash,
         sp1_proof: Some(proof),
@@ -718,24 +756,14 @@ where
     let verifier_key = proposal_vk.clone();
 
     for proof in &input.proofs {
-        if let Some(proof_hex) = &proof.proof {
-            let proof_bytes = alloy_primitives::hex::decode(proof_hex)
-                .map_err(|e| RaikoError::Guest(format!("Failed to decode proof hex: {e}")))?;
-            let sp1_proof_with_pv: SP1ProofWithPublicValues = bincode::deserialize(&proof_bytes)
-                .map_err(|e| {
-                    RaikoError::Guest(format!(
-                        "Failed to deserialize SP1ProofWithPublicValues: {e}"
-                    ))
-                })?;
-            match sp1_proof_with_pv.proof {
-                SP1Proof::Compressed(reduce_proof) => {
-                    stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
-                }
-                _ => {
-                    return Err(RaikoError::Guest(
-                        "Aggregation requires Compressed proofs".to_string(),
-                    ));
-                }
+        match load_sp1_subproof_for_aggregation(proof)? {
+            SP1Proof::Compressed(reduce_proof) => {
+                stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
+            }
+            _ => {
+                return Err(RaikoError::Guest(
+                    "Aggregation requires Compressed proofs".to_string(),
+                ));
             }
         }
     }
@@ -759,14 +787,12 @@ where
 
     let public_values = request.proof.public_values.as_slice();
     let agg_input_hash = parse_shasta_aggregation_input_hash(public_values);
-    let proof_bytes = bincode::serialize(&request.proof)
-        .map_err(|e| RaikoError::Guest(format!("Failed to serialize proof: {e}")))?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
 
     Ok(Sp1Response {
-        proof: Some(alloy_primitives::hex::encode_prefixed(&proof_bytes)),
+        proof: encode_sp1_aggregation_proof_payload(&request.proof, &vk, &proposal_vk),
         vkey_hash: Some(sp1_vk_digest(&vk)),
         input: agg_input_hash,
         sp1_proof: Some(request.proof),
@@ -925,9 +951,13 @@ fn insert_sp1_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::{remote_verifier_program_vkey, remote_verifier_proof_bytes};
+    use super::{
+        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
+        remote_verifier_program_vkey, remote_verifier_proof_bytes,
+    };
     use alloy_primitives::B256;
-    use raiko2_guests::sp1::shasta::PROPOSAL_ELF;
+    use raiko2_guests::sp1::shasta::{AGGREGATION_ELF, PROPOSAL_ELF};
+    use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::words_to_bytes_le;
     use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
     use std::str::FromStr;
@@ -979,5 +1009,71 @@ mod tests {
         assert!(remote_verifier_proof_bytes(&core).is_none());
         assert!(remote_verifier_proof_bytes(&compressed).is_none());
         assert!(remote_verifier_proof_bytes(&plonk).is_none());
+    }
+
+    #[test]
+    fn sp1_aggregation_payload_layout_matches_legacy_raiko() {
+        let client = ProverClient::builder().mock().build();
+        let (_, block_vk) = client.setup(PROPOSAL_ELF);
+        let (_, aggregation_vk) = client.setup(AGGREGATION_ELF);
+        let proof_bytes = [0xaa, 0xbb, 0xcc];
+
+        let payload = encode_sp1_onchain_payload(
+            &[
+                aggregation_vk.bytes32(),
+                alloy_primitives::hex::encode_prefixed(block_vk.hash_bytes()),
+            ],
+            &proof_bytes,
+        );
+
+        assert_eq!(
+            payload,
+            format!(
+                "{}{}{}",
+                aggregation_vk.bytes32(),
+                alloy_primitives::hex::encode(block_vk.hash_bytes()),
+                alloy_primitives::hex::encode(proof_bytes)
+            )
+        );
+    }
+
+    #[test]
+    fn load_sp1_subproof_for_aggregation_prefers_quote() {
+        let client = ProverClient::builder().mock().build();
+        let (pk, _) = client.setup(PROPOSAL_ELF);
+        let compressed = SP1ProofWithPublicValues::create_mock_proof(
+            &pk,
+            sp1_sdk::SP1PublicValues::new(),
+            SP1ProofMode::Compressed,
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+        );
+        let proof = Proof {
+            quote: Some(serde_json::to_string(&compressed.proof).expect("serialize quote")),
+            proof: Some("0xdeadbeef".to_string()),
+            ..Proof::default()
+        };
+
+        let loaded = load_sp1_subproof_for_aggregation(&proof).expect("load subproof");
+        assert!(matches!(loaded, sp1_sdk::SP1Proof::Compressed(_)));
+    }
+
+    #[test]
+    fn load_sp1_subproof_for_aggregation_accepts_legacy_bincode_payload() {
+        let client = ProverClient::builder().mock().build();
+        let (pk, _) = client.setup(PROPOSAL_ELF);
+        let compressed = SP1ProofWithPublicValues::create_mock_proof(
+            &pk,
+            sp1_sdk::SP1PublicValues::new(),
+            SP1ProofMode::Compressed,
+            sp1_sdk::SP1_CIRCUIT_VERSION,
+        );
+        let encoded = bincode::serialize(&compressed).expect("serialize legacy payload");
+        let proof = Proof {
+            proof: Some(alloy_primitives::hex::encode_prefixed(encoded)),
+            ..Proof::default()
+        };
+
+        let loaded = load_sp1_subproof_for_aggregation(&proof).expect("load legacy subproof");
+        assert!(matches!(loaded, sp1_sdk::SP1Proof::Compressed(_)));
     }
 }

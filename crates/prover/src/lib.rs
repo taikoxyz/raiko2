@@ -247,7 +247,11 @@ pub fn validate_external_aggregate_proofs(
                 }
             }
             raiko2_pipeline::PipelineKey::ShastaSp1 => {
-                if proof.input.is_none() || proof.extra_data.is_none() || proof.uuid.is_none() {
+                if proof.input.is_none()
+                    || proof.extra_data.is_none()
+                    || proof.uuid.is_none()
+                    || (proof.quote.is_none() && proof.proof.is_none())
+                {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing SP1 aggregation metadata"
                     )));
@@ -405,6 +409,21 @@ mod tests {
         proof.uuid = None;
 
         let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing uuid");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing SP1 aggregation metadata")
+        );
+    }
+
+    #[test]
+    fn aggregate_validator_rejects_sp1_proof_without_quote_or_legacy_payload() {
+        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
+        let mut proof = aggregate_proof_fixture();
+        proof.proof = None;
+        proof.quote = None;
+
+        let err =
+            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof data");
         assert!(
             err.to_string()
                 .contains("proof 0 is missing SP1 aggregation metadata")

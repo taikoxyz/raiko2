@@ -19,7 +19,8 @@ use raiko2_prover::Prover;
 use raiko2_prover::native::NativeProver;
 use raiko2_prover::sp1::{
     ProverMode as Sp1ProverMode, Sp1Config, Sp1FulfillmentStrategy, Sp1NetworkMode,
-    sp1_image_id_words_from_uuid, sp1_vk_uuid,
+    encode_sp1_aggregation_proof_payload, encode_sp1_proposal_proof_payload,
+    load_sp1_subproof_for_aggregation, sp1_image_id_words_from_uuid, sp1_vk_uuid,
 };
 use serde::Serialize;
 use sp1_sdk::utils::setup_logger;
@@ -398,12 +399,12 @@ async fn run_aggregation(args: Args) -> Result<()> {
         .elf(ProofStage::Aggregation)
         .context("load SP1 aggregation ELF")?;
     let start = Instant::now();
-    let proof = match sp1_config.prover {
+    let (proof, proposal_vk) = match sp1_config.prover {
         Sp1ProverMode::Mock => {
             let prover = ProverClient::builder().mock().build();
             let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
-                match proof.proof {
+                match proof {
                     SP1Proof::Compressed(reduce_proof) => {
                         stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
                     }
@@ -411,20 +412,23 @@ async fn run_aggregation(args: Args) -> Result<()> {
                 }
             }
             let (pk, vk) = prover.setup(elf);
-            Sp1ProofOutput {
-                proof: prover
-                    .prove(&pk, &stdin)
-                    .mode(args.proof_mode.into())
-                    .run()
-                    .context("prove failed")?,
-                vkey: vk,
-            }
+            (
+                Sp1ProofOutput {
+                    proof: prover
+                        .prove(&pk, &stdin)
+                        .mode(args.proof_mode.into())
+                        .run()
+                        .context("prove failed")?,
+                    vkey: vk,
+                },
+                proposal_vk,
+            )
         }
         Sp1ProverMode::Local => {
             let prover = ProverClient::builder().cpu().build();
             let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
-                match proof.proof {
+                match proof {
                     SP1Proof::Compressed(reduce_proof) => {
                         stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
                     }
@@ -432,20 +436,23 @@ async fn run_aggregation(args: Args) -> Result<()> {
                 }
             }
             let (pk, vk) = prover.setup(elf);
-            Sp1ProofOutput {
-                proof: prover
-                    .prove(&pk, &stdin)
-                    .mode(args.proof_mode.into())
-                    .run()
-                    .context("prove failed")?,
-                vkey: vk,
-            }
+            (
+                Sp1ProofOutput {
+                    proof: prover
+                        .prove(&pk, &stdin)
+                        .mode(args.proof_mode.into())
+                        .run()
+                        .context("prove failed")?,
+                    vkey: vk,
+                },
+                proposal_vk,
+            )
         }
         Sp1ProverMode::Network => {
             let prover = build_sp1_network_prover(&sp1_config)?;
             let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
-                match proof.proof {
+                match proof {
                     SP1Proof::Compressed(reduce_proof) => {
                         stdin.write_proof(*reduce_proof, proposal_vk.vk.clone());
                     }
@@ -453,9 +460,12 @@ async fn run_aggregation(args: Args) -> Result<()> {
                 }
             }
             let (pk, _) = prover.setup(elf);
-            request_network_proof(&prover, &pk, stdin, args.proof_mode.into(), &sp1_config)
-                .await
-                .context("prove failed")?
+            (
+                request_network_proof(&prover, &pk, stdin, args.proof_mode.into(), &sp1_config)
+                    .await
+                    .context("prove failed")?,
+                proposal_vk,
+            )
         }
     };
     let report = BenchReport {
@@ -477,7 +487,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
         memory_snapshots: Vec::new(),
     };
 
-    let output = build_sp1_proof_output(&proof.proof, proof.vkey(), None)?;
+    let output = build_sp1_aggregation_output(&proof.proof, proof.vkey(), &proposal_vk)?;
     write_proof_json(output_path, &output)?;
 
     println!("public_values: {}", report.public_values);
@@ -492,9 +502,10 @@ async fn run_aggregation(args: Args) -> Result<()> {
     Ok(())
 }
 
-fn build_sp1_proof_output(
+fn build_sp1_output(
     proof: &SP1ProofWithPublicValues,
     vk: &SP1VerifyingKey,
+    proof_payload: Option<String>,
     carry: Option<&ProofCarryData>,
 ) -> Result<Proof> {
     let public_values = proof.public_values.as_slice();
@@ -503,19 +514,46 @@ fn build_sp1_proof_output(
     } else {
         B256::default()
     };
-    let proof_bytes = bincode::serialize(proof).context("serialize SP1 proof")?;
     let extra_data = match carry {
         Some(data) => Some(encode_proof_carry_data(data)?),
         None => None,
     };
+    let quote = serde_json::to_string(&proof.proof).context("serialize SP1 quote")?;
 
     Ok(Proof {
-        proof: Some(hex::encode_prefixed(&proof_bytes)),
+        proof: proof_payload,
         input: Some(input_hash),
+        quote: Some(quote),
         uuid: Some(sp1_vk_uuid(vk)),
         extra_data,
         ..Default::default()
     })
+}
+
+fn build_sp1_proposal_output(
+    proof: &SP1ProofWithPublicValues,
+    vk: &SP1VerifyingKey,
+    carry: Option<&ProofCarryData>,
+) -> Result<Proof> {
+    build_sp1_output(
+        proof,
+        vk,
+        encode_sp1_proposal_proof_payload(proof, vk),
+        carry,
+    )
+}
+
+fn build_sp1_aggregation_output(
+    proof: &SP1ProofWithPublicValues,
+    aggregation_vk: &SP1VerifyingKey,
+    block_vk: &SP1VerifyingKey,
+) -> Result<Proof> {
+    build_sp1_output(
+        proof,
+        aggregation_vk,
+        encode_sp1_aggregation_proof_payload(proof, aggregation_vk, block_vk),
+        None,
+    )
 }
 
 #[derive(Clone)]
@@ -643,7 +681,7 @@ async fn run_sp1_proposal(
 
                     if let Some(path) = &args.output {
                         let output =
-                            build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
+                            build_sp1_proposal_output(&proof, &vk, Some(&input.proof_carry_data))?;
                         write_proof_json(path, &output)?;
                     }
                 }
@@ -666,7 +704,7 @@ async fn run_sp1_proposal(
 
                     if let Some(path) = &args.output {
                         let output =
-                            build_sp1_proof_output(&proof, &vk, Some(&input.proof_carry_data))?;
+                            build_sp1_proposal_output(&proof, &vk, Some(&input.proof_carry_data))?;
                         write_proof_json(path, &output)?;
                     }
                 }
@@ -691,7 +729,7 @@ async fn run_sp1_proposal(
                     println!("public_values: {}", report.public_values);
 
                     if let Some(path) = &args.output {
-                        let output = build_sp1_proof_output(
+                        let output = build_sp1_proposal_output(
                             &output.proof,
                             output.vkey(),
                             Some(&input.proof_carry_data),
@@ -770,11 +808,7 @@ fn read_proofs(paths: &[PathBuf]) -> Result<Vec<Proof>> {
 
 fn build_aggregation_inputs(
     proofs: &[Proof],
-) -> Result<(
-    ShastaZkAggregationGuestInput,
-    Vec<SP1ProofWithPublicValues>,
-    [u32; 8],
-)> {
+) -> Result<(ShastaZkAggregationGuestInput, Vec<SP1Proof>, [u32; 8])> {
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
     let mut block_inputs = Vec::with_capacity(proofs.len());
     let mut sp1_proofs = Vec::with_capacity(proofs.len());
@@ -805,10 +839,8 @@ fn build_aggregation_inputs(
             image_id = Some(candidate_id);
         }
 
-        let proof_hex = proof.proof.as_deref().context("missing proof bytes")?;
-        let proof_bytes = hex::decode(proof_hex).context("decode proof hex")?;
-        let sp1_proof: SP1ProofWithPublicValues =
-            bincode::deserialize(&proof_bytes).context("deserialize SP1 proof")?;
+        let sp1_proof = load_sp1_subproof_for_aggregation(proof)
+            .map_err(|err| anyhow::anyhow!("load SP1 aggregation subproof: {err}"))?;
         sp1_proofs.push(sp1_proof);
     }
 

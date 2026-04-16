@@ -12,7 +12,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use raiko2_guests::{
     risc0::shasta::{
-        AGGREGATION_ELF as RISC0_SHASTA_AGGREGATION_ELF, PROPOSAL_ELF as RISC0_SHASTA_PROPOSAL_ELF,
+        AGGREGATION_ELF as RISC0_SHASTA_AGGREGATION_ELF,
+        BOUNDLESS_AGGREGATION_ELF as RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF,
+        PROPOSAL_ELF as RISC0_SHASTA_PROPOSAL_ELF,
     },
     sp1::shasta::{
         AGGREGATION_ELF as SP1_SHASTA_AGGREGATION_ELF, PROPOSAL_ELF as SP1_SHASTA_PROPOSAL_ELF,
@@ -313,6 +315,12 @@ fn build_risc0_calls(config: &ResolvedProfile) -> Result<Vec<RegistrationCall>> 
             RISC0_SHASTA_AGGREGATION_ELF,
             config.risc0_verifier,
         )?,
+        risc0_call(
+            "risc0_shasta_boundless_aggregation",
+            Stage::Aggregation,
+            RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF,
+            config.risc0_verifier,
+        )?,
     ])
 }
 
@@ -562,11 +570,12 @@ impl RegistrationCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestSource, RegisterImageArgs, RegisterImageProfile, backend_name, digest_source_suffix,
-        resolve_profile,
+        DigestSource, RegisterImageArgs, RegisterImageProfile, backend_name, build_risc0_calls,
+        digest_source_suffix, resolve_profile,
     };
     use crate::Backend;
     use alloy::primitives::{Address, address};
+    use std::collections::BTreeSet;
 
     #[test]
     fn backend_names_match_cli_values() {
@@ -608,5 +617,31 @@ mod tests {
             digest_source_suffix(DigestSource::VkHashBytes),
             "vk-hash-bytes"
         );
+    }
+
+    #[test]
+    fn risc0_plan_includes_boundless_aggregation_registration() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::HoodiShasta,
+            backend: Backend::Risc0,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+
+        let resolved = resolve_profile(&args);
+        let calls = build_risc0_calls(&resolved).expect("build risc0 calls");
+        let keys = calls
+            .iter()
+            .map(|call| call.registration_key.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(calls.len(), 3);
+        assert!(keys.contains("risc0_shasta_proposal-image-id"));
+        assert!(keys.contains("risc0_shasta_aggregation-image-id"));
+        assert!(keys.contains("risc0_shasta_boundless_aggregation-image-id"));
     }
 }

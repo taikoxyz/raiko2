@@ -443,6 +443,7 @@ impl BoundlessProver {
         })
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn poll_until_fulfilled(
         &self,
         client: &Client,
@@ -510,8 +511,7 @@ impl BoundlessProver {
                         Ok(fulfillment) => fulfillment,
                         Err(error) => {
                             consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
-                            let message =
-                                format!("Failed to read boundless fulfillment: {error}");
+                            let message = format!("Failed to read boundless fulfillment: {error}");
                             tracing::warn!(
                                 provider_request_id = submission.provider_request_id,
                                 consecutive_poll_errors,
@@ -581,6 +581,7 @@ impl BoundlessProver {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prove_boundless(
         &self,
         elf_type: ElfType,

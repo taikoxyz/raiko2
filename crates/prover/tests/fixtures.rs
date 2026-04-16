@@ -10,6 +10,11 @@ pub(crate) fn risc0_receipt_json() -> String {
     serde_json::to_string(&receipt).expect("serialize Receipt to JSON")
 }
 
+#[allow(dead_code)]
+pub(crate) fn risc0_receipt_image_id_hex() -> String {
+    alloy_primitives::hex::encode_prefixed(risc0_zkvm::Digest::ZERO.as_bytes())
+}
+
 #[test]
 fn fixture_receipt_json_is_non_empty() {
     assert!(!risc0_receipt_json().is_empty());

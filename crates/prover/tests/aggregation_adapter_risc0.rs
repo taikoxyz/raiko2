@@ -39,7 +39,7 @@ fn builds_risc0_aggregation_input() {
 
     let agg = AggregationInput {
         proofs: vec![proof],
-        expected_image_id: Some(format!("0x{:0>64}", "11")),
+        expected_image_id: Some(fixtures::risc0_receipt_image_id_hex()),
         metadata: None,
     };
 
@@ -82,6 +82,39 @@ fn rejects_invalid_expected_image_id() {
 
     let err = build_risc0_aggregation_input(&agg).unwrap_err();
     assert!(err.to_string().contains("image id") || err.to_string().contains("expected_image_id"));
+}
+
+#[test]
+fn rejects_mismatched_receipt_image_id() {
+    let carry = sample_carry();
+    let proof = ProofEnvelope {
+        backend: "risc0".to_string(),
+        public_inputs: PublicInputs {
+            input_hash: Some(alloy_primitives::hex::encode_prefixed(
+                hash_shasta_subproof_input(&carry).as_slice(),
+            )),
+            instance_hash: None,
+        },
+        payload: ProofPayload {
+            payload_kind: "risc0_seal".to_string(),
+            bytes: vec![],
+        },
+        verifier_artifacts: vec![VerifierArtifact {
+            kind: "receipt_json".to_string(),
+            value: json!(fixtures::risc0_receipt_json()),
+        }],
+        carry_data: Some(encode_proof_carry_data(&carry).expect("encode carry data")),
+        metadata: None,
+    };
+
+    let agg = AggregationInput {
+        proofs: vec![proof],
+        expected_image_id: Some(format!("0x{:0>64}", "11")),
+        metadata: None,
+    };
+
+    let err = build_risc0_aggregation_input(&agg).unwrap_err();
+    assert!(err.to_string().contains("receipt image id"));
 }
 
 fn sample_carry() -> ProofCarryData {

@@ -832,8 +832,8 @@ fn insert_sp1_metadata(
 mod tests {
     use super::remote_verifier_program_vkey;
     use alloy_primitives::B256;
-    use raiko2_primitives_shasta::instance::words_to_bytes_le;
     use raiko2_guests::sp1::shasta::PROPOSAL_ELF;
+    use raiko2_primitives_shasta::instance::words_to_bytes_le;
     use sp1_sdk::{HashableKey, Prover as _, ProverClient};
     use std::str::FromStr;
 

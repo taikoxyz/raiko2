@@ -1,7 +1,9 @@
 use raiko2_primitives::proof::{AggregationInput, VerifierArtifact};
 use raiko2_primitives::{RaikoError, RaikoResult};
 use raiko2_primitives_shasta::ShastaBoundlessAggregationGuestInput;
-use risc0_zkvm::Receipt as ZkvmReceipt;
+use risc0_zkvm::{
+    Digest as ZkvmDigest, InnerReceipt, MaybePruned, Receipt as ZkvmReceipt, VerifierContext,
+};
 use serde_json::Value;
 
 use crate::{build_shasta_aggregation_input, sp1::sp1_image_id_words_from_uuid};
@@ -82,6 +84,8 @@ fn proof_from_envelope(
     envelope: &raiko2_primitives::proof::ProofEnvelope,
     expected_image_id: &str,
 ) -> RaikoResult<raiko2_primitives::Proof> {
+    let receipt = extract_receipt(&envelope.verifier_artifacts)?;
+    let actual_image_id = validate_receipt_image_id(&receipt, expected_image_id)?;
     let input = envelope
         .public_inputs
         .input_hash
@@ -123,8 +127,93 @@ fn proof_from_envelope(
         )),
         input,
         quote,
-        uuid: Some(expected_image_id.to_string()),
+        uuid: Some(alloy_primitives::hex::encode_prefixed(
+            actual_image_id.as_bytes(),
+        )),
         kzg_proof: None,
         extra_data: envelope.carry_data.clone(),
+    })
+}
+
+fn validate_receipt_image_id(
+    receipt: &ZkvmReceipt,
+    expected_image_id: &str,
+) -> RaikoResult<ZkvmDigest> {
+    let expected = parse_expected_image_id(expected_image_id)?;
+    match receipt_image_id(receipt) {
+        Ok(actual) => {
+            if actual != expected {
+                return Err(RaikoError::InvalidRequestConfig(format!(
+                    "receipt image id does not match expected_image_id: expected {}, got {}",
+                    alloy_primitives::hex::encode_prefixed(expected.as_bytes()),
+                    alloy_primitives::hex::encode_prefixed(actual.as_bytes()),
+                )));
+            }
+            Ok(actual)
+        }
+        Err(image_id_error) => {
+            verify_receipt_against_expected_image_id(receipt, expected).map_err(
+                |verify_error| {
+                    RaikoError::InvalidRequestConfig(format!(
+                        "receipt image id could not be determined ({image_id_error}) and \
+                     verification against expected_image_id failed: {verify_error}"
+                    ))
+                },
+            )?;
+            Ok(expected)
+        }
+    }
+}
+
+fn parse_expected_image_id(raw: &str) -> RaikoResult<ZkvmDigest> {
+    let trimmed = raw.strip_prefix("0x").unwrap_or(raw);
+    let bytes = alloy_primitives::hex::decode(trimmed).map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("Invalid expected_image_id/image id: {err}"))
+    })?;
+    if bytes.len() != 32 {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "Invalid expected_image_id/image id length: expected 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    ZkvmDigest::try_from(bytes.as_slice()).map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("Invalid expected_image_id/image id: {err}"))
+    })
+}
+
+fn receipt_image_id(receipt: &ZkvmReceipt) -> RaikoResult<ZkvmDigest> {
+    let claim = receipt.claim().map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("Failed to inspect receipt claim: {err}"))
+    })?;
+    let claim = match claim {
+        MaybePruned::Value(claim) => claim,
+        MaybePruned::Pruned(_) => {
+            return Err(RaikoError::InvalidRequestConfig(
+                "receipt claim is pruned and does not expose an image id".to_string(),
+            ));
+        }
+    };
+
+    Ok(match claim.pre {
+        MaybePruned::Value(pre_state) => pre_state.merkle_root,
+        MaybePruned::Pruned(image_id) => image_id,
+    })
+}
+
+fn verify_receipt_against_expected_image_id(
+    receipt: &ZkvmReceipt,
+    expected_image_id: ZkvmDigest,
+) -> RaikoResult<()> {
+    let result = match &receipt.inner {
+        InnerReceipt::Fake(_) => receipt.verify_with_context(
+            &VerifierContext::default().with_dev_mode(true),
+            expected_image_id,
+        ),
+        _ => receipt.verify(expected_image_id),
+    };
+    result.map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!(
+            "receipt image id does not match expected_image_id: {err}"
+        ))
     })
 }

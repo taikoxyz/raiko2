@@ -4,7 +4,7 @@ use crate::server::task_metadata::HoodiTaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
 use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
-use raiko2_runtime::{ExpiredTaskCursor, RuntimeManager, RuntimeTaskRecord};
+use raiko2_runtime::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -121,7 +121,7 @@ pub(crate) async fn cancel_registered_tasks(
     let mut errors = Vec::new();
 
     for proposal in &metadata.proposals {
-        if has_other_task_reference(runtime, public_task_id, &proposal.task_id).await? {
+        if has_other_live_task_reference(runtime, public_task_id, &proposal.task_id).await? {
             continue;
         }
         let task_id = decode_task_id::<EngineTaskKey>(&proposal.task_id)
@@ -136,7 +136,7 @@ pub(crate) async fn cancel_registered_tasks(
     }
 
     if let Some(task_id) = &metadata.aggregate_task_id
-        && !has_other_task_reference(runtime, public_task_id, task_id).await?
+        && !has_other_live_task_reference(runtime, public_task_id, task_id).await?
     {
         let task_id = decode_task_id::<EngineTaskKey>(task_id)
             .with_context(|| format!("invalid stored aggregate task id {task_id}"))?;
@@ -171,6 +171,26 @@ pub(crate) async fn has_other_task_reference(
     Ok(records
         .into_iter()
         .any(|record| record.task_id != public_task_id))
+}
+
+pub(crate) async fn has_other_live_task_reference(
+    runtime: &RuntimeManager,
+    public_task_id: &str,
+    engine_task_id: &str,
+) -> Result<bool> {
+    let records = runtime
+        .find_tasks_by_engine_task_id(engine_task_id)
+        .await
+        .with_context(|| {
+            format!("failed to inspect runtime task references for {engine_task_id}")
+        })?;
+    Ok(records.into_iter().any(|record| {
+        record.task_id != public_task_id
+            && matches!(
+                record.runner_status,
+                RunnerStatus::Allocated | RunnerStatus::Running
+            )
+    }))
 }
 
 pub(crate) async fn remove_task_children(
@@ -333,8 +353,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, proposal_stage_task_id, proposal_task_chain_ids,
-        run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_stage_task_id,
+        proposal_task_chain_ids, run_runtime_cleanup_pass,
     };
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use crate::server::task_metadata::{
@@ -360,6 +380,7 @@ mod tests {
     #[derive(Default)]
     struct MockEngine {
         removed: Mutex<Vec<String>>,
+        cancelled: Mutex<Vec<String>>,
         fail_on: HashSet<String>,
     }
 
@@ -367,12 +388,17 @@ mod tests {
         fn new(fail_on: HashSet<String>) -> Self {
             Self {
                 removed: Mutex::new(Vec::new()),
+                cancelled: Mutex::new(Vec::new()),
                 fail_on,
             }
         }
 
         fn removed(&self) -> Vec<String> {
             self.removed.lock().expect("removed lock").clone()
+        }
+
+        fn cancelled(&self) -> Vec<String> {
+            self.cancelled.lock().expect("cancelled lock").clone()
         }
     }
 
@@ -409,8 +435,13 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+        fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            let encoded = encode_task_id(&id).expect("encode task id");
+            let cancelled = &self.cancelled;
+            Box::pin(async move {
+                cancelled.lock().expect("cancelled lock").push(encoded);
+                Ok(())
+            })
         }
 
         fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -576,6 +607,49 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn cancel_registered_tasks_ignores_terminal_roots_for_live_shared_children() -> Result<()>
+    {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("cancel-shared"))?);
+        let engine = Arc::new(MockEngine::default());
+        let engine_handle: Arc<dyn EngineHandle> = engine.clone();
+        let proposal_task_id = encoded_proposal_task_id(4)?;
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "terminal-root",
+            &proposal_task_id,
+            RunnerStatus::Completed,
+            now_ts(),
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "live-root",
+            &proposal_task_id,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+
+        cancel_registered_tasks(
+            runtime.as_ref(),
+            &engine_handle,
+            "live-root",
+            &metadata_for_task(&proposal_task_id),
+        )
+        .await?;
+
+        let prove_task_id =
+            decode_task_id::<EngineTaskKey>(&proposal_task_id).expect("decode prove task id");
+        let expected = proposal_task_chain_ids(&prove_task_id)
+            .into_iter()
+            .map(|task_id| encode_task_id(&task_id).expect("encode stage task id"))
+            .collect::<Vec<_>>();
+        assert_eq!(engine.cancelled(), expected);
+        Ok(())
+    }
+
     fn build_factory(engine: Arc<dyn EngineHandle>) -> StaticPipelineFactory {
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaRisc0, engine);
@@ -596,24 +670,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(1),
                 proof_ids: vec![proposal_task_id.to_string()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
-                    network_pair: "taiko_dev/ethereum".to_string(),
-                    network: "taiko_dev".to_string(),
-                    l1_network: "ethereum".to_string(),
-                    proof_type: ProofType::Risc0,
-                    execution_mode: None,
-                    aggregate_requested: false,
-                    proposals: vec![HoodiProposalTask {
-                        proposal_id: 1,
-                        checkpoint: None,
-                        l1_inclusion_block_number: 0,
-                        l2_block_numbers: vec![1],
-                        last_anchor_block_number: 0,
-                        task_id: proposal_task_id.to_string(),
-                    }],
-                    aggregate_task_id: None,
-                    runtime: HoodiRuntimeMetadata::default(),
-                })?,
+                metadata: serde_json::to_value(metadata_for_task(proposal_task_id))?,
             })
             .await?;
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");
@@ -621,6 +678,27 @@ mod tests {
         record.updated_at = updated_at;
         runtime.upsert_task(&record).await?;
         Ok(())
+    }
+
+    fn metadata_for_task(proposal_task_id: &str) -> HoodiTaskMetadata {
+        HoodiTaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Risc0,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: vec![HoodiProposalTask {
+                proposal_id: 1,
+                checkpoint: None,
+                l1_inclusion_block_number: 0,
+                l2_block_numbers: vec![1],
+                last_anchor_block_number: 0,
+                task_id: proposal_task_id.to_string(),
+            }],
+            aggregate_task_id: None,
+            runtime: HoodiRuntimeMetadata::default(),
+        }
     }
 
     fn encoded_proposal_task_id(proposal_id: u64) -> Result<String> {

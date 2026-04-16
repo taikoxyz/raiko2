@@ -228,9 +228,9 @@ pub fn validate_external_aggregate_proofs(
                 }
             }
             raiko2_pipeline::PipelineKey::ShastaRisc0Boundless => {
-                if proof.input.is_none() || proof.extra_data.is_none() || proof.quote.is_none() {
+                if proof.quote.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing Boundless aggregation metadata"
+                        "proof {index} is missing receipt metadata"
                     )));
                 }
             }
@@ -398,5 +398,22 @@ mod tests {
             err.to_string()
                 .contains("proof 0 is missing receipt metadata")
         );
+    }
+
+    #[test]
+    fn aggregate_validator_accepts_quote_only_boundless_proof() {
+        let route = "risc0/boundless"
+            .parse::<PipelineRoute>()
+            .expect("parse route");
+        let proof = Proof {
+            proof: None,
+            input: None,
+            quote: Some("0xreceipt".to_string()),
+            uuid: None,
+            kzg_proof: None,
+            extra_data: None,
+        };
+
+        assert!(validate_external_aggregate_proofs(route, &[proof]).is_ok());
     }
 }

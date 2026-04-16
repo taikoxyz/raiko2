@@ -23,6 +23,7 @@ The public API surface is:
 - `GET /v3/tasks/{id}` (`raiko2` extension)
 - `POST /v3/tasks/{id}/cancel` (`raiko2` extension)
 - `GET /health`
+- `GET /metrics`
 - `GET /ready`
 
 `/v1/...` routes are removed.
@@ -41,6 +42,26 @@ GET /ready
 
 Readiness checks every configured `(network, l1_network)` pair in `rpc.pairs`, the configured
 queue backend, and the hosted proving capabilities exposed by the endpoint.
+
+## Metrics
+
+```http
+GET /metrics
+```
+
+Returns Prometheus text-format metrics for the hosted API.
+
+The canonical minimal metric families are:
+
+- `raiko2_request_registrations_total`
+- `raiko2_stage_tasks_inflight`
+- `raiko2_stage_task_started_total`
+- `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_duration_seconds`
+- `raiko2_external_submission_total`
+
+Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
+Terminal counters and duration histograms also include `status`.
 
 ## Submit Shasta Batch Proof
 
@@ -93,6 +114,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 ### Rules
 
 - `proposals` must not be empty.
+- `aggregate=true` is allowed with a single proposal for backward compatibility with `raiko`.
 - `proposal.l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
 - `proposal.checkpoint` is optional and is validated against the canonical final witness
   checkpoint when the proof is built.
@@ -117,6 +139,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sp1` is supported
   - `native`, `risc0`, and `sgx` request-scoped prover args are rejected
 - `proof_type=zk_any` does not accept request-scoped prover args.
+- `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
+  When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
 - `sp1.mode=execute` is only valid when `proof_type=sp1`.
 - `sp1.mode=execute` requires `aggregate=false`.
 - `sp1.mode=execute` does not support `sp1.prover=network`.
@@ -126,11 +150,21 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `sp1` network-only settings require `sp1.prover=network`.
 - `sp1.network_mode=mainnet` requires `sp1.fulfillment_strategy=auction`.
 - `sp1.network_mode=reserved` requires `sp1.fulfillment_strategy=reserved` or `hosted`.
-- `network` and `l1_network` must match an explicitly configured allowed pair.
+- When provided, `network` and `l1_network` must match an explicitly configured allowed pair.
 - `NETWORK_PRIVATE_KEY` must be present in the server environment when `sp1.prover=network` is
   used. `sp1.rpc_url` is operator configuration only and is not accepted as a request override.
 
 ### Response
+
+`POST /v3/proof/batch/shasta` is idempotent for canonically identical requests.
+
+- The first accepted request returns `registered + task_id`.
+- A repeated identical request may return:
+  - `data.status = "registered"`
+  - `data.status = "work_in_progress"`
+  - `data.status = "completed"` with a legacy-compatible `data.proof` object
+  - top-level `status = "error"` with `error/message` for terminal failure
+- `GET /v3/tasks/{id}` remains the canonical async inspection API.
 
 ```json
 {
@@ -140,6 +174,35 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
     "status": "registered",
     "task_id": "task_..."
   }
+}
+```
+
+Example repeated-request success after completion:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "sp1",
+  "data": {
+    "status": "completed",
+    "task_id": "task_...",
+    "proof": {
+      "proof": "0x...",
+      "kzg_proof": "",
+      "quote": ""
+    }
+  }
+}
+```
+
+Example repeated-request terminal failure:
+
+```json
+{
+  "status": "error",
+  "proof_type": "sp1",
+  "error": "task_failed",
+  "message": "..."
 }
 ```
 
@@ -190,8 +253,11 @@ Registers an aggregation root task from externally supplied proposal proofs.
 
 ### Rules
 
-- `proofs` must contain at least 2 entries.
+- `proofs` must not be empty.
+- Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `proof_type=zk_any` is not supported for aggregate requests.
+- `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
+  When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
 - `proof_type=sp1` requires each proof to include `proof`, `input`, `uuid`, and `extra_data`.
 - `proof_type=risc0` on the hosted Boundless route requires each proof to include `quote`.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.

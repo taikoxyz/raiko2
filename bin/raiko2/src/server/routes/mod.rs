@@ -1,6 +1,7 @@
 //! API route definitions.
 
 mod health;
+mod metrics;
 mod ready;
 mod v3;
 
@@ -12,6 +13,7 @@ use super::state::AppState;
 pub fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(health::routes())
+        .merge(metrics::routes())
         .merge(ready::routes())
         .merge(v3::routes())
 }

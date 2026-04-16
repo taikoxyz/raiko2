@@ -81,6 +81,9 @@ Direct `xtask` entrypoint:
 cargo run -r -p xtask -- build-guest all
 ```
 
+`build-guest` only rebuilds checked-in ELF artifacts under `crates/guests/elf`.
+It does not register verifier trust-list entries or update any external program registry.
+
 Prerequisites:
 
 - `docker`
@@ -96,6 +99,14 @@ To disable toolchain images and use local toolchains instead:
 ```bash
 RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
   cargo run -r -p xtask -- build-guest all
+```
+
+If a guest ELF changes and the target environment relies on onchain verifier trust lists,
+register the new digests explicitly:
+
+```bash
+cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
 ```
 
 ## Guest Benchmarking

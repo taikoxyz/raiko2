@@ -32,7 +32,7 @@ pub(crate) struct BuildGuestArgs {
 }
 
 pub(crate) fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
-    build(root, args.backend, args.bench, None, true)?;
+    build(root, args.backend, args.bench, None)?;
     println!("[INFO] Build complete!");
     Ok(())
 }
@@ -42,30 +42,17 @@ pub(crate) fn build(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
-    update_image_ids_flag: bool,
 ) -> Result<()> {
     match backend {
         Backend::Risc0 => {
             build_risc0(root, bench)?;
-            if update_image_ids_flag {
-                update_image_ids(root, "risc0")?;
-            }
         }
         Backend::Sp1 => {
             build_sp1(root, bench, sp1_docker_tag)?;
-            if update_image_ids_flag {
-                update_image_ids(root, "sp1")?;
-            }
         }
         Backend::All => {
             build_risc0(root, bench)?;
-            if update_image_ids_flag {
-                update_image_ids(root, "risc0")?;
-            }
             build_sp1(root, bench, sp1_docker_tag)?;
-            if update_image_ids_flag {
-                update_image_ids(root, "sp1")?;
-            }
         }
     }
     Ok(())
@@ -122,38 +109,13 @@ pub(crate) fn ensure_release_guest_elves(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
-    update_image_ids_flag: bool,
 ) -> Result<()> {
     match backend {
-        Backend::Risc0 => ensure_release_backend(
-            root,
-            Backend::Risc0,
-            bench,
-            sp1_docker_tag,
-            update_image_ids_flag,
-        ),
-        Backend::Sp1 => ensure_release_backend(
-            root,
-            Backend::Sp1,
-            bench,
-            sp1_docker_tag,
-            update_image_ids_flag,
-        ),
+        Backend::Risc0 => ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag),
+        Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag),
         Backend::All => {
-            ensure_release_backend(
-                root,
-                Backend::Risc0,
-                bench,
-                sp1_docker_tag,
-                update_image_ids_flag,
-            )?;
-            ensure_release_backend(
-                root,
-                Backend::Sp1,
-                bench,
-                sp1_docker_tag,
-                update_image_ids_flag,
-            )
+            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
+            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
         }
     }
 }
@@ -203,7 +165,6 @@ fn ensure_release_backend(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
-    update_image_ids_flag: bool,
 ) -> Result<()> {
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
@@ -223,7 +184,7 @@ fn ensure_release_backend(
     println!(
         "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
     );
-    build(root, backend, bench, sp1_docker_tag, update_image_ids_flag)?;
+    build(root, backend, bench, sp1_docker_tag)?;
     write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
     Ok(())
 }
@@ -899,25 +860,6 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
         );
     }
 
-    Ok(())
-}
-
-fn update_image_ids(root: &Path, backend: &str) -> Result<()> {
-    println!("[INFO] Updating image IDs for {backend}...");
-    if !root.join(".env").exists() {
-        println!("[WARN] No .env file found, skipping image ID update");
-        return Ok(());
-    }
-
-    let script = root.join("scripts/update_imageid.sh");
-    if !script.exists() {
-        println!("[WARN] update_imageid.sh not found at {script:?}, skipping image ID update");
-        return Ok(());
-    }
-
-    let mut cmd = Command::new(script);
-    cmd.arg(backend);
-    util::run(cmd)?;
     Ok(())
 }
 

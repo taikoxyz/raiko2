@@ -688,6 +688,34 @@ pub(crate) fn app_with_native_fixture_engine(
     app::build_router(state)
 }
 
+#[cfg(test)]
+pub(crate) fn app_with_observed_native_fixture_engine(
+    config: Config,
+) -> (Router, NativeFixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
+            .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = native_fixture_engine_with_observer(Some(observer));
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaNative,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
+    (app::build_router(state), engine)
+}
+
 pub(crate) async fn spawn_chain_id_rpc(
     chain_id: u64,
 ) -> Result<(String, tokio::task::JoinHandle<()>), std::io::Error> {

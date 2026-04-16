@@ -671,6 +671,7 @@ mod tests {
                 proposal_id: Some(1),
                 proof_ids: vec![proposal_task_id.to_string()],
                 metadata: serde_json::to_value(metadata_for_task(proposal_task_id))?,
+                request_fingerprint: None,
             })
             .await?;
         let mut record = runtime.get_task(task_id).await?.expect("runtime task");

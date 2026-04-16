@@ -35,8 +35,10 @@ pub(crate) struct BatchShastaRequest {
     #[serde(default)]
     pub(super) aggregate: bool,
     pub(super) proof_type: HoodiProofType,
-    pub(super) network: String,
-    pub(super) l1_network: String,
+    #[serde(default)]
+    pub(super) network: Option<String>,
+    #[serde(default)]
+    pub(super) l1_network: Option<String>,
     #[serde(default)]
     pub(super) graffiti: Option<String>,
     #[serde(default)]
@@ -52,8 +54,10 @@ pub(crate) struct BatchShastaRequest {
 pub(crate) struct AggregateProofRequest {
     pub(super) proofs: Vec<Proof>,
     pub(super) proof_type: HoodiProofType,
-    pub(super) network: String,
-    pub(super) l1_network: String,
+    #[serde(default)]
+    pub(super) network: Option<String>,
+    #[serde(default)]
+    pub(super) l1_network: Option<String>,
     #[serde(default)]
     pub(super) graffiti: Option<String>,
     #[serde(default)]
@@ -102,6 +106,37 @@ pub(crate) struct RegistrationData {
     pub(crate) status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LegacyProofEnvelope {
+    pub(crate) status: &'static str,
+    pub(crate) proof_type: String,
+    pub(crate) data: LegacyProofData,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LegacyProofData {
+    pub(crate) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof: Option<LegacyProofMaterial>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LegacyProofMaterial {
+    pub(crate) proof: String,
+    pub(crate) kzg_proof: String,
+    pub(crate) quote: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LegacyProofError {
+    pub(crate) status: &'static str,
+    pub(crate) proof_type: String,
+    pub(crate) error: &'static str,
+    pub(crate) message: String,
 }
 
 #[derive(Serialize)]
@@ -205,7 +240,7 @@ pub(crate) struct PruneStatus {
     pub(crate) status: &'static str,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct CanonicalProposal {
     pub(super) proposal_id: u64,
     pub(super) checkpoint: Option<ShastaCheckpoint>,

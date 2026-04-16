@@ -7,22 +7,29 @@ use raiko2_engine::{
 use raiko2_prover::ProverProgress;
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs;
 
 use crate::server::task_metadata::HoodiTaskMetadata;
+use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
 use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
+    started_stage_tasks: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RuntimeObserver {
-    pub(crate) const fn new(runtime: Arc<RuntimeManager>) -> Self {
-        Self { runtime }
+    pub(crate) fn new(runtime: Arc<RuntimeManager>) -> Self {
+        Self {
+            runtime,
+            started_stage_tasks: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     fn root_task_id(id: &EngineTaskId) -> EngineTaskId {
@@ -50,7 +57,7 @@ impl RuntimeObserver {
 
     async fn update_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
     where
-        F: Fn(&mut RuntimeTaskRecord, i64) -> Result<()>,
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
         let root_id = Self::root_task_id(id);
         let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
@@ -59,8 +66,9 @@ impl RuntimeObserver {
             anyhow::bail!("runtime task not registered for engine task {root_id}");
         }
         let updated_at = now_ts();
+        let observed_at_ms = now_ms();
         for record in &mut records {
-            mutator(record, updated_at)?;
+            mutator(record, updated_at, observed_at_ms)?;
             record.updated_at = updated_at;
             self.runtime.upsert_task(record).await?;
         }
@@ -72,17 +80,188 @@ impl RuntimeObserver {
         let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
         self.runtime.find_task_by_engine_task_id(&root_id).await
     }
+
+    fn metric_context(record: &RuntimeTaskRecord) -> Result<MetricContext> {
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+            .context("failed to parse runtime task metadata for telemetry")?;
+        Ok(MetricContext::new(
+            record.route.to_string(),
+            metadata.proof_type,
+            metadata.network_pair,
+            metadata.aggregate_requested,
+        ))
+    }
+
+    const fn submission_provider(progress: &ProverProgress) -> &'static str {
+        match progress {
+            ProverProgress::BoundlessSubmission(_) => "boundless",
+            ProverProgress::Sp1NetworkSubmission(_) => "sp1_network",
+        }
+    }
+
+    const fn stage_name_from_task_id(id: &EngineTaskId) -> &'static str {
+        match &id.0 {
+            EngineTaskKey::Proposal { stage, .. } => match stage {
+                ProposalStage::Preflight => "preflight",
+                ProposalStage::Validation => "validation",
+                ProposalStage::Encode => "encode",
+                ProposalStage::Prove => "prove",
+            },
+            EngineTaskKey::Aggregate { .. } => "aggregate",
+        }
+    }
+
+    fn timing_key(id: &EngineTaskId) -> Result<String> {
+        encode_task_id(id).context("failed to encode stage timing task id")
+    }
+
+    fn mark_stage_started_for_metrics(&self, id: &EngineTaskId) -> Result<bool> {
+        let task_id = Self::timing_key(id)?;
+        let mut started = self
+            .started_stage_tasks
+            .lock()
+            .expect("stage task telemetry mutex poisoned");
+        Ok(started.insert(task_id))
+    }
+
+    fn mark_stage_terminal_for_metrics(&self, id: &EngineTaskId) -> Result<bool> {
+        let task_id = Self::timing_key(id)?;
+        let mut started = self
+            .started_stage_tasks
+            .lock()
+            .expect("stage task telemetry mutex poisoned");
+        Ok(started.remove(&task_id))
+    }
+
+    fn stage_duration_secs(
+        record: &RuntimeTaskRecord,
+        id: &EngineTaskId,
+        finished_at_ms: i64,
+    ) -> Result<Option<f64>> {
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+            .context("failed to parse runtime task metadata for stage duration")?;
+        let task_id = Self::timing_key(id)?;
+        Ok(metadata.observe_stage_terminal_duration_secs(&task_id, finished_at_ms))
+    }
+
+    async fn observe_stage_terminal_metrics(
+        &self,
+        id: &EngineTaskId,
+        stage: &str,
+        status: &str,
+        finished_at_ms: i64,
+    ) {
+        let should_decrement = match self.mark_stage_terminal_for_metrics(id) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    task = ?id,
+                    error = %err,
+                    "failed to update in-process stage telemetry state"
+                );
+                false
+            }
+        };
+        match self.load_root_record(id).await {
+            Ok(Some(record)) => match Self::metric_context(&record) {
+                Ok(context) => match Self::stage_duration_secs(&record, id, finished_at_ms) {
+                    Ok(duration_seconds) => {
+                        telemetry::record_stage_task_terminal(
+                            &context,
+                            stage,
+                            status,
+                            should_decrement,
+                        );
+                        if let Some(duration_seconds) = duration_seconds {
+                            telemetry::record_stage_task_duration(
+                                &context,
+                                stage,
+                                status,
+                                duration_seconds,
+                            );
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        task = ?id,
+                        error = %err,
+                        "failed to derive stage duration"
+                    ),
+                },
+                Err(err) => {
+                    tracing::warn!(task = ?id, error = %err, "failed to build telemetry context")
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(task = ?id, error = %err, "failed to load runtime task for telemetry")
+            }
+        }
+    }
+
+    async fn write_proof_files(
+        &self,
+        id: &EngineTaskId,
+        proof: &raiko2_primitives::Proof,
+    ) -> Result<HashMap<String, String>> {
+        let root_id = Self::root_task_id(id);
+        let root_id = encode_task_id(&root_id).context("failed to encode root task id")?;
+        let records = self.runtime.find_tasks_by_engine_task_id(&root_id).await?;
+        if records.is_empty() {
+            anyhow::bail!("runtime task not registered for engine task {root_id}");
+        }
+
+        let proof_bytes =
+            serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
+        let mut proof_paths = HashMap::with_capacity(records.len());
+        for record in records {
+            let proof_path = Path::new(&record.task_dir).join("proof.json");
+            fs::write(&proof_path, &proof_bytes)
+                .await
+                .with_context(|| format!("failed to write proof file {}", proof_path.display()))?;
+            proof_paths.insert(record.task_id, proof_path.display().to_string());
+        }
+        Ok(proof_paths)
+    }
 }
 
 #[async_trait]
 impl EngineObserver for RuntimeObserver {
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
+        let should_increment = match self.mark_stage_started_for_metrics(id) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    task = ?id,
+                    error = %err,
+                    "failed to update in-process stage telemetry state"
+                );
+                false
+            }
+        };
+        match self.load_root_record(id).await {
+            Ok(Some(record)) => match Self::metric_context(&record) {
+                Ok(context) => {
+                    if should_increment {
+                        telemetry::record_stage_task_started(&context, stage);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(task = ?id, error = %err, "failed to build telemetry context")
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(task = ?id, error = %err, "failed to load runtime task for telemetry")
+            }
+        }
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
+                let task_id = Self::timing_key(id)?;
                 update_task_metadata(record, |metadata| {
+                    metadata.mark_stage_started(&task_id, stage, observed_at_ms);
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some(format!("started:{worker}"));
                 })?;
@@ -102,8 +281,24 @@ impl EngineObserver for RuntimeObserver {
         progress: &ProverProgress,
     ) {
         let stage = Self::stage_name(task);
+        match self.load_root_record(id).await {
+            Ok(Some(record)) => match Self::metric_context(&record) {
+                Ok(context) => telemetry::record_external_submission(
+                    &context,
+                    stage,
+                    Self::submission_provider(progress),
+                ),
+                Err(err) => {
+                    tracing::warn!(task = ?id, error = %err, "failed to build telemetry context")
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(task = ?id, error = %err, "failed to load runtime task for telemetry")
+            }
+        }
         let result = self
-            .update_root_records(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at, _observed_at_ms| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
                 record.provider_request_id = match progress {
@@ -166,13 +361,31 @@ impl EngineObserver for RuntimeObserver {
         success: &EngineTaskSuccess,
     ) {
         let stage = Self::stage_name(task);
+        let finished_at_ms = now_ms();
+        self.observe_stage_terminal_metrics(id, stage, "completed", finished_at_ms)
+            .await;
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                self.update_root_records(id, |record, updated_at| {
+                let proof_paths = self.write_proof_files(id, proof).await;
+                let proof_paths = match proof_paths {
+                    Ok(paths) => paths,
+                    Err(err) => {
+                        tracing::warn!(
+                            task = ?id,
+                            stage,
+                            error = %err,
+                            "failed to persist proof output"
+                        );
+                        return;
+                    }
+                };
+                self.update_root_records(id, move |record, updated_at, observed_at_ms| {
                     record.runner_status = RunnerStatus::Completed;
                     record.error = None;
-                    record.proof_path = Some(write_proof_file(record, proof)?);
+                    record.proof_path = proof_paths.get(&record.task_id).cloned();
+                    let task_id = Self::timing_key(id)?;
                     update_task_metadata(record, |metadata| {
+                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
                         metadata.runtime.active_stage = Some(stage.to_string());
                         metadata.runtime.last_event = Some("completed".to_string());
                     })?;
@@ -182,10 +395,17 @@ impl EngineObserver for RuntimeObserver {
                 .await
             }
             EngineTaskSuccess::GuestInput { stage } | EngineTaskSuccess::EncodedInput { stage } => {
-                self.update_root_records(id, |record, updated_at| {
+                self.update_root_records(id, |record, updated_at, observed_at_ms| {
                     record.runner_status = RunnerStatus::Allocated;
                     record.error = None;
+                    let task_id = Self::timing_key(id)?;
                     update_task_metadata(record, |metadata| {
+                        metadata.mark_stage_terminal(
+                            &task_id,
+                            Self::stage_name_from_task_id(id),
+                            observed_at_ms,
+                            "completed",
+                        );
                         metadata.runtime.active_stage =
                             Some(stage_name_from_pipeline_stage(*stage).to_string());
                         metadata.runtime.last_event = Some("stage_completed".to_string());
@@ -209,11 +429,16 @@ impl EngineObserver for RuntimeObserver {
 
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
         let stage = Self::stage_name(task);
+        let finished_at_ms = now_ms();
+        self.observe_stage_terminal_metrics(id, stage, "failed", finished_at_ms)
+            .await;
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Failed;
                 record.error = Some(error.to_string());
+                let task_id = Self::timing_key(id)?;
                 update_task_metadata(record, |metadata| {
+                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
                     metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some("failed".to_string());
                 })?;
@@ -227,11 +452,18 @@ impl EngineObserver for RuntimeObserver {
     }
 
     async fn on_task_cancelled(&self, id: &EngineTaskId) {
+        let stage = Self::stage_name_from_task_id(id);
+        let finished_at_ms = now_ms();
+        self.observe_stage_terminal_metrics(id, stage, "cancelled", finished_at_ms)
+            .await;
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at| {
+            .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Cancelled;
                 record.error = None;
+                let task_id = Self::timing_key(id)?;
                 update_task_metadata(record, |metadata| {
+                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "cancelled");
+                    metadata.runtime.active_stage = Some(stage.to_string());
                     metadata.runtime.last_event = Some("cancelled".to_string());
                 })?;
                 record.updated_at = updated_at;
@@ -291,19 +523,6 @@ where
     Ok(())
 }
 
-fn write_proof_file(
-    record: &RuntimeTaskRecord,
-    proof: &raiko2_primitives::Proof,
-) -> Result<String> {
-    let proof_path = Path::new(&record.task_dir).join("proof.json");
-    std::fs::write(
-        &proof_path,
-        serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?,
-    )
-    .with_context(|| format!("failed to write proof file {}", proof_path.display()))?;
-    Ok(proof_path.display().to_string())
-}
-
 const fn stage_name_from_pipeline_stage(stage: raiko2_pipeline::PipelineStage) -> &'static str {
     match stage {
         raiko2_pipeline::PipelineStage::Preflight => "preflight",
@@ -322,10 +541,21 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::task_metadata::{HoodiProposalTask, HoodiRuntimeMetadata};
+    use crate::server::telemetry;
     use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
@@ -397,6 +627,7 @@ mod tests {
                     aggregate_task_id: None,
                     runtime: HoodiRuntimeMetadata::default(),
                 })?,
+                request_fingerprint: None,
             })
             .await?;
 
@@ -476,6 +707,7 @@ mod tests {
                     aggregate_task_id: None,
                     runtime: HoodiRuntimeMetadata::default(),
                 })?,
+                request_fingerprint: None,
             })
             .await?;
 
@@ -577,6 +809,7 @@ mod tests {
                     aggregate_task_id: None,
                     runtime: HoodiRuntimeMetadata::default(),
                 })?,
+                request_fingerprint: None,
             })
             .await?;
 
@@ -660,6 +893,7 @@ mod tests {
                     aggregate_task_id: Some(encode_task_id(&aggregate_task_id)?),
                     runtime: HoodiRuntimeMetadata::default(),
                 })?,
+                request_fingerprint: None,
             })
             .await?;
 
@@ -694,6 +928,72 @@ mod tests {
                 .await
                 .as_deref(),
             Some("0xsp1-aggregate")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_does_not_decrement_inflight_after_process_restart() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-no-negative-gauge",
+        ))?);
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request: proposal_request(),
+            stage: ProposalStage::Preflight,
+        });
+        let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
+        let mut metadata = HoodiTaskMetadata {
+            network_pair: "telemetry_restart/ethereum".to_string(),
+            network: "telemetry_restart".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: vec![HoodiProposalTask {
+                proposal_id: 42,
+                checkpoint: None,
+                l1_inclusion_block_number: 1,
+                l2_block_numbers: vec![42],
+                last_anchor_block_number: 0,
+                task_id: encoded_task_id.clone(),
+            }],
+            aggregate_task_id: None,
+            runtime: HoodiRuntimeMetadata::default(),
+        };
+        metadata.mark_stage_started(&encoded_task_id, "preflight", now_ms() - 1_000);
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_restart".to_string(),
+                route: "native/local"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(42),
+                proof_ids: vec![encoded_task_id],
+                metadata: serde_json::to_value(metadata)?,
+                request_fingerprint: None,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_failed(
+                &proposal_task_id,
+                &EngineTask::Preflight {
+                    request: proposal_request(),
+                },
+                "fixture failed",
+            )
+            .await;
+
+        let (_, body) = telemetry::render().expect("render telemetry");
+        let body = String::from_utf8(body).expect("utf8 telemetry");
+        assert!(
+            !body.contains(
+                "raiko2_stage_tasks_inflight{aggregate=\"false\",pair=\"telemetry_restart/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"preflight\"} -1"
+            ),
+            "{body}"
         );
         Ok(())
     }

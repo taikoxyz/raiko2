@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -9,6 +11,7 @@ const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2
 const DEFAULT_NAMESPACE: &str = "tolba-raiko2-host";
 const DEFAULT_DEPLOYMENT: &str = "raiko2";
 const DEFAULT_CONTAINER: &str = "raiko2";
+const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseImageArgs {
@@ -36,6 +39,8 @@ pub(crate) struct ReleaseImageArgs {
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
     util::ensure_docker()?;
+    util::ensure_docker_buildx()?;
+    util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
     ensure_non_empty("namespace", &args.namespace)?;
@@ -43,6 +48,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     ensure_non_empty("container", &args.container)?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
+    let buildx_cache_root = util::target_root(root).join("buildx-cache").join("raiko2");
+    let buildx_cache_current = buildx_cache_root.join("current");
+    let buildx_cache_next = buildx_cache_root.join("next");
+    fs::create_dir_all(&buildx_cache_root)
+        .with_context(|| format!("failed to create buildx cache dir {buildx_cache_root:?}"))?;
+    reset_dir(&buildx_cache_next)?;
 
     println!(
         "[INFO] Preparing guest ELFs for backend `{}` before image release...",
@@ -50,15 +61,38 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     );
     if args.force_rebuild_guests {
         println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
-        build_guest::build(root, args.backend, false, None, true)?;
+        build_guest::build(root, args.backend, false, None)?;
     } else {
-        build_guest::ensure_release_guest_elves(root, args.backend, false, None, true)?;
+        build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
 
-    println!("[INFO] Building runtime image `{image_ref}`...");
+    println!(
+        "[INFO] Building runtime image `{image_ref}` with buildx local cache at {:?}...",
+        buildx_cache_current
+    );
     let mut build_cmd = Command::new("docker");
-    build_cmd.arg("build").arg("-t").arg(&image_ref).arg(root);
+    build_cmd
+        .arg("buildx")
+        .arg("build")
+        .arg("--builder")
+        .arg(DEFAULT_BUILDX_BUILDER)
+        .arg("--load");
+    if buildx_cache_current.join("index.json").exists() {
+        build_cmd
+            .arg("--cache-from")
+            .arg(format!("type=local,src={}", buildx_cache_current.display()));
+    }
+    build_cmd
+        .arg("--cache-to")
+        .arg(format!(
+            "type=local,dest={},mode=max",
+            buildx_cache_next.display()
+        ))
+        .arg("-t")
+        .arg(&image_ref)
+        .arg(root);
     util::run(build_cmd)?;
+    promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
     println!("[INFO] Pushing runtime image `{image_ref}`...");
     let mut push_cmd = Command::new("docker");
@@ -114,4 +148,32 @@ fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
         .into_iter()
         .find(|value| value.starts_with(&format!("{repository}@sha256:")))
         .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
+}
+
+fn reset_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path).with_context(|| format!("failed to remove {path:?}"))?;
+    }
+    fs::create_dir_all(path).with_context(|| format!("failed to create {path:?}"))
+}
+
+fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
+    if !next.join("index.json").exists() {
+        bail!("buildx cache export missing index.json at {next:?}");
+    }
+
+    let backup = current.with_extension("old");
+    if backup.exists() {
+        fs::remove_dir_all(&backup).with_context(|| format!("failed to remove {backup:?}"))?;
+    }
+    if current.exists() {
+        fs::rename(current, &backup)
+            .with_context(|| format!("failed to move {current:?} to {backup:?}"))?;
+    }
+    fs::rename(next, current)
+        .with_context(|| format!("failed to promote {next:?} to {current:?}"))?;
+    if backup.exists() {
+        fs::remove_dir_all(&backup).with_context(|| format!("failed to remove {backup:?}"))?;
+    }
+    Ok(())
 }

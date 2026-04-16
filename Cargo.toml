@@ -74,6 +74,7 @@ sp1-sdk = { version = "=5.2.4", features = ["network"] }
 
 # Alethia reth (pinned to the latest verified main commit on 2026-04-10)
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false, features = [
+    "prover",
     "serde",
 ] }
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false }
@@ -183,6 +184,7 @@ revm-database-interface = { version = "10.0.0", default-features = false }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = { version = "0.13.4", features = ["process"] }
 
 # Error handling
 anyhow = "1.0"

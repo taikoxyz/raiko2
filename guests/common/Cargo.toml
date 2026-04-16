@@ -11,6 +11,7 @@ raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 raiko2-stateless = { path = "../../crates/stateless" }
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false }
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false, features = [
+    "prover",
     "serde",
 ] }
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "dd2d4b5974d43f652f785e4b69b1e56417c3f853", default-features = false }

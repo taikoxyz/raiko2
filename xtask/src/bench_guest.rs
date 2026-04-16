@@ -176,13 +176,7 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
             "missing SP1 guest ELF; re-run without `--skip-build-guest` or run `cargo run -r -p xtask -- build-guest sp1 --bench` first"
         );
     } else {
-        build_guest::build(
-            root,
-            args.backend,
-            true,
-            Some(sp1_docker_tag.as_str()),
-            false,
-        )?;
+        build_guest::build(root, args.backend, true, Some(sp1_docker_tag.as_str()))?;
     }
 
     let launcher_path = build_guest_launcher(root)?;

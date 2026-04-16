@@ -65,6 +65,47 @@ pub(crate) fn ensure_docker() -> Result<()> {
     ensure_command(cmd, "docker", "Install Docker and re-run.")
 }
 
+pub(crate) fn ensure_docker_buildx() -> Result<()> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("buildx").arg("version");
+    ensure_command(
+        cmd,
+        "docker buildx",
+        "Install a Docker distribution with buildx support and re-run.",
+    )
+}
+
+pub(crate) fn ensure_docker_buildx_builder(name: &str) -> Result<()> {
+    let inspect_status = Command::new("docker")
+        .arg("buildx")
+        .arg("inspect")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("failed to inspect docker buildx builder {name}"))?;
+
+    if !inspect_status.success() {
+        let mut create_cmd = Command::new("docker");
+        create_cmd
+            .arg("buildx")
+            .arg("create")
+            .arg("--name")
+            .arg(name)
+            .arg("--driver")
+            .arg("docker-container");
+        run(create_cmd)?;
+    }
+
+    let mut bootstrap_cmd = Command::new("docker");
+    bootstrap_cmd
+        .arg("buildx")
+        .arg("inspect")
+        .arg("--bootstrap")
+        .arg(name);
+    run(bootstrap_cmd)
+}
+
 pub(crate) fn ensure_cargo_risczero() -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("risczero").arg("--version");

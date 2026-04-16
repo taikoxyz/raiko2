@@ -40,9 +40,21 @@ pub(crate) struct HoodiRuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_event: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) stage_timings: BTreeMap<String, HoodiStageTimingMetadata>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) proposals: BTreeMap<String, HoodiTaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate: Option<HoodiTaskRuntimeMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HoodiStageTimingMetadata {
+    pub(crate) stage: String,
+    pub(crate) started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finished_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -82,6 +94,7 @@ impl HoodiTaskMetadata {
     pub(crate) fn has_runtime_progress(&self) -> bool {
         self.runtime.active_stage.is_some()
             || self.runtime.last_event.is_some()
+            || !self.runtime.stage_timings.is_empty()
             || !self.runtime.proposals.is_empty()
             || self.runtime.aggregate.is_some()
     }
@@ -141,6 +154,42 @@ impl HoodiTaskMetadata {
             .get_or_insert_with(HoodiTaskRuntimeMetadata::default)
             .apply_sp1_network_submission(progress, updated_at);
     }
+
+    pub(crate) fn mark_stage_started(&mut self, task_id: &str, stage: &str, started_at_ms: i64) {
+        self.runtime.stage_timings.insert(
+            task_id.to_string(),
+            HoodiStageTimingMetadata {
+                stage: stage.to_string(),
+                started_at_ms,
+                finished_at_ms: None,
+                terminal_status: None,
+            },
+        );
+    }
+
+    pub(crate) fn observe_stage_terminal_duration_secs(
+        &self,
+        task_id: &str,
+        finished_at_ms: i64,
+    ) -> Option<f64> {
+        let timing = self.runtime.stage_timings.get(task_id)?;
+        Some(timing.duration_secs(finished_at_ms))
+    }
+
+    pub(crate) fn mark_stage_terminal(
+        &mut self,
+        task_id: &str,
+        stage: &str,
+        finished_at_ms: i64,
+        status: &str,
+    ) {
+        let Some(timing) = self.runtime.stage_timings.get_mut(task_id) else {
+            return;
+        };
+        timing.stage = stage.to_string();
+        timing.finished_at_ms = Some(finished_at_ms);
+        timing.terminal_status = Some(status.to_string());
+    }
 }
 
 impl HoodiTaskRuntimeMetadata {
@@ -174,6 +223,12 @@ impl HoodiTaskRuntimeMetadata {
     }
 }
 
+impl HoodiStageTimingMetadata {
+    fn duration_secs(&self, finished_at_ms: i64) -> f64 {
+        finished_at_ms.saturating_sub(self.started_at_ms) as f64 / 1_000.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +251,36 @@ mod tests {
             serde_json::from_value(json).expect("deserialize metadata");
 
         assert_eq!(roundtrip.proof_type, ProofType::Risc0);
+    }
+
+    #[test]
+    fn task_metadata_tracks_stage_timing_durations() {
+        let mut metadata = HoodiTaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: Vec::new(),
+            aggregate_task_id: None,
+            runtime: HoodiRuntimeMetadata::default(),
+        };
+
+        metadata.mark_stage_started("task-proof", "prove", 1_000);
+        assert_eq!(
+            metadata.observe_stage_terminal_duration_secs("task-proof", 4_250),
+            Some(3.25)
+        );
+
+        metadata.mark_stage_terminal("task-proof", "prove", 4_250, "completed");
+        let timing = metadata
+            .runtime
+            .stage_timings
+            .get("task-proof")
+            .expect("stage timing");
+        assert_eq!(timing.stage, "prove");
+        assert_eq!(timing.finished_at_ms, Some(4_250));
+        assert_eq!(timing.terminal_status.as_deref(), Some("completed"));
     }
 }

@@ -1,6 +1,9 @@
+use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use raiko2_engine::{
     AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
@@ -13,7 +16,9 @@ use raiko2_prover::sp1::{
 };
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_queue::{decode_task_id, encode_task_id};
-use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, TaskRegistration};
+use raiko2_runtime::{
+    RunnerStatus as RuntimeRunnerStatus, TaskRegistration, TaskRegistrationOutcome,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::info;
@@ -26,7 +31,8 @@ use super::proof_route::{
 use super::proof_types::{
     AggregateProofRequest, BatchShastaRequest, CanonicalProposal, HoodiAggregateStatus,
     HoodiProofType, HoodiProposalStatus, HoodiRootRuntimeView, HoodiSuccess, HoodiTaskData,
-    HoodiTaskRuntimeView, PruneStatus, PublicProverArgs, RegistrationData, RootTaskState,
+    HoodiTaskRuntimeView, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
+    LegacyProofMaterial, PruneStatus, PublicProverArgs, RegistrationData, RootTaskState,
     ShastaProposal, TaskMetadataParams,
 };
 use crate::config::ResolvedNetworkPair;
@@ -37,6 +43,7 @@ use crate::server::task_cleanup::{
 use crate::server::task_metadata::{
     HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata, HoodiTaskRuntimeMetadata,
 };
+use crate::server::telemetry::{self, MetricContext};
 
 #[derive(Clone)]
 struct CanonicalBatchSubmission {
@@ -91,17 +98,13 @@ struct TaskLookup {
 pub async fn request_batch_shasta_proof(
     State(state): State<AppState>,
     req: Result<Json<BatchShastaRequest>, JsonRejection>,
-) -> Result<Json<HoodiSuccess<RegistrationData>>, ApiError> {
+) -> Result<Response, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
     let Some(submission) = build_canonical_batch_submission(&state, req)? else {
-        return Ok(zk_any_not_drawn_response());
+        return Ok(zk_any_not_drawn_response().into_response());
     };
+    let request_fingerprint = batch_request_fingerprint(&submission)?;
     let plan = build_submission_plan(&submission)?;
-    let engine = resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
 
     info!(
         "Received hoodi shasta batch request: task_id={}, proposals={}, aggregate={}, route={}, pair={}",
@@ -112,26 +115,80 @@ pub async fn request_batch_shasta_proof(
         submission.pair.key
     );
 
-    register_batch_task(&state, &submission, &plan).await?;
+    match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
+        TaskRegistrationOutcome::Existing(existing) => {
+            info!(
+                "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, pair={}",
+                existing.task_id,
+                submission.aggregate_requested,
+                submission.route.route,
+                submission.pair.key
+            );
+            let existing_metadata: HoodiTaskMetadata =
+                serde_json::from_value(existing.metadata.clone()).map_err(|err| {
+                    ApiError::internal(format!("failed to parse existing task metadata: {err}"))
+                })?;
+            if should_reenqueue_existing_submission(&existing, &existing_metadata) {
+                let recovery_plan = build_submission_plan(&CanonicalBatchSubmission {
+                    public_task_id: existing.task_id.clone(),
+                    ..submission.clone()
+                })?;
+                let engine = resolve_engine(
+                    &state,
+                    &existing_metadata.network_pair,
+                    existing.pipeline_key,
+                )?;
+                enqueue_submission_plan(&engine, &recovery_plan)
+                    .await
+                    .map_err(|err| {
+                        ApiError::internal(format!(
+                            "failed to recover dormant task {}: {err}",
+                            existing.task_id,
+                            err = err.message
+                        ))
+                    })?;
+            }
+            compatibility_response_for_task(&state, &existing.task_id).await
+        }
+        TaskRegistrationOutcome::Created(_) => {
+            let engine = resolve_engine(
+                &state,
+                &submission.pair.key,
+                submission.route.pipeline_key(),
+            )?;
 
-    if let Err(err) = enqueue_submission_plan(&engine, &plan).await {
-        let _ = cleanup_submission_plan(&state, &engine, &submission.public_task_id, &plan).await;
-        let _ = state
-            .runtime
-            .sync_status(
-                &submission.public_task_id,
-                RuntimeRunnerStatus::Failed,
-                Some(err.message.clone()),
-                None,
+            if let Err(err) = enqueue_submission_plan(&engine, &plan).await {
+                let _ = cleanup_submission_plan(&state, &engine, &submission.public_task_id, &plan)
+                    .await;
+                let _ = state
+                    .runtime
+                    .sync_status(
+                        &submission.public_task_id,
+                        RuntimeRunnerStatus::Failed,
+                        Some(err.message.clone()),
+                        None,
+                    )
+                    .await;
+                return Err(err);
+            }
+
+            telemetry::record_request_registered(
+                &MetricContext::new(
+                    submission.route.route.to_string(),
+                    submission.route.proof_type(),
+                    submission.pair.key.clone(),
+                    submission.aggregate_requested,
+                ),
+                submission.aggregate_requested,
+            );
+
+            Ok(registered_response(
+                hoodi_response_proof_type(&submission),
+                submission.public_task_id,
             )
-            .await;
-        return Err(err);
+            .into_response())
+        }
     }
-
-    Ok(registered_response(
-        hoodi_response_proof_type(&submission),
-        submission.public_task_id,
-    ))
 }
 
 pub async fn request_aggregation_proof(
@@ -168,6 +225,7 @@ pub async fn request_aggregation_proof(
             metadata: serde_json::to_value(metadata.clone()).map_err(|err| {
                 ApiError::internal(format!("failed to serialize metadata: {err}"))
             })?,
+            request_fingerprint: None,
         })
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))?;
@@ -191,6 +249,16 @@ pub async fn request_aggregation_proof(
             "engine returned unexpected aggregation task id",
         ));
     }
+
+    telemetry::record_request_registered(
+        &MetricContext::new(
+            route.route.to_string(),
+            route.proof_type(),
+            pair.key.clone(),
+            true,
+        ),
+        true,
+    );
 
     Ok(registered_response(
         HoodiProofType::from_canonical(route.proof_type()),
@@ -296,7 +364,7 @@ fn build_canonical_batch_submission(
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
     validate_request_shape(&req)?;
-    let pair = resolved_pair(state, &req.network, &req.l1_network)?;
+    let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let requested_prover_config = augment_system_prover_config(
         &pair,
         validate_public_prover_args(req.proof_type, &req.prover_args)?,
@@ -504,10 +572,8 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
             "proof_type=zk_any is not supported for aggregate requests",
         ));
     }
-    if req.proofs.len() < 2 {
-        return Err(ApiError::bad_request(
-            "proofs must contain at least 2 entries",
-        ));
+    if req.proofs.is_empty() {
+        return Err(ApiError::bad_request("proofs must not be empty"));
     }
     Ok(())
 }
@@ -517,7 +583,7 @@ fn build_external_aggregate_submission(
     req: AggregateProofRequest,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
-    let pair = resolved_pair(state, &req.network, &req.l1_network)?;
+    let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let prover_config = augment_system_prover_config(
         &pair,
         validate_public_prover_args(req.proof_type, &req.prover_args)?,
@@ -639,7 +705,8 @@ async fn register_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     plan: &SubmissionPlan,
-) -> Result<(), ApiError> {
+    request_fingerprint: &str,
+) -> Result<TaskRegistrationOutcome, ApiError> {
     let metadata = build_task_metadata(
         &submission.pair,
         TaskMetadataParams {
@@ -657,7 +724,7 @@ async fn register_batch_task(
 
     state
         .runtime
-        .register_task(TaskRegistration {
+        .register_task_if_absent(TaskRegistration {
             task_id: submission.public_task_id.clone(),
             route: submission.route.route,
             task_kind: "hoodi_batch".to_string(),
@@ -673,9 +740,9 @@ async fn register_batch_task(
             metadata: serde_json::to_value(metadata).map_err(|err| {
                 ApiError::internal(format!("failed to serialize metadata: {err}"))
             })?,
+            request_fingerprint: Some(request_fingerprint.to_string()),
         })
         .await
-        .map(|_| ())
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
 }
 
@@ -794,32 +861,35 @@ async fn cleanup_submission_plan(
 }
 
 async fn load_task_data(state: &AppState, id: &str) -> Result<HoodiTaskData, ApiError> {
-    let TaskLookup {
-        record,
-        metadata,
-        engine,
-    } = load_task_lookup(state, id).await?;
+    let lookup = load_task_lookup(state, id).await?;
+    load_task_data_from_lookup(id, &lookup).await
+}
+
+async fn load_task_data_from_lookup(
+    id: &str,
+    lookup: &TaskLookup,
+) -> Result<HoodiTaskData, ApiError> {
     let (proposals, proposal_engine_state_present): (Vec<HoodiProposalStatus>, bool) =
-        load_proposal_statuses(&engine, &metadata, &record).await?;
+        load_proposal_statuses(&lookup.engine, &lookup.metadata, &lookup.record).await?;
     let (aggregate, aggregate_engine_state_present): (Option<HoodiAggregateStatus>, bool) =
-        load_aggregate_status(&engine, &metadata, &record).await?;
+        load_aggregate_status(&lookup.engine, &lookup.metadata, &lookup.record).await?;
     let root_engine_state_present = proposal_engine_state_present || aggregate_engine_state_present;
     let root_state = resolve_root_task_state(
-        record.runner_status,
+        lookup.record.runner_status,
         &proposals,
         aggregate.as_ref(),
-        metadata.has_runtime_progress(),
-        record.error.as_deref(),
+        lookup.metadata.has_runtime_progress(),
+        lookup.record.error.as_deref(),
     );
 
     Ok(HoodiTaskData {
         task_id: id.to_string(),
-        route: record.route.to_string(),
-        execution_mode: metadata.execution_mode_str(),
+        route: lookup.record.route.to_string(),
+        execution_mode: lookup.metadata.execution_mode_str(),
         status: root_state.status.clone(),
-        network: metadata.network.clone(),
-        l1_network: metadata.l1_network.clone(),
-        runtime: root_runtime_view(&record, &metadata, root_engine_state_present),
+        network: lookup.metadata.network.clone(),
+        l1_network: lookup.metadata.l1_network.clone(),
+        runtime: root_runtime_view(&lookup.record, &lookup.metadata, root_engine_state_present),
         current_index: root_state.current_index,
         proposals,
         aggregate,
@@ -1193,14 +1263,58 @@ fn task_runtime_view(
 
 fn resolved_pair(
     state: &AppState,
-    network: &str,
-    l1_network: &str,
+    network: Option<&str>,
+    l1_network: Option<&str>,
 ) -> Result<ResolvedNetworkPair, ApiError> {
-    state
+    if let (Some(network), Some(l1_network)) = (network, l1_network) {
+        return state
+            .config
+            .rpc
+            .resolve_pair(network, l1_network)
+            .map_err(|err| ApiError::bad_request(err.to_string()));
+    }
+
+    let resolved_pairs = state
         .config
         .rpc
-        .resolve_pair(network, l1_network)
-        .map_err(|err| ApiError::bad_request(err.to_string()))
+        .resolved_pairs()
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    let default_pair = resolved_pairs
+        .first()
+        .ok_or_else(|| ApiError::internal("rpc.pairs must contain at least one network pair"))?;
+    let default_network = default_pair.network.clone();
+    let default_l1_network = default_pair.l1_network.clone();
+    let network = network.unwrap_or(default_network.as_str());
+    let l1_network = l1_network.unwrap_or(default_l1_network.as_str());
+
+    resolved_pairs
+        .into_iter()
+        .find(|pair| pair.network == network && pair.l1_network == l1_network)
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "unsupported network pair: network={network}, l1_network={l1_network}"
+            ))
+        })
+}
+
+fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, ApiError> {
+    let payload = serde_json::json!({
+        "pair_key": submission.pair.key.as_str(),
+        "route": submission.route.route.to_string(),
+        "aggregate_requested": submission.aggregate_requested,
+        "execution_mode": submission
+            .execution_mode
+            .map(|mode| mode.as_str()),
+        "blob_proof_type": submission.blob_proof_type.as_deref(),
+        "prover": submission.prover.as_deref(),
+        "graffiti": submission.graffiti.as_deref(),
+        "prover_config": &submission.prover_config,
+        "proposals": &submission.proposals,
+    });
+    let encoded = serde_json::to_vec(&payload).map_err(|err| {
+        ApiError::internal(format!("failed to serialize request fingerprint: {err}"))
+    })?;
+    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
 }
 
 fn resolve_engine(
@@ -1249,4 +1363,95 @@ fn registered_response(
 
 fn zk_any_not_drawn_response() -> Json<HoodiSuccess<RegistrationData>> {
     registration_response(HoodiProofType::Native.as_str(), "zk_any_not_drawn", None)
+}
+
+fn should_reenqueue_existing_submission(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &HoodiTaskMetadata,
+) -> bool {
+    !matches!(
+        record.runner_status,
+        RuntimeRunnerStatus::Completed
+            | RuntimeRunnerStatus::Failed
+            | RuntimeRunnerStatus::Cancelled
+    ) && !metadata.has_runtime_progress()
+}
+
+async fn compatibility_response_for_task(
+    state: &AppState,
+    task_id: &str,
+) -> Result<Response, ApiError> {
+    let lookup = load_task_lookup(state, task_id).await?;
+    let proof_type = HoodiProofType::from_canonical(lookup.metadata.proof_type);
+    let task = load_task_data_from_lookup(task_id, &lookup).await?;
+    let public_task_id = Some(task.task_id.clone());
+
+    Ok(match task.status {
+        ProofStatus::Pending => {
+            legacy_success_response(proof_type, "registered", public_task_id, None)
+        }
+        ProofStatus::Proving => {
+            legacy_success_response(proof_type, "work_in_progress", public_task_id, None)
+        }
+        ProofStatus::Completed => match task.proof {
+            Some(proof) => legacy_success_response(
+                proof_type,
+                "completed",
+                public_task_id,
+                Some(LegacyProofMaterial {
+                    proof,
+                    kzg_proof: String::new(),
+                    quote: String::new(),
+                }),
+            ),
+            None => legacy_success_response(proof_type, "completed", public_task_id, None),
+        },
+        ProofStatus::Failed => legacy_error_response(
+            proof_type,
+            "task_failed",
+            task.error
+                .unwrap_or_else(|| format!("task {task_id} failed")),
+        ),
+        ProofStatus::Cancelled => legacy_error_response(
+            proof_type,
+            "task_cancelled",
+            task.error
+                .unwrap_or_else(|| format!("task {task_id} was cancelled")),
+        ),
+    })
+}
+
+fn legacy_success_response(
+    proof_type: HoodiProofType,
+    status: &'static str,
+    task_id: Option<String>,
+    proof: Option<LegacyProofMaterial>,
+) -> Response {
+    Json(LegacyProofEnvelope {
+        status: "ok",
+        proof_type: proof_type.as_str().to_string(),
+        data: LegacyProofData {
+            status,
+            task_id,
+            proof,
+        },
+    })
+    .into_response()
+}
+
+fn legacy_error_response(
+    proof_type: HoodiProofType,
+    error: &'static str,
+    message: String,
+) -> Response {
+    (
+        StatusCode::OK,
+        Json(LegacyProofError {
+            status: "error",
+            proof_type: proof_type.as_str().to_string(),
+            error,
+            message,
+        }),
+    )
+        .into_response()
 }

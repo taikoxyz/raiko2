@@ -11,6 +11,7 @@ mod sampling;
 mod state;
 mod task_cleanup;
 mod task_metadata;
+mod telemetry;
 
 pub use fixture::run_fixture_server;
 pub use run::run_server;

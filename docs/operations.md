@@ -103,6 +103,25 @@ cargo run -r -p xtask -- release-image risc0 \
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts and does not rebuild guest sources by itself.
 
+## Register Guest Digests
+
+Guest builds and image releases do not update verifier trust lists automatically.
+When a checked-in guest ELF changes, register the new digests explicitly with `xtask`:
+
+```bash
+cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+```
+
+Current behavior:
+
+- `risc0` registrations compute the digest from the current ELF and call
+  `setImageIdTrusted(bytes32,bool)`.
+- `sp1` registrations derive the current proving key digests from `setup(elf)` and call
+  `setProgramTrusted(bytes32,bool)`.
+- Boundless program upload is a separate runtime concern and still happens automatically when
+  `risc0/boundless` submits a request.
+
 ## Boundless Route
 
 To use the boundless-backed RISC0 route, configure:
@@ -196,5 +215,20 @@ the proxy. If `l2_witness_rpc` is unset, the server falls back to `l2_rpc`.
 ## Health and Readiness
 
 - `GET /health`: basic process health
+- `GET /metrics`: Prometheus text-format key service metrics
 - `GET /ready`: configured L1/L2 RPC chain-ID readiness, queue readiness, and prerequisite checks
   for the hosted proving capabilities exposed by the endpoint
+
+The hosted server exports a minimal Prometheus surface focused on request intake and proving-stage
+health:
+
+- `raiko2_request_registrations_total`
+- `raiko2_stage_tasks_inflight`
+- `raiko2_stage_task_started_total`
+- `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_duration_seconds`
+- `raiko2_external_submission_total`
+
+Import [raiko2-hosted-stage-latency.json](./grafana/raiko2-hosted-stage-latency.json) into
+Grafana for a baseline hosted-api dashboard with preflight, prove, aggregate, inflight, and
+external-submission panels.

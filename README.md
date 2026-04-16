@@ -59,7 +59,7 @@ flowchart LR
 - `bin/raiko2`: HTTP server and CLI
 - `crates/pipeline`: preflight, manifest building, and validation wiring
 - `crates/prover`: prover backends and aggregation adapters
-- `xtask`: guest build, benchmarking, and release automation
+- `xtask`: guest build, verifier registration, benchmarking, and release automation
 
 ## License
 

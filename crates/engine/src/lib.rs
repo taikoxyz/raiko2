@@ -462,9 +462,9 @@ where
         &self,
         proof_tasks: Vec<EngineTaskId>,
     ) -> Result<EngineTaskId, TaskStoreError> {
-        if proof_tasks.len() < 2 {
+        if proof_tasks.is_empty() {
             return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 2 proof tasks",
+                "aggregation requires at least 1 proof task",
             ));
         }
 
@@ -513,9 +513,9 @@ where
         request: AggregationTaskRequest,
         proof_tasks: Vec<EngineTaskId>,
     ) -> Result<EngineTaskId, TaskStoreError> {
-        if proof_tasks.len() < 2 {
+        if proof_tasks.is_empty() {
             return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 2 proof tasks",
+                "aggregation requires at least 1 proof task",
             ));
         }
 
@@ -567,9 +567,9 @@ where
         request: AggregationTaskRequest,
         proofs: Vec<Proof>,
     ) -> Result<EngineTaskId, TaskStoreError> {
-        if proofs.len() < 2 {
+        if proofs.is_empty() {
             return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 2 proofs",
+                "aggregation requires at least 1 proof",
             ));
         }
 
@@ -1328,6 +1328,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_aggregation_proof_accepts_single_prove_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let proof_task = engine.proposal_task_id(proposal_request(1), ProposalStage::Prove);
+        let aggregate_id = engine
+            .submit_aggregation_proof(vec![proof_task.clone()])
+            .await?;
+
+        let view = engine
+            .get(aggregate_id.clone())
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected aggregate task view"))?;
+        assert!(matches!(view.state, TaskState::Pending { .. }));
+        assert_eq!(
+            aggregate_id,
+            EngineTaskId::new(EngineTaskKey::Aggregate {
+                pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                request: AggregationTaskRequest {
+                    request_id: "1".to_string(),
+                    proposal_ids: vec![1],
+                    prover_config: ProverTaskConfig::default(),
+                },
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_aggregation_proof_rejects_empty_input() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let err = engine
+            .submit_aggregation_proof(Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("aggregation requires at least 1 proof task")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn submit_aggregation_proof_rejects_non_prove_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
@@ -1343,10 +1398,7 @@ mod tests {
             ])
             .await
             .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("aggregation requires at least 2 proof tasks")
-        );
+        assert!(err.to_string().contains("proposal prove tasks"));
 
         let err = engine
             .submit_aggregation_proof(vec![

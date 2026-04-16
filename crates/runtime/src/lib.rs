@@ -3,6 +3,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use anyhow::{Context, Result};
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -16,6 +17,12 @@ pub struct RuntimeManager {
     root: PathBuf,
     db_path: PathBuf,
     conn: OnceCell<tokio_rusqlite::Connection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredTaskCursor {
+    pub updated_at: i64,
+    pub task_id: String,
 }
 
 impl RuntimeManager {
@@ -98,15 +105,22 @@ impl RuntimeManager {
     }
 
     #[must_use]
-    pub fn task_dir(&self, pipeline_key: &str, task_id: &str) -> PathBuf {
-        self.root.join("tasks").join(pipeline_key).join(task_id)
+    pub fn task_dir(&self, pipeline_key: PipelineKey, task_id: &str) -> PathBuf {
+        self.root
+            .join("tasks")
+            .join(pipeline_key.as_str())
+            .join(task_id)
     }
 
     /// # Errors
     ///
     /// Returns an error if the task workspace or metadata cannot be created.
     pub async fn register_task(&self, registration: TaskRegistration) -> Result<RuntimeTaskRecord> {
-        let task_dir = self.task_dir(&registration.pipeline_key, &registration.task_id);
+        let pipeline_key = registration
+            .route
+            .pipeline_key()
+            .map_err(anyhow::Error::msg)?;
+        let task_dir = self.task_dir(pipeline_key, &registration.task_id);
         fs::create_dir_all(task_dir.join("logs"))
             .with_context(|| format!("failed to create task workspace {}", task_dir.display()))?;
         fs::write(
@@ -122,10 +136,8 @@ impl RuntimeManager {
 
         let record = RuntimeTaskRecord {
             task_id: registration.task_id,
-            pipeline_key: registration.pipeline_key,
+            pipeline_key,
             route: registration.route,
-            guest_system: registration.guest_system,
-            runner: registration.runner,
             task_kind: registration.task_kind,
             proposal_id: registration.proposal_id,
             proof_ids: registration.proof_ids,
@@ -181,10 +193,10 @@ impl RuntimeManager {
                 ",
                 params![
                     record.task_id,
-                    record.pipeline_key,
-                    record.route,
-                    record.guest_system,
-                    record.runner,
+                    record.pipeline_key.as_str(),
+                    record.route.to_string(),
+                    record.route.guest_system.to_string(),
+                    record.route.runner.to_string(),
                     record.task_kind,
                     record.proposal_id,
                     proof_ids_json,
@@ -342,6 +354,73 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if expired runtime task records cannot be loaded.
+    pub async fn list_expired_terminal_tasks(
+        &self,
+        now_ts: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredTaskCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
+        if ttl_secs == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connection().await?;
+        let ttl_secs = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
+        let cutoff = now_ts.saturating_sub(ttl_secs);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.cloned();
+        let tasks = conn
+            .call(move |conn| {
+                let mut stmt = if after.is_some() {
+                    conn.prepare(
+                        r"
+                        SELECT
+                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                            remote_tx_hash, proof_path, error, metadata_json, updated_at
+                        FROM runtime_tasks
+                        WHERE runner_status IN ('completed', 'failed', 'cancelled')
+                            AND updated_at <= ?1
+                            AND (updated_at > ?2 OR (updated_at = ?2 AND task_id > ?3))
+                        ORDER BY updated_at ASC, task_id ASC
+                        LIMIT ?4
+                        ",
+                    )?
+                } else {
+                    conn.prepare(
+                        r"
+                        SELECT
+                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                            remote_tx_hash, proof_path, error, metadata_json, updated_at
+                        FROM runtime_tasks
+                        WHERE runner_status IN ('completed', 'failed', 'cancelled')
+                            AND updated_at <= ?1
+                        ORDER BY updated_at ASC, task_id ASC
+                        LIMIT ?2
+                        ",
+                    )?
+                };
+                let mut rows = if let Some(after) = after {
+                    stmt.query(params![cutoff, after.updated_at, after.task_id, limit])?
+                } else {
+                    stmt.query(params![cutoff, limit])?
+                };
+                let mut tasks = Vec::new();
+                while let Some(row) = rows.next()? {
+                    tasks.push(runtime_task_record_from_row(row)?);
+                }
+                Ok(tasks)
+            })
+            .await
+            .context("failed to list expired terminal runtime tasks")?;
+        Ok(tasks)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the task record or workspace cannot be deleted.
     pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
         let Some(record) = self.get_task(task_id).await? else {
@@ -374,10 +453,7 @@ impl RuntimeManager {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRegistration {
     pub task_id: String,
-    pub pipeline_key: String,
-    pub route: String,
-    pub guest_system: String,
-    pub runner: String,
+    pub route: PipelineRoute,
     pub task_kind: String,
     pub proposal_id: Option<u64>,
     #[serde(default)]
@@ -389,10 +465,8 @@ pub struct TaskRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeTaskRecord {
     pub task_id: String,
-    pub pipeline_key: String,
-    pub route: String,
-    pub guest_system: String,
-    pub runner: String,
+    pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
     pub task_kind: String,
     pub proposal_id: Option<u64>,
     pub proof_ids: Vec<String>,
@@ -410,12 +484,47 @@ pub struct RuntimeTaskRecord {
 fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
     let proof_ids_json: String = row.get(7)?;
     let metadata_json: String = row.get(15)?;
+    let pipeline_key_raw: String = row.get(1)?;
+    let route_raw: String = row.get(2)?;
+    let guest_system_raw: String = row.get(3)?;
+    let runner_raw: String = row.get(4)?;
+    let pipeline_key = pipeline_key_raw.parse::<PipelineKey>().map_err(|err| {
+        invalid_runtime_task_row(
+            1,
+            format!("invalid pipeline_key '{pipeline_key_raw}': {err}"),
+        )
+    })?;
+    let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
+        invalid_runtime_task_row(2, format!("invalid route '{route_raw}': {err}"))
+    })?;
+    let expected_pipeline_key = route.pipeline_key().map_err(|err| {
+        invalid_runtime_task_row(
+            2,
+            format!("route '{route_raw}' does not map to a supported pipeline: {err}"),
+        )
+    })?;
+    if pipeline_key != expected_pipeline_key {
+        return Err(invalid_runtime_task_row(
+            1,
+            format!("pipeline_key '{pipeline_key_raw}' does not match route '{route_raw}'"),
+        ));
+    }
+    if guest_system_raw != route.guest_system.to_string() {
+        return Err(invalid_runtime_task_row(
+            3,
+            format!("guest_system '{guest_system_raw}' does not match route '{route_raw}'"),
+        ));
+    }
+    if runner_raw != route.runner.to_string() {
+        return Err(invalid_runtime_task_row(
+            4,
+            format!("runner '{runner_raw}' does not match route '{route_raw}'"),
+        ));
+    }
     Ok(RuntimeTaskRecord {
         task_id: row.get(0)?,
-        pipeline_key: row.get(1)?,
-        route: row.get(2)?,
-        guest_system: row.get(3)?,
-        runner: row.get(4)?,
+        pipeline_key,
+        route,
         task_kind: row.get(5)?,
         proposal_id: row.get(6)?,
         proof_ids: serde_json::from_str(&proof_ids_json).unwrap_or_default(),
@@ -429,6 +538,17 @@ fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
         metadata: serde_json::from_str(&metadata_json).unwrap_or_default(),
         updated_at: row.get(16)?,
     })
+}
+
+fn invalid_runtime_task_row(column: usize, message: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,22 +595,31 @@ fn now_ts() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunnerStatus, RuntimeManager, TaskRegistration};
+    use super::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, TaskRegistration};
+    use raiko2_pipeline::PipelineRoute;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_root(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
 
     #[tokio::test]
     async fn runtime_manager_registers_and_loads_task() -> anyhow::Result<()> {
-        let root = std::env::temp_dir().join(format!("raiko2-runtime-test-{}", std::process::id()));
+        let root = unique_root("raiko2-runtime-test");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
         let runtime = RuntimeManager::new(root.clone())?;
         let registration = TaskRegistration {
             task_id: "task-1".to_string(),
-            pipeline_key: "shasta-risc0-local".to_string(),
-            route: "risc0/local".to_string(),
-            guest_system: "risc0".to_string(),
-            runner: "local".to_string(),
+            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "proposal".to_string(),
             proposal_id: Some(7),
             proof_ids: Vec::new(),
@@ -508,10 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_manager_finds_task_by_engine_task_id() -> anyhow::Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "raiko2-runtime-engine-lookup-{}",
-            std::process::id()
-        ));
+        let root = unique_root("raiko2-runtime-engine-lookup");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
@@ -519,10 +645,9 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task-public".to_string(),
-                pipeline_key: "shasta-risc0-boundless".to_string(),
-                route: "risc0/boundless".to_string(),
-                guest_system: "risc0".to_string(),
-                runner: "boundless".to_string(),
+                route: "risc0/boundless"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(7),
                 proof_ids: vec!["proposal-proof-task".to_string()],
@@ -550,10 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_manager_lists_all_tasks_by_engine_task_id() -> anyhow::Result<()> {
-        let root = std::env::temp_dir().join(format!(
-            "raiko2-runtime-engine-lookup-all-{}",
-            std::process::id()
-        ));
+        let root = unique_root("raiko2-runtime-engine-lookup-all");
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
@@ -562,10 +684,9 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.to_string(),
-                    pipeline_key: "shasta-risc0-boundless".to_string(),
-                    route: "risc0/boundless".to_string(),
-                    guest_system: "risc0".to_string(),
-                    runner: "boundless".to_string(),
+                    route: "risc0/boundless"
+                        .parse::<PipelineRoute>()
+                        .expect("parse route"),
                     task_kind: "hoodi_batch".to_string(),
                     proposal_id: Some(7),
                     proof_ids: vec!["shared-proposal-proof-task".to_string()],
@@ -582,6 +703,146 @@ mod tests {
         assert_eq!(shared.len(), 2);
         assert_eq!(shared[0].task_id, "task-public-a");
         assert_eq!(shared[1].task_id, "task-public-b");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_rejects_inconsistent_route_identity() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-invalid-route");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        let conn = runtime.connection().await?;
+        conn.call(|conn| {
+            conn.execute(
+                r"
+                INSERT INTO runtime_tasks (
+                    task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                    proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                    remote_tx_hash, proof_path, error, metadata_json, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                ",
+                rusqlite::params![
+                    "task-invalid",
+                    "shasta-native-local",
+                    "risc0/local",
+                    "native",
+                    "local",
+                    "hoodi_batch",
+                    Option::<u64>::None,
+                    "[]",
+                    "allocated",
+                    "/tmp/runtime-task",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "{}",
+                    1_i64,
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+
+        let err = runtime
+            .get_task("task-invalid")
+            .await
+            .expect_err("mismatched runtime row should fail");
+        assert!(
+            err.chain().any(|source| source
+                .to_string()
+                .contains("does not match route 'risc0/local'")),
+            "{err:?}"
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_lists_only_expired_terminal_tasks() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-expired");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for task_id in ["completed-task", "running-task", "cancelled-task"] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: Vec::new(),
+                    metadata: serde_json::json!({}),
+                })
+                .await?;
+        }
+
+        for (task_id, status, updated_at) in [
+            ("completed-task", RunnerStatus::Completed, 10_i64),
+            ("running-task", RunnerStatus::Running, 10_i64),
+            ("cancelled-task", RunnerStatus::Cancelled, 20_i64),
+        ] {
+            let mut record = runtime.get_task(task_id).await?.expect("task present");
+            record.runner_status = status;
+            record.updated_at = updated_at;
+            runtime.upsert_task(&record).await?;
+        }
+
+        let expired = runtime
+            .list_expired_terminal_tasks(7_220, 7_200, None, 8)
+            .await?;
+
+        assert_eq!(expired.len(), 2);
+        assert_eq!(expired[0].task_id, "completed-task");
+        assert_eq!(expired[1].task_id, "cancelled-task");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_pages_expired_terminal_tasks_after_cursor() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-expired-page");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for (task_id, status, updated_at) in [
+            ("task-a", RunnerStatus::Completed, 10_i64),
+            ("task-b", RunnerStatus::Failed, 20_i64),
+            ("task-c", RunnerStatus::Cancelled, 30_i64),
+        ] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: Vec::new(),
+                    metadata: serde_json::json!({}),
+                })
+                .await?;
+            let mut record = runtime.get_task(task_id).await?.expect("task present");
+            record.runner_status = status;
+            record.updated_at = updated_at;
+            runtime.upsert_task(&record).await?;
+        }
+
+        let expired = runtime
+            .list_expired_terminal_tasks(
+                7_230,
+                7_200,
+                Some(&ExpiredTaskCursor {
+                    updated_at: 20,
+                    task_id: "task-b".to_string(),
+                }),
+                8,
+            )
+            .await?;
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].task_id, "task-c");
 
         std::fs::remove_dir_all(root)?;
         Ok(())

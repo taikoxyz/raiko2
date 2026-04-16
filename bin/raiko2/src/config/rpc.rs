@@ -1,6 +1,7 @@
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
+use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
     RpcClientConfig as ProviderRpcClientConfig, RpcRetryConfig as ProviderRpcRetryConfig,
 };
@@ -39,6 +40,7 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
+        boundless: BoundlessPairConfig::default(),
     }]
 }
 
@@ -65,6 +67,8 @@ pub struct NetworkPairConfig {
     pub sp1_verifier_rpc_url: Option<String>,
     #[serde(default)]
     pub sp1_verifier_address: Option<String>,
+    #[serde(default)]
+    pub boundless: BoundlessPairConfig,
 }
 
 impl NetworkPairConfig {
@@ -85,8 +89,49 @@ pub struct ResolvedNetworkPair {
     pub l2_witness_rpc: String,
     pub sp1_verifier_rpc_url: Option<String>,
     pub sp1_verifier_address: Option<String>,
+    pub boundless: BoundlessPairConfig,
     pub l1_spec: ChainSpec,
     pub l2_spec: ChainSpec,
+}
+
+/// Pair-specific Boundless overrides for RISC0/Boundless routes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BoundlessPairConfig {
+    pub batch_quoted_mcycles: Option<u32>,
+    pub offer_params: BoundlessOfferParamsOverride,
+}
+
+impl BoundlessPairConfig {
+    /// Validate the optional pair-specific Boundless overrides.
+    pub fn validate(&self, pair_key: &str) -> Result<()> {
+        if matches!(self.batch_quoted_mcycles, Some(0)) {
+            bail!("{pair_key}: boundless.batch_quoted_mcycles must be > 0");
+        }
+        if let Some(batch) = &self.offer_params.batch {
+            validate_offer_spec(batch)
+                .map_err(anyhow::Error::msg)
+                .map_err(|err| {
+                    anyhow::anyhow!("{pair_key}: boundless.offer_params.batch: {err}")
+                })?;
+        }
+        if let Some(aggregation) = &self.offer_params.aggregation {
+            validate_offer_spec(aggregation)
+                .map_err(anyhow::Error::msg)
+                .map_err(|err| {
+                    anyhow::anyhow!("{pair_key}: boundless.offer_params.aggregation: {err}")
+                })?;
+        }
+        Ok(())
+    }
+}
+
+/// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BoundlessOfferParamsOverride {
+    pub batch: Option<BoundlessOfferParams>,
+    pub aggregation: Option<BoundlessOfferParams>,
 }
 
 impl ResolvedNetworkPair {
@@ -185,6 +230,7 @@ impl RpcConfig {
             if !seen.insert(pair.key.clone()) {
                 bail!("duplicate rpc pair configuration: {}", pair.key);
             }
+            pair.boundless.validate(&pair.key)?;
             if !is_valid_url(&pair.l1_rpc) {
                 bail!(
                     "{}: l1_rpc = '{}'",
@@ -293,6 +339,7 @@ fn resolve_pair(
         l2_witness_rpc: pair.l2_witness_rpc.clone().unwrap_or(l2_rpc),
         sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
         sp1_verifier_address: pair.sp1_verifier_address.clone(),
+        boundless: pair.boundless.clone(),
         l1_spec,
         l2_spec,
     })

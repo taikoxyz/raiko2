@@ -66,6 +66,9 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
 
 /// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
 ///
+/// Raw 32-byte image ids are encoded into little-endian `u32` words because the Shasta
+/// aggregation guest ABI reconstructs them with `words_to_bytes_le`.
+///
 /// # Errors
 ///
 /// Returns an error when the input is neither valid SP1 verifying key JSON nor a 32-byte hex
@@ -88,7 +91,7 @@ pub fn sp1_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
     for (index, chunk) in bytes.chunks_exact(4).enumerate() {
         let mut word = [0u8; 4];
         word.copy_from_slice(chunk);
-        words[index] = u32::from_be_bytes(word);
+        words[index] = u32::from_le_bytes(word);
     }
     Ok(words)
 }
@@ -829,6 +832,7 @@ fn insert_sp1_metadata(
 mod tests {
     use super::remote_verifier_program_vkey;
     use alloy_primitives::B256;
+    use raiko2_primitives_shasta::instance::words_to_bytes_le;
     use raiko2_guests::sp1::shasta::PROPOSAL_ELF;
     use sp1_sdk::{HashableKey, Prover as _, ProverClient};
     use std::str::FromStr;
@@ -843,5 +847,13 @@ mod tests {
 
         assert_eq!(remote_verifier_program_vkey(&vk), expected);
         assert_ne!(remote_verifier_program_vkey(&vk), old_buggy);
+    }
+
+    #[test]
+    fn raw_image_id_hex_roundtrips_through_guest_word_encoding() {
+        let expected = B256::from([0x5a; 32]);
+        let words = super::sp1_image_id_words_from_uuid(&expected.to_string()).expect("image id");
+
+        assert_eq!(B256::from(words_to_bytes_le(&words)), expected);
     }
 }

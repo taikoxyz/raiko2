@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::HoodiTaskMetadata;
+#[cfg(test)]
+use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeObserver {
@@ -371,10 +373,9 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public".to_string(),
-                pipeline_key: "shasta-risc0-boundless".to_string(),
-                route: "risc0/boundless".to_string(),
-                guest_system: "risc0".to_string(),
-                runner: "boundless".to_string(),
+                route: "risc0/boundless"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![encoded_task_id.clone()],
@@ -453,10 +454,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1".to_string(),
-                pipeline_key: "shasta-sp1-local".to_string(),
-                route: "sp1/local".to_string(),
-                guest_system: "sp1".to_string(),
-                runner: "local".to_string(),
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![encoded_task_id.clone()],
@@ -547,10 +545,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_load".to_string(),
-                pipeline_key: "shasta-sp1-network".to_string(),
-                route: "sp1/network".to_string(),
-                guest_system: "sp1".to_string(),
-                runner: "network".to_string(),
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![encoded_task_id.clone(), encoded_other_task_id.clone()],
@@ -650,10 +645,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_aggregate".to_string(),
-                pipeline_key: "shasta-sp1-network".to_string(),
-                route: "sp1/network".to_string(),
-                guest_system: "sp1".to_string(),
-                runner: "network".to_string(),
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
                 proof_ids: vec![encoded_task_id],

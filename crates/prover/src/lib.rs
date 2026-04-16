@@ -31,7 +31,7 @@ pub use sp1::{
 };
 
 use alloy_primitives::{B256, Bytes};
-use raiko2_pipeline::ProverBackend;
+use raiko2_pipeline::{PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
@@ -187,6 +187,59 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
 
     Ok(image_id.unwrap_or([0; 8]))
 }
+
+/// # Errors
+///
+/// Returns an error when the supplied proofs do not satisfy the route-specific external
+/// aggregation admission contract.
+pub fn validate_external_aggregate_proofs(
+    route: PipelineRoute,
+    proofs: &[Proof],
+) -> Result<(), RaikoError> {
+    let pipeline_key = route
+        .pipeline_key()
+        .map_err(RaikoError::InvalidRequestConfig)?;
+
+    for (index, proof) in proofs.iter().enumerate() {
+        match pipeline_key {
+            raiko2_pipeline::PipelineKey::ShastaNative => {
+                if proof.input.is_none() || proof.extra_data.is_none() {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing native aggregation metadata"
+                    )));
+                }
+            }
+            raiko2_pipeline::PipelineKey::ShastaSp1 => {
+                if proof.input.is_none() || proof.extra_data.is_none() || proof.uuid.is_none() {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing SP1 aggregation metadata"
+                    )));
+                }
+            }
+            raiko2_pipeline::PipelineKey::ShastaRisc0 => {
+                if proof.input.is_none()
+                    || proof.extra_data.is_none()
+                    || proof.uuid.is_none()
+                    || proof.quote.is_none()
+                {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing RISC0 aggregation metadata"
+                    )));
+                }
+            }
+            raiko2_pipeline::PipelineKey::ShastaRisc0Boundless => {
+                if proof.input.is_none() || proof.extra_data.is_none() || proof.quote.is_none() {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing Boundless aggregation metadata"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Common prover trait for all proving backends.
 #[async_trait::async_trait]
 pub trait Prover<B>: Send + Sync
@@ -251,8 +304,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash};
+    use super::{
+        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+        validate_external_aggregate_proofs,
+    };
     use alloy_primitives::B256;
+    use raiko2_pipeline::PipelineRoute;
+    use raiko2_primitives::Proof;
 
     #[test]
     fn parses_shasta_proposal_input_hash_from_first_committed_word() {
@@ -279,6 +337,66 @@ mod tests {
         assert_eq!(
             parse_shasta_aggregation_input_hash(&public_values),
             agg_input_hash
+        );
+    }
+
+    fn aggregate_proof_fixture() -> Proof {
+        Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(B256::repeat_byte(0x11)),
+            quote: Some("0xquote".to_string()),
+            uuid: Some("0xuuid".to_string()),
+            kzg_proof: None,
+            extra_data: Some(serde_json::json!({"carry": "ok"})),
+        }
+    }
+
+    #[test]
+    fn aggregate_validator_accepts_native_local_proof() {
+        let route = "native/local"
+            .parse::<PipelineRoute>()
+            .expect("parse route");
+        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+    }
+
+    #[test]
+    fn aggregate_validator_rejects_missing_sp1_fields() {
+        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
+        let mut proof = aggregate_proof_fixture();
+        proof.uuid = None;
+
+        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing uuid");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing SP1 aggregation metadata")
+        );
+    }
+
+    #[test]
+    fn aggregate_validator_rejects_missing_risc0_local_fields() {
+        let route = "risc0/local".parse::<PipelineRoute>().expect("parse route");
+        let mut proof = aggregate_proof_fixture();
+        proof.quote = None;
+
+        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing RISC0 aggregation metadata")
+        );
+    }
+
+    #[test]
+    fn aggregate_validator_rejects_missing_boundless_receipt() {
+        let route = "risc0/boundless"
+            .parse::<PipelineRoute>()
+            .expect("parse route");
+        let mut proof = aggregate_proof_fixture();
+        proof.quote = None;
+
+        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing receipt metadata")
         );
     }
 }

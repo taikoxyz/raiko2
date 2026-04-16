@@ -106,6 +106,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> 400`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
+- `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the same draw is
+  reused for both proposal proving and aggregation.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
   - `proof_type = "native"`
   - `data.status = "zk_any_not_drawn"`
@@ -310,6 +312,8 @@ Returns the root-task view derived from the original batch request.
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
   `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
+- Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
+  `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the

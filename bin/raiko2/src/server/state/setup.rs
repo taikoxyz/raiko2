@@ -128,18 +128,24 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
 
 pub(crate) fn boundless_prover_config(
     config: &Config,
+    pair: &ResolvedNetworkPair,
 ) -> raiko2_prover::boundless::BoundlessConfig {
+    let boundless = config
+        .prover
+        .boundless
+        .apply_pair_override(&pair.boundless)
+        .expect("validated boundless config must merge cleanly");
     raiko2_prover::boundless::BoundlessConfig {
         execution_po2: config.prover.risc0.execution_po2,
-        offchain: config.prover.boundless.offchain,
-        rpc_url: config.prover.boundless.rpc_url.clone(),
-        signer_key: config.prover.boundless.signer_key.clone(),
-        deployment: config.prover.boundless.deployment.clone(),
-        batch_quoted_mcycles: config.prover.boundless.batch_quoted_mcycles,
-        batch_quote_strategy: config.prover.boundless.batch_quote_strategy.clone(),
-        offer_params: config.prover.boundless.offer_params.clone(),
-        poll_interval_ms: config.prover.boundless.poll_interval_ms,
-        timeout_ms: config.prover.boundless.timeout_ms,
+        offchain: boundless.offchain,
+        rpc_url: boundless.rpc_url,
+        signer_key: boundless.signer_key,
+        deployment: boundless.deployment,
+        batch_quoted_mcycles: boundless.batch_quoted_mcycles,
+        batch_quote_strategy: boundless.batch_quote_strategy,
+        offer_params: boundless.offer_params,
+        poll_interval_ms: boundless.poll_interval_ms,
+        timeout_ms: boundless.timeout_ms,
     }
 }
 
@@ -205,11 +211,48 @@ mod tests {
     fn boundless_prover_inherits_risc0_execution_po2() {
         let mut config = Config::default();
         config.prover.risc0.execution_po2 = 24;
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("resolved rpc pairs")
+            .pop()
+            .expect("default pair");
 
         let risc0 = risc0_prover_config(&config);
-        let boundless = boundless_prover_config(&config);
+        let boundless = boundless_prover_config(&config, &pair);
 
         assert_eq!(risc0.execution_po2, 24);
         assert_eq!(boundless.execution_po2, risc0.execution_po2);
+    }
+
+    #[test]
+    fn boundless_prover_applies_pair_specific_overrides() {
+        let mut config = Config::default();
+        config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
+        config.rpc.pairs[0].boundless.offer_params.batch =
+            Some(raiko2_prover::boundless::BoundlessOfferParams {
+                timeout_ms_per_mcycle: 500,
+                ..config.prover.boundless.offer_params.batch.clone()
+            });
+        config.rpc.pairs[0].boundless.offer_params.aggregation =
+            Some(raiko2_prover::boundless::BoundlessOfferParams {
+                timeout_ms_per_mcycle: 7_000,
+                ..config.prover.boundless.offer_params.aggregation.clone()
+            });
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("resolved rpc pairs")
+            .pop()
+            .expect("default pair");
+
+        let boundless = boundless_prover_config(&config, &pair);
+
+        assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
+        assert_eq!(boundless.offer_params.batch.timeout_ms_per_mcycle, 500);
+        assert_eq!(
+            boundless.offer_params.aggregation.timeout_ms_per_mcycle,
+            7_000
+        );
     }
 }

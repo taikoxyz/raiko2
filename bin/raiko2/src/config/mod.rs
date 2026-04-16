@@ -12,11 +12,10 @@ mod runtime;
 mod server;
 mod validation;
 
-pub use prover::{
-    GuestSystem, PipelineRoute, ProverConfig, RunnerKind, ZkAnyConfig, ZkAnyTargetConfig,
-};
+pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
-pub use rpc::{NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
+pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
 
@@ -141,6 +140,18 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
+        for pair in self
+            .rpc
+            .resolved_pairs()
+            .context("RPC configuration error")?
+        {
+            self.prover
+                .boundless
+                .apply_pair_override(&pair.boundless)
+                .with_context(|| {
+                    format!("Boundless configuration error for rpc pair {}", pair.key)
+                })?;
+        }
         Ok(())
     }
 }
@@ -218,6 +229,7 @@ mod tests {
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -235,6 +247,7 @@ mod tests {
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -254,6 +267,7 @@ mod tests {
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
                 sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -281,6 +295,7 @@ mod tests {
                 sp1_verifier_address: Some(
                     "0x0000000000000000000000000000000000000001".to_string(),
                 ),
+                boundless: BoundlessPairConfig::default(),
             }],
             ..Default::default()
         };
@@ -295,6 +310,30 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_runtime_config_defaults_inactive_ttl_to_two_hours() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.inactive_ttl_secs, 7_200);
+    }
+
+    #[test]
+    fn test_config_rejects_invalid_pair_specific_boundless_offer() {
+        let mut config = Config::default();
+        config.rpc.pairs[0].boundless.offer_params.batch =
+            Some(raiko2_prover::boundless::BoundlessOfferParams {
+                timeout_ms_per_mcycle: 100,
+                lock_timeout_ms_per_mcycle: 100,
+                ..config.prover.boundless.offer_params.batch.clone()
+            });
+
+        let err = config.validate().expect_err("invalid pair offer config");
+        assert!(err.chain().any(|source| {
+            source
+                .to_string()
+                .contains("timeout must be greater than lock_timeout")
+        }));
     }
 
     #[test]

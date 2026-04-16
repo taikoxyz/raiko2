@@ -32,3 +32,49 @@
 2026-04-15 23:29:15,820 - INFO - latest proposal is 6835315
 2026-04-15 23:29:23,087 - INFO - found blocks for proposal 15734, start: 6835050, end: 6835241
 2026-04-15 23:29:23,087 - INFO - Selected 4 proposals
+2026-04-16 00:33:53,443 - INFO - Starting discovery (range=None, count=20, proof_type=native, debug_witness=True)
+2026-04-16 00:33:53,443 - ERROR - count exceeds max 5
+2026-04-16 00:34:09,947 - INFO - Starting discovery (range=None, count=5, proof_type=native, debug_witness=True)
+2026-04-16 00:34:52,014 - INFO - latest proposal is 6837283
+2026-04-16 00:35:02,292 - INFO - found blocks for proposal 15740, start: 6836202, end: 6836393
+2026-04-16 00:35:02,640 - INFO - latest proposal is 6837288
+2026-04-16 00:35:12,470 - INFO - found blocks for proposal 15741, start: 6836394, end: 6836585
+2026-04-16 00:35:12,806 - INFO - latest proposal is 6837294
+2026-04-16 00:35:22,455 - INFO - found blocks for proposal 15742, start: 6836586, end: 6836777
+2026-04-16 00:35:22,807 - INFO - latest proposal is 6837299
+2026-04-16 00:35:31,076 - INFO - found blocks for proposal 15743, start: 6836778, end: 6836969
+2026-04-16 00:35:31,410 - INFO - latest proposal is 6837303
+2026-04-16 00:35:39,752 - INFO - found blocks for proposal 15744, start: 6836970, end: 6837161
+2026-04-16 00:35:39,752 - INFO - Selected 5 proposals
+2026-04-16 01:10:43,704 - INFO - Starting discovery (range=None, count=3, proof_type=native, debug_witness=True)
+2026-04-16 01:11:09,583 - INFO - latest proposal is 6838372
+2026-04-16 01:11:19,174 - INFO - found blocks for proposal 15748, start: 6837738, end: 6837929
+2026-04-16 01:11:19,506 - INFO - latest proposal is 6838377
+2026-04-16 01:11:27,480 - INFO - found blocks for proposal 15749, start: 6837930, end: 6838121
+2026-04-16 01:11:27,811 - INFO - latest proposal is 6838381
+2026-04-16 01:11:35,133 - INFO - found blocks for proposal 15750, start: 6838122, end: 6838313
+2026-04-16 01:11:35,133 - INFO - Selected 3 proposals
+2026-04-16 01:12:54,267 - INFO - Starting discovery (range=None, count=10, proof_type=native, debug_witness=True)
+2026-04-16 01:12:54,267 - ERROR - count exceeds max 5
+2026-04-16 01:13:01,341 - INFO - Starting discovery (range=None, count=5, proof_type=native, debug_witness=True)
+2026-04-16 01:13:44,114 - INFO - latest proposal is 6838449
+2026-04-16 01:13:55,418 - INFO - found blocks for proposal 15746, start: 6837354, end: 6837545
+2026-04-16 01:13:55,751 - INFO - latest proposal is 6838455
+2026-04-16 01:14:05,809 - INFO - found blocks for proposal 15747, start: 6837546, end: 6837737
+2026-04-16 01:14:06,139 - INFO - latest proposal is 6838460
+2026-04-16 01:14:15,822 - INFO - found blocks for proposal 15748, start: 6837738, end: 6837929
+2026-04-16 01:14:16,159 - INFO - latest proposal is 6838465
+2026-04-16 01:14:25,046 - INFO - found blocks for proposal 15749, start: 6837930, end: 6838121
+2026-04-16 01:14:25,394 - INFO - latest proposal is 6838470
+2026-04-16 01:14:33,440 - INFO - found blocks for proposal 15750, start: 6838122, end: 6838313
+2026-04-16 01:14:33,440 - INFO - Selected 5 proposals
+2026-04-16 03:35:32,842 - INFO - Starting discovery (range=None, count=4, proof_type=native, debug_witness=True)
+2026-04-16 03:36:08,258 - INFO - latest proposal is 6842720
+2026-04-16 03:36:18,251 - INFO - found blocks for proposal 15769, start: 6841770, end: 6841961
+2026-04-16 03:36:18,602 - INFO - latest proposal is 6842725
+2026-04-16 03:36:28,441 - INFO - found blocks for proposal 15770, start: 6841962, end: 6842153
+2026-04-16 03:36:28,795 - INFO - latest proposal is 6842731
+2026-04-16 03:36:37,907 - INFO - found blocks for proposal 15771, start: 6842154, end: 6842344
+2026-04-16 03:36:38,237 - INFO - latest proposal is 6842735
+2026-04-16 03:36:46,614 - INFO - found blocks for proposal 15772, start: 6842345, end: 6842536
+2026-04-16 03:36:46,615 - INFO - Selected 4 proposals

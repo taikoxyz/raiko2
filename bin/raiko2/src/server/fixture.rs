@@ -492,6 +492,7 @@ pub(crate) fn base_config() -> Config {
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
+        boundless: crate::config::BoundlessPairConfig::default(),
     }];
     config
 }

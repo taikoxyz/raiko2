@@ -1,123 +1,13 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
-    boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig},
+    boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
     sp1::Sp1Config,
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
 
-/// Guest execution system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum GuestSystem {
-    #[default]
-    Risc0,
-    Sp1,
-    Native,
-}
-
-impl GuestSystem {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            GuestSystem::Risc0 => "risc0",
-            GuestSystem::Sp1 => "sp1",
-            GuestSystem::Native => "native",
-        }
-    }
-}
-
-impl fmt::Display for GuestSystem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for GuestSystem {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "risc0" => Ok(Self::Risc0),
-            "sp1" => Ok(Self::Sp1),
-            "native" => Ok(Self::Native),
-            _ => Err(format!("Unknown guest_system: {s}")),
-        }
-    }
-}
-
-/// Prover runner implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum RunnerKind {
-    #[default]
-    Local,
-    Boundless,
-}
-
-impl RunnerKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            RunnerKind::Local => "local",
-            RunnerKind::Boundless => "boundless",
-        }
-    }
-}
-
-impl fmt::Display for RunnerKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for RunnerKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "local" => Ok(Self::Local),
-            "boundless" => Ok(Self::Boundless),
-            _ => Err(format!("Unknown runner: {s}")),
-        }
-    }
-}
-
-/// Canonical route for a proving request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct PipelineRoute {
-    pub guest_system: GuestSystem,
-    pub runner: RunnerKind,
-}
-
-impl PipelineRoute {
-    #[must_use]
-    pub const fn new(guest_system: GuestSystem, runner: RunnerKind) -> Self {
-        Self {
-            guest_system,
-            runner,
-        }
-    }
-}
-
-impl fmt::Display for PipelineRoute {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.guest_system, self.runner)
-    }
-}
-
-impl FromStr for PipelineRoute {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let (guest_system, runner) = s
-            .split_once('/')
-            .ok_or_else(|| format!("Invalid route '{s}', expected <guest_system>/<runner>"))?;
-        Ok(Self::new(guest_system.parse()?, runner.parse()?))
-    }
-}
+use super::BoundlessPairConfig;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -150,24 +40,7 @@ impl ProverConfig {
     ///
     /// Returns an error if the configured guest system and runner are incompatible.
     pub fn validate(&self) -> Result<()> {
-        match self.route() {
-            PipelineRoute {
-                guest_system: GuestSystem::Risc0,
-                ..
-            }
-            | PipelineRoute {
-                guest_system: GuestSystem::Sp1 | GuestSystem::Native,
-                runner: RunnerKind::Local,
-            } => {}
-            PipelineRoute {
-                guest_system: GuestSystem::Sp1,
-                runner: RunnerKind::Boundless,
-            } => bail!("sp1/boundless is not supported"),
-            PipelineRoute {
-                guest_system: GuestSystem::Native,
-                runner: RunnerKind::Boundless,
-            } => bail!("native/boundless is not supported"),
-        }
+        self.route().pipeline_key().map_err(anyhow::Error::msg)?;
 
         if matches!(self.runner, RunnerKind::Boundless) {
             if self.boundless.rpc_url.trim().is_empty() {
@@ -177,6 +50,7 @@ impl ProverConfig {
                 bail!("prover.boundless.signer_key must not be empty");
             }
         }
+        self.boundless.validate()?;
         if self.risc0.execution_po2 == 0 {
             bail!("prover.risc0.execution_po2 must be greater than zero");
         }
@@ -322,6 +196,38 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
         }
+    }
+}
+
+impl BoundlessConfig {
+    /// Validate the effective Boundless config.
+    pub fn validate(&self) -> Result<()> {
+        if matches!(self.batch_quoted_mcycles, Some(0)) {
+            bail!("prover.boundless.batch_quoted_mcycles must be > 0");
+        }
+        validate_offer_spec(&self.offer_params.batch)
+            .map_err(anyhow::Error::msg)
+            .context("prover.boundless.offer_params.batch")?;
+        validate_offer_spec(&self.offer_params.aggregation)
+            .map_err(anyhow::Error::msg)
+            .context("prover.boundless.offer_params.aggregation")?;
+        Ok(())
+    }
+
+    /// Merge a pair-specific Boundless override into the global default config.
+    pub fn apply_pair_override(&self, pair: &BoundlessPairConfig) -> Result<Self> {
+        let mut merged = self.clone();
+        if let Some(batch_quoted_mcycles) = pair.batch_quoted_mcycles {
+            merged.batch_quoted_mcycles = Some(batch_quoted_mcycles);
+        }
+        if let Some(batch) = &pair.offer_params.batch {
+            merged.offer_params.batch = batch.clone();
+        }
+        if let Some(aggregation) = &pair.offer_params.aggregation {
+            merged.offer_params.aggregation = aggregation.clone();
+        }
+        merged.validate()?;
+        Ok(merged)
     }
 }
 

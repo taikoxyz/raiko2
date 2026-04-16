@@ -14,6 +14,10 @@ pub mod risc0 {
             env!("CARGO_MANIFEST_DIR"),
             "/elf/risc0_shasta_aggregation.elf"
         ));
+        pub const BOUNDLESS_AGGREGATION_ELF: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/elf/risc0_shasta_boundless_aggregation.elf"
+        ));
     }
 }
 

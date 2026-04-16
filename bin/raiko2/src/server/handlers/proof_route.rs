@@ -1,13 +1,12 @@
 use alloy_primitives::keccak256;
-use axum::http::StatusCode;
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::super::errors::ApiError;
 use super::proof_types::{BatchShastaRequest, HoodiProofType};
-use crate::config::{GuestSystem, PipelineRoute, RunnerKind};
+use crate::config::GuestSystem;
 use crate::server::state::AppState;
 
 static PUBLIC_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -15,8 +14,23 @@ static PUBLIC_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CanonicalProofRoute {
     pub(super) route: PipelineRoute,
-    pub(super) pipeline_key: PipelineKey,
-    pub(super) proof_type: ProofType,
+}
+
+impl CanonicalProofRoute {
+    fn new(route: PipelineRoute) -> Result<Self, ApiError> {
+        route.pipeline_key().map_err(ApiError::bad_request)?;
+        Ok(Self { route })
+    }
+
+    pub(super) fn pipeline_key(self) -> raiko2_pipeline::PipelineKey {
+        self.route
+            .pipeline_key()
+            .expect("canonical proof route should always be supported")
+    }
+
+    pub(super) const fn proof_type(self) -> ProofType {
+        self.route.proof_type()
+    }
 }
 
 pub(super) enum BatchProofDecision {
@@ -53,44 +67,7 @@ pub(super) fn route_for_proof_type(
         }
     };
 
-    let (pipeline_key, proof_type) = match route {
-        PipelineRoute {
-            guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Local,
-        } => (PipelineKey::ShastaRisc0, ProofType::Risc0),
-        PipelineRoute {
-            guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Boundless,
-        } => (PipelineKey::ShastaRisc0Boundless, ProofType::Risc0),
-        PipelineRoute {
-            guest_system: GuestSystem::Sp1,
-            runner: RunnerKind::Local,
-        } => (PipelineKey::ShastaSp1, ProofType::Sp1),
-        PipelineRoute {
-            guest_system: GuestSystem::Native,
-            runner: RunnerKind::Local,
-        } => (PipelineKey::ShastaNative, ProofType::Native),
-        _ => return Err(ApiError::bad_request("unsupported proving route")),
-    };
-
-    Ok(CanonicalProofRoute {
-        route,
-        pipeline_key,
-        proof_type,
-    })
-}
-
-pub(super) fn parse_pipeline_key(raw: &str) -> Result<PipelineKey, ApiError> {
-    match raw {
-        "shasta-risc0-local" => Ok(PipelineKey::ShastaRisc0),
-        "shasta-risc0-boundless" => Ok(PipelineKey::ShastaRisc0Boundless),
-        "shasta-sp1-local" => Ok(PipelineKey::ShastaSp1),
-        "shasta-native-local" => Ok(PipelineKey::ShastaNative),
-        _ => Err(ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("unknown pipeline key '{raw}'"),
-        }),
-    }
+    CanonicalProofRoute::new(route)
 }
 
 pub(super) fn decide_batch_proof_type(

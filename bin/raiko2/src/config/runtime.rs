@@ -6,12 +6,15 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     pub root: PathBuf,
+    #[serde(default = "default_inactive_ttl_secs")]
+    pub inactive_ttl_secs: u64,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             root: PathBuf::from("./data/runtime"),
+            inactive_ttl_secs: default_inactive_ttl_secs(),
         }
     }
 }
@@ -26,4 +29,8 @@ impl RuntimeConfig {
         }
         Ok(())
     }
+}
+
+const fn default_inactive_ttl_secs() -> u64 {
+    7_200
 }

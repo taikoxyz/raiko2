@@ -2,7 +2,7 @@ mod backends;
 mod manifest;
 mod spec;
 
-pub use backends::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND};
+pub use backends::{RISC0_BOUNDLESS_SHASTA_BACKEND, RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND};
 pub use manifest::ShastaManifestBuilder;
 pub use spec::ShastaSpec;
 
@@ -20,6 +20,11 @@ mod tests {
         let risc0_agg = RISC0_SHASTA_BACKEND.elf(ProofStage::Aggregation)?;
         assert_eq!(risc0_proposal, risc0::shasta::PROPOSAL_ELF);
         assert_eq!(risc0_agg, risc0::shasta::AGGREGATION_ELF);
+
+        let boundless_proposal = RISC0_BOUNDLESS_SHASTA_BACKEND.elf(ProofStage::Proposal)?;
+        let boundless_agg = RISC0_BOUNDLESS_SHASTA_BACKEND.elf(ProofStage::Aggregation)?;
+        assert_eq!(boundless_proposal, risc0::shasta::PROPOSAL_ELF);
+        assert_eq!(boundless_agg, risc0::shasta::BOUNDLESS_AGGREGATION_ELF);
 
         let sp1_proposal = SP1_SHASTA_BACKEND.elf(ProofStage::Proposal)?;
         let sp1_agg = SP1_SHASTA_BACKEND.elf(ProofStage::Aggregation)?;

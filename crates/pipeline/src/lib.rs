@@ -9,6 +9,8 @@ use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 pub mod forks;
 mod pipeline;
@@ -50,6 +52,211 @@ impl PipelineKey {
             PipelineKey::ShastaNative => "shasta-native-local",
             PipelineKey::ShastaRisc0Boundless => "shasta-risc0-boundless",
         }
+    }
+
+    #[must_use]
+    pub const fn route(self) -> PipelineRoute {
+        match self {
+            Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
+            Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+            Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            Self::ShastaRisc0Boundless => {
+                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
+            }
+        }
+    }
+}
+
+impl fmt::Display for PipelineKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PipelineKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "shasta-risc0-local" => Ok(Self::ShastaRisc0),
+            "shasta-sp1-local" => Ok(Self::ShastaSp1),
+            "shasta-native-local" => Ok(Self::ShastaNative),
+            "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Boundless),
+            _ => Err(format!("Unknown pipeline key: {s}")),
+        }
+    }
+}
+
+/// Guest execution system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestSystem {
+    #[default]
+    Risc0,
+    Sp1,
+    Native,
+}
+
+impl GuestSystem {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Risc0 => "risc0",
+            Self::Sp1 => "sp1",
+            Self::Native => "native",
+        }
+    }
+}
+
+impl fmt::Display for GuestSystem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GuestSystem {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "risc0" => Ok(Self::Risc0),
+            "sp1" => Ok(Self::Sp1),
+            "native" => Ok(Self::Native),
+            _ => Err(format!("Unknown guest_system: {s}")),
+        }
+    }
+}
+
+/// Prover runner implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunnerKind {
+    #[default]
+    Local,
+    Boundless,
+}
+
+impl RunnerKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Boundless => "boundless",
+        }
+    }
+}
+
+impl fmt::Display for RunnerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RunnerKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "boundless" => Ok(Self::Boundless),
+            _ => Err(format!("Unknown runner: {s}")),
+        }
+    }
+}
+
+/// Canonical route for a proving request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PipelineRoute {
+    pub guest_system: GuestSystem,
+    pub runner: RunnerKind,
+}
+
+impl PipelineRoute {
+    #[must_use]
+    pub const fn new(guest_system: GuestSystem, runner: RunnerKind) -> Self {
+        Self {
+            guest_system,
+            runner,
+        }
+    }
+
+    #[must_use]
+    pub const fn proof_type(self) -> raiko2_primitives::ProofType {
+        match self.guest_system {
+            GuestSystem::Risc0 => raiko2_primitives::ProofType::Risc0,
+            GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
+            GuestSystem::Native => raiko2_primitives::ProofType::Native,
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the guest system and runner combination is not supported by the
+    /// current canonical pipeline set.
+    pub fn pipeline_key(self) -> Result<PipelineKey, String> {
+        match (self.guest_system, self.runner) {
+            (GuestSystem::Risc0, RunnerKind::Local) => Ok(PipelineKey::ShastaRisc0),
+            (GuestSystem::Risc0, RunnerKind::Boundless) => Ok(PipelineKey::ShastaRisc0Boundless),
+            (GuestSystem::Sp1, RunnerKind::Local) => Ok(PipelineKey::ShastaSp1),
+            (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
+            (GuestSystem::Sp1, RunnerKind::Boundless) => {
+                Err("Unsupported proving route: sp1/boundless".to_string())
+            }
+            (GuestSystem::Native, RunnerKind::Boundless) => {
+                Err("Unsupported proving route: native/boundless".to_string())
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn from_pipeline_key(pipeline_key: PipelineKey) -> Self {
+        pipeline_key.route()
+    }
+}
+
+impl fmt::Display for PipelineRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.guest_system, self.runner)
+    }
+}
+
+impl FromStr for PipelineRoute {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (guest_system, runner) = s
+            .split_once('/')
+            .ok_or_else(|| format!("Invalid route '{s}', expected <guest_system>/<runner>"))?;
+        Ok(Self::new(guest_system.parse()?, runner.parse()?))
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+
+    #[test]
+    fn pipeline_route_roundtrips_with_pipeline_key() {
+        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless);
+        let pipeline_key = route.pipeline_key().expect("supported route");
+
+        assert_eq!(pipeline_key, PipelineKey::ShastaRisc0Boundless);
+        assert_eq!(PipelineRoute::from_pipeline_key(pipeline_key), route);
+        assert_eq!(
+            "shasta-risc0-boundless"
+                .parse::<PipelineKey>()
+                .expect("parse pipeline key"),
+            pipeline_key
+        );
+    }
+
+    #[test]
+    fn pipeline_route_rejects_unsupported_combo() {
+        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Boundless);
+        assert_eq!(
+            route.pipeline_key().expect_err("unsupported route"),
+            "Unsupported proving route: sp1/boundless"
+        );
     }
 }
 

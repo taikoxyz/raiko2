@@ -21,6 +21,10 @@ pairs = [
   # Optional: enable hosted SP1 network verification for a specific pair.
   # Leave these fields unset to keep that line closed.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "http://34.121.5.35:8545", l2_witness_rpc = "http://34.121.5.35:8545", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x0000000000000000000000000000000000000000" },
+  # Optional: override Boundless quote and offer params per pair.
+  # This only affects the `risc0/boundless` route. SP1 ignores it.
+  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 1500 } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi-rpc.example.com", l2_rpc = "https://taiko-hoodi-rpc.example.com", boundless = { batch_quoted_mcycles = 5000, offer_params = { batch = { ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, max_price_per_mcycle = "0.000000085", min_price_per_mcycle = "0.000000010", lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
@@ -34,6 +38,7 @@ compute_units_per_second = 1000
 
 [runtime]
 root = "./data/runtime"
+inactive_ttl_secs = 7200
 
 [prover]
 # Server default route.
@@ -61,6 +66,8 @@ timeout_secs = 7200
 # rpc_url = "https://rpc.production.succinct.xyz"
 
 [prover.boundless]
+# Global default for the `risc0/boundless` route. Pair-specific overrides under `rpc.pairs[*].boundless`
+# can replace `batch_quoted_mcycles` and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
@@ -74,12 +81,12 @@ timeout_ms = 3600000
 # and does not register a task.
 #
 # [prover.zk_any.sp1]
-# probability = 0.20
-# per_day = 100
+# probability = 0.05
+# per_day = 8
 #
 # [prover.zk_any.risc0]
-# probability = 0.30
-# per_day = 0
+# probability = 0.05
+# per_day = 8
 
 [prover.boundless.deployment]
 deployment_type = "base"

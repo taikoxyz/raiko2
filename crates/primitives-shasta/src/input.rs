@@ -256,6 +256,18 @@ pub struct ShastaZkAggregationGuestInput {
     pub prover_address: Address,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ShastaBoundlessAggregationGuestInput {
+    /// Verifier image id for the RISC0 proposal proofs being aggregated.
+    pub image_id: [u32; 8],
+    /// Proof carry data associated with each underlying proof.
+    pub proof_carry_data_vec: Vec<ProofCarryData>,
+    /// Bincode-encoded RISC0 receipts for the underlying proofs.
+    pub receipts: Vec<Vec<u8>>,
+    /// Address representing the prover/aggregator (zero for zk provers today).
+    pub prover_address: Address,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GuestInput, roll_proposal_ancestor_headers};

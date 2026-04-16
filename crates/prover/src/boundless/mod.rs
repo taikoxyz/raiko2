@@ -25,6 +25,7 @@ use raiko2_primitives::proof::{
 };
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_ethereum_contracts_boundless::receipt::{Receipt as ContractReceipt, decode_seal};
 use risc0_zkvm::{Digest, Journal, compute_image_id, local_executor};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ use url::Url;
 use crate::{
     BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver, RISC0_SEAL_PAYLOAD_KIND,
     decode_hex_payload, parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+    with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -66,7 +68,7 @@ impl FromStr for DeploymentType {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundlessOfferParams {
     pub ramp_up_start_sec: u32,
     pub ramp_up_period_blocks: u32,
@@ -449,18 +451,50 @@ impl BoundlessProver {
         image_id: Digest,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
+        proposal_carry_data: Option<&ProofCarryData>,
     ) -> RaikoResult<Proof> {
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
         let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
         let started_at = Instant::now();
+        let mut last_poll_error: Option<String> = None;
+        let mut consecutive_poll_errors = 0_u32;
 
         loop {
-            match client
+            if started_at.elapsed() > timeout {
+                let detail = last_poll_error
+                    .as_deref()
+                    .map(|error| format!("; last polling error: {error}"))
+                    .unwrap_or_default();
+                return Err(RaikoError::Guest(format!(
+                    "Boundless request timed out before fulfillment{detail}"
+                )));
+            }
+
+            let status = match client
                 .boundless_market
                 .get_status(submission.market_request_id, Some(submission.expires_at))
                 .await
-                .map_err(|e| RaikoError::Guest(format!("Failed to read boundless status: {e}")))?
             {
+                Ok(status) => {
+                    consecutive_poll_errors = 0;
+                    last_poll_error = None;
+                    status
+                }
+                Err(error) => {
+                    consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                    let message = format!("Failed to read boundless status: {error}");
+                    tracing::warn!(
+                        provider_request_id = submission.provider_request_id,
+                        consecutive_poll_errors,
+                        "{message}"
+                    );
+                    last_poll_error = Some(message);
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+            };
+
+            match status {
                 RequestStatus::Unknown | RequestStatus::Locked => {}
                 RequestStatus::Expired => {
                     return Err(RaikoError::Guest(
@@ -468,13 +502,26 @@ impl BoundlessProver {
                     ));
                 }
                 RequestStatus::Fulfilled => {
-                    let fulfillment = client
+                    let fulfillment = match client
                         .boundless_market
                         .get_request_fulfillment(submission.market_request_id)
                         .await
-                        .map_err(|e| {
-                            RaikoError::Guest(format!("Failed to read boundless fulfillment: {e}"))
-                        })?;
+                    {
+                        Ok(fulfillment) => fulfillment,
+                        Err(error) => {
+                            consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                            let message =
+                                format!("Failed to read boundless fulfillment: {error}");
+                            tracing::warn!(
+                                provider_request_id = submission.provider_request_id,
+                                consecutive_poll_errors,
+                                "{message}"
+                            );
+                            last_poll_error = Some(message);
+                            tokio::time::sleep(poll_interval).await;
+                            continue;
+                        }
+                    };
                     let fulfillment_data = fulfillment.data().map_err(|e| {
                         RaikoError::Guest(format!(
                             "Failed to decode boundless fulfillment payload: {e}"
@@ -498,34 +545,38 @@ impl BoundlessProver {
                         "proposal" => parse_shasta_proposal_input_hash(journal)?,
                         _ => parse_shasta_aggregation_input_hash(journal),
                     };
+                    let stage_metadata = serde_json::json!({
+                        "zkvm": "risc0",
+                        "runner": "boundless",
+                        "proof_type": proof_type,
+                        "mcycles_count": quoted_mcycles_count,
+                        "quoted_mcycles_count": quoted_mcycles_count,
+                        "evaluated_mcycles_count": evaluated_mcycles_count,
+                        "boundless": {
+                            "provider_request_id": submission.provider_request_id,
+                            "remote_tx_hash": submission.remote_tx_hash,
+                            "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
+                            "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
+                            "offchain": self.config.offchain,
+                        }
+                    });
+                    let extra_data = match (proof_type, proposal_carry_data) {
+                        ("proposal", Some(carry)) => {
+                            with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
+                        }
+                        _ => Some(stage_metadata),
+                    };
                     return Ok(Proof {
                         proof: Some(alloy_primitives::hex::encode_prefixed(seal)),
                         input: Some(input_hash),
                         quote: receipt_json,
                         uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
                         kzg_proof: None,
-                        extra_data: Some(serde_json::json!({
-                            "zkvm": "risc0",
-                            "runner": "boundless",
-                            "proof_type": proof_type,
-                            "mcycles_count": quoted_mcycles_count,
-                            "quoted_mcycles_count": quoted_mcycles_count,
-                            "evaluated_mcycles_count": evaluated_mcycles_count,
-                            "boundless": {
-                                "provider_request_id": submission.provider_request_id,
-                                "remote_tx_hash": submission.remote_tx_hash,
-                                "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
-                                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
-                                "offchain": self.config.offchain,
-                            }
-                        })),
+                        extra_data,
                     });
                 }
             }
 
-            if started_at.elapsed() > timeout {
-                return Err(RaikoError::Guest("Boundless request timed out".to_string()));
-            }
             tokio::time::sleep(poll_interval).await;
         }
     }
@@ -537,6 +588,7 @@ impl BoundlessProver {
         proof_type: &'static str,
         input: Bytes,
         elf: &[u8],
+        proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let client = self.create_client().await?;
@@ -585,6 +637,7 @@ impl BoundlessProver {
             program.image_id,
             quoted_mcycles_count,
             evaluated_mcycles_count,
+            proposal_carry_data.as_ref(),
         )
         .await
     }
@@ -615,6 +668,8 @@ where
         _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Batch,
@@ -622,6 +677,7 @@ where
             "proposal",
             input,
             &elf,
+            Some(guest_input.proof_carry_data),
             None,
         ))
         .await
@@ -634,6 +690,8 @@ where
         backend: &B,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
+            .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         let elf = backend.elf(ProofStage::Proposal)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Batch,
@@ -641,6 +699,7 @@ where
             "proposal",
             input,
             &elf,
+            Some(guest_input.proof_carry_data),
             observer,
         ))
         .await
@@ -671,6 +730,7 @@ where
             Bytes::from(aggregation_input),
             &aggregation_elf,
             None,
+            None,
         ))
         .await
     }
@@ -700,6 +760,7 @@ where
             "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
+            None,
             observer,
         ))
         .await
@@ -769,11 +830,38 @@ fn parse_staking_token(value: &str) -> RaikoResult<U256> {
         })
 }
 
+/// Validate the static offer invariants that must hold for every Boundless offer config.
+///
+/// # Errors
+///
+/// Returns an error when the configured min/max price range, timeout ordering, or staking token
+/// amount is invalid.
+pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
+    let max_price = parse_ether(&offer_spec.max_price_per_mcycle).map_err(|e| {
+        format!(
+            "Failed to parse max_price_per_mcycle {}: {e}",
+            offer_spec.max_price_per_mcycle
+        )
+    })?;
+    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+    let min_price = parse_ether(min_price_value)
+        .map_err(|e| format!("Failed to parse min_price_per_mcycle {min_price_value}: {e}"))?;
+    if min_price > max_price {
+        return Err("min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string());
+    }
+    if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
+        return Err("timeout must be greater than lock_timeout".to_string());
+    }
+    parse_staking_token(&offer_spec.lock_collateral).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
     block_time_sec: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
+    validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let max_price = parse_ether(&offer_spec.max_price_per_mcycle).map_err(|e| {
         RaikoError::InvalidRequestConfig(format!(
             "Failed to parse max_price_per_mcycle {}: {e}",
@@ -786,19 +874,8 @@ fn validate_offer_params(
             "Failed to parse min_price_per_mcycle {min_price_value}: {e}"
         ))
     })? * U256::from(mcycles_count);
-    if min_price > max_price {
-        return Err(RaikoError::InvalidRequestConfig(
-            "min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string(),
-        ));
-    }
-
     let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    if timeout <= lock_timeout {
-        return Err(RaikoError::InvalidRequestConfig(
-            "timeout must be greater than lock_timeout".to_string(),
-        ));
-    }
     let ramp_up_seconds = offer_spec
         .ramp_up_period_blocks
         .saturating_mul(block_time_sec);
@@ -832,14 +909,16 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
             value: serde_json::Value::String(receipt),
         });
     }
+    let input_hash = proof
+        .input
+        .map(|value| alloy_primitives::hex::encode_prefixed(value.as_slice()));
+    let carry_data = proof.extra_data;
     let payload_bytes = decode_hex_payload(proof.proof.as_deref());
 
     ProofEnvelope {
         backend: "risc0".to_string(),
         public_inputs: PublicInputs {
-            input_hash: proof
-                .input
-                .map(|value| alloy_primitives::hex::encode_prefixed(value.as_slice())),
+            input_hash,
             instance_hash: None,
         },
         payload: ProofPayload {
@@ -847,7 +926,7 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
             bytes: payload_bytes,
         },
         verifier_artifacts,
-        carry_data: None,
+        carry_data,
         metadata: None,
     }
 }
@@ -966,9 +1045,16 @@ mod tests {
 
     #[test]
     fn proof_to_envelope_preserves_risc0_seal_payload() {
+        let expected_input_hash = alloy_primitives::hex::encode_prefixed([0x55; 32]);
         let envelope = proof_to_envelope(Proof {
             proof: Some("0x1234".to_string()),
+            input: Some(alloy_primitives::B256::from([0x55; 32])),
             quote: Some("{\"receipt\":true}".to_string()),
+            extra_data: Some(serde_json::json!({
+                "proof_carry_data": {
+                    "chain_id": 167013
+                }
+            })),
             ..Default::default()
         });
 
@@ -976,5 +1062,17 @@ mod tests {
         assert_eq!(envelope.payload.bytes, vec![0x12, 0x34]);
         assert_eq!(envelope.verifier_artifacts.len(), 1);
         assert_eq!(envelope.verifier_artifacts[0].kind, "receipt_json");
+        assert_eq!(
+            envelope.public_inputs.input_hash.as_deref(),
+            Some(expected_input_hash.as_str())
+        );
+        assert_eq!(
+            envelope.carry_data,
+            Some(serde_json::json!({
+                "proof_carry_data": {
+                    "chain_id": 167013
+                }
+            }))
+        );
     }
 }

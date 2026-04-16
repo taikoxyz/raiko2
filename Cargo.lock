@@ -9935,6 +9935,7 @@ name = "raiko2-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "raiko2-pipeline",
  "rusqlite",
  "serde",
  "serde_json",

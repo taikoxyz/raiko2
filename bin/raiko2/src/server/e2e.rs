@@ -12,7 +12,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
@@ -1276,10 +1276,9 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            pipeline_key: PipelineKey::ShastaNative.as_str().to_string(),
-            route: "native/local".to_string(),
-            guest_system: "native".to_string(),
-            runner: "local".to_string(),
+            route: "native/local"
+                .parse::<PipelineRoute>()
+                .expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
             proof_ids: vec![encoded_task_id.clone()],
@@ -1305,7 +1304,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "native/local");
     assert_eq!(res["data"]["status"], "proving");
-    assert_eq!(res["data"]["runtime"]["runner_status"], "running");
+    assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
     assert_eq!(res["data"]["runtime"]["active_stage"], "prove");
     assert_eq!(
         res["data"]["runtime"]["last_event"],

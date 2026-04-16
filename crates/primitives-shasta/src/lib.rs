@@ -13,8 +13,8 @@ mod proof;
 pub use anchor::{anchor_max_offset_for_chain, validate_anchor_progression};
 pub use blob::verify_proposal_mode_blob_usage;
 pub use input::{
-    ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, ShastaRawAggregationGuestInput,
-    ShastaZkAggregationGuestInput, roll_proposal_ancestor_headers,
+    ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, ShastaBoundlessAggregationGuestInput,
+    ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, roll_proposal_ancestor_headers,
     roll_proposal_ancestor_headers_in_place,
 };
 pub use proof::{

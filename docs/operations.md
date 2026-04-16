@@ -127,9 +127,13 @@ Operator notes:
 
 - `raiko2` uploads guest ELFs and submits Boundless requests directly.
 - Runtime state and task workdirs are stored under `./data/runtime` by default.
+- `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
+  (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
 - Proposal requests use `prover.boundless.batch_quoted_mcycles` when it is set. Otherwise,
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
+- `rpc.pairs[*].boundless` can override `batch_quoted_mcycles` and either offer param block for
+  a specific `(network, l1_network)` pair. This only affects `risc0/boundless`; SP1 ignores it.
 - Aggregation requests quote `200` mcycles.
 - The local dry-run validates guest execution and prepares the request journal.
 
@@ -137,17 +141,19 @@ Optional `zk_any` request sampling is configured at the server level:
 
 ```toml
 [prover.zk_any.sp1]
-probability = 0.20
-per_day = 100
+probability = 0.05
+per_day = 8
 
 [prover.zk_any.risc0]
-probability = 0.30
-per_day = 0
+probability = 0.05
+per_day = 8
 ```
 
 When a client submits `proof_type = "zk_any"` to `/v3/proof/batch/shasta`, the server draws once
 at admission time and either routes the request to `sp1` / `risc0` or returns
 `data.status = "zk_any_not_drawn"` without registering a task.
+If the same request also sets `aggregate = true`, the draw still happens exactly once and the
+resulting backend is reused for both proposal proving and aggregation.
 
 ## SP1 Hosted Posture
 

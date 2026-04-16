@@ -16,7 +16,9 @@ use anyhow::Result;
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+    forks::shasta::{
+        RISC0_BOUNDLESS_SHASTA_BACKEND, RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec,
+    },
 };
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
@@ -42,6 +44,7 @@ type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
+use super::task_cleanup::spawn_runtime_cleanup_loop;
 
 /// Shared application state.
 #[derive(Clone)]
@@ -124,11 +127,18 @@ impl AppState {
             );
         }
 
+        let config = Arc::new(config);
+        let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
         let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        spawn_runtime_cleanup_loop(
+            Arc::clone(&config),
+            Arc::clone(&runtime),
+            Arc::clone(&pipelines),
+        );
 
         Ok(Self {
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
+            config,
+            pipelines,
             runtime,
             zk_any_sampler,
         })
@@ -358,7 +368,7 @@ async fn build_boundless_engine(
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<BoundlessSpec>> {
-    let agent_config = setup::boundless_prover_config(config);
+    let agent_config = setup::boundless_prover_config(config, pair);
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
@@ -367,7 +377,7 @@ async fn build_boundless_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Boundless,
                 BoundlessProver::new(agent_config),
-                RISC0_SHASTA_BACKEND,
+                RISC0_BOUNDLESS_SHASTA_BACKEND,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -401,7 +411,7 @@ async fn build_boundless_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0Boundless,
                     BoundlessProver::new(agent_config),
-                    RISC0_SHASTA_BACKEND,
+                    RISC0_BOUNDLESS_SHASTA_BACKEND,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(

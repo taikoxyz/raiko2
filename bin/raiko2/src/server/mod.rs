@@ -9,6 +9,7 @@ mod routes;
 mod run;
 mod sampling;
 mod state;
+mod task_cleanup;
 mod task_metadata;
 
 pub use fixture::run_fixture_server;

@@ -334,6 +334,20 @@ mod route_tests {
             route
         );
     }
+
+    #[test]
+    fn pipeline_key_parses_sgx_variants() {
+        assert_eq!(
+            "shasta-sgx-remote".parse::<PipelineKey>().expect("sgx key"),
+            PipelineKey::ShastaSgx
+        );
+        assert_eq!(
+            "shasta-sgxgeth-remote"
+                .parse::<PipelineKey>()
+                .expect("sgxgeth key"),
+            PipelineKey::ShastaSgxGeth
+        );
+    }
 }
 
 /// Pipeline stage output wrapper for status tracking.

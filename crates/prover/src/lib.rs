@@ -276,10 +276,12 @@ pub fn validate_external_aggregate_proofs(
 
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
-            raiko2_pipeline::PipelineKey::ShastaNative => {
+            raiko2_pipeline::PipelineKey::ShastaNative
+            | raiko2_pipeline::PipelineKey::ShastaSgx
+            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
                 if proof.input.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing native aggregation metadata"
+                        "proof {index} is missing sgx/native aggregation metadata"
                     )));
                 }
             }

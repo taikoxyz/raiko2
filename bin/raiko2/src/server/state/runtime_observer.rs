@@ -187,9 +187,10 @@ impl RuntimeObserver {
         }
     }
 
-    async fn write_proof_files(
+    async fn write_final_proof_files(
         &self,
         id: &EngineTaskId,
+        stage: &str,
         proof: &raiko2_primitives::Proof,
     ) -> Result<HashMap<String, String>> {
         let root_ref = Self::root_task_ref(id);
@@ -202,6 +203,14 @@ impl RuntimeObserver {
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
         let mut proof_paths = HashMap::with_capacity(records.len());
         for record in records {
+            let mut metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+                .context("failed to parse hoodi task metadata")?;
+            let task_id = Self::timing_key(id);
+            metadata.mark_stage_terminal(&task_id, stage, 0, "completed");
+            if !Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key) {
+                continue;
+            }
+
             let proof_path = Path::new(&record.task_dir).join("proof.json");
             fs::write(&proof_path, &proof_bytes)
                 .await
@@ -209,6 +218,35 @@ impl RuntimeObserver {
             proof_paths.insert(record.task_id, proof_path.display().to_string());
         }
         Ok(proof_paths)
+    }
+
+    fn root_completed_by_proof_success(
+        id: &EngineTaskId,
+        metadata: &HoodiTaskMetadata,
+        pipeline_key: raiko2_pipeline::PipelineKey,
+    ) -> bool {
+        match &id.0 {
+            EngineTaskKey::Aggregate { .. } => true,
+            EngineTaskKey::Proposal {
+                stage: ProposalStage::Prove,
+                ..
+            } if !metadata.aggregate_requested && metadata.aggregate_task_id.is_none() => {
+                !metadata.proposals.is_empty()
+                    && metadata.proposals.iter().all(|proposal| {
+                        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+                            return false;
+                        };
+                        let task_ref = Self::timing_key(&task_id);
+                        metadata
+                            .runtime
+                            .stage_timings
+                            .get(&task_ref)
+                            .and_then(|timing| timing.terminal_status.as_deref())
+                            == Some("completed")
+                    })
+            }
+            EngineTaskKey::Proposal { .. } => false,
+        }
     }
 }
 
@@ -352,7 +390,7 @@ impl EngineObserver for RuntimeObserver {
             .await;
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
-                let proof_paths = self.write_proof_files(id, proof).await;
+                let proof_paths = self.write_final_proof_files(id, stage, proof).await;
                 let proof_paths = match proof_paths {
                     Ok(paths) => paths,
                     Err(err) => {
@@ -366,15 +404,32 @@ impl EngineObserver for RuntimeObserver {
                     }
                 };
                 self.update_root_records(id, move |record, updated_at, observed_at_ms| {
-                    record.runner_status = RunnerStatus::Completed;
                     record.error = None;
-                    record.proof_path = proof_paths.get(&record.task_id).cloned();
                     let task_id = Self::timing_key(id);
-                    update_task_metadata(record, |metadata| {
-                        metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
-                        metadata.runtime.active_stage = Some(stage.to_string());
-                        metadata.runtime.last_event = Some("completed".to_string());
-                    })?;
+                    let mut metadata: HoodiTaskMetadata =
+                        serde_json::from_value(record.metadata.clone())
+                            .context("failed to parse hoodi task metadata")?;
+                    metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
+                    let root_completed =
+                        Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
+                    metadata.runtime.active_stage = Some(stage.to_string());
+                    metadata.runtime.last_event = Some(
+                        if root_completed {
+                            "completed"
+                        } else {
+                            "stage_completed"
+                        }
+                        .to_string(),
+                    );
+                    record.metadata = serde_json::to_value(metadata)
+                        .context("failed to serialize task metadata")?;
+                    if root_completed {
+                        record.runner_status = RunnerStatus::Completed;
+                        record.proof_path = proof_paths.get(&record.task_id).cloned();
+                    } else {
+                        record.runner_status = RunnerStatus::Allocated;
+                        record.proof_path = None;
+                    }
                     record.updated_at = updated_at;
                     Ok(())
                 })
@@ -579,6 +634,40 @@ mod tests {
         }
     }
 
+    fn proposal_request_with_id(proposal_id: u64) -> ProposalTaskRequest {
+        ProposalTaskRequest {
+            proposal_id,
+            ..proposal_request()
+        }
+    }
+
+    fn proposal_metadata_task(
+        pipeline: PipelineKey,
+        request: &ProposalTaskRequest,
+    ) -> HoodiProposalTask {
+        let task_ref = proposal_task_ref(pipeline, request);
+        HoodiProposalTask {
+            proposal_id: request.proposal_id,
+            checkpoint: None,
+            l1_inclusion_block_number: request.l1_inclusion_block_number,
+            l2_block_numbers: vec![request.proposal_id],
+            last_anchor_block_number: request.last_anchor_block_number,
+            task_id: task_ref,
+            request: Some(request.clone()),
+        }
+    }
+
+    fn proof_fixture() -> raiko2_primitives::Proof {
+        raiko2_primitives::Proof {
+            proof: Some("0xproof".to_string()),
+            input: None,
+            quote: None,
+            uuid: None,
+            kzg_proof: None,
+            extra_data: None,
+        }
+    }
+
     #[tokio::test]
     async fn runtime_observer_records_boundless_submission_metadata_immediately() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
@@ -660,6 +749,182 @@ mod tests {
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_keeps_aggregate_root_allocated_after_proposal_proof() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-aggregate-pending",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+            stage: ProposalStage::Prove,
+        });
+        let proposal_ref = proposal_task_ref(pipeline, &request);
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-42".to_string(),
+            proposal_ids: vec![42],
+            prover_config: Default::default(),
+        };
+        let aggregate_ref = aggregate_task_ref(pipeline, &aggregate_request);
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_aggregate_pending".to_string(),
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(42),
+                proof_ids: vec![proposal_ref.clone(), aggregate_ref.clone()],
+                metadata: serde_json::to_value(HoodiTaskMetadata {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    network: "taiko_dev".to_string(),
+                    l1_network: "ethereum".to_string(),
+                    proof_type: ProofType::Sp1,
+                    execution_mode: Some(ExecutionMode::Prove),
+                    aggregate_requested: true,
+                    proposals: vec![proposal_metadata_task(pipeline, &request)],
+                    aggregate_task_id: Some(aggregate_ref),
+                    aggregate_request: Some(aggregate_request),
+                    runtime: HoodiRuntimeMetadata::default(),
+                })?,
+                request_fingerprint: None,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_succeeded(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: proposal_task_id.clone(),
+                },
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof: proof_fixture(),
+                },
+            )
+            .await;
+
+        let record = runtime
+            .get_task("task_public_aggregate_pending")
+            .await?
+            .expect("runtime task exists");
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
+        assert_eq!(record.proof_path, None);
+        assert_eq!(
+            metadata.runtime.last_event.as_deref(),
+            Some("stage_completed")
+        );
+        assert!(
+            !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
+            "proposal proof must not become the root proof for aggregate requests"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_completes_non_aggregate_root_after_all_proofs() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-multi-proposal",
+        ))?);
+        let pipeline = PipelineKey::ShastaSp1;
+        let first_request = proposal_request_with_id(42);
+        let second_request = proposal_request_with_id(43);
+        let first_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: first_request.clone(),
+            stage: ProposalStage::Prove,
+        });
+        let second_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: second_request.clone(),
+            stage: ProposalStage::Prove,
+        });
+        let first_ref = proposal_task_ref(pipeline, &first_request);
+        let second_ref = proposal_task_ref(pipeline, &second_request);
+        runtime
+            .register_task(TaskRegistration {
+                task_id: "task_public_multi_proposal".to_string(),
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: None,
+                proof_ids: vec![first_ref, second_ref],
+                metadata: serde_json::to_value(HoodiTaskMetadata {
+                    network_pair: "taiko_dev/ethereum".to_string(),
+                    network: "taiko_dev".to_string(),
+                    l1_network: "ethereum".to_string(),
+                    proof_type: ProofType::Sp1,
+                    execution_mode: Some(ExecutionMode::Prove),
+                    aggregate_requested: false,
+                    proposals: vec![
+                        proposal_metadata_task(pipeline, &first_request),
+                        proposal_metadata_task(pipeline, &second_request),
+                    ],
+                    aggregate_task_id: None,
+                    aggregate_request: None,
+                    runtime: HoodiRuntimeMetadata::default(),
+                })?,
+                request_fingerprint: None,
+            })
+            .await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime));
+        observer
+            .on_task_succeeded(
+                &first_task_id,
+                &EngineTask::ProveProposal {
+                    request: first_request,
+                    input_task: first_task_id.clone(),
+                },
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof: proof_fixture(),
+                },
+            )
+            .await;
+
+        let record = runtime
+            .get_task("task_public_multi_proposal")
+            .await?
+            .expect("runtime task exists");
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
+        assert_eq!(record.proof_path, None);
+        assert!(
+            !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
+            "partial proposal proof must not be persisted as final root proof"
+        );
+
+        observer
+            .on_task_succeeded(
+                &second_task_id,
+                &EngineTask::ProveProposal {
+                    request: second_request,
+                    input_task: second_task_id.clone(),
+                },
+                &EngineTaskSuccess::Proof {
+                    stage: raiko2_pipeline::PipelineStage::Prove,
+                    proof: proof_fixture(),
+                },
+            )
+            .await;
+
+        let record = runtime
+            .get_task("task_public_multi_proposal")
+            .await?
+            .expect("runtime task exists");
+        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        assert_eq!(record.runner_status, RunnerStatus::Completed);
+        assert!(record.proof_path.is_some());
+        assert_eq!(metadata.runtime.last_event.as_deref(), Some("completed"));
+        assert!(
+            tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
+            "final proof should be written after all proposal proofs complete"
+        );
         Ok(())
     }
 

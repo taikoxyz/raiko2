@@ -213,9 +213,16 @@ impl HoodiTaskMetadata {
         finished_at_ms: i64,
         status: &str,
     ) {
-        let Some(timing) = self.runtime.stage_timings.get_mut(task_id) else {
-            return;
-        };
+        let timing = self
+            .runtime
+            .stage_timings
+            .entry(task_id.to_string())
+            .or_insert_with(|| HoodiStageTimingMetadata {
+                stage: stage.to_string(),
+                started_at_ms: finished_at_ms,
+                finished_at_ms: None,
+                terminal_status: None,
+            });
         timing.stage = stage.to_string();
         timing.finished_at_ms = Some(finished_at_ms);
         timing.terminal_status = Some(status.to_string());

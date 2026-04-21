@@ -42,9 +42,9 @@ struct Args {
     /// Execution mode (execute for simulation, prove for proof generation).
     #[arg(long, value_enum, default_value = "execute")]
     mode: Mode,
-    /// Proof mode when generating proofs.
-    #[arg(long, value_enum, default_value = "plonk")]
-    proof_mode: ProofMode,
+    /// Proof mode when generating proofs. Defaults to compressed for proposals and plonk for aggregation.
+    #[arg(long, value_enum)]
+    proof_mode: Option<ProofMode>,
     /// Proof backend to use.
     #[arg(long, value_enum, default_value = "native")]
     proof_type: ProofType,
@@ -87,7 +87,7 @@ enum ProofType {
     Sp1,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
 enum ProofMode {
     Core,
     Compressed,
@@ -192,6 +192,16 @@ impl ProofType {
 }
 
 impl Args {
+    fn effective_proof_mode(&self) -> ProofMode {
+        self.proof_mode.unwrap_or({
+            if self.aggregate.is_empty() {
+                ProofMode::Compressed
+            } else {
+                ProofMode::Plonk
+            }
+        })
+    }
+
     fn sp1_config(&self) -> Result<Sp1Config> {
         let prover = self.sp1_prover.map_or_else(
             || {
@@ -203,8 +213,9 @@ impl Args {
             },
             Into::into,
         );
+        let proof_mode = self.effective_proof_mode();
         let config = Sp1Config {
-            recursion: match self.proof_mode {
+            recursion: match proof_mode {
                 ProofMode::Core => raiko2_prover::sp1::RecursionMode::Core,
                 ProofMode::Compressed => raiko2_prover::sp1::RecursionMode::Compressed,
                 ProofMode::Plonk => raiko2_prover::sp1::RecursionMode::Plonk,
@@ -342,10 +353,11 @@ fn read_input(path: &PathBuf, proof_type: ProofType) -> Result<GuestInput> {
 
 async fn run_proposal(args: Args) -> Result<()> {
     let input_path = args.input.clone().context("missing --input")?;
+    let proof_mode = args.effective_proof_mode();
     let mut report = BenchReport {
         stage: "proposal",
         mode: args.mode.as_str(),
-        proof_mode: args.proof_mode.as_str(),
+        proof_mode: proof_mode.as_str(),
         input: input_path.display().to_string(),
         public_values: String::new(),
         wall_time_ms: 0,
@@ -385,6 +397,10 @@ async fn run_aggregation(args: Args) -> Result<()> {
     if args.mode == Mode::Execute {
         anyhow::bail!("aggregation requires --mode prove");
     }
+    let proof_mode = args.effective_proof_mode();
+    if proof_mode != ProofMode::Plonk {
+        anyhow::bail!("aggregation proof output requires --proof-mode plonk");
+    }
 
     let proofs = read_proofs(&args.aggregate)?;
     let (aggregation_input, sp1_proofs, image_id) = build_aggregation_inputs(&proofs)?;
@@ -416,7 +432,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
                 Sp1ProofOutput {
                     proof: prover
                         .prove(&pk, &stdin)
-                        .mode(args.proof_mode.into())
+                        .mode(proof_mode.into())
                         .run()
                         .context("prove failed")?,
                     vkey: vk,
@@ -440,7 +456,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
                 Sp1ProofOutput {
                     proof: prover
                         .prove(&pk, &stdin)
-                        .mode(args.proof_mode.into())
+                        .mode(proof_mode.into())
                         .run()
                         .context("prove failed")?,
                     vkey: vk,
@@ -461,7 +477,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
             }
             let (pk, _) = prover.setup(elf);
             (
-                request_network_proof(&prover, &pk, stdin, args.proof_mode.into(), &sp1_config)
+                request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)
                     .await
                     .context("prove failed")?,
                 proposal_vk,
@@ -471,7 +487,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
     let report = BenchReport {
         stage: "aggregation",
         mode: args.mode.as_str(),
-        proof_mode: args.proof_mode.as_str(),
+        proof_mode: proof_mode.as_str(),
         input: output_path.display().to_string(),
         public_values: proof.proof.public_values.raw(),
         wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -618,6 +634,7 @@ async fn run_sp1_proposal(
     mut report: BenchReport,
 ) -> Result<()> {
     let sp1_config = args.sp1_config()?;
+    let proof_mode = args.effective_proof_mode();
     record_memory_snapshot(&mut report, "proposal:before_stdin_write");
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
@@ -669,7 +686,7 @@ async fn run_sp1_proposal(
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let proof = prover
                         .prove(&pk, &stdin)
-                        .mode(args.proof_mode.into())
+                        .mode(proof_mode.into())
                         .cycle_limit(sp1_config.cycle_limit)
                         .run()
                         .context("prove failed")?;
@@ -692,7 +709,7 @@ async fn run_sp1_proposal(
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let proof = prover
                         .prove(&pk, &stdin)
-                        .mode(args.proof_mode.into())
+                        .mode(proof_mode.into())
                         .cycle_limit(sp1_config.cycle_limit)
                         .run()
                         .context("prove failed")?;
@@ -713,15 +730,10 @@ async fn run_sp1_proposal(
                     record_memory_snapshot(&mut report, "proposal:before_setup");
                     let (pk, _) = prover.setup(elf);
                     record_memory_snapshot(&mut report, "proposal:after_setup");
-                    let output = request_network_proof(
-                        &prover,
-                        &pk,
-                        stdin,
-                        args.proof_mode.into(),
-                        &sp1_config,
-                    )
-                    .await
-                    .context("prove failed")?;
+                    let output =
+                        request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)
+                            .await
+                            .context("prove failed")?;
                     record_memory_snapshot(&mut report, "proposal:after_network_proof");
                     report.wall_time_ms =
                         u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);

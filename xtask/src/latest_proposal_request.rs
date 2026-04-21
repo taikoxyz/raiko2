@@ -10,7 +10,7 @@ use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_protocol_shasta::shasta::Proposed;
+use raiko2_protocol_shasta::shasta::{Proposed, decode_proposal_id_from_extra_data};
 use raiko2_provider::rpc::{RpcClientConfig, RpcRetryConfig, build_rpc_client};
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::Serialize;
@@ -509,16 +509,7 @@ async fn fetch_blocks(
 }
 
 fn block_proposal_id(block: &RethBlock) -> Option<u64> {
-    decode_shasta_proposal_id(block.header.extra_data.as_ref())
-}
-
-fn decode_shasta_proposal_id(extra_data: &[u8]) -> Option<u64> {
-    if extra_data.len() < 7 {
-        return None;
-    }
-    let mut proposal_bytes = [0_u8; 8];
-    proposal_bytes[2..8].copy_from_slice(&extra_data[1..7]);
-    Some(u64::from_be_bytes(proposal_bytes))
+    decode_proposal_id_from_extra_data(block.header.extra_data.as_ref())
 }
 
 impl RequestProofType {
@@ -589,10 +580,9 @@ impl DescendingRangeFinder {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DescendingRangeFinder, L2ProposalRange, LatestProposalRef, decode_shasta_proposal_id,
-    };
+    use super::{DescendingRangeFinder, L2ProposalRange, LatestProposalRef};
     use alloy::primitives::Bytes;
+    use raiko2_protocol_shasta::shasta::decode_proposal_id_from_extra_data;
 
     fn shasta_extra_data(proposal_id: u64) -> Bytes {
         let proposal_bytes = proposal_id.to_be_bytes();
@@ -611,13 +601,13 @@ mod tests {
     #[test]
     fn decodes_shasta_proposal_id_from_extra_data() {
         let proposal_id = 2_670_u64;
-        let decoded = decode_shasta_proposal_id(shasta_extra_data(proposal_id).as_ref());
+        let decoded = decode_proposal_id_from_extra_data(shasta_extra_data(proposal_id).as_ref());
         assert_eq!(decoded, Some(proposal_id));
     }
 
     #[test]
     fn returns_none_for_short_extra_data() {
-        assert_eq!(decode_shasta_proposal_id(&[1, 2, 3]), None);
+        assert_eq!(decode_proposal_id_from_extra_data(&[1, 2, 3]), None);
     }
 
     #[test]

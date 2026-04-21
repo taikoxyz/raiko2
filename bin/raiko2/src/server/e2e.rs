@@ -16,6 +16,8 @@ use raiko2_engine::{
     Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
+use raiko2_primitives_shasta::encode_proof_carry_data;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
@@ -168,8 +170,11 @@ fn sp1_external_proof(proof_hex: String) -> Value {
 }
 
 fn risc0_boundless_external_proof() -> Value {
+    let extra_data =
+        encode_proof_carry_data(&ProofCarryData::default()).expect("encode proof carry data");
     json!({
-        "quote": "0xfixture-boundless-receipt"
+        "quote": "0xfixture-boundless-receipt",
+        "extra_data": extra_data
     })
 }
 

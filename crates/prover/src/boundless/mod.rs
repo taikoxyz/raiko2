@@ -544,7 +544,7 @@ impl BoundlessProver {
                     };
                     let input_hash = match proof_type {
                         "proposal" => parse_shasta_proposal_input_hash(journal)?,
-                        _ => parse_shasta_aggregation_input_hash(journal),
+                        _ => parse_shasta_aggregation_input_hash(journal)?,
                     };
                     let stage_metadata = serde_json::json!({
                         "zkvm": "risc0",

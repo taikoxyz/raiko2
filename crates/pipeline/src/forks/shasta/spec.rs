@@ -15,7 +15,7 @@ use raiko2_primitives::{
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
 };
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::shasta::{ShastaEventData, decode_proposal_id_from_extra_data};
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
@@ -521,7 +521,9 @@ fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
         return Ok(((range.start..=range.end).collect(), ctx.request.proposal_id));
     }
 
-    Ok((vec![ctx.request.proposal_id], ctx.request.proposal_id))
+    Err(RaikoError::InvalidRequestConfig(
+        "request l2_block_range is required for Shasta preflight".into(),
+    ))
 }
 
 fn validate_block_range(
@@ -533,27 +535,14 @@ fn validate_block_range(
             "GuestInput has no witnesses to validate".to_string(),
         ));
     }
-    // Proposal id is stored in extradata bytes[1..7] big-endian in Shasta.
     for (idx, w) in witnesses.iter().enumerate() {
         let extradata = &w.block.header.extra_data;
-        if extradata.len() < 7 {
-            return Err(RaikoError::Preflight(format!(
+        let pid = decode_proposal_id_from_extra_data(extradata).ok_or_else(|| {
+            RaikoError::Preflight(format!(
                 "witness {idx} extradata too short ({})",
                 extradata.len()
-            )));
-        }
-        let pid_bytes = &extradata[1..7];
-        let pid = u64::from_be_bytes([
-            0,
-            0,
-            0,
-            pid_bytes[0],
-            pid_bytes[1],
-            pid_bytes[2],
-            pid_bytes[3],
-            pid_bytes[4],
-        ]);
-        let pid = (pid << 8) | u64::from(pid_bytes[5]);
+            ))
+        })?;
         if pid != expected_proposal_id {
             return Err(RaikoError::Preflight(format!(
                 "witness {idx} proposal_id mismatch: expected {expected_proposal_id}, got {pid}"
@@ -910,6 +899,19 @@ mod tests {
             SupportedChainSpecs::default()
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
+        );
+    }
+
+    #[test]
+    fn extract_block_range_requires_explicit_l2_block_range() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_block_range = None;
+
+        let err = super::extract_block_range(&ctx).expect_err("missing range");
+
+        assert!(
+            err.to_string()
+                .contains("request l2_block_range is required for Shasta preflight")
         );
     }
 

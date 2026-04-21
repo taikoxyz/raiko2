@@ -732,7 +732,7 @@ where
     }
 
     let public_values = proof.public_values.as_slice();
-    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values);
+    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
 
     Ok(Sp1Response {
         proof: encode_sp1_aggregation_proof_payload(&proof, &vk, &proposal_vk),
@@ -792,7 +792,7 @@ where
     }
 
     let public_values = request.proof.public_values.as_slice();
-    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values);
+    let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;

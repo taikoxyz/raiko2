@@ -10,7 +10,6 @@ use alloy_primitives::{Address, U256};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 /// The maximum number of blocks allowed in a proposal.
 pub const PROPOSAL_MAX_BLOCKS: usize = 192;
@@ -99,39 +98,22 @@ impl DerivationSourceManifest {
     /// # Errors
     ///
     /// Returns an error if the payload header is invalid or the payload cannot be decompressed.
-    /// If the payload cannot be decoded as a `DerivationSourceManifest`, this function returns a
-    /// default manifest and logs a warning.
+    /// Returns an error if the decoded bytes are not a valid derivation source manifest or if the
+    /// manifest exceeds the protocol block limit.
     pub fn decompress_and_decode(bytes: &[u8], offset: usize) -> Result<Self> {
-        let decoded = match decode_manifest_payload(bytes, offset) {
-            Ok(decoded) => decoded,
-            Err(err) => {
-                warn!(
-                    ?err,
-                    "failed to decode manifest payload; returning default manifest"
-                );
-                return Ok(Self::default());
-            }
-        };
-
+        let decoded = decode_manifest_payload(bytes, offset)?;
         let mut decoded_slice = decoded.as_slice();
-        let manifest = match <Self as Decodable>::decode(&mut decoded_slice) {
-            Ok(manifest) => manifest,
-            Err(err) => {
-                warn!(
-                    ?err,
-                    "failed to decode derivation manifest RLP; returning default manifest"
-                );
-                return Ok(Self::default());
-            }
-        };
+        let manifest = <Self as Decodable>::decode(&mut decoded_slice).map_err(|err| {
+            ProtocolError::InvalidPayload(format!(
+                "failed to decode derivation manifest RLP: {err}"
+            ))
+        })?;
 
         if manifest.blocks.len() > PROPOSAL_MAX_BLOCKS {
-            warn!(
-                blocks = manifest.blocks.len(),
-                max = PROPOSAL_MAX_BLOCKS,
-                "manifest contains too many blocks; returning default manifest"
-            );
-            return Ok(Self::default());
+            return Err(ProtocolError::InvalidPayload(format!(
+                "manifest contains {} blocks, max {PROPOSAL_MAX_BLOCKS}",
+                manifest.blocks.len()
+            )));
         }
 
         Ok(manifest)
@@ -204,4 +186,28 @@ fn decode_manifest_payload(bytes: &[u8], offset: usize) -> Result<Vec<u8>> {
         .map_err(|e| ProtocolError::Compression(format!("failed to decompress zlib data: {e}")))?;
 
     Ok(decompressed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decompress_and_decode_rejects_invalid_payload_header() {
+        let err =
+            DerivationSourceManifest::decompress_and_decode(&[0u8; 64], 0).expect_err("reject");
+
+        assert!(err.to_string().contains("unsupported payload version"));
+    }
+
+    #[test]
+    fn decompress_and_decode_rejects_oversized_manifest() {
+        let manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest::default(); PROPOSAL_MAX_BLOCKS + 1],
+        };
+        let payload = manifest.encode_and_compress().expect("encode manifest");
+        let err = DerivationSourceManifest::decompress_and_decode(&payload, 0).expect_err("reject");
+
+        assert!(err.to_string().contains("manifest contains 193 blocks"));
+    }
 }

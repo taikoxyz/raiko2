@@ -334,12 +334,12 @@ where
                 &opts,
                 image_id,
                 "aggregation",
-                |journal_bytes| Ok(parse_shasta_aggregation_input_hash(journal_bytes)),
+                parse_shasta_aggregation_input_hash,
             )?;
             prover.finalize_stage("aggregation", &receipt, image_id)?;
 
             let journal_bytes = &receipt.journal.bytes;
-            let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes);
+            let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes)?;
 
             let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
 

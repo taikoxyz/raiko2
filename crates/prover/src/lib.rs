@@ -94,11 +94,14 @@ pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoRes
     }
 }
 
-pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> B256 {
+pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
     if public_values.len() >= B256_BYTES {
-        B256::from_slice(&public_values[..B256_BYTES])
+        Ok(B256::from_slice(&public_values[..B256_BYTES]))
     } else {
-        B256::default()
+        Err(RaikoError::Guest(format!(
+            "invalid Shasta aggregation journal length: expected at least {B256_BYTES} bytes, got {}",
+            public_values.len()
+        )))
     }
 }
 
@@ -269,11 +272,22 @@ pub fn validate_external_aggregate_proofs(
                 }
             }
             raiko2_pipeline::PipelineKey::ShastaRisc0Boundless => {
-                if proof.quote.is_none() {
+                if proof.quote.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing receipt metadata"
+                        "proof {index} is missing Boundless aggregation metadata"
                     )));
                 }
+                proof_carry_from_proof(proof)
+                    .map_err(|err| {
+                        RaikoError::InvalidRequestConfig(format!(
+                            "proof {index} invalid shasta carry data: {err}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        RaikoError::InvalidRequestConfig(format!(
+                            "proof {index} missing shasta carry data"
+                        ))
+                    })?;
             }
         }
     }
@@ -346,7 +360,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_hex_payload, encode_risc0_aggregation_seal_payload,
+        decode_hex_payload, encode_proof_carry_data, encode_risc0_aggregation_seal_payload,
         encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
         parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
@@ -354,6 +368,7 @@ mod tests {
     use alloy_sol_types::SolValue;
     use raiko2_pipeline::PipelineRoute;
     use raiko2_primitives::Proof;
+    use raiko2_protocol_shasta::shasta::ProofCarryData;
 
     #[test]
     fn parses_shasta_proposal_input_hash_from_first_committed_word() {
@@ -378,9 +393,16 @@ mod tests {
         let public_values = agg_input_hash.as_slice().to_vec();
 
         assert_eq!(
-            parse_shasta_aggregation_input_hash(&public_values),
+            parse_shasta_aggregation_input_hash(&public_values)
+                .expect("parse aggregation input hash"),
             agg_input_hash
         );
+    }
+
+    #[test]
+    fn rejects_short_shasta_aggregation_public_input_length() {
+        let err = parse_shasta_aggregation_input_hash(&[0u8; 31]).expect_err("reject");
+        assert!(err.to_string().contains("expected at least 32 bytes"));
     }
 
     fn aggregate_proof_fixture() -> Proof {
@@ -390,7 +412,9 @@ mod tests {
             quote: Some("0xquote".to_string()),
             uuid: Some("0xuuid".to_string()),
             kzg_proof: None,
-            extra_data: Some(serde_json::json!({"carry": "ok"})),
+            extra_data: Some(
+                encode_proof_carry_data(&ProofCarryData::default()).expect("encode carry data"),
+            ),
         }
     }
 
@@ -454,12 +478,12 @@ mod tests {
         let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing receipt");
         assert!(
             err.to_string()
-                .contains("proof 0 is missing receipt metadata")
+                .contains("proof 0 is missing Boundless aggregation metadata")
         );
     }
 
     #[test]
-    fn aggregate_validator_accepts_quote_only_boundless_proof() {
+    fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
         let route = "risc0/boundless"
             .parse::<PipelineRoute>()
             .expect("parse route");
@@ -470,6 +494,29 @@ mod tests {
             uuid: None,
             kzg_proof: None,
             extra_data: None,
+        };
+
+        let err = validate_external_aggregate_proofs(route, &[proof]).expect_err("missing carry");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing Boundless aggregation metadata")
+        );
+    }
+
+    #[test]
+    fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
+        let route = "risc0/boundless"
+            .parse::<PipelineRoute>()
+            .expect("parse route");
+        let proof = Proof {
+            proof: None,
+            input: None,
+            quote: Some("0xreceipt".to_string()),
+            uuid: None,
+            kzg_proof: None,
+            extra_data: Some(
+                encode_proof_carry_data(&ProofCarryData::default()).expect("encode carry data"),
+            ),
         };
 
         assert!(validate_external_aggregate_proofs(route, &[proof]).is_ok());

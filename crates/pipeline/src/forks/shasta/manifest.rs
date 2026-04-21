@@ -25,40 +25,54 @@ impl ShastaManifestBuilder {
         Self
     }
 
-    fn parse_prover_data(ctx: &ProofContext) -> TaikoProverData {
+    fn parse_prover_data(ctx: &ProofContext) -> RaikoResult<TaikoProverData> {
         let prover_address = ctx
             .request
             .prover
-            .as_ref()
-            .and_then(|s| s.parse().ok())
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!("invalid prover address: {err}"))
+            })?
             .unwrap_or_default();
 
-        TaikoProverData {
+        let graffiti = ctx
+            .request
+            .graffiti
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| RaikoError::InvalidRequestConfig(format!("invalid graffiti: {err}")))?
+            .unwrap_or_default();
+
+        let checkpoint = ctx.request.shasta.and_then(|shasta| shasta.checkpoint);
+        let checkpoint = checkpoint
+            .map(|checkpoint| {
+                let block_number = checkpoint.block_number.try_into().map_err(|_| {
+                    RaikoError::InvalidRequestConfig(
+                        "checkpoint.block_number does not fit in uint48".to_string(),
+                    )
+                })?;
+                Ok::<_, RaikoError>(raiko2_protocol_shasta::shasta::Checkpoint {
+                    blockNumber: block_number,
+                    blockHash: checkpoint.block_hash,
+                    stateRoot: checkpoint.state_root,
+                })
+            })
+            .transpose()?;
+
+        Ok(TaikoProverData {
             actual_prover: prover_address,
             designated_prover: None,
-            graffiti: ctx
-                .request
-                .graffiti
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
+            graffiti,
             parent_transition_hash: None,
-            checkpoint: ctx.request.shasta.and_then(|shasta| {
-                shasta.checkpoint.and_then(|checkpoint| {
-                    checkpoint.block_number.try_into().ok().map(|block_number| {
-                        raiko2_protocol_shasta::shasta::Checkpoint {
-                            blockNumber: block_number,
-                            blockHash: checkpoint.block_hash,
-                            stateRoot: checkpoint.state_root,
-                        }
-                    })
-                })
-            }),
+            checkpoint,
             last_anchor_block_number: ctx
                 .request
                 .shasta
                 .map(|shasta| shasta.last_anchor_block_number),
-        }
+        })
     }
 
     fn build_chain_spec(ctx: &ProofContext) -> ManifestChainSpec {
@@ -302,7 +316,7 @@ impl ShastaManifestBuilder {
         );
 
         // Proposal events are resolved by preflight and may be passed in explicitly by callers.
-        let prover_data = Self::parse_prover_data(ctx);
+        let prover_data = Self::parse_prover_data(ctx)?;
         let chain_spec = Self::build_chain_spec(ctx);
         let blob_proof_type = Self::resolve_blob_proof_type(ctx)?;
 
@@ -361,5 +375,62 @@ impl ShastaManifestBuilder {
             data_sources,
             l1_ancestor_headers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raiko2_primitives::{ProofRequest, ProofType, ProverConfig, ShastaCheckpoint};
+
+    fn context_with_request(request: ProofRequest) -> ProofContext {
+        ProofContext::new(request, ProverConfig::default())
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_invalid_prover_address() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            prover: Some("not-an-address".to_string()),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("invalid prover address"));
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_invalid_graffiti() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            graffiti: Some("not-a-b256".to_string()),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("invalid graffiti"));
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_checkpoint_block_number_overflow() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            shasta: Some(raiko2_primitives::ShastaRequest {
+                l1_inclusion_block_number: 1,
+                last_anchor_block_number: 0,
+                checkpoint: Some(ShastaCheckpoint {
+                    block_number: u64::MAX,
+                    block_hash: Default::default(),
+                    state_root: Default::default(),
+                }),
+            }),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("does not fit in uint48"));
     }
 }

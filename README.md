@@ -16,9 +16,18 @@ Hoodi-compatible v3 API.
 - Canonical routes: `native/local`, `risc0/local`, `risc0/boundless`, `sp1/local`
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
-- In-process runtime state under `./data/runtime` by default
+- Persisted runtime state and task workdirs under `./data/runtime` by default
+- In-process memory queue by default, with an optional Redis-backed queue
 
 ## Quickstart
+
+Run the fixture-backed server for a dependency-free local API smoke test:
+
+```bash
+cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
+```
+
+Run the real server with an explicit config file:
 
 ```bash
 cp config.example.toml config.toml
@@ -26,7 +35,10 @@ cargo run -r -p raiko2 -- --config config.toml
 ```
 
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
-override values from the file.
+override values from the file. The real server checks configured RPC endpoints and hosted prover
+capabilities before it starts, so replace example RPC endpoints and set required prover secrets
+such as `NETWORK_PRIVATE_KEY` for SP1 network proving or a Boundless signer key for
+`risc0/boundless`.
 
 ## Core Flow
 
@@ -44,6 +56,18 @@ flowchart LR
   PR --> API["Task API"]
   AG --> API
 ```
+
+## API Compatibility
+
+- `POST /v3/proof/batch/shasta` registers proposal proof work and, when `aggregate=true`, also
+  registers the aggregation work for that batch.
+- `POST /v3/proof/aggregate` registers aggregation work from externally supplied proposal proofs.
+- Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
+- Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
+  `kzg_versioned_hash` manifests are rejected.
+- Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
+- `proof_type=risc0` resolves to the server's configured RISC Zero runner. The `risc0/boundless`
+  route submits to Boundless and exposes Boundless quote metadata.
 
 ## Routes
 

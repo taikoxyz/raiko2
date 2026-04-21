@@ -30,7 +30,6 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY bin ./bin
 COPY xtask ./xtask
-COPY vendor ./vendor
 COPY config ./config
 COPY config.example.toml ./
 COPY test.json ./
@@ -40,7 +39,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY vendor ./vendor
 COPY --from=planner /app/recipe.json ./recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
 
@@ -48,7 +46,6 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY bin ./bin
 COPY xtask ./xtask
-COPY vendor ./vendor
 COPY config ./config
 COPY config.example.toml ./
 COPY test.json ./

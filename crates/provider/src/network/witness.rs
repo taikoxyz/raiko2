@@ -36,16 +36,19 @@ struct SystemProofRequest {
 }
 
 fn taiko_system_proof_targets(chain_id: u64) -> TaikoSystemProofTargets {
-    let mut account_only = Vec::with_capacity(1);
-    let mut storage_backed = Vec::with_capacity(2);
+    let mut account_only = Vec::with_capacity(2);
+    let mut storage_backed = Vec::with_capacity(1);
     let golden_touch = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
     account_only.push(golden_touch);
 
     let treasury = get_treasury_address(chain_id);
-    if treasury != golden_touch {
-        storage_backed.push(treasury);
+    if treasury != golden_touch && !account_only.contains(&treasury) {
+        account_only.push(treasury);
     }
 
+    // `l2_contract` remains downstream Raiko chain-spec metadata. The built-in Taiko specs
+    // currently map it to the same `...10001` address as treasury, but this fallback stays here
+    // for custom chain specs or future configurations where it diverges again.
     if let Some(chain_spec) = SupportedChainSpecs::default().get_chain_spec_with_chain_id(chain_id)
         && let Some(l2_contract) = chain_spec.l2_contract
         && !account_only.contains(&l2_contract)
@@ -70,6 +73,13 @@ fn witness_storage_keys(witness: &ExecutionWitness) -> Vec<B256> {
     keys.sort_unstable();
     keys.dedup();
     keys
+}
+
+fn witness_has_account_preimage(witness: &ExecutionWitness, address: Address) -> bool {
+    witness
+        .keys
+        .iter()
+        .any(|key| key.len() == Address::len_bytes() && key.as_ref() == address.as_slice())
 }
 
 fn should_fallback_to_on_the_spot(err: &RaikoError) -> bool {
@@ -163,13 +173,18 @@ impl NetworkProvider {
 
     fn build_system_proof_requests(
         witness_chunk: &[(u64, ExecutionWitness)],
+        block_indices: &[usize],
         address: Address,
         include_storage_keys: bool,
     ) -> RaikoResult<Vec<SystemProofRequest>> {
-        witness_chunk
+        block_indices
             .iter()
-            .enumerate()
-            .map(|(block_idx, (block_number, witness))| {
+            .map(|&block_idx| {
+                let (block_number, witness) = witness_chunk.get(block_idx).ok_or_else(|| {
+                    RaikoError::RPC(format!(
+                        "missing witness chunk entry while building system proof request for block index {block_idx}"
+                    ))
+                })?;
                 let parent_block_number = block_number.checked_sub(1).ok_or_else(|| {
                     RaikoError::RPC(format!(
                         "cannot fetch system proof for genesis block {block_number}"
@@ -186,6 +201,19 @@ impl NetworkProvider {
                         Vec::new()
                     },
                 })
+            })
+            .collect()
+    }
+
+    fn missing_account_proof_block_indices(
+        witness_chunk: &[(u64, ExecutionWitness)],
+        address: Address,
+    ) -> Vec<usize> {
+        witness_chunk
+            .iter()
+            .enumerate()
+            .filter_map(|(block_idx, (_, witness))| {
+                (!witness_has_account_preimage(witness, address)).then_some(block_idx)
             })
             .collect()
     }
@@ -255,11 +283,23 @@ impl NetworkProvider {
         targets: &TaikoSystemProofTargets,
     ) -> RaikoResult<()> {
         for &address in &targets.account_only {
-            let requests = Self::build_system_proof_requests(witness_chunk, address, false)?;
+            let missing_block_indices =
+                Self::missing_account_proof_block_indices(witness_chunk, address);
+            if missing_block_indices.is_empty() {
+                continue;
+            }
+
+            let requests = Self::build_system_proof_requests(
+                witness_chunk,
+                &missing_block_indices,
+                address,
+                false,
+            )?;
             let mut proofs = self.fetch_system_account_proofs(&requests).await?;
             proofs.sort_by_key(|(block_idx, _)| *block_idx);
 
-            for ((_, witness), (_, proof)) in witness_chunk.iter_mut().zip(proofs.into_iter()) {
+            for (block_idx, proof) in proofs {
+                let (_, witness) = &mut witness_chunk[block_idx];
                 witness.state.extend(
                     proof
                         .account_proof
@@ -270,7 +310,9 @@ impl NetworkProvider {
         }
 
         for &address in &targets.storage_backed {
-            let requests = Self::build_system_proof_requests(witness_chunk, address, true)?;
+            let block_indices = (0..witness_chunk.len()).collect::<Vec<_>>();
+            let requests =
+                Self::build_system_proof_requests(witness_chunk, &block_indices, address, true)?;
             let mut proofs = self.fetch_system_account_proofs(&requests).await?;
             proofs.sort_by_key(|(block_idx, _)| *block_idx);
 

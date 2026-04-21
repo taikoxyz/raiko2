@@ -41,12 +41,4 @@ sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.8
 p256 = { git = "https://github.com/risc0/RustCrypto-elliptic-curves", tag = "p256/v0.13.2-risczero.1" }
 crypto-bigint = { git = "https://github.com/risc0/RustCrypto-crypto-bigint", tag = "v0.5.5-risczero.0" }
 tiny-keccak = { git = "https://github.com/risc0/tiny-keccak.git", tag = "tiny-keccak/v2.0.2-risczero.0" }
-reth-primitives-traits = { path = "../../vendor/reth-primitives-traits" }
-
-[patch."https://github.com/taikoxyz/alethia-reth"]
-alethia-reth-block = { path = "../../vendor/alethia-reth/crates/block" }
-alethia-reth-chainspec = { path = "../../vendor/alethia-reth/crates/chainspec" }
-alethia-reth-consensus = { path = "../../vendor/alethia-reth/crates/consensus" }
-alethia-reth-evm = { path = "../../vendor/alethia-reth/crates/evm" }
-alethia-reth-primitives = { path = "../../vendor/alethia-reth/crates/primitives" }
 [workspace]

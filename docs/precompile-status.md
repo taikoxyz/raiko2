@@ -11,7 +11,7 @@ It answers three separate questions:
 
 Use this file together with the regression tests in:
 
-- `vendor/alethia-reth/crates/evm/src/spec.rs`
+- the upstream `alethia-reth` `crates/evm/src/spec.rs` tests at the revision pinned in `Cargo.lock`
 - `guests/risc0/src/crypto.rs`
 - `guests/sp1/src/crypto.rs`
 

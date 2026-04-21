@@ -11,15 +11,12 @@ use serde::{Deserialize, Serialize};
 
 /// Blob proof type for Taiko.
 #[derive(
-    Clone, Copy, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash,
+    Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BlobProofType {
-    /// Guest runs through the entire computation from blob to Kzg commitment
-    /// then to version hash.
-    #[default]
-    KzgVersionedHash,
     /// Simplified Proof of Equivalence with fiat input in non-aligned field.
+    #[default]
     ProofOfEquivalence,
 }
 
@@ -29,7 +26,6 @@ impl FromStr for BlobProofType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
             "proof_of_equivalence" => Ok(BlobProofType::ProofOfEquivalence),
-            "kzg_versioned_hash" => Ok(BlobProofType::KzgVersionedHash),
             _ => Err(anyhow!("invalid blob proof type")),
         }
     }
@@ -174,13 +170,10 @@ mod tests {
     #[test]
     fn test_blob_proof_type_from_str() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
-            "kzg_versioned_hash".parse::<BlobProofType>()?,
-            BlobProofType::KzgVersionedHash
-        );
-        assert_eq!(
             "proof_of_equivalence".parse::<BlobProofType>()?,
             BlobProofType::ProofOfEquivalence
         );
+        assert!("kzg_versioned_hash".parse::<BlobProofType>().is_err());
         assert!("invalid".parse::<BlobProofType>().is_err());
         Ok(())
     }
@@ -191,7 +184,7 @@ mod tests {
         assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
         assert!(manifest.l1_ancestor_headers.is_empty());
-        assert_eq!(manifest.blob_proof_type, BlobProofType::KzgVersionedHash);
+        assert_eq!(manifest.blob_proof_type, BlobProofType::ProofOfEquivalence);
     }
 
     #[test]

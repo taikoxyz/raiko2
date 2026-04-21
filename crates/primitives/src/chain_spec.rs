@@ -35,10 +35,8 @@ impl SupportedChainSpecs {
     /// Returns an error if the file cannot be read or parsed.
     pub fn merge_from_file(file_path: PathBuf) -> Result<SupportedChainSpecs> {
         let mut known_chain_specs = SupportedChainSpecs::default();
-        let file = std::fs::File::open(file_path)?;
-        let reader = std::io::BufReader::new(file);
-        let config: Value = serde_json::from_reader(reader)?;
-        let chain_spec_list: Vec<ChainSpec> = serde_json::from_value(config)?;
+        let config = std::fs::read(file_path)?;
+        let chain_spec_list: Vec<ChainSpec> = serde_json::from_slice(&config)?;
         let new_chain_specs = chain_spec_list
             .into_iter()
             .map(|cs| (cs.name.clone(), cs))

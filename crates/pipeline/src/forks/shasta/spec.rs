@@ -901,7 +901,10 @@ mod tests {
         );
         assert_eq!(input.taiko.l1_ancestor_headers.len(), 1);
         assert_eq!(input.taiko.prover_data.last_anchor_block_number, Some(9));
-        assert_eq!(input.taiko.blob_proof_type, BlobProofType::KzgVersionedHash);
+        assert_eq!(
+            input.taiko.blob_proof_type,
+            BlobProofType::ProofOfEquivalence
+        );
         assert_eq!(
             input.witnesses[0].chain_spec,
             SupportedChainSpecs::default()
@@ -911,7 +914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_forces_proof_of_equivalence_for_sp1() {
+    async fn preflight_rejects_kzg_versioned_hash_hint_for_sp1() {
         let provider = sample_provider();
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.proof_type = ProofType::Sp1;
@@ -923,12 +926,11 @@ mod tests {
             provider.clone(),
         );
 
-        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
-
-        assert_eq!(
-            input.taiko.blob_proof_type,
-            BlobProofType::ProofOfEquivalence
-        );
+        let err = spec
+            .preflight(&ctx, &provider)
+            .await
+            .expect_err("kzg_versioned_hash should be rejected");
+        assert!(err.to_string().contains("invalid blob_proof_type"));
     }
 
     #[tokio::test]

@@ -66,22 +66,17 @@ impl NetworkProvider {
     fn blob_proof_for_type(
         blob: &[u8],
         commitment: &KzgCommitmentBytes,
-        blob_proof_type: BlobProofType,
+        _blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<u8>> {
-        match blob_proof_type {
-            BlobProofType::KzgVersionedHash => Ok(Vec::new()),
-            BlobProofType::ProofOfEquivalence => {
-                let proof = blob_to_proof_of_equivalence(blob, commitment).map_err(|err| {
-                    RaikoError::Preflight(format!(
-                        "failed to compute proof-of-equivalence proof: {err}"
-                    ))
-                })?;
-                verify_blob_proof_of_equivalence(blob, commitment, &proof).map_err(|err| {
-                    RaikoError::Preflight(format!("invalid proof-of-equivalence proof: {err}"))
-                })?;
-                Ok(proof.to_vec())
-            }
-        }
+        let proof = blob_to_proof_of_equivalence(blob, commitment).map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to compute proof-of-equivalence proof: {err}"
+            ))
+        })?;
+        verify_blob_proof_of_equivalence(blob, commitment, &proof).map_err(|err| {
+            RaikoError::Preflight(format!("invalid proof-of-equivalence proof: {err}"))
+        })?;
+        Ok(proof.to_vec())
     }
 
     async fn fetch_blob_sidecars(

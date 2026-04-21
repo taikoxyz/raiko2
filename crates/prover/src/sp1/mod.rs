@@ -407,7 +407,7 @@ fn remote_verifier_program_vkey(vk: &SP1VerifyingKey) -> B256 {
     B256::from_slice(&vk.bytes32_raw())
 }
 
-fn sp1_proof_mode_name(proof: &SP1ProofWithPublicValues) -> &'static str {
+const fn sp1_proof_mode_name(proof: &SP1ProofWithPublicValues) -> &'static str {
     match &proof.proof {
         SP1Proof::Core(_) => "core",
         SP1Proof::Compressed(_) => "compressed",
@@ -425,6 +425,7 @@ fn encode_sp1_onchain_payload(segments: &[String], proof_bytes: &[u8]) -> String
     payload
 }
 
+#[must_use]
 pub fn encode_sp1_proposal_proof_payload(
     proof: &SP1ProofWithPublicValues,
     vk: &SP1VerifyingKey,
@@ -433,6 +434,7 @@ pub fn encode_sp1_proposal_proof_payload(
     Some(encode_sp1_onchain_payload(&[vk.bytes32()], &proof_bytes))
 }
 
+#[must_use]
 pub fn encode_sp1_aggregation_proof_payload(
     proof: &SP1ProofWithPublicValues,
     aggregation_vk: &SP1VerifyingKey,
@@ -448,6 +450,10 @@ pub fn encode_sp1_aggregation_proof_payload(
     ))
 }
 
+/// # Errors
+///
+/// Returns an error when the proof does not contain a valid SP1 quote or legacy encoded proof
+/// payload that can be deserialized for aggregation.
 pub fn load_sp1_subproof_for_aggregation(proof: &Proof) -> RaikoResult<SP1Proof> {
     if let Some(quote) = proof.quote.as_deref() {
         return serde_json::from_str::<SP1Proof>(quote)

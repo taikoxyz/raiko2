@@ -1,11 +1,9 @@
 //! Shasta-specific blob verification helpers.
 
 use raiko2_primitives::blob::util::{
-    KzgCommitmentBytes, blob_to_commitment, commitment_to_version_hash,
-    verify_blob_proof_of_equivalence,
+    KzgCommitmentBytes, commitment_to_version_hash, verify_blob_proof_of_equivalence,
 };
 use raiko2_primitives::{RaikoError, RaikoResult};
-use raiko2_protocol::BlobProofType;
 
 use crate::GuestInput;
 
@@ -70,9 +68,7 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
                 commitments.len()
             )));
         }
-        if guest_input.taiko.blob_proof_type == BlobProofType::ProofOfEquivalence
-            && commitments.len() != proofs.len()
-        {
+        if commitments.len() != proofs.len() {
             return Err(RaikoError::InvalidBlobOption(format!(
                 "commitment count ({}) does not match proof count ({})",
                 commitments.len(),
@@ -91,36 +87,20 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
         for (idx, blob_data) in data_source.tx_data_from_blob.iter().enumerate() {
             let commitment_array = read_kzg_bytes(&commitments[idx], "Commitment", idx)?;
 
-            let versioned_hash = match guest_input.taiko.blob_proof_type {
-                BlobProofType::KzgVersionedHash => {
-                    let computed_commitment = blob_to_commitment(blob_data).map_err(|e| {
-                        RaikoError::InvalidBlobOption(format!(
-                            "Blob commitment reconstruction failed at index {idx}: {e}"
-                        ))
-                    })?;
-                    if computed_commitment != commitment_array {
-                        return Err(RaikoError::InvalidBlobOption(format!(
-                            "blob commitment mismatch at source {source_idx}, index {idx}"
-                        )));
-                    }
-                    commitment_to_version_hash(&computed_commitment)
-                }
-                BlobProofType::ProofOfEquivalence => {
-                    let proof_bytes = proofs.get(idx).ok_or_else(|| {
-                        RaikoError::InvalidBlobOption(format!(
-                            "missing proof for source {source_idx}, index {idx}"
-                        ))
-                    })?;
-                    let proof_array = read_kzg_bytes(proof_bytes, "Proof", idx)?;
-                    verify_blob_proof_of_equivalence(blob_data, &commitment_array, &proof_array)
-                        .map_err(|e| {
-                            RaikoError::InvalidBlobOption(format!(
-                                "Blob proof-of-equivalence verification failed at index {idx}: {e}"
-                            ))
-                        })?;
-                    commitment_to_version_hash(&commitment_array)
-                }
-            };
+            let proof_bytes = proofs.get(idx).ok_or_else(|| {
+                RaikoError::InvalidBlobOption(format!(
+                    "missing proof for source {source_idx}, index {idx}"
+                ))
+            })?;
+            let proof_array = read_kzg_bytes(proof_bytes, "Proof", idx)?;
+            verify_blob_proof_of_equivalence(blob_data, &commitment_array, &proof_array).map_err(
+                |e| {
+                    RaikoError::InvalidBlobOption(format!(
+                        "Blob proof-of-equivalence verification failed at index {idx}: {e}"
+                    ))
+                },
+            )?;
+            let versioned_hash = commitment_to_version_hash(&commitment_array);
             if versioned_hash != expected_blob_hashes[idx] {
                 return Err(RaikoError::InvalidBlobOption(format!(
                     "blob versioned hash mismatch at source {}, index {}: expected {:?}, got {:?}",

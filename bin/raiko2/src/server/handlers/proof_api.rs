@@ -203,23 +203,7 @@ pub async fn request_aggregation_proof(
         &submission.pair.key,
         submission.route.pipeline_key(),
     )?;
-    let aggregate = PlannedAggregateTask {
-        task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
-        request: submission.request.clone(),
-        task_id: submission.task_id.clone(),
-    };
-    let metadata = build_task_metadata(
-        &submission.pair,
-        TaskMetadataParams {
-            network: &submission.pair.network,
-            l1_network: &submission.pair.l1_network,
-            proof_type: submission.route.proof_type(),
-            execution_mode: None,
-            aggregate_requested: true,
-        },
-        &[],
-        Some(&aggregate),
-    );
+    let aggregate = planned_external_aggregate_task(&submission);
 
     info!(
         "Received hoodi aggregate request: task_id={}, proofs={}, aggregate_ids={}, route={}, pair={}",
@@ -230,110 +214,12 @@ pub async fn request_aggregation_proof(
         submission.pair.key
     );
 
-    match state
-        .runtime
-        .register_task_if_absent(TaskRegistration {
-            task_id: submission.public_task_id.clone(),
-            route: submission.route.route,
-            task_kind: "hoodi_aggregate".to_string(),
-            proposal_id: None,
-            proof_ids: Vec::new(),
-            metadata: serde_json::to_value(metadata.clone()).map_err(|err| {
-                ApiError::internal(format!("failed to serialize metadata: {err}"))
-            })?,
-            request_fingerprint: Some(submission.request_fingerprint.clone()),
-        })
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))?
-    {
+    match register_external_aggregate_task(&state, &submission, &aggregate).await? {
         TaskRegistrationOutcome::Existing(existing) => {
-            info!(
-                "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, pair={}",
-                existing.task_id, submission.route.route, submission.pair.key
-            );
-            let existing_metadata: HoodiTaskMetadata =
-                serde_json::from_value(existing.metadata.clone()).map_err(|err| {
-                    ApiError::internal(format!("failed to parse existing task metadata: {err}"))
-                })?;
-            if should_reenqueue_existing_submission(&existing, &existing_metadata) {
-                let request = existing_metadata.aggregate_request.clone().ok_or_else(|| {
-                    ApiError::internal("existing aggregate task missing aggregate_request")
-                })?;
-                let expected_task_id = existing_metadata
-                    .aggregate_engine_task_id(existing.pipeline_key)
-                    .ok_or_else(|| {
-                        ApiError::internal("existing aggregate task missing aggregate task id")
-                    })?;
-                let actual_task_id = engine
-                    .submit_aggregation_proof_from_proofs(request, submission.proofs.clone())
-                    .await
-                    .map_err(|err| {
-                        ApiError::internal(format!(
-                            "failed to recover dormant aggregate task {}: {err}",
-                            existing.task_id
-                        ))
-                    })?;
-                if actual_task_id != expected_task_id {
-                    return Err(ApiError::internal(
-                        "engine returned unexpected aggregation task id",
-                    ));
-                }
-            }
-            compatibility_response_for_task(&state, &existing.task_id).await
+            handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
         }
         TaskRegistrationOutcome::Created(_) => {
-            let enqueue_result = engine
-                .submit_aggregation_proof_from_proofs(
-                    submission.request.clone(),
-                    submission.proofs.clone(),
-                )
-                .await
-                .map_err(|err| {
-                    ApiError::internal(format!("failed to enqueue aggregation proof: {err}"))
-                });
-            let actual_task_id = match enqueue_result {
-                Ok(task_id) => task_id,
-                Err(err) => {
-                    let _ = state.runtime.remove_task(&submission.public_task_id).await;
-                    let _ = remove_task_children(
-                        &engine,
-                        submission.route.pipeline_key(),
-                        &metadata,
-                        &mut HashSet::new(),
-                    )
-                    .await;
-                    return Err(err);
-                }
-            };
-            if actual_task_id != aggregate.task_id {
-                let _ = state.runtime.remove_task(&submission.public_task_id).await;
-                let _ = remove_task_children(
-                    &engine,
-                    submission.route.pipeline_key(),
-                    &metadata,
-                    &mut HashSet::new(),
-                )
-                .await;
-                return Err(ApiError::internal(
-                    "engine returned unexpected aggregation task id",
-                ));
-            }
-
-            telemetry::record_request_registered(
-                &MetricContext::new(
-                    submission.route.route.to_string(),
-                    submission.route.proof_type(),
-                    submission.pair.key.clone(),
-                    true,
-                ),
-                true,
-            );
-
-            Ok(registered_response(
-                HoodiProofType::from_canonical(submission.route.proof_type()),
-                submission.public_task_id,
-            )
-            .into_response())
+            handle_created_external_aggregate_task(&state, &engine, &submission, &aggregate).await
         }
     }
 }
@@ -679,8 +565,7 @@ fn build_external_aggregate_submission(
         pipeline: route.pipeline_key(),
         request: request.clone(),
     });
-    let request_fingerprint =
-        external_aggregate_request_fingerprint(&pair, &route, &req, &request)?;
+    let request_fingerprint = external_aggregate_request_fingerprint(&pair, route, &req, &request)?;
     let _ = (&req.graffiti, &req.prover, &req.blob_proof_type);
 
     Ok(ExternalAggregateSubmission {
@@ -692,6 +577,16 @@ fn build_external_aggregate_submission(
         request,
         request_fingerprint,
     })
+}
+
+fn planned_external_aggregate_task(
+    submission: &ExternalAggregateSubmission,
+) -> PlannedAggregateTask {
+    PlannedAggregateTask {
+        task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
+        request: submission.request.clone(),
+        task_id: submission.task_id.clone(),
+    }
 }
 
 fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> {
@@ -822,6 +717,41 @@ async fn register_batch_task(
                 ApiError::internal(format!("failed to serialize metadata: {err}"))
             })?,
             request_fingerprint: Some(request_fingerprint.to_string()),
+        })
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+async fn register_external_aggregate_task(
+    state: &AppState,
+    submission: &ExternalAggregateSubmission,
+    aggregate: &PlannedAggregateTask,
+) -> Result<TaskRegistrationOutcome, ApiError> {
+    let metadata = build_task_metadata(
+        &submission.pair,
+        TaskMetadataParams {
+            network: &submission.pair.network,
+            l1_network: &submission.pair.l1_network,
+            proof_type: submission.route.proof_type(),
+            execution_mode: None,
+            aggregate_requested: true,
+        },
+        &[],
+        Some(aggregate),
+    );
+
+    state
+        .runtime
+        .register_task_if_absent(TaskRegistration {
+            task_id: submission.public_task_id.clone(),
+            route: submission.route.route,
+            task_kind: "hoodi_aggregate".to_string(),
+            proposal_id: None,
+            proof_ids: Vec::new(),
+            metadata: serde_json::to_value(metadata).map_err(|err| {
+                ApiError::internal(format!("failed to serialize metadata: {err}"))
+            })?,
+            request_fingerprint: Some(submission.request_fingerprint.clone()),
         })
         .await
         .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
@@ -964,6 +894,131 @@ async fn cleanup_submission_plan(
     remove_task_children(engine, pipeline_key, &metadata, &mut HashSet::new())
         .await
         .map_err(|err| ApiError::internal(err.to_string()))
+}
+
+async fn handle_existing_external_aggregate_task(
+    state: &AppState,
+    engine: &Arc<dyn EngineHandle>,
+    submission: &ExternalAggregateSubmission,
+    existing: raiko2_runtime::RuntimeTaskRecord,
+) -> Result<Response, ApiError> {
+    info!(
+        "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, pair={}",
+        existing.task_id, submission.route.route, submission.pair.key
+    );
+    let existing_metadata: HoodiTaskMetadata = serde_json::from_value(existing.metadata.clone())
+        .map_err(|err| {
+            ApiError::internal(format!("failed to parse existing task metadata: {err}"))
+        })?;
+    if should_reenqueue_existing_submission(&existing, &existing_metadata) {
+        reenqueue_existing_external_aggregate_task(
+            engine,
+            submission,
+            &existing,
+            &existing_metadata,
+        )
+        .await?;
+    }
+    compatibility_response_for_task(state, &existing.task_id).await
+}
+
+async fn reenqueue_existing_external_aggregate_task(
+    engine: &Arc<dyn EngineHandle>,
+    submission: &ExternalAggregateSubmission,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    existing_metadata: &HoodiTaskMetadata,
+) -> Result<(), ApiError> {
+    let request = existing_metadata
+        .aggregate_request
+        .clone()
+        .ok_or_else(|| ApiError::internal("existing aggregate task missing aggregate_request"))?;
+    let expected_task_id = existing_metadata
+        .aggregate_engine_task_id(existing.pipeline_key)
+        .ok_or_else(|| ApiError::internal("existing aggregate task missing aggregate task id"))?;
+    let actual_task_id = engine
+        .submit_aggregation_proof_from_proofs(request, submission.proofs.clone())
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!(
+                "failed to recover dormant aggregate task {}: {err}",
+                existing.task_id
+            ))
+        })?;
+    if actual_task_id != expected_task_id {
+        return Err(ApiError::internal(
+            "engine returned unexpected aggregation task id",
+        ));
+    }
+    Ok(())
+}
+
+async fn handle_created_external_aggregate_task(
+    state: &AppState,
+    engine: &Arc<dyn EngineHandle>,
+    submission: &ExternalAggregateSubmission,
+    aggregate: &PlannedAggregateTask,
+) -> Result<Response, ApiError> {
+    let metadata = build_task_metadata(
+        &submission.pair,
+        TaskMetadataParams {
+            network: &submission.pair.network,
+            l1_network: &submission.pair.l1_network,
+            proof_type: submission.route.proof_type(),
+            execution_mode: None,
+            aggregate_requested: true,
+        },
+        &[],
+        Some(aggregate),
+    );
+    let actual_task_id = engine
+        .submit_aggregation_proof_from_proofs(submission.request.clone(), submission.proofs.clone())
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to enqueue aggregation proof: {err}")));
+    let actual_task_id = match actual_task_id {
+        Ok(task_id) => task_id,
+        Err(err) => {
+            cleanup_external_aggregate_submission(state, engine, submission, &metadata).await;
+            return Err(err);
+        }
+    };
+    if actual_task_id != aggregate.task_id {
+        cleanup_external_aggregate_submission(state, engine, submission, &metadata).await;
+        return Err(ApiError::internal(
+            "engine returned unexpected aggregation task id",
+        ));
+    }
+
+    telemetry::record_request_registered(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            true,
+        ),
+        true,
+    );
+
+    Ok(registered_response(
+        HoodiProofType::from_canonical(submission.route.proof_type()),
+        submission.public_task_id.clone(),
+    )
+    .into_response())
+}
+
+async fn cleanup_external_aggregate_submission(
+    state: &AppState,
+    engine: &Arc<dyn EngineHandle>,
+    submission: &ExternalAggregateSubmission,
+    metadata: &HoodiTaskMetadata,
+) {
+    let _ = state.runtime.remove_task(&submission.public_task_id).await;
+    let _ = remove_task_children(
+        engine,
+        submission.route.pipeline_key(),
+        metadata,
+        &mut HashSet::new(),
+    )
+    .await;
 }
 
 async fn load_task_data(state: &AppState, id: &str) -> Result<HoodiTaskData, ApiError> {
@@ -1424,7 +1479,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
 
 fn external_aggregate_request_fingerprint(
     pair: &ResolvedNetworkPair,
-    route: &CanonicalProofRoute,
+    route: CanonicalProofRoute,
     req: &AggregateProofRequest,
     request: &AggregationTaskRequest,
 ) -> Result<String, ApiError> {

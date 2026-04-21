@@ -47,7 +47,7 @@ pub(crate) struct LatestProposalRequestArgs {
     proof_type: RequestProofType,
 
     /// Blob proof type to include in the request body.
-    #[arg(long, default_value = "kzg_versioned_hash")]
+    #[arg(long, default_value = "proof_of_equivalence")]
     blob_proof_type: String,
 
     /// Emit an aggregate request instead of proposal-only.

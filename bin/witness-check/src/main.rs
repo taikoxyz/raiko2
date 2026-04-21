@@ -17,7 +17,7 @@ use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy::{
     consensus::TrieAccount,
     consensus::transaction::SignerRecoverable,
-    primitives::address,
+    primitives::{Address, B256, address},
     providers::{Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
     rpc::types::EIP1186AccountProofResponse,
@@ -66,6 +66,15 @@ struct Args {
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     diagnose_golden_touch: bool,
 
+    /// Compare the witness against the account proof for an arbitrary address.
+    #[arg(long = "diagnose-address")]
+    diagnose_addresses: Vec<Address>,
+
+    /// Compare the witness against the account+storage proof for an arbitrary address using the
+    /// witness storage-key set.
+    #[arg(long = "diagnose-storage-address")]
+    diagnose_storage_addresses: Vec<Address>,
+
     /// Temporarily merge the golden-touch account proof into the witness and validate again.
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     supplement_golden_touch_proof: bool,
@@ -110,6 +119,10 @@ async fn main() -> Result<()> {
     validation_env.metrics.set_block_stats(&blocks);
 
     for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
+        diagnose_witness_addresses(&args, &rpc_provider, &block, &witness)
+            .await
+            .context("diagnose witness address coverage")?;
+
         if maybe_validate_with_golden_touch(
             &args,
             &rpc_provider,
@@ -221,6 +234,99 @@ struct ValidationEnv<'a> {
     metrics: &'a mut RunMetrics,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WitnessDiagnosisKind {
+    AccountOnly,
+    StorageBacked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WitnessDiagnosisTarget {
+    address: Address,
+    kind: WitnessDiagnosisKind,
+}
+
+async fn diagnose_witness_addresses<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    block: &Block,
+    witness: &ExecutionWitness,
+) -> Result<()> {
+    let mut targets = Vec::new();
+    if args.diagnose_golden_touch {
+        targets.push(WitnessDiagnosisTarget {
+            address: GOLDEN_TOUCH_ADDRESS,
+            kind: WitnessDiagnosisKind::AccountOnly,
+        });
+    }
+    targets.extend(
+        args.diagnose_addresses
+            .iter()
+            .copied()
+            .map(|address| WitnessDiagnosisTarget {
+                address,
+                kind: WitnessDiagnosisKind::AccountOnly,
+            }),
+    );
+    targets.extend(
+        args.diagnose_storage_addresses
+            .iter()
+            .copied()
+            .map(|address| WitnessDiagnosisTarget {
+                address,
+                kind: WitnessDiagnosisKind::StorageBacked,
+            }),
+    );
+    targets.sort_unstable_by_key(|target| {
+        (
+            target.address,
+            matches!(target.kind, WitnessDiagnosisKind::StorageBacked),
+        )
+    });
+    targets.dedup();
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let parent_block_number = block
+        .header
+        .number
+        .checked_sub(1)
+        .context("cannot diagnose witness coverage for genesis block")?;
+    let witness_storage_keys = witness_storage_keys(witness);
+
+    for target in targets {
+        let storage_keys = match target.kind {
+            WitnessDiagnosisKind::AccountOnly => Vec::new(),
+            WitnessDiagnosisKind::StorageBacked => witness_storage_keys.clone(),
+        };
+        let proof = fetch_account_proof(
+            rpc_provider,
+            target.address,
+            storage_keys,
+            parent_block_number,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "fetch witness diagnosis proof for address {}",
+                target.address
+            )
+        })?;
+
+        if target.address == GOLDEN_TOUCH_ADDRESS
+            && target.kind == WitnessDiagnosisKind::AccountOnly
+        {
+            print_golden_touch_coverage(witness, &proof);
+        } else {
+            print_address_coverage(witness, &proof, target);
+        }
+    }
+
+    Ok(())
+}
+
 async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
     args: &Args,
     rpc_provider: &P,
@@ -238,10 +344,14 @@ async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
         .number
         .checked_sub(1)
         .context("cannot diagnose golden-touch proof for genesis block")?;
-    let proof = fetch_account_proof(rpc_provider, GOLDEN_TOUCH_ADDRESS, parent_block_number)
-        .await
-        .context("fetch golden-touch account proof")?;
-    print_golden_touch_coverage(witness, &proof);
+    let proof = fetch_account_proof(
+        rpc_provider,
+        GOLDEN_TOUCH_ADDRESS,
+        Vec::new(),
+        parent_block_number,
+    )
+    .await
+    .context("fetch golden-touch account proof")?;
 
     if !args.supplement_golden_touch_proof {
         return Ok(false);
@@ -276,14 +386,27 @@ async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
 
 async fn fetch_account_proof<P: AlloyProvider>(
     rpc_provider: &P,
-    address: alloy_primitives::Address,
+    address: Address,
+    storage_keys: Vec<B256>,
     block_number: u64,
 ) -> Result<EIP1186AccountProofResponse> {
     rpc_provider
-        .get_proof(address, Vec::new())
+        .get_proof(address, storage_keys)
         .number(block_number)
         .await
         .context("eth_getProof failed")
+}
+
+fn witness_storage_keys(witness: &ExecutionWitness) -> Vec<B256> {
+    let mut keys = witness
+        .keys
+        .iter()
+        .filter(|key| key.len() == B256::len_bytes())
+        .map(|key| B256::from_slice(key.as_ref()))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
 }
 
 fn print_golden_touch_coverage(witness: &ExecutionWitness, proof: &EIP1186AccountProofResponse) {
@@ -307,6 +430,50 @@ fn print_golden_touch_coverage(witness: &ExecutionWitness, proof: &EIP1186Accoun
     );
     if !missing.is_empty() {
         eprintln!("golden_touch_missing_hashes={missing:?}");
+    }
+}
+
+fn print_address_coverage(
+    witness: &ExecutionWitness,
+    proof: &EIP1186AccountProofResponse,
+    target: WitnessDiagnosisTarget,
+) {
+    let witness_hashes = witness
+        .state
+        .iter()
+        .map(|node| node.hash)
+        .collect::<HashSet<_>>();
+    let missing_account = proof
+        .account_proof
+        .iter()
+        .map(alloy_primitives::keccak256)
+        .filter(|hash| !witness_hashes.contains(hash))
+        .collect::<Vec<_>>();
+    let missing_storage = proof
+        .storage_proof
+        .iter()
+        .flat_map(|storage_proof| storage_proof.proof.iter())
+        .map(alloy_primitives::keccak256)
+        .filter(|hash| !witness_hashes.contains(hash))
+        .collect::<Vec<_>>();
+    let mode = match target.kind {
+        WitnessDiagnosisKind::AccountOnly => "account",
+        WitnessDiagnosisKind::StorageBacked => "storage",
+    };
+
+    eprintln!(
+        "diagnose_{mode}_address={} account_proof_nodes={} missing_account_nodes={} storage_slots={} missing_storage_nodes={}",
+        target.address,
+        proof.account_proof.len(),
+        missing_account.len(),
+        proof.storage_proof.len(),
+        missing_storage.len(),
+    );
+    if !missing_account.is_empty() {
+        eprintln!("diagnose_{mode}_address_missing_account_hashes={missing_account:?}");
+    }
+    if !missing_storage.is_empty() {
+        eprintln!("diagnose_{mode}_address_missing_storage_hashes={missing_storage:?}");
     }
 }
 

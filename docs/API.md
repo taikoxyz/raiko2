@@ -106,7 +106,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "prover": "0x0000000000000000000000000000000000000000",
-  "blob_proof_type": "kzg_versioned_hash"
+  "blob_proof_type": "proof_of_equivalence"
 }
 ```
 

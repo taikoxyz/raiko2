@@ -1,12 +1,15 @@
 //! Helpers for zkVM guest programs.
 
-use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alethia_reth_chainspec::{
     hardfork::{TaikoHardfork, TaikoHardforks},
     spec::TaikoChainSpec,
 };
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{transaction::Transaction as _, BlockHeader as _, Header};
+use alloy_consensus::{
+    transaction::{SignerRecoverable, Transaction as _},
+    BlockHeader as _, Header,
+};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::{ensure, Context, Result};
@@ -17,14 +20,13 @@ use raiko2_primitives_shasta::{
         shasta_zk_aggregation_output,
     },
     roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
-    verify_proposal_mode_blob_usage, GuestInput,
-    ShastaZkAggregationGuestInput,
+    verify_proposal_mode_blob_usage, GuestInput, ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
     manifest::BlockManifest, prepare_source_manifest, ParentBlockContext, ProposalMetadata,
 };
-use raiko2_stateless::validate_block_with_witness_resources;
+use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
 use std::sync::Arc;
 
 sol! {
@@ -276,10 +278,7 @@ fn calculate_shasta_difficulty(parent_difficulty: B256, block_number: u64) -> B2
 
 fn initial_proposal_ancestor_headers(guest_input: &GuestInput) -> Result<Vec<WitnessHeader>> {
     let headers = guest_input.initial_proposal_ancestor_headers();
-    ensure!(
-        !headers.is_empty(),
-        "missing proposal ancestor headers"
-    );
+    ensure!(!headers.is_empty(), "missing proposal ancestor headers");
     Ok(headers)
 }
 
@@ -438,7 +437,7 @@ fn validate_anchor_transaction_binding(
     Ok(())
 }
 
-fn validate_shasta_manifest_block(
+fn validate_shasta_manifest_block_metadata(
     guest_input: &GuestInput,
     stateless_input: &StatelessInput,
     expected_block: &BlockManifest,
@@ -488,6 +487,15 @@ fn validate_shasta_manifest_block(
 
     validate_anchor_transaction_binding(stateless_input, expected_block)?;
 
+    Ok(())
+}
+
+fn validate_manifest_transactions_match_canonical(
+    stateless_input: &StatelessInput,
+    expected_block: &BlockManifest,
+) -> Result<()> {
+    let block = &stateless_input.block;
+
     let actual_transactions = block.body.transactions().collect::<Vec<_>>();
     ensure!(
         actual_transactions.len() == expected_block.transactions.len() + 1,
@@ -514,35 +522,69 @@ fn validate_shasta_manifest_block(
     Ok(())
 }
 
-pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
-    bench_report_start("proposal_blob_usage");
-    verify_proposal_mode_blob_usage(guest_input)
-        .context("proposal mode blob usage verification failed")?;
-    bench_report_end("proposal_blob_usage");
+fn validate_generated_block_matches_canonical(
+    generated_block: &reth_ethereum_primitives::Block,
+    canonical_block: &reth_ethereum_primitives::Block,
+) -> Result<()> {
+    ensure!(
+        generated_block.header == canonical_block.header,
+        "generated block header mismatch"
+    );
 
-    prove_shasta_proposal_with_validator(
-        guest_input,
-        |stateless_input, ancestor_headers, runtime| {
-            validate_block_with_witness_resources(
-                stateless_input.block.clone(),
-                &stateless_input.witness,
-                ancestor_headers,
-                guest_input.proposal_state_nodes(),
-                stateless_input.accounts.clone(),
-                &runtime.chain_spec,
-                &runtime.evm_config,
-            )
-            .map_err(|e| anyhow::anyhow!(e))
-        },
-    )
+    let generated_transactions = generated_block.body.transactions().collect::<Vec<_>>();
+    let canonical_transactions = canonical_block.body.transactions().collect::<Vec<_>>();
+    ensure!(
+        generated_transactions.len() == canonical_transactions.len(),
+        "generated block transaction count mismatch: expected {}, got {}",
+        canonical_transactions.len(),
+        generated_transactions.len()
+    );
+
+    for (tx_index, (generated_tx, canonical_tx)) in generated_transactions
+        .iter()
+        .zip(canonical_transactions.iter())
+        .enumerate()
+    {
+        ensure!(
+            alloy_rlp::encode(generated_tx) == alloy_rlp::encode(canonical_tx),
+            "generated block transaction {} mismatch",
+            tx_index
+        );
+    }
+
+    Ok(())
 }
 
-pub fn prove_shasta_proposal_with_validator<V>(
+fn shasta_block_env_attributes(
+    stateless_input: &StatelessInput,
+) -> Result<TaikoNextBlockEnvAttributes> {
+    let block = &stateless_input.block;
+    Ok(TaikoNextBlockEnvAttributes {
+        timestamp: block.header.timestamp,
+        suggested_fee_recipient: block.header.beneficiary,
+        prev_randao: block.header.mix_hash,
+        gas_limit: block.header.gas_limit,
+        extra_data: block.header.extra_data.clone(),
+        base_fee_per_gas: block
+            .header
+            .base_fee_per_gas()
+            .context("missing base fee per gas in Shasta block header")?,
+    })
+}
+
+fn prove_shasta_proposal_with_block_verifier<V>(
     guest_input: &GuestInput,
-    mut validate_block: V,
+    mut verify_block: V,
 ) -> Result<B256>
 where
-    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
+    V: FnMut(
+        usize,
+        &StatelessInput,
+        Option<&BlockManifest>,
+        Option<&Header>,
+        &[WitnessHeader],
+        &TaikoRuntime,
+    ) -> Result<B256>,
 {
     let proof_carry_data = &guest_input.proof_carry_data;
     ensure!(
@@ -619,13 +661,11 @@ where
     bench_report_start("proposal_derivation");
     let expected_blocks = derive_expected_shasta_blocks(guest_input, &runtime)?;
     let mut proposal_ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
-    let mut canonical_parent_header = expected_blocks
-        .as_ref()
-        .and_then(|_| {
-            proposal_ancestor_headers
-                .last()
-                .and_then(|header| header.full_header().cloned())
-        });
+    let mut canonical_parent_header = expected_blocks.as_ref().and_then(|_| {
+        proposal_ancestor_headers
+            .last()
+            .and_then(|header| header.full_header().cloned())
+    });
     bench_report_end("proposal_derivation");
 
     let mut anchor_checkpoints = Vec::with_capacity(guest_input.witnesses.len());
@@ -639,13 +679,13 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
-        if let (Some(expected_blocks), Some(parent_header)) =
-            (expected_blocks.as_ref(), canonical_parent_header.as_ref())
-        {
-            let expected_block = expected_blocks
-                .get(index)
-                .with_context(|| format!("missing derived manifest block at index {index}"))?;
-            validate_shasta_manifest_block(
+        let expected_block = expected_blocks
+            .as_ref()
+            .and_then(|blocks| blocks.get(index));
+        let parent_header = canonical_parent_header.as_ref();
+
+        if let (Some(expected_block), Some(parent_header)) = (expected_block, parent_header) {
+            validate_shasta_manifest_block_metadata(
                 guest_input,
                 stateless_input,
                 expected_block,
@@ -666,8 +706,15 @@ where
             );
         }
 
-        let validated_hash = validate_block(stateless_input, &proposal_ancestor_headers, &runtime)
-            .with_context(|| format!("stateless block validation failed at index {index}"))?;
+        let validated_hash = verify_block(
+            index,
+            stateless_input,
+            expected_block,
+            parent_header,
+            &proposal_ancestor_headers,
+            &runtime,
+        )
+        .with_context(|| format!("stateless block validation failed at index {index}"))?;
         first_parent_block_hash.get_or_insert(block.header.parent_hash);
         previous_block_hash = Some(validated_hash);
         previous_block_number = Some(block.header.number);
@@ -720,6 +767,74 @@ where
     bench_report_end("proposal_output_hash");
 
     Ok(output)
+}
+
+pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
+    bench_report_start("proposal_blob_usage");
+    verify_proposal_mode_blob_usage(guest_input)
+        .context("proposal mode blob usage verification failed")?;
+    bench_report_end("proposal_blob_usage");
+
+    prove_shasta_proposal_with_block_verifier(
+        guest_input,
+        |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
+            let expected_block = expected_block
+                .with_context(|| format!("missing expected Shasta block at index {index}"))?;
+            let anchor_tx = stateless_input
+                .block
+                .body
+                .transactions()
+                .next()
+                .cloned()
+                .context("missing canonical anchor transaction")?
+                .try_into_recovered()
+                .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
+            let outcome = reconstruct_block_from_transactions_with_witness_resources(
+                Some(anchor_tx),
+                expected_block
+                    .transactions
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect(),
+                shasta_block_env_attributes(stateless_input)?,
+                &stateless_input.witness,
+                ancestor_headers,
+                guest_input.proposal_state_nodes(),
+                stateless_input.accounts.clone(),
+                &runtime.chain_spec,
+                &runtime.evm_config,
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| format!("failed to reconstruct Shasta block at index {index}"))?;
+            let generated_block = outcome.block.into_block();
+            validate_generated_block_matches_canonical(&generated_block, &stateless_input.block)
+                .with_context(|| format!("generated Shasta block mismatch at index {index}"))?;
+            Ok(generated_block.header.hash_slow())
+        },
+    )
+}
+
+pub fn prove_shasta_proposal_with_validator<V>(
+    guest_input: &GuestInput,
+    mut validate_block: V,
+) -> Result<B256>
+where
+    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
+{
+    prove_shasta_proposal_with_block_verifier(
+        guest_input,
+        |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
+            if let Some(expected_block) = expected_block {
+                validate_manifest_transactions_match_canonical(stateless_input, expected_block)
+                    .with_context(|| {
+                        format!("canonical Shasta derivation mismatch at index {index}")
+                    })?;
+            }
+
+            validate_block(stateless_input, ancestor_headers, runtime)
+        },
+    )
 }
 
 pub fn aggregate_shasta_zk_with_verifier<V>(
@@ -817,14 +932,22 @@ mod tests {
 
     fn guest_input_with_single_block() -> GuestInput {
         let chain_spec = taiko_mainnet_chain_spec();
+        let parent_header = alloy_consensus::Header {
+            number: 0,
+            timestamp: (u64::MAX / 2) - 1,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1),
+            ..Default::default()
+        };
         let mut input = StatelessInput {
             chain_spec,
             ..Default::default()
         };
         input.block.header.number = 1;
         input.block.header.timestamp = u64::MAX / 2;
-        input.block.header.parent_hash = B256::from([9u8; 32]);
+        input.block.header.parent_hash = parent_header.hash_slow();
         input.block.header.state_root = B256::from([1u8; 32]);
+        input.witness.headers = vec![WitnessHeader::from_header(parent_header)];
         let l1_header = sample_l1_header(7, B256::from([0x66; 32]));
         let checkpoint = AnchorV4Checkpoint {
             blockNumber: l1_header.number.try_into().expect("fits in uint48"),
@@ -864,6 +987,12 @@ mod tests {
         guest_input
     }
 
+    fn error_chain_contains(err: &anyhow::Error, expected: &str) -> bool {
+        err.chain()
+            .map(ToString::to_string)
+            .any(|message| message.contains(expected))
+    }
+
     #[test]
     fn prove_shasta_proposal_builds_expected_hash() {
         let guest_input = guest_input_with_single_block();
@@ -888,9 +1017,7 @@ mod tests {
         let guest_input = GuestInput::default();
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| {
-                Ok(B256::ZERO)
-            },
+            |_stateless_input, _ancestor_headers, _runtime| Ok(B256::ZERO),
         )
         .expect_err("empty witnesses should fail");
         assert!(err
@@ -928,7 +1055,10 @@ mod tests {
         )
         .expect_err("expected parent-hash mismatch to fail");
 
-        assert!(err.to_string().contains("must link to previous block hash"));
+        assert!(error_chain_contains(
+            &err,
+            "must link to previous block hash"
+        ));
         assert_ne!(
             guest_input.witnesses[1].block.header.parent_hash,
             first_hash
@@ -953,7 +1083,10 @@ mod tests {
         )
         .expect_err("block number gap should fail");
 
-        assert!(err.to_string().contains("must increment block number by 1"));
+        assert!(error_chain_contains(
+            &err,
+            "must increment block number by 1"
+        ));
     }
 
     #[test]
@@ -995,7 +1128,7 @@ mod tests {
         )
         .expect_err("checkpoint mismatch should fail");
 
-        assert!(err.to_string().contains("checkpoint.blockHash mismatch"));
+        assert!(error_chain_contains(&err, "checkpoint.blockHash mismatch"));
     }
 
     #[test]
@@ -1011,7 +1144,7 @@ mod tests {
         )
         .expect_err("stalled anchor should fail");
 
-        assert!(err.to_string().contains("did not grow"));
+        assert!(error_chain_contains(&err, "did not grow"));
     }
 
     #[test]
@@ -1045,7 +1178,10 @@ mod tests {
         )
         .expect_err("anchor regression should fail");
 
-        assert!(err.to_string().contains("regressed below previous anchor"));
+        assert!(error_chain_contains(
+            &err,
+            "regressed below previous anchor"
+        ));
     }
 
     #[test]
@@ -1091,9 +1227,7 @@ mod tests {
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
-            |_stateless_input, _ancestor_headers, _runtime| {
-                Ok(B256::ZERO)
-            },
+            |_stateless_input, _ancestor_headers, _runtime| Ok(B256::ZERO),
         )
         .expect_err("expected chain_id mismatch to fail");
 

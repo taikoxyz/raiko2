@@ -1,25 +1,30 @@
 use crate::{
     sparse::SparseState,
-    trie::StatelessTrieExt,
-    witness_db::{AncestorHashes, WitnessDatabase},
+    trie::{StatelessTrie, StatelessTrieExt},
+    witness_db::{AncestorHashes, WitnessDatabase, WitnessStateProvider},
 };
-use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
-use alloy_consensus::BlockHeader;
-use alloy_consensus::TrieAccount;
+use alloy_consensus::{BlockHeader, TrieAccount, transaction::Recovered};
 use alloy_primitives::{B256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_consensus_common::validation::validate_block_pre_execution;
+use reth_errors::BlockValidationError;
 use reth_ethereum_consensus::validate_block_post_execution;
-use reth_ethereum_primitives::Block;
-use reth_evm::{ConfigureEvm, execute::Executor};
-use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
+use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
+use reth_evm::{
+    ConfigureEvm,
+    block::BlockExecutionError,
+    execute::{BlockBuilder, BlockBuilderOutcome, Executor},
+};
+use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader, SignedTransaction};
+use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
 
@@ -122,6 +127,117 @@ pub(crate) fn determine_pre_state_root(
             .ok_or(StatelessValidationError::HeaderDeserializationFailed),
         None => Err(StatelessValidationError::MissingAncestorHeader),
     }
+}
+
+fn sealed_parent_header(
+    ancestor_headers: &[WitnessHeader],
+) -> Result<SealedHeader, StatelessValidationError> {
+    ancestor_headers
+        .last()
+        .and_then(|header| {
+            header
+                .full_header()
+                .cloned()
+                .map(|full| SealedHeader::new(full, header.hash))
+        })
+        .ok_or(StatelessValidationError::MissingAncestorHeader)
+}
+
+fn map_block_execution_error(err: BlockExecutionError) -> StatelessValidationError {
+    StatelessValidationError::StatelessExecutionFailed(err.to_string())
+}
+
+fn execute_candidate_transaction<B>(
+    builder: &mut B,
+    tx: TransactionSigned,
+    allow_skip: bool,
+) -> Result<(), StatelessValidationError>
+where
+    B: BlockBuilder<Primitives = EthPrimitives>,
+{
+    let recovered = match tx.try_into_recovered() {
+        Ok(recovered) => recovered,
+        Err(_) if allow_skip => return Ok(()),
+        Err(_) => return Err(StatelessValidationError::SignerRecovery),
+    };
+
+    match builder.execute_transaction(recovered) {
+        Ok(_) => Ok(()),
+        Err(
+            BlockExecutionError::Validation(BlockValidationError::InvalidTx { .. })
+            | BlockExecutionError::Validation(
+                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas { .. },
+            ),
+        ) if allow_skip => Ok(()),
+        Err(err) => Err(map_block_execution_error(err)),
+    }
+}
+
+/// Reconstruct a candidate block from a transaction sequence using the witness-backed pre-state.
+///
+/// The optional `anchor_tx` is always executed first and is treated as fatal if it cannot be
+/// recovered or executed. All transactions in `transactions` are treated as non-anchor candidates:
+/// unrecoverable or invalid transactions are skipped, while committed transactions are recorded in
+/// the generated block body.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_block_from_transactions_with_witness_resources(
+    anchor_tx: Option<Recovered<TransactionSigned>>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+    callers: AddressMap<TrieAccount>,
+    chain_spec: &Arc<TaikoChainSpec>,
+    evm_config: &TaikoEvmConfig,
+) -> Result<BlockBuilderOutcome<EthPrimitives>, StatelessValidationError> {
+    let pre_state_root = determine_pre_state_root(ancestor_headers)?;
+    let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
+    let parent_header = sealed_parent_header(ancestor_headers)?;
+
+    let (mut trie, bytecode) =
+        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    trie.append_callers(callers);
+
+    let provider = WitnessStateProvider::new(trie, bytecode, ancestor_hashes);
+    let mut db = State::builder()
+        .with_database(StateProviderDatabase::new(provider.clone()))
+        .with_bundle_update()
+        .build();
+
+    let mut builder = evm_config
+        .builder_for_next_block(&mut db, &parent_header, block_env)
+        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))?;
+
+    builder
+        .apply_pre_execution_changes()
+        .map_err(map_block_execution_error)?;
+
+    if let Some(anchor_tx) = anchor_tx {
+        builder
+            .execute_transaction(anchor_tx)
+            .map_err(map_block_execution_error)?;
+    }
+
+    for tx in transactions {
+        execute_candidate_transaction(&mut builder, tx, true)?;
+    }
+
+    let outcome = builder
+        .finish(provider, None)
+        .map_err(map_block_execution_error)?;
+
+    validate_block_consensus(chain_spec, &outcome.block, ancestor_headers)?;
+    validate_block_post_execution(
+        &outcome.block,
+        chain_spec.as_ref(),
+        &outcome.execution_result.receipts,
+        &outcome.execution_result.requests,
+        None,
+    )
+    .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,13 +404,35 @@ pub(crate) fn compute_ancestor_hashes(
     current_block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<AncestorHashes, StatelessValidationError> {
-    let mut child_number = current_block.number();
-    let mut child_parent_hash = current_block.parent_hash();
+    compute_ancestor_hashes_for_child(
+        current_block.number(),
+        current_block.parent_hash(),
+        ancestor_headers,
+    )
+}
 
-    // Next verify that headers supplied are contiguous
+fn compute_next_block_ancestor_hashes(
+    ancestor_headers: &[WitnessHeader],
+) -> Result<AncestorHashes, StatelessValidationError> {
+    let parent_header = ancestor_headers
+        .last()
+        .ok_or(StatelessValidationError::MissingAncestorHeader)?;
+
+    compute_ancestor_hashes_for_child(
+        parent_header.number + 1,
+        parent_header.hash,
+        ancestor_headers,
+    )
+}
+
+fn compute_ancestor_hashes_for_child(
+    mut child_number: u64,
+    mut child_parent_hash: B256,
+    ancestor_headers: &[WitnessHeader],
+) -> Result<AncestorHashes, StatelessValidationError> {
     for parent_header in ancestor_headers.iter().rev() {
         if child_parent_hash != parent_header.hash || parent_header.number + 1 != child_number {
-            return Err(StatelessValidationError::InvalidAncestorChain); // Blocks must be contiguous
+            return Err(StatelessValidationError::InvalidAncestorChain);
         }
 
         child_number = parent_header.number;
@@ -304,20 +442,30 @@ pub(crate) fn compute_ancestor_hashes(
     let Some(start_block_number) = ancestor_headers.first().map(|header| header.number) else {
         return Ok(AncestorHashes::default());
     };
-    let hashes = ancestor_headers.iter().map(|header| header.hash).collect();
 
-    Ok(AncestorHashes::new(start_block_number, hashes))
+    Ok(AncestorHashes::new(
+        start_block_number,
+        ancestor_headers.iter().map(|header| header.hash).collect(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_block;
+    use super::{reconstruct_block_from_transactions_with_witness_resources, validate_block};
     use alethia_reth_block::config::TaikoEvmConfig;
+    use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
     use alethia_reth_chainspec::TAIKO_DEVNET;
-    use alloy_consensus::{Header, proofs};
-    use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessHeader};
+    use alloy_consensus::{
+        Header, SignableTransaction, TrieAccount, TxEip1559, constants::KECCAK_EMPTY, proofs,
+    };
+    use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, keccak256};
+    use alloy_trie::EMPTY_ROOT_HASH;
+    use raiko2_primitives::{
+        ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
+    };
     use reth_consensus::ConsensusError;
     use reth_ethereum_primitives::{Block, BlockBody};
+    use risc0_ethereum_trie::Trie;
 
     fn empty_shanghai_body() -> BlockBody {
         BlockBody {
@@ -342,6 +490,25 @@ mod tests {
         header.withdrawals_root = body.calculate_withdrawals_root();
 
         header
+    }
+
+    fn witness_from_state_nodes(
+        state_nodes: Vec<Bytes>,
+        state_root: alloy_primitives::B256,
+    ) -> ExecutionWitness {
+        let header = Header {
+            number: 0,
+            state_root,
+            ..Default::default()
+        };
+        ExecutionWitness {
+            state: state_nodes
+                .into_iter()
+                .map(WitnessStateNode::from_bytes)
+                .collect(),
+            headers: vec![WitnessHeader::from_header(header)],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -400,5 +567,68 @@ mod tests {
             )) => Ok(()),
             other => Err(format!("unexpected result: {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn reconstruct_block_skips_invalid_nonce_transaction() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let sender = Address::with_last_byte(0x11);
+
+        let mut trie = Trie::default();
+        trie.insert(
+            keccak256(sender),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::from(1_000_000u64),
+                storage_root: EMPTY_ROOT_HASH,
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+
+        let parent_header = Header {
+            number: 0,
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(25_000_000),
+            state_root: trie.hash_slow(),
+            ..Default::default()
+        };
+        let witness = witness_from_state_nodes(trie.rlp_nodes(), parent_header.state_root);
+        let candidate_tx = TxEip1559 {
+            chain_id: chain_spec.inner.chain().id(),
+            nonce: 1,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::with_last_byte(0x22)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+        .into_signed(Signature::test_signature())
+        .into();
+
+        let outcome = reconstruct_block_from_transactions_with_witness_resources(
+            None,
+            vec![candidate_tx],
+            TaikoNextBlockEnvAttributes {
+                timestamp: 101,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: Bytes::new(),
+                base_fee_per_gas: 25_000_000,
+            },
+            &witness,
+            &witness.headers,
+            &[],
+            Default::default(),
+            &chain_spec,
+            &evm_config,
+        )
+        .expect("reconstruction should succeed while skipping invalid nonce tx");
+
+        assert_eq!(outcome.block.body().transactions().count(), 0);
     }
 }

@@ -40,10 +40,6 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
     }
 
     for (source_idx, data_source) in guest_input.taiko.data_sources.iter().enumerate() {
-        if data_source.tx_data_from_blob.is_empty() {
-            continue;
-        }
-
         let expected_blob_hashes = guest_input
             .taiko
             .proposal_event
@@ -58,6 +54,24 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
             .blobSlice
             .blobHashes
             .as_slice();
+
+        if expected_blob_hashes.is_empty() {
+            if !data_source.tx_data_from_calldata.is_empty()
+                || !data_source.tx_data_from_blob.is_empty()
+            {
+                return Err(RaikoError::InvalidBlobOption(format!(
+                    "inline payloads are not accepted for ZK proposal source {source_idx}"
+                )));
+            }
+            continue;
+        }
+
+        if data_source.tx_data_from_blob.is_empty() {
+            return Err(RaikoError::InvalidBlobOption(format!(
+                "blob-backed source {source_idx} is missing blob data"
+            )));
+        }
+
         let commitments = &data_source.blob_commitments;
         let proofs = &data_source.blob_proofs;
 
@@ -111,4 +125,77 @@ pub fn verify_proposal_mode_blob_usage(guest_input: &GuestInput) -> RaikoResult<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_proposal_mode_blob_usage;
+    use crate::GuestInput;
+    use alloy_primitives::{B256, Uint};
+    use raiko2_protocol::InputDataSource;
+    use raiko2_protocol_shasta::{
+        TaikoManifest,
+        shasta::{BlobSlice, DerivationSource, ShastaEventData},
+    };
+
+    fn guest_input(source: DerivationSource, data_source: InputDataSource) -> GuestInput {
+        GuestInput {
+            taiko: TaikoManifest {
+                proposal_event: ShastaEventData {
+                    proposal: raiko2_protocol_shasta::shasta::Proposal {
+                        sources: vec![source],
+                        ..Default::default()
+                    },
+                },
+                data_sources: vec![data_source],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn source(blob_hashes: Vec<B256>) -> DerivationSource {
+        DerivationSource {
+            blobSlice: BlobSlice {
+                blobHashes: blob_hashes,
+                offset: Uint::ZERO,
+                timestamp: Uint::ZERO,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_inline_calldata_payload() {
+        let input = guest_input(
+            source(Vec::new()),
+            InputDataSource {
+                tx_data_from_calldata: vec![1, 2, 3],
+                ..Default::default()
+            },
+        );
+
+        let err = verify_proposal_mode_blob_usage(&input).expect_err("inline payload rejected");
+
+        assert!(err.to_string().contains("inline payloads are not accepted"));
+    }
+
+    #[test]
+    fn allows_empty_default_source() {
+        let input = guest_input(source(Vec::new()), InputDataSource::default());
+
+        verify_proposal_mode_blob_usage(&input).expect("empty default source accepted");
+    }
+
+    #[test]
+    fn rejects_blob_backed_source_without_blob_data() {
+        let input = guest_input(
+            source(vec![B256::repeat_byte(0x11)]),
+            InputDataSource::default(),
+        );
+
+        let err = verify_proposal_mode_blob_usage(&input).expect_err("missing blob data rejected");
+
+        assert!(err.to_string().contains("missing blob data"));
+    }
 }

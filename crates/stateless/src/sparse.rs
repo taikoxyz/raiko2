@@ -95,7 +95,7 @@ impl SparseState {
             return Ok(witness
                 .state
                 .iter()
-                .map(|node| (node.hash, node.bytes.clone()))
+                .map(|node| (keccak256(&node.bytes), node.bytes.clone()))
                 .collect());
         }
 
@@ -109,7 +109,7 @@ impl SparseState {
                         len: shared_state_nodes.len(),
                     },
                 )?;
-                Ok((node.hash, node.bytes.clone()))
+                Ok((keccak256(&node.bytes), node.bytes.clone()))
             })
             .collect()
     }

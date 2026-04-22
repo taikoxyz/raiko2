@@ -13,7 +13,7 @@ use alloy_consensus::{
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use anyhow::{ensure, Context, Result};
-use raiko2_primitives::{ChainSpec, StatelessInput, SupportedChainSpecs, WitnessHeader};
+use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs, WitnessHeader};
 use raiko2_primitives_shasta::{
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
@@ -581,6 +581,7 @@ fn shasta_block_env_attributes(
 
 fn prove_shasta_proposal_with_block_verifier<V>(
     guest_input: &GuestInput,
+    proof_type: ProofType,
     mut verify_block: V,
 ) -> Result<B256>
 where
@@ -593,6 +594,11 @@ where
         &TaikoRuntime,
     ) -> Result<B256>,
 {
+    bench_report_start("proposal_blob_usage");
+    verify_proposal_mode_blob_usage(guest_input)
+        .context("proposal mode blob usage verification failed")?;
+    bench_report_end("proposal_blob_usage");
+
     let proof_carry_data = &guest_input.proof_carry_data;
     ensure!(
         !guest_input.witnesses.is_empty(),
@@ -627,6 +633,29 @@ where
         "proof_carry_data.chain_id mismatch: expected {}, got {}",
         first_chain_spec.chain_id,
         proof_carry_data.chain_id
+    );
+    let verifier_proof_type = match proof_type {
+        ProofType::Native => ProofType::Sgx,
+        other => other,
+    };
+    let expected_verifier = first_chain_spec
+        .get_fork_verifier_address(
+            guest_input.witnesses.first().expect("checked").block.header.number,
+            guest_input
+                .witnesses
+                .first()
+                .expect("checked")
+                .block
+                .header
+                .timestamp,
+            verifier_proof_type,
+        )
+        .with_context(|| {
+            format!("failed to resolve verifier address for proof type {verifier_proof_type}")
+        })?;
+    ensure!(
+        proof_carry_data.verifier == expected_verifier,
+        "proof_carry_data.verifier mismatch"
     );
     ensure!(
         proof_carry_data.transition_input.proposal_id == guest_input.taiko.proposal_id,
@@ -777,13 +806,16 @@ where
 }
 
 pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
-    bench_report_start("proposal_blob_usage");
-    verify_proposal_mode_blob_usage(guest_input)
-        .context("proposal mode blob usage verification failed")?;
-    bench_report_end("proposal_blob_usage");
+    prove_shasta_proposal_for_proof_type(guest_input, ProofType::Native)
+}
 
+pub fn prove_shasta_proposal_for_proof_type(
+    guest_input: &GuestInput,
+    proof_type: ProofType,
+) -> Result<B256> {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
+        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             let expected_block = expected_block
                 .with_context(|| format!("missing expected Shasta block at index {index}"))?;
@@ -824,6 +856,21 @@ pub fn prove_shasta_proposal(guest_input: &GuestInput) -> Result<B256> {
 
 pub fn prove_shasta_proposal_with_validator<V>(
     guest_input: &GuestInput,
+    validate_block: V,
+) -> Result<B256>
+where
+    V: FnMut(&StatelessInput, &[WitnessHeader], &TaikoRuntime) -> Result<B256>,
+{
+    prove_shasta_proposal_with_validator_for_proof_type(
+        guest_input,
+        ProofType::Native,
+        validate_block,
+    )
+}
+
+pub fn prove_shasta_proposal_with_validator_for_proof_type<V>(
+    guest_input: &GuestInput,
+    proof_type: ProofType,
     mut validate_block: V,
 ) -> Result<B256>
 where
@@ -831,6 +878,7 @@ where
 {
     prove_shasta_proposal_with_block_verifier(
         guest_input,
+        proof_type,
         |index, stateless_input, expected_block, _parent_header, ancestor_headers, runtime| {
             if let Some(expected_block) = expected_block {
                 validate_manifest_transactions_match_canonical(stateless_input, expected_block)
@@ -1244,6 +1292,22 @@ mod tests {
         assert!(err
             .to_string()
             .contains("proof_carry_data.chain_id mismatch"));
+    }
+
+    #[test]
+    fn rejects_verifier_mismatch_between_chain_spec_and_proof_carry_data() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.proof_carry_data.verifier = Address::from([0x77; 20]);
+
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |_stateless_input, _ancestor_headers, _runtime| Ok(B256::ZERO),
+        )
+        .expect_err("expected verifier mismatch to fail");
+
+        assert!(err
+            .to_string()
+            .contains("proof_carry_data.verifier mismatch"));
     }
 
     #[test]

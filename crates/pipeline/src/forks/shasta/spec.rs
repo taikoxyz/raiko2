@@ -565,6 +565,83 @@ fn validate_block_range(
     Ok(())
 }
 
+/// Validates a Shasta guest input with the same stateless checks used by preflight.
+///
+/// # Errors
+///
+/// Returns an error when the input is empty, has inconsistent witness chain specs, is missing
+/// proposal ancestor headers, or any block fails stateless validation.
+pub fn validate_shasta_guest_input(input: &GuestInput) -> RaikoResult<()> {
+    let Some(first_input) = input.witnesses.first() else {
+        return Err(RaikoError::Preflight(
+            "GuestInput has no witnesses to validate".to_string(),
+        ));
+    };
+
+    let chain_spec = &first_input.chain_spec;
+    let taiko_chain_spec = chain_spec
+        .to_taiko_chain_spec()
+        .map_err(|e| RaikoError::Preflight(e.to_string()))?;
+    let evm_config = TaikoEvmConfig::new(taiko_chain_spec.clone());
+    let mut ancestor_headers = input.initial_proposal_ancestor_headers();
+    if ancestor_headers.is_empty() {
+        return Err(RaikoError::Preflight(
+            "GuestInput is missing proposal ancestor headers".to_string(),
+        ));
+    }
+
+    for (index, stateless_input) in input.witnesses.iter().enumerate() {
+        if stateless_input.chain_spec.chain_id != chain_spec.chain_id {
+            return Err(RaikoError::Preflight(format!(
+                "witness {index} chain_id mismatch: expected {}, got {}",
+                chain_spec.chain_id, stateless_input.chain_spec.chain_id
+            )));
+        }
+
+        if stateless_input.chain_spec.is_taiko != chain_spec.is_taiko {
+            return Err(RaikoError::Preflight(format!(
+                "witness {index} is_taiko mismatch: expected {}, got {}",
+                chain_spec.is_taiko, stateless_input.chain_spec.is_taiko
+            )));
+        }
+
+        let block_number = stateless_input.block.header.number;
+        let validated_hash = catch_unwind(AssertUnwindSafe(|| {
+            validate_block_with_witness_resources(
+                stateless_input.block.clone(),
+                &stateless_input.witness,
+                &ancestor_headers,
+                input.proposal_state_nodes(),
+                stateless_input.accounts.clone(),
+                &taiko_chain_spec,
+                &evm_config,
+            )
+        }))
+        .map_err(|panic| {
+            let reason = if let Some(message) = panic.downcast_ref::<&str>() {
+                (*message).to_string()
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            RaikoError::stateless_validation_detailed(
+                format!(
+                    "validation panicked at witness index {index}, block {block_number}: {reason}"
+                ),
+                Some(block_number),
+            )
+        })??;
+        roll_proposal_ancestor_headers_in_place(
+            &mut ancestor_headers,
+            &stateless_input.block.header,
+            validated_hash,
+        );
+    }
+
+    Ok(())
+}
+
 impl<Pr, Bk, Pv> Validation for ShastaSpec<Pr, Bk, Pv>
 where
     Pr: Send + Sync,
@@ -574,74 +651,7 @@ where
     type Input = GuestInput;
 
     fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
-        let Some(first_input) = input.witnesses.first() else {
-            return Err(RaikoError::Preflight(
-                "GuestInput has no witnesses to validate".to_string(),
-            ));
-        };
-
-        let chain_spec = &first_input.chain_spec;
-        let taiko_chain_spec = chain_spec
-            .to_taiko_chain_spec()
-            .map_err(|e| RaikoError::Preflight(e.to_string()))?;
-        let evm_config = TaikoEvmConfig::new(taiko_chain_spec.clone());
-        let mut ancestor_headers = input.initial_proposal_ancestor_headers();
-        if ancestor_headers.is_empty() {
-            return Err(RaikoError::Preflight(
-                "GuestInput is missing proposal ancestor headers".to_string(),
-            ));
-        }
-
-        for (index, stateless_input) in input.witnesses.iter().enumerate() {
-            if stateless_input.chain_spec.chain_id != chain_spec.chain_id {
-                return Err(RaikoError::Preflight(format!(
-                    "witness {index} chain_id mismatch: expected {}, got {}",
-                    chain_spec.chain_id, stateless_input.chain_spec.chain_id
-                )));
-            }
-
-            if stateless_input.chain_spec.is_taiko != chain_spec.is_taiko {
-                return Err(RaikoError::Preflight(format!(
-                    "witness {index} is_taiko mismatch: expected {}, got {}",
-                    chain_spec.is_taiko, stateless_input.chain_spec.is_taiko
-                )));
-            }
-
-            let block_number = stateless_input.block.header.number;
-            let validated_hash = catch_unwind(AssertUnwindSafe(|| {
-                validate_block_with_witness_resources(
-                    stateless_input.block.clone(),
-                    &stateless_input.witness,
-                    &ancestor_headers,
-                    input.proposal_state_nodes(),
-                    stateless_input.accounts.clone(),
-                    &taiko_chain_spec,
-                    &evm_config,
-                )
-            }))
-            .map_err(|panic| {
-                let reason = if let Some(message) = panic.downcast_ref::<&str>() {
-                    (*message).to_string()
-                } else if let Some(message) = panic.downcast_ref::<String>() {
-                    message.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                RaikoError::stateless_validation_detailed(
-                    format!(
-                        "validation panicked at witness index {index}, block {block_number}: {reason}"
-                    ),
-                    Some(block_number),
-                )
-            })??;
-            roll_proposal_ancestor_headers_in_place(
-                &mut ancestor_headers,
-                &stateless_input.block.header,
-                validated_hash,
-            );
-        }
-
-        Ok(())
+        validate_shasta_guest_input(input)
     }
 }
 

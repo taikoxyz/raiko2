@@ -131,9 +131,8 @@ enum WitnessHeaderHuman {
 
 impl From<WitnessHeaderSerde> for WitnessHeader {
     fn from(value: WitnessHeaderSerde) -> Self {
-        let mut header = Self::from_header(value.header);
-        header.hash = value.hash;
-        header
+        let _host_hash = value.hash;
+        Self::from_header(value.header)
     }
 }
 
@@ -186,12 +185,16 @@ impl<'a> From<&'a WitnessHeader> for WitnessHeaderBincode<'a> {
 
 impl From<WitnessHeaderBincode<'_>> for WitnessHeader {
     fn from(value: WitnessHeaderBincode<'_>) -> Self {
+        if let Some(header) = value.header {
+            return Self::from_header(header.into());
+        }
+
         Self {
             number: value.number,
             parent_hash: value.parent_hash,
             timestamp: value.timestamp,
             hash: value.hash,
-            header: value.header.map(Into::into),
+            header: None,
         }
     }
 }
@@ -267,10 +270,8 @@ enum WitnessStateNodeHuman {
 
 impl From<WitnessStateNodeSerde> for WitnessStateNode {
     fn from(value: WitnessStateNodeSerde) -> Self {
-        Self {
-            hash: value.hash,
-            bytes: value.bytes,
-        }
+        let _host_hash = value.hash;
+        Self::from_bytes(value.bytes)
     }
 }
 
@@ -354,22 +355,11 @@ impl ExecutionWitness {
         state_indices
     }
 
-    /// Sort headers by block number and keep only the parent header in full form.
+    /// Sort headers by block number while preserving full header payloads.
     #[must_use]
     pub fn canonicalize_headers(mut headers: Vec<WitnessHeader>) -> Vec<WitnessHeader> {
         headers.sort_by_key(|header| header.number);
-        let parent_index = headers.len().saturating_sub(1);
         headers
-            .into_iter()
-            .enumerate()
-            .map(|(index, header)| {
-                if index == parent_index {
-                    header
-                } else {
-                    header.into_compact()
-                }
-            })
-            .collect()
     }
 
     #[must_use]
@@ -506,6 +496,9 @@ pub enum StatelessValidationError {
     #[error("could not deserialize ancestor headers")]
     HeaderDeserializationFailed,
 
+    #[error("compact ancestor headers are not accepted in host-untrusted validation")]
+    CompactAncestorHeaderUnsupported,
+
     #[error("mismatched post-state root: {got}\n {expected}")]
     PostStateRootMismatch { got: B256, expected: B256 },
 
@@ -524,7 +517,7 @@ pub enum StatelessValidationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionWitness, WitnessHeader, WitnessStateNode};
+    use super::{ExecutionWitness, WitnessHeader, WitnessStateNode, WitnessStateNodeSerde};
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Bytes, keccak256};
 
@@ -569,6 +562,37 @@ mod tests {
     }
 
     #[test]
+    fn witness_header_deserialization_ignores_supplied_hash_when_full() {
+        let header = sample_header(42);
+        let wrong_hash = B256::repeat_byte(0x99);
+        let json = serde_json::json!({
+            "header": header,
+            "hash": wrong_hash,
+        });
+
+        let witness_header: WitnessHeader =
+            serde_json::from_value(json).expect("deserialize structured witness header");
+
+        assert_eq!(witness_header.hash, header.hash_slow());
+        assert_ne!(witness_header.hash, wrong_hash);
+    }
+
+    #[test]
+    fn witness_header_bincode_deserialization_ignores_supplied_hash_when_full() {
+        let header = sample_header(42);
+        let witness_header = WitnessHeader {
+            hash: B256::repeat_byte(0x99),
+            ..WitnessHeader::from_header(header.clone())
+        };
+
+        let encoded = bincode::serialize(&witness_header).expect("serialize witness header");
+        let decoded: WitnessHeader =
+            bincode::deserialize(&encoded).expect("deserialize witness header");
+
+        assert_eq!(decoded.hash, header.hash_slow());
+    }
+
+    #[test]
     fn execution_witness_bincode_roundtrip_preserves_headers() {
         let header = WitnessHeader::from_header(sample_header(7));
         let witness = ExecutionWitness {
@@ -605,7 +629,7 @@ mod tests {
 
         assert_eq!(witness.headers.len(), 2);
         assert_eq!(witness.headers[0].number, 1);
-        assert!(witness.headers[0].full_header().is_none());
+        assert_eq!(witness.headers[0].full_header(), Some(&oldest));
         assert_eq!(witness.headers[1].number, 2);
         assert_eq!(witness.headers[1].full_header(), Some(&parent));
     }
@@ -632,14 +656,45 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_headers_compacts_non_parent_headers() {
+    fn witness_state_node_deserialization_ignores_supplied_hash() {
+        let bytes = Bytes::from_static(b"node-a");
+        let wrong_hash = B256::repeat_byte(0x99);
+        let json = serde_json::json!({
+            "hash": wrong_hash,
+            "bytes": bytes,
+        });
+
+        let node: WitnessStateNode =
+            serde_json::from_value(json).expect("deserialize structured state node");
+
+        assert_eq!(node.hash, keccak256(&bytes));
+        assert_ne!(node.hash, wrong_hash);
+    }
+
+    #[test]
+    fn witness_state_node_bincode_deserialization_ignores_supplied_hash() {
+        let bytes = Bytes::from_static(b"node-a");
+        let encoded = bincode::serialize(&WitnessStateNodeSerde {
+            hash: B256::repeat_byte(0x99),
+            bytes: bytes.clone(),
+        })
+        .expect("serialize state node");
+
+        let node: WitnessStateNode =
+            bincode::deserialize(&encoded).expect("deserialize state node");
+
+        assert_eq!(node.hash, keccak256(&bytes));
+    }
+
+    #[test]
+    fn canonicalize_headers_preserves_full_headers() {
         let oldest = WitnessHeader::from_header(sample_header(1));
         let parent = WitnessHeader::from_header(sample_header(2));
         let headers = ExecutionWitness::canonicalize_headers(vec![parent.clone(), oldest.clone()]);
 
         assert_eq!(headers.len(), 2);
         assert_eq!(headers[0].number, 1);
-        assert!(headers[0].full_header().is_none());
+        assert_eq!(headers[0].full_header(), oldest.full_header());
         assert_eq!(headers[1].number, 2);
         assert_eq!(headers[1].full_header(), parent.full_header());
     }

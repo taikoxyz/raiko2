@@ -159,11 +159,6 @@ pub fn roll_proposal_ancestor_headers_in_place(
     parent_header: &Header,
     parent_hash: B256,
 ) {
-    if let Some(last) = current_headers.last_mut()
-        && last.full_header().is_some()
-    {
-        last.compact_in_place();
-    }
     if current_headers.len() == ANCESTOR_HEADER_WINDOW_LIMIT {
         current_headers.rotate_left(1);
         current_headers.pop();
@@ -291,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn json_serialize_compacts_shared_ancestor_headers() {
+    fn json_serialize_moves_shared_ancestor_headers() {
         let parent = sample_header(10, B256::ZERO);
         let mut input = GuestInput::default();
         input.witnesses.push(StatelessInput::default());
@@ -316,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn bincode_roundtrip_preserves_compacted_ancestor_headers() {
+    fn bincode_roundtrip_preserves_shared_ancestor_headers() {
         let parent = sample_header(10, B256::ZERO);
         let mut input = GuestInput::default();
         input.witnesses.push(StatelessInput::default());
@@ -434,14 +429,14 @@ mod tests {
     }
 
     #[test]
-    fn rolling_window_keeps_latest_header_full() {
+    fn rolling_window_keeps_headers_full() {
         let first = WitnessHeader::from_header(sample_header(10, B256::ZERO));
         let second_header = sample_header(11, first.hash);
 
         let rolled = roll_proposal_ancestor_headers(&[first.clone()], &second_header);
 
         assert_eq!(rolled.len(), 2);
-        assert!(rolled[0].full_header().is_none());
+        assert_eq!(rolled[0].full_header(), first.full_header());
         assert_eq!(rolled[1].full_header(), Some(&second_header));
     }
 }

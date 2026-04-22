@@ -68,16 +68,16 @@ raiko2-guests = { path = "./crates/guests" }
 risc0-zkvm = { version = "=3.0.3", features = ["prove"] }
 sp1-sdk = { version = "=5.2.4", features = ["network"] }
 
-# Alethia reth (pinned to no-std guest feature isolation commit on 2026-04-21)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false, features = [
+# Alethia reth (pinned to filtered block helper commit on 2026-04-22)
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "c3cf168834050d12b354b2581af7e934a3e6b09e", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "c3cf168834050d12b354b2581af7e934a3e6b09e", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "c3cf168834050d12b354b2581af7e934a3e6b09e", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "c3cf168834050d12b354b2581af7e934a3e6b09e", default-features = false }
 
 # Reth (v2.0.0 - aligned with the current alethia-reth main compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v2.0.0" }

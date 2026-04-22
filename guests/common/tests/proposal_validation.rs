@@ -445,7 +445,7 @@ fn one_pass_guest_input_with_skipped_invalid_tx() -> GuestInput {
     )
     .expect("candidate block reconstruction should succeed");
 
-    guest_input.witnesses[0].block = outcome.block.into_block();
+    guest_input.witnesses[0].block = outcome.filtered_block.into_block();
     guest_input.witnesses[0].block.header.parent_hash = witness_parent_header.hash_slow();
     guest_input.taiko.data_sources = vec![InputDataSource {
         tx_data_from_calldata: DerivationSourceManifest {

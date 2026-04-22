@@ -105,6 +105,7 @@ reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", defaul
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
 reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
 

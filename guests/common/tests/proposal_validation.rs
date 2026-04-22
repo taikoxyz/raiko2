@@ -393,9 +393,10 @@ fn one_pass_guest_input_with_skipped_invalid_tx() -> GuestInput {
         state_root: trie.hash_slow(),
         ..parent_header
     };
-    guest_input.witnesses[0].witness.headers = vec![raiko2_primitives::WitnessHeader::from_header(
-        witness_parent_header.clone(),
-    )];
+    let witness_parent_witness_header =
+        raiko2_primitives::WitnessHeader::from_header(witness_parent_header.clone());
+    guest_input.witnesses[0].witness.headers = vec![witness_parent_witness_header.clone()];
+    guest_input.proposal_ancestor_headers = vec![witness_parent_witness_header];
     guest_input.witnesses[0].witness.state = trie
         .rlp_nodes()
         .into_iter()

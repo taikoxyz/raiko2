@@ -776,7 +776,6 @@ class BatchMonitor:
             )
             self.proposal_block_cache[proposal_id] = None
             return None
-
         search_start, search_end = search_range
         self.logger.info(
             f"Searching L1 blocks {search_start} to {search_end} for proposal_id {proposal_id} (not in cache)"
@@ -951,7 +950,6 @@ class BatchMonitor:
     def get_latest_l2_block_number(self) -> int:
         """Get the latest L2 block number."""
         return int(self.l2_w3.eth.block_number)
-
     def _clamp_l1_search_range(
         self, search_start: int, search_end: int
     ) -> Optional[Tuple[int, int]]:

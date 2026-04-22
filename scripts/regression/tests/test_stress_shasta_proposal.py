@@ -350,6 +350,5 @@ class TestStressDiscoveryOutput(unittest.TestCase):
 
         self.assertEqual(payload, {"proposals": [record]})
 
-
 if __name__ == "__main__":
     unittest.main()

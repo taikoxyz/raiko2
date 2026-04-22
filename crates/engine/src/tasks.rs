@@ -2,7 +2,7 @@ use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineKey, PipelineStageResult};
 use raiko2_primitives::{L2BlockRange, Proof, ShastaCheckpoint};
 use raiko2_prover::sp1::{Sp1ConfigOverrides, Sp1SystemConfig};
-use raiko2_queue::TaskId;
+use raiko2_queue::{ReadyQueueSort, TaskId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +68,50 @@ impl EngineTaskKey {
         match self {
             EngineTaskKey::Proposal { pipeline, .. }
             | EngineTaskKey::Aggregate { pipeline, .. } => *pipeline,
+        }
+    }
+}
+
+const fn proposal_stage_rank(stage: ProposalStage) -> u8 {
+    match stage {
+        ProposalStage::Preflight => 0,
+        ProposalStage::Validation => 1,
+        ProposalStage::Encode => 2,
+        ProposalStage::Prove => 3,
+    }
+}
+
+const fn pipeline_rank(pipeline: PipelineKey) -> u8 {
+    match pipeline {
+        PipelineKey::ShastaNative => 0,
+        PipelineKey::ShastaRisc0 => 1,
+        PipelineKey::ShastaSp1 => 2,
+        PipelineKey::ShastaRisc0Boundless => 3,
+    }
+}
+
+fn proposal_ready_sort_prefix(
+    proposal_id: u64,
+    stage: ProposalStage,
+    pipeline: PipelineKey,
+) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[0..8].copy_from_slice(&proposal_id.to_be_bytes());
+    b[8] = proposal_stage_rank(stage);
+    b[9] = pipeline_rank(pipeline);
+    b
+}
+
+impl ReadyQueueSort for EngineTaskKey {
+    fn ready_queue_sort_prefix(&self) -> [u8; 16] {
+        match self {
+            EngineTaskKey::Proposal {
+                request,
+                stage,
+                pipeline,
+            } => proposal_ready_sort_prefix(request.proposal_id, *stage, *pipeline),
+            // Aggregation uses `High` only in practice; if it ever shared Low/Medium queues, sort last.
+            EngineTaskKey::Aggregate { .. } => [0xffu8; 16],
         }
     }
 }

@@ -1,4 +1,5 @@
-use crate::{Priority, TaskExecutionPolicy, TaskId, TaskState};
+use crate::ready_sort::insert_ready_sorted;
+use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -206,7 +207,7 @@ impl<P, O, Id> TaskStore<P, O, Id> for MemoryStore<P, O, Id>
 where
     P: Clone + Send + 'static,
     O: Clone + Send + 'static,
-    Id: Clone + Eq + Hash + Send + Sync + 'static,
+    Id: ReadyQueueSort,
 {
     async fn insert_task(
         &self,
@@ -354,8 +355,8 @@ where
         let mut g = self.inner.lock().await;
         match prio {
             Priority::High => g.ready_high.push_back(id),
-            Priority::Medium => g.ready_med.push_back(id),
-            Priority::Low => g.ready_low.push_back(id),
+            Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
+            Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
         }
 
         Ok(())
@@ -482,8 +483,8 @@ where
                     record.lease_until_ms = None;
                     match record.priority {
                         Priority::High => g.ready_high.push_back(id),
-                        Priority::Medium => g.ready_med.push_back(id),
-                        Priority::Low => g.ready_low.push_back(id),
+                        Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
+                        Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
                     }
                     moved += 1;
                 }
@@ -527,8 +528,8 @@ where
             };
             match record.priority {
                 Priority::High => g.ready_high.push_back(id),
-                Priority::Medium => g.ready_med.push_back(id),
-                Priority::Low => g.ready_low.push_back(id),
+                Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
+                Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
             }
         }
 
@@ -591,6 +592,27 @@ mod tests {
         store.push_ready(Priority::High, b.clone()).await?;
         assert_eq!(store.pop_ready(Priority::High).await?, Some(b));
         assert_eq!(store.pop_ready(Priority::Low).await?, Some(a));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn medium_ready_sorted_by_sort_prefix() -> StoreResult<()> {
+        let store: MemoryStore<(), (), u64> = MemoryStore::new();
+        store.push_ready(Priority::Medium, TaskId::new(100)).await?;
+        store.push_ready(Priority::Medium, TaskId::new(5)).await?;
+        store.push_ready(Priority::Medium, TaskId::new(42)).await?;
+        assert_eq!(
+            store.pop_ready(Priority::Medium).await?,
+            Some(TaskId::new(5))
+        );
+        assert_eq!(
+            store.pop_ready(Priority::Medium).await?,
+            Some(TaskId::new(42))
+        );
+        assert_eq!(
+            store.pop_ready(Priority::Medium).await?,
+            Some(TaskId::new(100))
+        );
         Ok(())
     }
 }

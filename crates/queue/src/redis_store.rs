@@ -1,6 +1,7 @@
 use crate::{
-    Priority, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStore, TaskStoreError,
-    decode_task_id, encode_task_id,
+    Priority, ReadyQueueSort, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStore,
+    TaskStoreError, decode_task_id, encode_task_id, encoded_from_zset_member, sort_prefix_hex,
+    zset_member_from_encoded,
 };
 use async_trait::async_trait;
 use redis::AsyncCommands;
@@ -21,6 +22,8 @@ const FIELD_WORKER: &str = "worker";
 const FIELD_LEASE_UNTIL_MS: &str = "lease_until_ms";
 const FIELD_LEASE_DURATION_MS: &str = "lease_duration_ms";
 const FIELD_EXECUTION_POLICY: &str = "execution_policy";
+/// Hex-encoded [`ReadyQueueSort::ready_queue_sort_prefix`] (32 chars); used to build ZSET members.
+const FIELD_RQP_HEX: &str = "rqp";
 
 const STATE_PENDING: &str = "pending";
 const STATE_READY: &str = "ready";
@@ -71,7 +74,13 @@ where
     }
 
     fn ready_key(&self, prio: Priority) -> String {
-        format!("{}:ready:{}", self.namespace, prio.as_str())
+        match prio {
+            Priority::High => format!("{}:ready:{}", self.namespace, prio.as_str()),
+            // Sorted-set queues (see `push_ready` / `pop_ready`). Suffix avoids colliding with older LIST keys.
+            Priority::Medium | Priority::Low => {
+                format!("{}:ready:{}:zq", self.namespace, prio.as_str())
+            }
+        }
     }
 
     fn scheduled_key(&self) -> String {
@@ -122,7 +131,7 @@ impl<P, O, Id> TaskStore<P, O, Id> for RedisStore<P, O, Id>
 where
     P: Serialize + DeserializeOwned + Send + 'static,
     O: Serialize + DeserializeOwned + Clone + Send + 'static,
-    Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    Id: ReadyQueueSort + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn insert_task(
         &self,
@@ -225,6 +234,15 @@ return 1
         if inserted == 0 {
             return Ok(false);
         }
+
+        let rqp_hex = sort_prefix_hex(&id.0.ready_queue_sort_prefix());
+        let _: () = redis::cmd("HSET")
+            .arg(&task_key)
+            .arg(FIELD_RQP_HEX)
+            .arg(rqp_hex.as_str())
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
 
         if let Some(error) = failure_error {
             let _: () = redis::cmd("HSET")
@@ -577,10 +595,24 @@ return redis.call('HGET', KEYS[1], ARGV[5])
         let key = self.ready_key(prio);
         let encoded = self.encode_id(&id)?;
         let mut conn = self.conn.lock().await;
-        let _: () = conn
-            .rpush(key, encoded)
-            .await
-            .map_err(TaskStoreError::backend)?;
+        match prio {
+            Priority::High => {
+                let _: () = conn
+                    .rpush(&key, encoded)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+            }
+            Priority::Medium | Priority::Low => {
+                let member = zset_member_from_encoded(&id, &encoded);
+                let _: () = redis::cmd("ZADD")
+                    .arg(&key)
+                    .arg(0i64)
+                    .arg(member)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+            }
+        }
 
         Ok(())
     }
@@ -588,92 +620,34 @@ return redis.call('HGET', KEYS[1], ARGV[5])
     async fn pop_ready(&self, prio: Priority) -> StoreResult<Option<TaskId<Id>>> {
         let key = self.ready_key(prio);
         let mut conn = self.conn.lock().await;
-        let id: Option<String> = conn
-            .lpop(key, None)
-            .await
-            .map_err(TaskStoreError::backend)?;
-        match id {
-            Some(raw) => Ok(Some(self.decode_id(&raw)?)),
-            None => Ok(None),
+        match prio {
+            Priority::High => {
+                let id: Option<String> = conn
+                    .lpop(&key, None)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                match id {
+                    Some(raw) => Ok(Some(self.decode_id(&raw)?)),
+                    None => Ok(None),
+                }
+            }
+            Priority::Medium | Priority::Low => {
+                let popped: Vec<String> = redis::cmd("ZPOPMIN")
+                    .arg(&key)
+                    .arg(1i64)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                if popped.len() < 2 {
+                    return Ok(None);
+                }
+                let member = &popped[0];
+                let enc = encoded_from_zset_member(member).ok_or_else(|| {
+                    TaskStoreError::corrupt_msg("ready zset member missing encoded task id suffix")
+                })?;
+                Ok(Some(self.decode_id(enc)?))
+            }
         }
-    }
-
-    async fn pop_ready_and_take(
-        &self,
-        prio: Priority,
-        worker: &str,
-    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
-        let ready_key = self.ready_key(prio);
-        let running_key = self.running_key();
-
-        let default_lease_ms = self.lease.as_millis().min(u64::MAX as u128) as u64;
-        let script = redis::Script::new(
-            r#"
-while true do
-  local id = redis.call('LPOP', KEYS[1])
-  if not id then
-    return nil
-  end
-
-  local task_key = ARGV[1] .. id
-  local state = redis.call('HGET', task_key, ARGV[2])
-  if state == ARGV[3] then
-    local lease_duration_ms = tonumber(redis.call('HGET', task_key, ARGV[12]) or ARGV[13])
-    local lease_until_ms = tonumber(ARGV[8]) + lease_duration_ms
-    redis.call('HSET', task_key, ARGV[2], ARGV[4], ARGV[5], ARGV[6], ARGV[7], lease_until_ms)
-    local attempt = redis.call('HINCRBY', task_key, ARGV[9], 1)
-    redis.call('ZADD', KEYS[2], lease_until_ms, id)
-
-    local payload = redis.call('HGET', task_key, ARGV[10])
-    local priority = redis.call('HGET', task_key, ARGV[11])
-    local execution_policy = redis.call('HGET', task_key, ARGV[14])
-    return {id, payload, priority, attempt, execution_policy}
-  end
-end
-"#,
-        );
-
-        let mut conn = self.conn.lock().await;
-        let result: Option<(String, Vec<u8>, String, i64)> = script
-            .key(ready_key)
-            .key(running_key)
-            .arg(self.task_key_prefix())
-            .arg(FIELD_STATE)
-            .arg(STATE_READY)
-            .arg(STATE_RUNNING)
-            .arg(FIELD_WORKER)
-            .arg(worker)
-            .arg(FIELD_LEASE_UNTIL_MS)
-            .arg(now_millis() as i64)
-            .arg(FIELD_ATTEMPT)
-            .arg(FIELD_PAYLOAD)
-            .arg(FIELD_PRIORITY)
-            .arg(FIELD_LEASE_DURATION_MS)
-            .arg(default_lease_ms as i64)
-            .arg(FIELD_EXECUTION_POLICY)
-            .invoke_async(&mut *conn)
-            .await
-            .map_err(TaskStoreError::backend)?;
-
-        let Some((id, payload_bytes, prio, attempt, execution_policy_bytes)) = result else {
-            return Ok(None);
-        };
-        let id = self.decode_id(&id)?;
-        let payload: P = bincode::deserialize(&payload_bytes)
-            .map_err(|e| TaskStoreError::corrupt_msg(format!("deserialize payload: {e}")))?;
-        let prio = Priority::parse(prio.as_str())
-            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {prio}")))?;
-        let execution_policy: TaskExecutionPolicy = bincode::deserialize(&execution_policy_bytes)
-            .map_err(|e| {
-            TaskStoreError::corrupt_msg(format!("deserialize execution policy: {e}"))
-        })?;
-        Ok(Some((
-            id,
-            payload,
-            prio,
-            attempt.max(0) as u32,
-            execution_policy,
-        )))
     }
 
     async fn take_ready(
@@ -707,7 +681,7 @@ return {payload, priority, attempt, execution_policy}
         );
 
         let mut conn = self.conn.lock().await;
-        let result: Option<(Vec<u8>, String, i64)> = script
+        let result: Option<(Vec<u8>, String, i64, Vec<u8>)> = script
             .key(task_key)
             .key(running_key)
             .arg(FIELD_STATE)
@@ -849,10 +823,14 @@ for _, id in ipairs(ids) do
       redis.call('RPUSH', KEYS[2], id)
       moved = moved + 1
     elseif prio == 'medium' then
-      redis.call('RPUSH', KEYS[3], id)
+      local rqp = redis.call('HGET', task_key, 'rqp') or ''
+      local member = rqp .. id
+      redis.call('ZADD', KEYS[3], 0, member)
       moved = moved + 1
     elseif prio == 'low' then
-      redis.call('RPUSH', KEYS[4], id)
+      local rqp = redis.call('HGET', task_key, 'rqp') or ''
+      local member = rqp .. id
+      redis.call('ZADD', KEYS[4], 0, member)
       moved = moved + 1
     end
   end
@@ -903,10 +881,14 @@ for _, id in ipairs(ids) do
       redis.call('RPUSH', KEYS[2], id)
       moved = moved + 1
     elseif prio == 'medium' then
-      redis.call('RPUSH', KEYS[3], id)
+      local rqp = redis.call('HGET', task_key, 'rqp') or ''
+      local member = rqp .. id
+      redis.call('ZADD', KEYS[3], 0, member)
       moved = moved + 1
     elseif prio == 'low' then
-      redis.call('RPUSH', KEYS[4], id)
+      local rqp = redis.call('HGET', task_key, 'rqp') or ''
+      local member = rqp .. id
+      redis.call('ZADD', KEYS[4], 0, member)
       moved = moved + 1
     end
   end
@@ -939,6 +921,7 @@ return moved
 
     async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool> {
         let encoded = self.encode_id(id)?;
+        let ready_zmember = zset_member_from_encoded(id, &encoded);
         let task_key = self.task_key(id)?;
         let dependents_key = self.dependents_key(id)?;
         let ready_high = self.ready_key(Priority::High);
@@ -965,15 +948,13 @@ return moved
             .arg(0)
             .arg(&encoded)
             .ignore()
-            .cmd("LREM")
+            .cmd("ZREM")
             .arg(&ready_medium)
-            .arg(0)
-            .arg(&encoded)
+            .arg(&ready_zmember)
             .ignore()
-            .cmd("LREM")
+            .cmd("ZREM")
             .arg(&ready_low)
-            .arg(0)
-            .arg(&encoded)
+            .arg(&ready_zmember)
             .ignore()
             .cmd("ZREM")
             .arg(&scheduled_key)

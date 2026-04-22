@@ -593,6 +593,19 @@ fn accepts_canonical_inline_source_derivation() {
 }
 
 #[test]
+fn rejects_force_inclusion_as_last_source() {
+    let mut guest_input = canonical_inline_source_guest_input();
+    guest_input.taiko.proposal_event.proposal.sources[0].isForcedInclusion = true;
+    guest_input.proof_carry_data.transition_input.proposal_hash =
+        hash_proposal(&guest_input.taiko.proposal_event.proposal);
+
+    assert_rejected_with_message(
+        &guest_input,
+        "last Shasta derivation source must be a normal source",
+    );
+}
+
+#[test]
 fn top_level_proposal_proof_reconstructs_block_and_skips_invalid_tx() {
     let guest_input = one_pass_guest_input_with_skipped_invalid_tx();
 

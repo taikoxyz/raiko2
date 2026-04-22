@@ -307,6 +307,13 @@ fn derive_expected_shasta_blocks(
     if proposal.sources.is_empty() {
         return Ok(None);
     }
+    ensure!(
+        proposal
+            .sources
+            .last()
+            .is_some_and(|source| !source.isForcedInclusion),
+        "last Shasta derivation source must be a normal source"
+    );
 
     ensure!(
         guest_input.taiko.data_sources.len() == proposal.sources.len(),

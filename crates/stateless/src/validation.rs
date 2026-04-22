@@ -129,6 +129,19 @@ pub(crate) fn determine_pre_state_root(
     }
 }
 
+fn ensure_full_ancestor_headers(
+    ancestor_headers: &[WitnessHeader],
+) -> Result<(), StatelessValidationError> {
+    if ancestor_headers
+        .iter()
+        .any(|header| header.full_header().is_none())
+    {
+        return Err(StatelessValidationError::CompactAncestorHeaderUnsupported);
+    }
+
+    Ok(())
+}
+
 fn sealed_parent_header(
     ancestor_headers: &[WitnessHeader],
 ) -> Result<SealedHeader, StatelessValidationError> {
@@ -143,7 +156,7 @@ fn sealed_parent_header(
         .ok_or(StatelessValidationError::MissingAncestorHeader)
 }
 
-fn map_block_execution_error(err: BlockExecutionError) -> StatelessValidationError {
+fn map_block_execution_error(err: &BlockExecutionError) -> StatelessValidationError {
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
 }
 
@@ -163,13 +176,11 @@ where
 
     match builder.execute_transaction(recovered) {
         Ok(_) => Ok(()),
-        Err(
-            BlockExecutionError::Validation(BlockValidationError::InvalidTx { .. })
-            | BlockExecutionError::Validation(
-                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas { .. },
-            ),
-        ) if allow_skip => Ok(()),
-        Err(err) => Err(map_block_execution_error(err)),
+        Err(BlockExecutionError::Validation(
+            BlockValidationError::InvalidTx { .. }
+            | BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas { .. },
+        )) if allow_skip => Ok(()),
+        Err(err) => Err(map_block_execution_error(&err)),
     }
 }
 
@@ -179,6 +190,11 @@ where
 /// recovered or executed. All transactions in `transactions` are treated as non-anchor candidates:
 /// unrecoverable or invalid transactions are skipped, while committed transactions are recorded in
 /// the generated block body.
+///
+/// # Errors
+///
+/// Returns an error if the witness pre-state cannot be materialized, the EVM block builder fails,
+/// the anchor transaction fails, or the reconstructed block fails consensus/post-state validation.
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_block_from_transactions_with_witness_resources(
     anchor_tx: Option<Recovered<TransactionSigned>>,
@@ -211,12 +227,12 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
 
     builder
         .apply_pre_execution_changes()
-        .map_err(map_block_execution_error)?;
+        .map_err(|err| map_block_execution_error(&err))?;
 
     if let Some(anchor_tx) = anchor_tx {
         builder
             .execute_transaction(anchor_tx)
-            .map_err(map_block_execution_error)?;
+            .map_err(|err| map_block_execution_error(&err))?;
     }
 
     for tx in transactions {
@@ -225,7 +241,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
 
     let outcome = builder
         .finish(provider, None)
-        .map_err(map_block_execution_error)?;
+        .map_err(|err| map_block_execution_error(&err))?;
 
     validate_block_consensus(chain_spec, &outcome.block, ancestor_headers)?;
     validate_block_post_execution(
@@ -363,6 +379,8 @@ pub(crate) fn validate_block_consensus(
     block: &RecoveredBlock<Block>,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<(), StatelessValidationError> {
+    ensure_full_ancestor_headers(ancestor_headers)?;
+
     let parent_header = ancestor_headers
         .last()
         .and_then(|header| {
@@ -423,6 +441,8 @@ fn compute_ancestor_hashes_for_child(
     mut child_parent_hash: B256,
     ancestor_headers: &[WitnessHeader],
 ) -> Result<AncestorHashes, StatelessValidationError> {
+    ensure_full_ancestor_headers(ancestor_headers)?;
+
     for parent_header in ancestor_headers.iter().rev() {
         if child_parent_hash != parent_header.hash || parent_header.number + 1 != child_number {
             return Err(StatelessValidationError::InvalidAncestorChain);
@@ -560,6 +580,37 @@ mod tests {
             )) => Ok(()),
             other => Err(format!("unexpected result: {other:?}").into()),
         }
+    }
+
+    #[test]
+    fn rejects_compact_ancestor_headers() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+
+        let parent_header = shanghai_header(0, 100, alloy_primitives::B256::ZERO);
+        let parent_hash = parent_header.hash_slow();
+
+        let header = shanghai_header(1, 200, parent_hash);
+        let body = empty_shanghai_body();
+        let block = Block { header, body };
+
+        let witness = ExecutionWitness {
+            headers: vec![WitnessHeader::from_header(parent_header).into_compact()],
+            ..Default::default()
+        };
+
+        let result = validate_block(
+            block,
+            &witness,
+            Default::default(),
+            &chain_spec,
+            &evm_config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::CompactAncestorHeaderUnsupported)
+        ));
     }
 
     #[test]

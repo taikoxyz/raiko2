@@ -45,6 +45,6 @@ httpmock = "0.7"
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
 reth-ethereum-primitives.workspace = true
-risc0-binfmt = "=3.0.3"
-risc0-zkos-v1compat = "2.2.1"
+risc0-binfmt = "=3.0.4"
+risc0-zkos-v1compat = "2.2.2"
 raiko2-guests.workspace = true

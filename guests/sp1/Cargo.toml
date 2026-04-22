@@ -14,6 +14,7 @@ path = "src/shasta_aggregation.rs"
 
 [dependencies]
 raiko2-guest-common = { path = "../common", default-features = false }
+raiko2-primitives = { path = "../../crates/primitives" }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 sp1-zkvm = { version = "=5.2.4", features = ["verify"] }

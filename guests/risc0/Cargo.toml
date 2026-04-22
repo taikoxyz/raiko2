@@ -18,13 +18,14 @@ path = "src/boundless_aggregation.rs"
 
 [dependencies]
 raiko2-guest-common = { path = "../common", default-features = false }
+raiko2-primitives = { path = "../../crates/primitives" }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
-risc0-zkvm = { version = "=3.0.3", default-features = false, features = [
+risc0-zkvm = { version = "=3.0.5", default-features = false, features = [
     "std",
     "getrandom",
 ] }
-risc0-zkvm-platform = { version = "2.2.1", default-features = false, features = ["sys-getenv"] }
+risc0-zkvm-platform = { version = "2.2.2", default-features = false, features = ["sys-getenv"] }
 alloy-primitives = { version = "1.5.0", default-features = false, features = ["tiny-keccak"] }
 bincode = "1.3.3"
 revm-precompile = { version = "=34.0.0", default-features = false }

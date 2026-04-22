@@ -586,20 +586,26 @@ fn rejects_proof_carry_data_parent_block_hash_mismatch() {
 }
 
 #[test]
-fn accepts_canonical_inline_source_derivation() {
+fn rejects_canonical_inline_source_derivation() {
     let guest_input = canonical_inline_source_guest_input();
 
-    prove_shasta_proposal_with_validator(
-        &guest_input,
-        |stateless_input, _ancestor_headers, _runtime| Ok(stateless_input.block.header.hash_slow()),
-    )
-    .expect("inline source derivation should validate");
+    assert_rejected_with_message(&guest_input, "inline payloads are not accepted");
 }
 
 #[test]
 fn rejects_force_inclusion_as_last_source() {
     let mut guest_input = canonical_inline_source_guest_input();
+    guest_input.witnesses[0].block.header.timestamp = 1_775_393_400;
+    guest_input.proof_carry_data.verifier = guest_input.witnesses[0]
+        .chain_spec
+        .get_fork_verifier_address(
+            guest_input.witnesses[0].block.header.number,
+            guest_input.witnesses[0].block.header.timestamp,
+            ProofType::Sgx,
+        )
+        .expect("Shasta SGX verifier should be active");
     guest_input.taiko.proposal_event.proposal.sources[0].isForcedInclusion = true;
+    guest_input.taiko.data_sources = vec![InputDataSource::default()];
     guest_input.proof_carry_data.transition_input.proposal_hash =
         hash_proposal(&guest_input.taiko.proposal_event.proposal);
 
@@ -610,15 +616,22 @@ fn rejects_force_inclusion_as_last_source() {
 }
 
 #[test]
-fn top_level_proposal_proof_reconstructs_block_and_skips_invalid_tx() {
+fn top_level_proposal_proof_rejects_inline_one_pass_payload() {
     let guest_input = one_pass_guest_input_with_skipped_invalid_tx();
 
-    prove_shasta_proposal(&guest_input)
-        .expect("one-pass proposal proving should reconstruct the canonical block");
+    let err = prove_shasta_proposal(&guest_input)
+        .expect_err("inline one-pass proposal payload should be rejected");
+
+    assert!(err
+        .to_string()
+        .contains("proposal mode blob usage verification failed"));
+    assert!(err
+        .chain()
+        .any(|cause| cause.to_string().contains("inline payloads are not accepted")));
 }
 
 #[test]
-fn rejects_inline_source_transaction_count_mismatch() {
+fn rejects_inline_source_payload_before_transaction_matching() {
     let mut guest_input = canonical_inline_source_guest_input();
     guest_input.witnesses[0].block.body.transactions.push(
         TxEip1559 {
@@ -638,7 +651,7 @@ fn rejects_inline_source_transaction_count_mismatch() {
 
     assert_rejected_with_message(
         &guest_input,
-        "canonical Shasta derivation mismatch at index 0",
+        "inline payloads are not accepted",
     );
 }
 

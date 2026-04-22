@@ -65,7 +65,7 @@ raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
 
 # zkVM
-risc0-zkvm = { version = "=3.0.3", features = ["prove"] }
+risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 sp1-sdk = { version = "=5.2.4", features = ["network"] }
 
 # Alethia reth (raiko2 integration branch)

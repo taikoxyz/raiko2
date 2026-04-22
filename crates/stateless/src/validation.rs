@@ -3,7 +3,10 @@ use crate::{
     trie::{StatelessTrie, StatelessTrieExt},
     witness_db::{AncestorHashes, WitnessDatabase, WitnessStateProvider},
 };
-use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
+use alethia_reth_block::{
+    config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
+    filtered_block::{FilteredBlockExecutionOutcome, execute_and_filter_block_transactions},
+};
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
@@ -15,16 +18,10 @@ use raiko2_primitives::{
 };
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_consensus_common::validation::validate_block_pre_execution;
-use reth_errors::BlockValidationError;
 use reth_ethereum_consensus::validate_block_post_execution;
-use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
-use reth_evm::{
-    ConfigureEvm,
-    block::BlockExecutionError,
-    execute::{BlockBuilder, BlockBuilderOutcome, Executor},
-};
-use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader, SignedTransaction};
-use reth_revm::{database::StateProviderDatabase, db::State};
+use reth_ethereum_primitives::{Block, TransactionSigned};
+use reth_evm::{ConfigureEvm, block::BlockExecutionError, execute::Executor};
+use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
 
@@ -147,32 +144,6 @@ fn map_block_execution_error(err: BlockExecutionError) -> StatelessValidationErr
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
 }
 
-fn execute_candidate_transaction<B>(
-    builder: &mut B,
-    tx: TransactionSigned,
-    allow_skip: bool,
-) -> Result<(), StatelessValidationError>
-where
-    B: BlockBuilder<Primitives = EthPrimitives>,
-{
-    let recovered = match tx.try_into_recovered() {
-        Ok(recovered) => recovered,
-        Err(_) if allow_skip => return Ok(()),
-        Err(_) => return Err(StatelessValidationError::SignerRecovery),
-    };
-
-    match builder.execute_transaction(recovered) {
-        Ok(_) => Ok(()),
-        Err(
-            BlockExecutionError::Validation(BlockValidationError::InvalidTx { .. })
-            | BlockExecutionError::Validation(
-                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas { .. },
-            ),
-        ) if allow_skip => Ok(()),
-        Err(err) => Err(map_block_execution_error(err)),
-    }
-}
-
 /// Reconstruct a candidate block from a transaction sequence using the witness-backed pre-state.
 ///
 /// The optional `anchor_tx` is always executed first and is treated as fatal if it cannot be
@@ -190,46 +161,29 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
-) -> Result<BlockBuilderOutcome<EthPrimitives>, StatelessValidationError> {
+) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
+    let parent_header = sealed_parent_header(ancestor_headers)?;
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
     let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
-    let parent_header = sealed_parent_header(ancestor_headers)?;
 
     let (mut trie, bytecode) =
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
     trie.append_callers(callers);
 
     let provider = WitnessStateProvider::new(trie, bytecode, ancestor_hashes);
-    let mut db = State::builder()
-        .with_database(StateProviderDatabase::new(provider.clone()))
-        .with_bundle_update()
-        .build();
+    let outcome = execute_and_filter_block_transactions(
+        evm_config,
+        &parent_header,
+        block_env,
+        anchor_tx,
+        transactions,
+        provider,
+    )
+    .map_err(map_block_execution_error)?;
 
-    let mut builder = evm_config
-        .builder_for_next_block(&mut db, &parent_header, block_env)
-        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))?;
-
-    builder
-        .apply_pre_execution_changes()
-        .map_err(map_block_execution_error)?;
-
-    if let Some(anchor_tx) = anchor_tx {
-        builder
-            .execute_transaction(anchor_tx)
-            .map_err(map_block_execution_error)?;
-    }
-
-    for tx in transactions {
-        execute_candidate_transaction(&mut builder, tx, true)?;
-    }
-
-    let outcome = builder
-        .finish(provider, None)
-        .map_err(map_block_execution_error)?;
-
-    validate_block_consensus(chain_spec, &outcome.block, ancestor_headers)?;
+    validate_block_consensus(chain_spec, &outcome.filtered_block, ancestor_headers)?;
     validate_block_post_execution(
-        &outcome.block,
+        &outcome.filtered_block,
         chain_spec.as_ref(),
         &outcome.execution_result.receipts,
         &outcome.execution_result.requests,
@@ -629,6 +583,6 @@ mod tests {
         )
         .expect("reconstruction should succeed while skipping invalid nonce tx");
 
-        assert_eq!(outcome.block.body().transactions().count(), 0);
+        assert_eq!(outcome.filtered_block.body().transactions().count(), 0);
     }
 }

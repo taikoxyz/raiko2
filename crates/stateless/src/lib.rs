@@ -16,6 +16,7 @@ mod witness_db;
 
 pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
 pub use crate::trie::StatelessTrie;
+pub use alethia_reth_block::filtered_block::FilteredBlockExecutionOutcome;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{
     reconstruct_block_from_transactions_with_witness_resources, validate_block,

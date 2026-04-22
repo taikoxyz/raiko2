@@ -1,21 +1,23 @@
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_primitives::addresses::{TAIKO_GOLDEN_TOUCH_ADDRESS, get_treasury_address};
 use alloy::{
+    consensus::Header,
     eips::BlockNumberOrTag,
-    primitives::{Address, B256},
+    primitives::{Address, B256, Bytes},
     providers::Provider as AlloyProvider,
 };
 use futures::{StreamExt, stream};
 use raiko2_primitives::{
-    ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessStateNode,
+    ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessHeader, WitnessStateNode,
     chain_spec::SupportedChainSpecs,
 };
+use serde::{Deserialize, Deserializer};
 use std::{sync::Arc, time::Instant};
 use tracing::info;
 
 use crate::on_the_spot_witness::execution_witness;
 
-use super::NetworkProvider;
+use super::{GethL2Provider, RethL2Provider, RpcL2Provider};
 
 const DEFAULT_WITNESS_BATCH_SIZE: usize = 5;
 const DEFAULT_SYSTEM_PROOF_BATCH_SIZE: usize = 64;
@@ -33,6 +35,51 @@ struct SystemProofRequest {
     parent_block_number: u64,
     address: Address,
     storage_keys: Vec<B256>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GethExecutionWitness {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    headers: Vec<Header>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    codes: Vec<Bytes>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    state: Vec<Bytes>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    keys: Vec<Bytes>,
+}
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+impl TryFrom<GethExecutionWitness> for ExecutionWitness {
+    type Error = alloy::rlp::Error;
+
+    fn try_from(value: GethExecutionWitness) -> Result<Self, Self::Error> {
+        let headers = value
+            .headers
+            .iter()
+            .map(WitnessHeader::from_encoded_header)
+            .collect::<Result<_, _>>()?;
+        let state = value
+            .state
+            .into_iter()
+            .map(WitnessStateNode::from_bytes)
+            .collect();
+
+        Ok(Self {
+            state: Self::canonicalize_state_nodes(state),
+            state_indices: Vec::new(),
+            codes: value.codes,
+            keys: value.keys,
+            headers: Self::canonicalize_headers(headers),
+        })
+    }
 }
 
 fn taiko_system_proof_targets(chain_id: u64) -> TaikoSystemProofTargets {
@@ -111,9 +158,9 @@ fn system_proof_batch_size() -> usize {
         .unwrap_or(DEFAULT_SYSTEM_PROOF_BATCH_SIZE)
 }
 
-impl NetworkProvider {
+impl RpcL2Provider {
     fn resolved_l2_chain_spec(&self, chain_id: u64) -> Option<ChainSpec> {
-        self.l2_chain_spec
+        self.chain_spec
             .as_ref()
             .filter(|spec| spec.chain_id == chain_id)
             .cloned()
@@ -146,7 +193,7 @@ impl NetworkProvider {
                 async move {
                     let witness = execution_witness(
                         evm_config,
-                        &self.l2_witness_provider,
+                        &self.witness_provider,
                         block_number.into(),
                     )
                     .await
@@ -226,7 +273,7 @@ impl NetworkProvider {
         let batch_size = system_proof_batch_size();
 
         for chunk in requests.chunks(batch_size) {
-            let mut batch = self.l2_witness_client.new_batch();
+            let mut batch = self.witness_client.new_batch();
             let mut pending = Vec::with_capacity(chunk.len());
 
             for request in chunk {
@@ -340,7 +387,9 @@ impl NetworkProvider {
 
         Ok(())
     }
+}
 
+impl RethL2Provider {
     async fn fetch_witnesses_via_debug_endpoint(
         &self,
         block_numbers: &[u64],
@@ -357,7 +406,7 @@ impl NetworkProvider {
             .collect::<Vec<_>>()
             .chunks(batch_size)
         {
-            let mut batch = self.l2_witness_client.new_batch();
+            let mut batch = self.rpc.witness_client.new_batch();
             let mut pending = Vec::with_capacity(indexed_chunk.len());
 
             for &(index, block_number) in indexed_chunk {
@@ -411,7 +460,8 @@ impl NetworkProvider {
             .collect::<Vec<_>>();
 
         if !targets.account_only.is_empty() || !targets.storage_backed.is_empty() {
-            self.supplement_taiko_system_account_proofs(&mut witness_chunk, targets)
+            self.rpc
+                .supplement_taiko_system_account_proofs(&mut witness_chunk, targets)
                 .await?;
         }
 
@@ -428,15 +478,20 @@ impl NetworkProvider {
             .collect())
     }
 
-    pub(crate) async fn fetch_witnesses(
+    pub(super) async fn fetch_witnesses(
         &self,
         block_numbers: &[u64],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         let started_at = Instant::now();
-        let chain_id = self.l2_witness_provider.get_chain_id().await.map_err(|e| {
-            RaikoError::RPC(format!("eth_chainId failed while fetching witnesses: {e}"))
-        })?;
-        let resolved_l2_chain_spec = self.resolved_l2_chain_spec(chain_id);
+        let chain_id = self
+            .rpc
+            .witness_provider
+            .get_chain_id()
+            .await
+            .map_err(|e| {
+                RaikoError::RPC(format!("eth_chainId failed while fetching witnesses: {e}"))
+            })?;
+        let resolved_l2_chain_spec = self.rpc.resolved_l2_chain_spec(chain_id);
         let supports_taiko_on_the_spot =
             resolved_l2_chain_spec.as_ref().is_some_and(|chain_spec| {
                 chain_spec.is_taiko() && chain_spec.to_taiko_chain_spec().is_ok()
@@ -462,6 +517,7 @@ impl NetworkProvider {
             }
             Err(err) if supports_taiko_on_the_spot && should_fallback_to_on_the_spot(&err) => {
                 let witnesses = self
+                    .rpc
                     .fetch_on_the_spot_taiko_witnesses(chain_id, block_numbers)
                     .await?;
                 info!(
@@ -474,5 +530,182 @@ impl NetworkProvider {
             }
             Err(err) => Err(err),
         }
+    }
+}
+
+impl GethL2Provider {
+    async fn fetch_witnesses_via_debug_endpoint(
+        &self,
+        block_numbers: &[u64],
+        targets: &TaikoSystemProofTargets,
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let started_at = Instant::now();
+        let mut witness_chunk = Vec::with_capacity(block_numbers.len());
+        let batch_size = witness_batch_size();
+
+        for indexed_chunk in block_numbers
+            .iter()
+            .copied()
+            .enumerate()
+            .collect::<Vec<_>>()
+            .chunks(batch_size)
+        {
+            let mut batch = self.rpc.witness_client.new_batch();
+            let mut pending = Vec::with_capacity(indexed_chunk.len());
+
+            for &(index, block_number) in indexed_chunk {
+                pending.push((
+                    index,
+                    block_number,
+                    Box::pin(
+                        batch
+                            .add_call::<_, GethExecutionWitness>(
+                                "debug_executionWitness",
+                                &(BlockNumberOrTag::from(block_number),),
+                            )
+                            .map_err(|_| {
+                                RaikoError::RPC(
+                                    "failed adding geth debug_executionWitness call to batch"
+                                        .to_owned(),
+                                )
+                            })?,
+                    ),
+                ));
+            }
+
+            batch.send().await.map_err(|e| {
+                let blocks = indexed_chunk
+                    .iter()
+                    .map(|(_, block_number)| *block_number)
+                    .collect::<Vec<_>>();
+                RaikoError::RPC(format!(
+                    "error sending geth debug_executionWitness batch for blocks {blocks:?}: {e}"
+                ))
+            })?;
+
+            for (index, block_number, request) in pending {
+                let raw_witness = request.await.map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "geth debug_executionWitness failed for block {block_number}: {e}"
+                    ))
+                })?;
+                let witness = ExecutionWitness::try_from(raw_witness).map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "failed to decode geth debug_executionWitness headers for block {block_number}: {e}"
+                    ))
+                })?;
+                witness_chunk.push((index, block_number, witness));
+            }
+        }
+
+        witness_chunk.sort_by_key(|(index, _, _)| *index);
+        let mut witness_chunk = witness_chunk
+            .into_iter()
+            .map(|(_, block_number, witness)| (block_number, witness))
+            .collect::<Vec<_>>();
+
+        if !targets.account_only.is_empty() || !targets.storage_backed.is_empty() {
+            self.rpc
+                .supplement_taiko_system_account_proofs(&mut witness_chunk, targets)
+                .await?;
+        }
+
+        info!(
+            block_count = block_numbers.len(),
+            witness_batch_size = batch_size,
+            system_proof_batch_size = system_proof_batch_size(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched proposal-window geth execution witnesses"
+        );
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
+    }
+
+    pub(super) async fn fetch_witnesses(
+        &self,
+        block_numbers: &[u64],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let started_at = Instant::now();
+        let chain_id = self
+            .rpc
+            .witness_provider
+            .get_chain_id()
+            .await
+            .map_err(|e| {
+                RaikoError::RPC(format!(
+                    "eth_chainId failed while fetching geth witnesses: {e}"
+                ))
+            })?;
+        let system_proof_targets = self
+            .rpc
+            .resolved_l2_chain_spec(chain_id)
+            .filter(ChainSpec::is_taiko)
+            .map_or_else(TaikoSystemProofTargets::default, |_| {
+                taiko_system_proof_targets(chain_id)
+            });
+        let witnesses = self
+            .fetch_witnesses_via_debug_endpoint(block_numbers, &system_proof_targets)
+            .await?;
+        info!(
+            chain_id,
+            block_count = block_numbers.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched witnesses via geth debug_executionWitness"
+        );
+        Ok(witnesses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{B256, Bytes};
+
+    fn sample_header(number: u64) -> Header {
+        Header {
+            parent_hash: B256::repeat_byte(0x11),
+            number,
+            timestamp: 1_700_000_000 + number,
+            extra_data: Bytes::from_static(b"raiko2"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn geth_execution_witness_accepts_header_objects_and_null_keys() {
+        let header = sample_header(7);
+        let first = Bytes::from_static(b"node-a");
+        let second = Bytes::from_static(b"node-b");
+        let json = serde_json::json!({
+            "headers": [header],
+            "codes": [Bytes::from_static(b"code")],
+            "state": [second.clone(), first.clone(), first.clone()],
+            "keys": null,
+        });
+
+        let raw: GethExecutionWitness =
+            serde_json::from_value(json).expect("deserialize geth witness");
+        let witness = ExecutionWitness::try_from(raw).expect("convert geth witness");
+
+        assert_eq!(witness.headers.len(), 1);
+        assert_eq!(witness.headers[0].number, 7);
+        assert!(witness.headers[0].full_header().is_some());
+        assert_eq!(witness.codes, vec![Bytes::from_static(b"code")]);
+        assert!(witness.keys.is_empty());
+        assert_eq!(witness.state.len(), 2);
+        let mut hashes = witness
+            .state
+            .iter()
+            .map(|node| node.hash)
+            .collect::<Vec<_>>();
+        hashes.sort_unstable();
+        let mut expected = vec![
+            alloy::primitives::keccak256(&first),
+            alloy::primitives::keccak256(&second),
+        ];
+        expected.sort_unstable();
+        assert_eq!(hashes, expected);
     }
 }

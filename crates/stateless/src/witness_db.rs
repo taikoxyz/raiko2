@@ -11,8 +11,9 @@ use reth_storage_api::{
     StateProvider, StateRootProvider, StorageRootProvider,
 };
 use reth_trie_common::{
-    AccountProof, HashedPostState, HashedStorage, KeccakKeyHasher, MultiProof, MultiProofTargets,
-    StorageMultiProof, StorageProof, TrieInput, updates::TrieUpdates,
+    AccountProof, ExecutionWitnessMode, HashedPostState, HashedStorage, KeccakKeyHasher,
+    MultiProof, MultiProofTargets, StorageMultiProof, StorageProof, TrieInput,
+    updates::TrieUpdates,
 };
 use std::format;
 use std::{cell::RefCell, rc::Rc};
@@ -303,7 +304,12 @@ where
         unimplemented!("multiproof generation is not used by stateless witness reconstruction")
     }
 
-    fn witness(&self, _input: TrieInput, _target: HashedPostState) -> ProviderResult<Vec<Bytes>> {
+    fn witness(
+        &self,
+        _input: TrieInput,
+        _target: HashedPostState,
+        _mode: ExecutionWitnessMode,
+    ) -> ProviderResult<Vec<Bytes>> {
         unimplemented!("witness generation is not used by stateless witness reconstruction")
     }
 }

@@ -1,7 +1,7 @@
 //! Guest-specific crypto hooks for RISC Zero proofs.
 
 use alloy_primitives::keccak256;
-use revm_precompile::{install_crypto, Crypto, PrecompileError};
+use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
 pub struct Risc0GuestCrypto;
@@ -18,11 +18,11 @@ impl Crypto for Risc0GuestCrypto {
         sig: &[u8; 64],
         mut recid: u8,
         msg: &[u8; 32],
-    ) -> Result<[u8; 32], PrecompileError> {
+    ) -> Result<[u8; 32], PrecompileHalt> {
         use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 
         let mut sig = Signature::from_slice(sig).map_err(|_| {
-            PrecompileError::other_static("patched k256 deserialize signature failed")
+            PrecompileHalt::other_static("patched k256 deserialize signature failed")
         })?;
         if let Some(sig_normalized) = sig.normalize_s() {
             sig = sig_normalized;
@@ -30,9 +30,9 @@ impl Crypto for Risc0GuestCrypto {
         }
 
         let recid = RecoveryId::from_byte(recid)
-            .ok_or_else(|| PrecompileError::other_static("invalid recovery ID"))?;
+            .ok_or_else(|| PrecompileHalt::other_static("invalid recovery ID"))?;
         let recovered_key = VerifyingKey::recover_from_prehash(msg, &sig, recid)
-            .map_err(|_| PrecompileError::Secp256k1RecoverFailed)?;
+            .map_err(|_| PrecompileHalt::Secp256k1RecoverFailed)?;
 
         let mut hash = keccak256(&recovered_key.to_encoded_point(false).as_bytes()[1..]);
         hash[..12].fill(0);

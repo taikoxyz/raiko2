@@ -11,13 +11,28 @@ kubectl -n tolba-raiko2-host get pods -l app=raiko2 -o wide
 git status --short
 ```
 
-## 2. Generate Default Tag
+## 2. Verify Config And Key Identity
+
+Run this before building and again after the rollout. The script prints derived addresses and
+source fields only; it must not print private keys.
+
+```bash
+bash .codex/skills/raiko2-rollout/scripts/verify-config-keys.sh
+```
+
+The check fails if:
+
+- Kubernetes context is not the `tolba-prod` context.
+- `[prover.boundless].signer_key` does not derive the old agent signer address.
+- `[prover.boundless].signer_key` reuses the host `NETWORK_PRIVATE_KEY` address.
+
+## 3. Generate Default Tag
 
 ```bash
 date +tolba-%Y%m%d-%H%M
 ```
 
-## 3. Build And Push The Runtime Image
+## 4. Build And Push The Runtime Image
 
 ```bash
 cargo run -r -p xtask -- release-image all \
@@ -30,7 +45,7 @@ cargo run -r -p xtask -- release-image all \
 
 Capture the pushed digest from the command output.
 
-## 4. Check Whether Register Is Needed
+## 5. Check Whether Register Is Needed
 
 Run this after `release-image`, because `xtask release-image` refreshes the checked-in guest ELF
 artifacts before packaging the runtime image.
@@ -57,7 +72,7 @@ Fallback apply flow when `.env` does not define `PRIVATE_KEY`:
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
 ```
 
-## 5. Roll Out The New Digest
+## 6. Roll Out The New Digest
 
 ```bash
 kubectl set image deployment/raiko2 -n tolba-raiko2-host \
@@ -66,7 +81,7 @@ kubectl set image deployment/raiko2 -n tolba-raiko2-host \
 kubectl rollout status deployment/raiko2 -n tolba-raiko2-host
 ```
 
-## 6. Confirm Live Pod Digest
+## 7. Confirm Live Pod Digest
 
 ```bash
 kubectl -n tolba-raiko2-host get deploy raiko2 -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision} {.spec.template.spec.containers[0].image}{"\n"}'
@@ -74,7 +89,7 @@ kubectl -n tolba-raiko2-host get pods -l app=raiko2 -o wide
 kubectl -n tolba-raiko2-host get pod <pod-name> -o jsonpath='{.status.containerStatuses[0].imageID}{"\n"}'
 ```
 
-## 7. Passive Smoke
+## 8. Passive Smoke
 
 ```bash
 curl -sf http://34.87.10.238:8080/ready
@@ -90,7 +105,7 @@ curl -sf http://34.87.10.238:8080/metrics | rg 'raiko2_request_registrations_tot
 If the optional metric-family check is empty but `/metrics` itself is reachable, explain that the
 new pod may not have seen request traffic yet.
 
-## 8. Rollout Failure Diagnostics
+## 9. Rollout Failure Diagnostics
 
 ```bash
 kubectl -n tolba-raiko2-host get pods -l app=raiko2 -o wide

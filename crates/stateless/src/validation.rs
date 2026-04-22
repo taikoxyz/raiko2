@@ -231,8 +231,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     validate_block_post_execution(
         &outcome.block,
         chain_spec.as_ref(),
-        &outcome.execution_result.receipts,
-        &outcome.execution_result.requests,
+        &outcome.execution_result,
         None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
@@ -268,14 +267,8 @@ where
         .map_err(|e| StatelessValidationError::StatelessExecutionFailed(e.to_string()))?;
 
     // Post validation checks
-    validate_block_post_execution(
-        current_block,
-        chain_spec,
-        &output.receipts,
-        &output.requests,
-        None,
-    )
-    .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+    validate_block_post_execution(current_block, chain_spec, &output, None)
+        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     validate_anchor_transaction_in_block(current_block, chain_spec)
         .map_err(StatelessValidationError::ConsensusValidationFailed)?;

@@ -78,6 +78,21 @@ Run the smallest set of checks that proves the change safely, then scale up when
 - Keep changes on the single primary codepath; do not leave duplicate implementations behind.
 - Fail fast on invalid inputs and keep one source of truth for business rules.
 
+## Alethia Reth Integration
+
+- Use `~/code/github.com/taikoxyz/alethia-reth` branch `feat/raiko2` as the canonical base for all
+  raiko2-specific alethia-reth patches.
+- Put every alethia-reth fix required by raiko2 on `feat/raiko2`; do not keep those fixes only in
+  one-off PR branches, local worktrees, or raiko2-side workaround layers.
+- Rebase `feat/raiko2` onto alethia-reth `origin/main` when upstream alethia-reth or reth changes are
+  adopted, then update raiko2 lockfiles to the resulting branch commit.
+- Raiko2 Cargo manifests should reference alethia-reth with `branch = "feat/raiko2"`; lockfiles are the
+  exact commit pin. Do not pin arbitrary alethia-reth `main` revisions for integration-only fixes.
+- Treat reth test utilities as non-production support code. Do not solve guest or no-std issues by
+  routing through `test-utils` features or dev-only APIs.
+- Keep RISC0 guest `getrandom` handling in `xtask`; do not add a second Cargo config source of truth
+  for `getrandom_backend`.
+
 ## Safety Rails
 
 - Keep guest sources under `guests/` and host/workspace code under `crates/` and `bin/`.

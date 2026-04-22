@@ -6,6 +6,7 @@ Confirm all of these before reporting success:
 
 - Kubernetes context matches `tolba-prod`
 - current deployment revision and image were captured before rollout
+- config/key identity check passed before build
 - dirty worktree state was shown
 - pushed image digest was captured
 - `register-image` dry-run was executed after `release-image`
@@ -13,6 +14,7 @@ Confirm all of these before reporting success:
 - new deployment revision was captured
 - at least one new pod is `Ready`
 - pod `imageID` matches the pushed digest
+- config/key identity check passed after rollout
 - `/ready` returned `200`
 - `/metrics` endpoint was reachable
 
@@ -25,6 +27,7 @@ Previous revision/image: <old-revision> <old-image>
 New revision/image: <new-revision> <new-digest>
 Tag: <tag>
 Register: checked only | applied
+Config/key check: ok
 Ready: ok
 Metrics: reachable
 Worktree: clean | dirty
@@ -119,4 +122,29 @@ Use this note:
 ```text
 /metrics is reachable. Custom raiko2 metric families are not present yet, which can happen when
 the fresh pod has not observed new proof traffic since startup.
+```
+
+## Config Or Key Check Failed
+
+If `.codex/skills/raiko2-rollout/scripts/verify-config-keys.sh` fails, stop before building,
+registering, or rolling out. Do not patch secrets unless the user explicitly asks for a live fix.
+
+The report must include:
+
+- which source failed
+- the derived address mismatch if one was printed
+- whether the Boundless signer reused the host `NETWORK_PRIVATE_KEY`
+- the next required action
+
+Use this report shape:
+
+```text
+Rollout blocked by config/key check.
+
+Failure point: verify-config-keys.sh
+Primary signal: <short error>
+Boundless signer source: <source>
+Expected signer source: <source>
+Network key source: <source-or-unavailable>
+Next step required: fix the config secret or signer source before rollout
 ```

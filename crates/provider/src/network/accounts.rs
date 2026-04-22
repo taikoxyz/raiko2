@@ -7,7 +7,7 @@ use risc0_ethereum_trie::Trie;
 use std::time::Instant;
 use tracing::info;
 
-use super::NetworkProvider;
+use super::RpcL2Provider;
 
 const DEFAULT_ACCOUNT_PROOF_BATCH_SIZE: usize = 250;
 
@@ -75,8 +75,8 @@ fn account_proof_batch_size() -> usize {
         .unwrap_or(DEFAULT_ACCOUNT_PROOF_BATCH_SIZE)
 }
 
-impl NetworkProvider {
-    pub(crate) async fn fetch_accounts(
+impl RpcL2Provider {
+    pub(super) async fn fetch_accounts(
         &self,
         block_numbers: &[u64],
         addresses: &[Vec<Address>],
@@ -87,7 +87,7 @@ impl NetworkProvider {
         let batch_size = account_proof_batch_size();
 
         for chunk in requests.chunks(batch_size) {
-            let mut batch = self.l2_client.new_batch();
+            let mut batch = self.client.new_batch();
             let mut pending = Vec::with_capacity(chunk.len());
 
             for &(block_idx, parent_block_number, address) in chunk {

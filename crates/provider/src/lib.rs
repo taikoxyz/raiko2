@@ -14,7 +14,7 @@ use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
 
-pub use network::NetworkProvider;
+pub use network::{L2ProviderKind, NetworkProvider};
 pub use rpc::{RpcClientConfig, RpcRetryConfig};
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.

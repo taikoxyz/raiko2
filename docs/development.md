@@ -25,6 +25,30 @@ cargo clippy --workspace -- -D warnings
 cargo nextest run --workspace
 ```
 
+## Alethia Reth Integration Workflow
+
+Raiko2 consumes alethia-reth through the `feat/raiko2` branch in
+`~/code/github.com/taikoxyz/alethia-reth`. That branch is the single integration baseline for
+raiko2-specific alethia-reth patches.
+
+Development rules:
+
+- Put every alethia-reth change required by raiko2 on `feat/raiko2`.
+- Rebase `feat/raiko2` onto alethia-reth `origin/main` when adopting upstream alethia-reth or reth
+  updates.
+- Open the alethia-reth PR from `feat/raiko2` so the patch stack is reviewable upstream.
+- Point raiko2 alethia-reth Cargo dependencies at `branch = "feat/raiko2"`.
+- Use raiko2 lockfiles as the exact commit pin for reproducible builds.
+- Update raiko2 lockfiles after the alethia-reth branch moves.
+- Rebuild guest ELFs with the normal `xtask`/`just` entrypoints when guest-facing dependencies change.
+
+Do not keep raiko2-required alethia-reth fixes only in stale local branches, one-off PR branches, or
+raiko2 workaround layers. Do not route guest or no-std fixes through reth `test-utils` features or
+dev-only APIs.
+
+RISC0 guest `getrandom` configuration belongs in the guest build path managed by `xtask`. Do not add a
+second Cargo config source for `getrandom_backend`.
+
 ## Fixture-Backed API Testing
 
 For manual HTTP testing without external RPC dependencies, run the fixture server:

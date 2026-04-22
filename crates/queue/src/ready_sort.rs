@@ -44,6 +44,7 @@ pub fn zset_member_from_encoded<Id: ReadyQueueSort>(
 }
 
 /// Strip [`sort_prefix_hex`] prefix and return the encoded task id substring.
+#[must_use]
 pub fn encoded_from_zset_member(member: &str) -> Option<&str> {
     member.get(READY_SORT_PREFIX_HEX_LEN..)
 }

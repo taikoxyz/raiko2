@@ -68,79 +68,79 @@ raiko2-guests = { path = "./crates/guests" }
 risc0-zkvm = { version = "=3.0.3", features = ["prove"] }
 sp1-sdk = { version = "=5.2.4", features = ["network"] }
 
-# Alethia reth (pinned to no-std guest feature isolation commit on 2026-04-21)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false, features = [
+# Alethia reth (raiko2 integration branch)
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/raiko2", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/raiko2", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/raiko2", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bfb8b9a20f4580efe6eec71ab8ea19c1aca2cb4b", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", branch = "feat/raiko2", default-features = false }
 
-# Reth (v2.0.0 - aligned with the current alethia-reth main compatibility surface)
-reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v2.0.0" }
-reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false, features = [
+# Reth (v2.1.0 - aligned with the current alethia-reth main compatibility surface)
+reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v2.1.0" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false, features = [
     "serde",
 ] }
-reth-primitives = { git = "https://github.com/paradigmxyz/reth", package = "reth-ethereum-primitives", tag = "v2.0.0", default-features = false }
-reth-primitives-traits = { version = "0.1.0", default-features = false }
-reth-engine-local = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
-reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0", default-features = false }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.0.0" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", package = "reth-ethereum-primitives", tag = "v2.1.0", default-features = false }
+reth-primitives-traits = { version = "0.3.0", default-features = false }
+reth-engine-local = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-ethereum-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0", default-features = false }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v2.1.0" }
 
 # Alloy
 alloy-rlp = { version = "0.3.4", default-features = false }
 alloy-primitives = { version = "1.5.0", default-features = false }
 alloy-sol-types = { version = "1.5.0", default-features = false }
 alloy-trie = { version = "0.9", default-features = false }
-alloy-eips = { version = "1.0", default-features = false }
-alloy-evm = { version = "0.30.0", default-features = false }
-alloy-genesis = { version = "1.8.2", default-features = false }
-alloy-hardforks = "0.4.5"
-alloy-consensus = { version = "1.0", default-features = false, features = [
+alloy-eips = { version = "2.0", default-features = false }
+alloy-evm = { version = "0.33.2", default-features = false }
+alloy-genesis = { version = "2.0", default-features = false }
+alloy-hardforks = "0.4.7"
+alloy-consensus = { version = "2.0", default-features = false, features = [
     "serde",
     "serde-bincode-compat",
 ] }
-alloy-rpc-types-engine = { version = "1.0", default-features = false }
-alloy-network = { version = "1.0", default-features = false, features = [
+alloy-rpc-types-engine = { version = "2.0", default-features = false }
+alloy-network = { version = "2.0", default-features = false, features = [
     "k256",
 ] }
-alloy-json-rpc = { version = "1.0", default-features = false }
-alloy-rpc-types = { version = "1.0", default-features = false }
-alloy-rpc-types-debug = "1.6.3"
-alloy-rpc-types-eth = { version = "1.1.3", default-features = false }
-alloy-rpc-client = { version = "1.0", default-features = false, features = [
+alloy-json-rpc = { version = "2.0", default-features = false }
+alloy-rpc-types = { version = "2.0", default-features = false }
+alloy-rpc-types-debug = "2.0"
+alloy-rpc-types-eth = { version = "2.0", default-features = false }
+alloy-rpc-client = { version = "2.0", default-features = false, features = [
     "reqwest",
 ] }
-alloy-serde = { version = "1.8.2", default-features = false }
-alloy-provider = { version = "1.0", default-features = false, features = [
+alloy-serde = { version = "2.0", default-features = false }
+alloy-provider = { version = "2.0", default-features = false, features = [
     "reqwest",
 ] }
-alloy-transport-http = { version = "1.0", default-features = false, features = [
+alloy-transport-http = { version = "2.0", default-features = false, features = [
     "reqwest",
 ] }
-alloy-signer-local = { version = "1.6.3" }
+alloy-signer-local = { version = "1.8.3" }
 
 # Async, server, http
 axum = { version = "0.8.7", features = ["macros"] }
@@ -187,11 +187,11 @@ thiserror = "2.0.17"
 
 # rpc-proxy dependencies
 actix-web = "4"
-alloy = { version = "1.4.3", features = ["full", "serde"] }
+alloy = { version = "2.0", features = ["full", "serde"] }
 alloy-chains = { version = "0.2.23", features = ["serde"] }
 blst = "0.3"
 itertools = "0.14"
-revm = { version = "36.0.0", default-features = false }
+revm = { version = "38.0.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.0" }
 risc0-ethereum-contracts-boundless = { package = "risc0-ethereum-contracts", version = "=3.0.1" }
 boundless-market = { version = "=1.0.0" }

@@ -4,7 +4,7 @@ use kzg_rs::kzg_proof::{
     evaluate_polynomial_in_evaluation_form, safe_g1_affine_from_bytes, scalar_from_bytes_unchecked,
     verify_kzg_proof_impl,
 };
-use kzg_rs::{Blob as KzgBlob, Bytes48, KzgProof};
+use kzg_rs::{Blob as KzgBlob, Bytes48, KzgProof, KzgSettings};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "kzg-host")]
@@ -49,6 +49,14 @@ fn kzg_blob(blob: &[u8]) -> RaikoResult<KzgBlob> {
 
 fn kzg_bytes48(bytes: &KzgCommitmentBytes, label: &str) -> RaikoResult<Bytes48> {
     Bytes48::from_slice(bytes).map_err(|err| invalid_blob_option(&format!("Invalid {label}"), err))
+}
+
+fn proof_of_equivalence_kzg_settings() -> KzgSettings {
+    KzgSettings {
+        roots_of_unity: kzg_rs::get_roots_of_unity(),
+        g1_points: &[],
+        g2_points: kzg_rs::get_g2_points(),
+    }
 }
 
 #[cfg(feature = "kzg-host")]
@@ -213,7 +221,7 @@ pub fn verify_blob_proof_of_equivalence(
     let proof = safe_g1_affine_from_bytes(&proof_bytes)
         .map_err(|err| invalid_blob_option("Invalid proof", err))?;
 
-    let settings = kzg_rs::get_kzg_settings();
+    let settings = proof_of_equivalence_kzg_settings();
     let evaluation_point =
         scalar_from_bytes_unchecked(proof_of_equivalence_point_bytes(blob, &commitment_array));
     let polynomial = kzg_blob
@@ -243,7 +251,9 @@ pub fn verify_blob_proof_of_equivalence(
 #[cfg(test)]
 mod test {
     use super::*;
+    #[cfg(feature = "kzg-host")]
     use anyhow::{Context, Result};
+    #[cfg(feature = "kzg-host")]
     use kzg_rs::BYTES_PER_BLOB;
 
     #[test]
@@ -253,6 +263,15 @@ mod test {
         let mut expected = sha256(&commitment);
         expected[0] = VERSIONED_HASH_VERSION_KZG;
         assert_eq!(version_hash, B256::from_slice(&expected));
+    }
+
+    #[test]
+    fn proof_of_equivalence_settings_skip_unused_g1_setup() {
+        let settings = proof_of_equivalence_kzg_settings();
+
+        assert!(settings.g1_points.is_empty());
+        assert_eq!(settings.roots_of_unity.len(), kzg_rs::NUM_ROOTS_OF_UNITY);
+        assert!(settings.g2_points.len() > 1);
     }
 
     #[cfg(feature = "kzg-host")]

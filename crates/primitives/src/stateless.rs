@@ -551,6 +551,7 @@ mod tests {
             excess_blob_gas: None,
             parent_beacon_block_root: None,
             requests_hash: None,
+            ..Default::default()
         }
     }
 

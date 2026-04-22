@@ -11,8 +11,20 @@ This skill currently supports one production profile only.
 - Namespace: `tolba-raiko2-host`
 - Deployment: `raiko2`
 - Container: `raiko2`
+- Runtime config secret: `raiko2-risc0-boundless-config`
 - Image repository:
   `us-docker.pkg.dev/evmchain/images/raiko2`
+
+### Key Identity Target
+
+- Boundless signer source:
+  `tolba-raiko2-host/raiko2-risc0-boundless-config:config.toml [prover.boundless].signer_key`
+- Expected signer source:
+  `tolba-raiko2-zk-agent/raiko2-agent-secrets:boundlessSignerKey`
+- Network key source:
+  deployment env `NETWORK_PRIVATE_KEY`
+- The Boundless signer address must match the old agent signer address.
+- The Boundless signer address must not match the host network/SP1 key address.
 
 ### Register Target
 

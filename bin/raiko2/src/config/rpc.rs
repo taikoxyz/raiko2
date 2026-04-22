@@ -3,7 +3,8 @@ use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
-    RpcClientConfig as ProviderRpcClientConfig, RpcRetryConfig as ProviderRpcRetryConfig,
+    L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
+    RpcRetryConfig as ProviderRpcRetryConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -37,6 +38,7 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
         l2_rpc: None,
+        l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
@@ -62,6 +64,8 @@ pub struct NetworkPairConfig {
     #[serde(default)]
     pub l2_rpc: Option<String>,
     #[serde(default)]
+    pub l2_provider: L2ProviderKind,
+    #[serde(default)]
     pub l2_witness_rpc: Option<String>,
     #[serde(default)]
     pub sp1_verifier_rpc_url: Option<String>,
@@ -86,6 +90,7 @@ pub struct ResolvedNetworkPair {
     pub l1_network: String,
     pub l1_rpc: String,
     pub l2_rpc: String,
+    pub l2_provider: L2ProviderKind,
     pub l2_witness_rpc: String,
     pub sp1_verifier_rpc_url: Option<String>,
     pub sp1_verifier_address: Option<String>,
@@ -336,6 +341,7 @@ fn resolve_pair(
         l1_network: pair.l1_network.clone(),
         l1_rpc: pair.l1_rpc.clone().unwrap_or_else(|| l1_spec.rpc.clone()),
         l2_rpc: l2_rpc.clone(),
+        l2_provider: pair.l2_provider,
         l2_witness_rpc: pair.l2_witness_rpc.clone().unwrap_or(l2_rpc),
         sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
         sp1_verifier_address: pair.sp1_verifier_address.clone(),

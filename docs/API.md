@@ -420,6 +420,9 @@ All API errors use the Hoodi-style envelope:
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
+- `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
+  set it to `geth` when `l2_rpc`/`l2_witness_rpc` points at a geth endpoint with native
+  `debug_executionWitness`.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
 - `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional
@@ -427,6 +430,10 @@ All API errors use the Hoodi-style envelope:
   verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network proving.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
+- `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.
+  `l2_provider = "geth"` expects geth's native witness response with JSON header objects.
+- Geth witness endpoints should run geth v1.17.2 or newer to include the upstream
+  `debug_executionWitness` corruption fix.
 - If the upstream L2 does not expose `debug_executionWitness` and predictable latency matters,
   deploy `zeth-rpc-proxy` as a compatibility layer and point `rpc.pairs[*].l2_witness_rpc` at
   that proxy.

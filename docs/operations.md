@@ -199,6 +199,13 @@ without changing the rest of the endpoint posture.
 `rpc.pairs[*].l2_rpc` should ideally point to a witness-capable endpoint that supports
 `debug_executionWitness` for the best latency envelope.
 
+`rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`, whose
+`debug_executionWitness` response carries RLP-encoded headers. Use `geth` for geth's native
+`debug_executionWitness` response, where headers are JSON objects.
+
+For geth witness endpoints, run a version that includes the upstream `debug_executionWitness`
+corruption fix from geth v1.17.2 or newer.
+
 `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
 while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 

@@ -45,9 +45,10 @@ pub(crate) fn build_provider(
 ) -> Result<NetworkProvider> {
     let rpc_config = config.rpc.provider_client_config();
     let _ = config;
-    NetworkProvider::new_pair_with_chain_specs_and_config(
+    NetworkProvider::new_pair_with_l2_provider_kind_and_chain_specs_and_config(
         &pair.l1_rpc,
         &pair.l2_rpc,
+        pair.l2_provider,
         Some(pair.l1_spec.clone()),
         Some(pair.l2_spec.clone()),
         Some(&pair.l2_witness_rpc),

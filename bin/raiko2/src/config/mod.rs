@@ -15,6 +15,7 @@ mod validation;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+pub use raiko2_provider::L2ProviderKind;
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;
@@ -226,6 +227,7 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
+                l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
@@ -244,6 +246,7 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
                 l2_rpc: Some("http://localhost:9545".to_string()),
+                l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
@@ -264,6 +267,7 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
+                l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
                 sp1_verifier_address: None,
@@ -290,6 +294,7 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
+                l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
                 sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
                 sp1_verifier_address: Some(
@@ -510,10 +515,47 @@ maintenance_interval_ms = 200
             .expect("resolved pair");
         assert_eq!(pair.l1_rpc, "http://34.46.244.179:8545");
         assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
+        assert_eq!(pair.l2_provider, L2ProviderKind::Reth);
         assert_eq!(pair.l2_witness_rpc, "http://34.172.70.130:8545");
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_accepts_geth_l2_provider() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+
+        assert_eq!(pair.l2_provider, L2ProviderKind::Geth);
 
         let _ = std::fs::remove_file(path);
     }

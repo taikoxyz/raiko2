@@ -941,11 +941,13 @@ mod tests {
         let chain_spec = taiko_mainnet_chain_spec();
         let parent_header = alloy_consensus::Header {
             number: 0,
-            timestamp: (u64::MAX / 2) - 1,
+            timestamp: u64::MAX / 2 - 1,
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1),
+            state_root: B256::from([0x10; 32]),
             ..Default::default()
         };
+        let parent_witness_header = WitnessHeader::from_header(parent_header.clone());
         let mut input = StatelessInput {
             chain_spec,
             ..Default::default()
@@ -954,7 +956,7 @@ mod tests {
         input.block.header.timestamp = u64::MAX / 2;
         input.block.header.parent_hash = parent_header.hash_slow();
         input.block.header.state_root = B256::from([1u8; 32]);
-        input.witness.headers = vec![WitnessHeader::from_header(parent_header)];
+        input.witness.headers = vec![parent_witness_header.clone()];
         let l1_header = sample_l1_header(7, B256::from([0x66; 32]));
         let checkpoint = AnchorV4Checkpoint {
             blockNumber: l1_header.number.try_into().expect("fits in uint48"),
@@ -971,6 +973,7 @@ mod tests {
             },
             ..Default::default()
         };
+        guest_input.proposal_ancestor_headers = vec![parent_witness_header];
         guest_input.taiko.chain_spec.name = "taiko_mainnet".to_string();
         guest_input.taiko.chain_spec.chain_id = 167_000;
         guest_input.taiko.chain_spec.is_taiko = true;

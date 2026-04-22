@@ -70,9 +70,9 @@ pub(crate) struct FixtureProvider {
 impl FixtureProvider {
     #[must_use]
     pub(crate) fn from_repo_test_json() -> Self {
-        let raw = include_str!("../../../../test.json");
-        let mut input: GuestInput =
-            serde_json::from_str(raw).expect("parse test.json as GuestInput");
+        let raw =
+            include_str!("../../../../test/guest_inputs/shasta/fixture/proposals/proposal_3.json");
+        let mut input: GuestInput = serde_json::from_str(raw).expect("parse fixture GuestInput");
         if input.taiko.l1_ancestor_headers.is_empty() && input.taiko.l1_header.number != 0 {
             input.taiko.l1_ancestor_headers = vec![input.taiko.l1_header.clone()];
         }

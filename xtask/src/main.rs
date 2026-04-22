@@ -3,6 +3,7 @@ mod build_guest;
 mod latest_proposal_request;
 mod register_image;
 mod release_image;
+mod replay_guest_input;
 mod util;
 
 use anyhow::Result;
@@ -31,6 +32,9 @@ enum Cmd {
 
     /// Register the current Shasta guest image ids on verifier contracts.
     RegisterImage(register_image::RegisterImageArgs),
+
+    /// Replay repo-managed Shasta GuestInput fixtures.
+    ReplayGuestInput(replay_guest_input::ReplayGuestInputArgs),
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -51,5 +55,6 @@ async fn main() -> Result<()> {
         Cmd::LatestProposalRequest(args) => latest_proposal_request::run(&root, args).await,
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
+        Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),
     }
 }

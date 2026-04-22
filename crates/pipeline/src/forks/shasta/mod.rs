@@ -4,7 +4,7 @@ mod spec;
 
 pub use backends::{RISC0_BOUNDLESS_SHASTA_BACKEND, RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND};
 pub use manifest::ShastaManifestBuilder;
-pub use spec::ShastaSpec;
+pub use spec::{ShastaSpec, validate_shasta_guest_input};
 
 // ELF selection is handled by the backend instance.
 

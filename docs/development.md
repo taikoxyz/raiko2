@@ -164,19 +164,57 @@ PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta
 Typical workflow:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --input ./test.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
 ```
 
 Reuse prebuilt ELFs:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
 ```
 
 If the checked-in SP1 ELF is stale, rebuild it with the benchmark feature:
 
 ```bash
 cargo run -r -p xtask -- build-guest sp1 --bench
+```
+
+## GuestInput Replay
+
+Checked-in Shasta GuestInput fixtures live under `test/guest_inputs/shasta/<network>/`.
+Use `preflight` to capture a native fixture after live RPC preflight succeeds:
+
+```bash
+cargo run -r -p preflight -- \
+  --rpc-url "$L2_RPC_URL" \
+  --l2-chain-id 167000 \
+  --l1-chain-id 17000 \
+  --proposal-id 123 \
+  --l1-inclusion-block-number 456 \
+  --l2-start 1000 \
+  --l2-end 1005 \
+  --proof-type native \
+  --save-guest-input \
+  --network taiko_hoodi \
+  --pretty
+```
+
+Replay one proposal, a suite, or every fixture for a network without RPC:
+
+```bash
+cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --suite smoke
+cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --proposal 123
+cargo run -r -p xtask -- replay-guest-input --network taiko_hoodi --all
+```
+
+Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
+
+```json
+{
+  "network": "taiko_hoodi",
+  "name": "smoke",
+  "proposals": [123, 124, 125]
+}
 ```
 
 ## Regression Harness

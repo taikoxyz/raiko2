@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -8,9 +9,8 @@ use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
 use raiko2_primitives::{
     ProofContext, ProofRequest, ProofType, ProverConfig, ShastaRequest, SupportedChainSpecs,
 };
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{DEFAULT_GUEST_INPUT_ROOT, GuestInput, guest_input_proposal_path};
 use raiko2_provider::{NetworkProvider, RpcClientConfig, RpcRetryConfig};
-use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -97,7 +97,23 @@ struct Args {
 
     /// Output path for the serialized guest input JSON.
     #[arg(short = 'o', long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+
+    /// Save the serialized guest input into the repo-managed fixture tree.
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
+    save_guest_input: bool,
+
+    /// Network key used when saving into the repo-managed fixture tree.
+    #[arg(long)]
+    network: Option<String>,
+
+    /// Root directory for repo-managed guest input fixtures.
+    #[arg(long, default_value = DEFAULT_GUEST_INPUT_ROOT)]
+    guest_input_root: PathBuf,
+
+    /// Allow overwriting an existing repo-managed guest input fixture.
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
+    overwrite_guest_input: bool,
 
     /// Pretty-print JSON output.
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
@@ -107,6 +123,9 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.output.is_none() && !args.save_guest_input {
+        anyhow::bail!("either --output or --save-guest-input is required");
+    }
     let supported_chain_specs = load_supported_chain_specs(args.chain_spec_file.as_ref())?;
     let l2_chain_spec = supported_chain_specs
         .get_chain_spec_with_chain_id(args.l2_chain_id)
@@ -137,6 +156,14 @@ async fn main() -> Result<()> {
         anyhow::bail!("--l2-start must be <= --l2-end");
     }
 
+    let proof_type = args
+        .proof_type
+        .parse::<ProofType>()
+        .map_err(anyhow::Error::msg)?;
+    if args.save_guest_input && proof_type != ProofType::Native {
+        anyhow::bail!("--save-guest-input requires --proof-type native");
+    }
+
     let request = ProofRequest {
         l1_chain_id: args.l1_chain_id,
         l2_chain_id: args.l2_chain_id,
@@ -150,10 +177,7 @@ async fn main() -> Result<()> {
             last_anchor_block_number: args.last_anchor_block_number,
             checkpoint: None,
         }),
-        proof_type: args
-            .proof_type
-            .parse::<ProofType>()
-            .map_err(anyhow::Error::msg)?,
+        proof_type,
         blob_proof_type: args.blob_proof_type,
         prover: args.prover,
         graffiti: args.graffiti,
@@ -182,11 +206,45 @@ async fn main() -> Result<()> {
             validate_start.elapsed().as_millis()
         );
     }
-    write_json(&args.output, &guest_input, args.pretty)?;
+    if let Some(output) = &args.output {
+        write_guest_input_json(output, &guest_input, args.pretty, true)?;
+    }
+    if args.save_guest_input {
+        let network = args
+            .network
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--network is required with --save-guest-input"))?;
+        let path = guest_input_proposal_path(
+            &args.guest_input_root,
+            network,
+            guest_input.taiko.proposal_id,
+        )?;
+        write_guest_input_json(&path, &guest_input, args.pretty, args.overwrite_guest_input)?;
+        eprintln!(
+            "saved_guest_input: network={} proposal_id={} path={}",
+            network,
+            guest_input.taiko.proposal_id,
+            path.display()
+        );
+    }
     Ok(())
 }
 
-fn write_json(path: &PathBuf, value: &GuestInput, pretty: bool) -> Result<()> {
+fn write_guest_input_json(
+    path: &Path,
+    value: &GuestInput,
+    pretty: bool,
+    overwrite: bool,
+) -> Result<()> {
+    if path.exists() && !overwrite {
+        anyhow::bail!(
+            "refusing to overwrite existing guest input: {}",
+            path.display()
+        );
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
     let contents = if pretty {
         serde_json::to_string_pretty(value)
     } else {

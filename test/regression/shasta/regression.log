@@ -94,3 +94,11 @@
 2026-04-21 15:32:07,648 - INFO - Selected 5 proposals
 2026-04-21 15:32:11,648 - INFO - Starting discovery (range=None, count=5, proof_type=native, debug_witness=True)
 2026-04-21 15:32:42,062 - INFO - latest proposal is 21732
+2026-04-22 18:54:59,198 - INFO - Starting discovery (range=None, count=3, proof_type=native, debug_witness=True)
+2026-04-22 18:55:26,557 - INFO - latest proposal is 7166398
+2026-04-22 18:55:35,762 - INFO - found blocks for proposal 17460, start: 7165709, end: 7165900
+2026-04-22 18:55:36,111 - INFO - latest proposal is 7166403
+2026-04-22 18:55:44,903 - INFO - found blocks for proposal 17461, start: 7165901, end: 7166092
+2026-04-22 18:55:45,236 - INFO - latest proposal is 7166408
+2026-04-22 18:55:52,425 - INFO - found blocks for proposal 17462, start: 7166093, end: 7166284
+2026-04-22 18:55:52,425 - INFO - Selected 3 proposals

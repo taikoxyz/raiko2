@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-block"
 version = "0.7.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fraiko2#1ef7cfeab0fd8d935f414c8be72ec089a7c97c42"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=be5b43415fb194d53b6be7db5382f026503a248e#be5b43415fb194d53b6be7db5382f026503a248e"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -309,7 +309,9 @@ dependencies = [
  "reth-execution-types",
  "reth-primitives-traits",
  "reth-revm",
+ "reth-storage-api",
  "reth-storage-errors",
+ "reth-trie-common",
  "revm-database-interface",
  "tracing",
 ]
@@ -317,7 +319,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-chainspec"
 version = "0.7.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fraiko2#1ef7cfeab0fd8d935f414c8be72ec089a7c97c42"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=be5b43415fb194d53b6be7db5382f026503a248e#be5b43415fb194d53b6be7db5382f026503a248e"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.0.1",
@@ -339,7 +341,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-consensus"
 version = "0.7.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fraiko2#1ef7cfeab0fd8d935f414c8be72ec089a7c97c42"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=be5b43415fb194d53b6be7db5382f026503a248e#be5b43415fb194d53b6be7db5382f026503a248e"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -360,7 +362,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "0.7.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fraiko2#1ef7cfeab0fd8d935f414c8be72ec089a7c97c42"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=be5b43415fb194d53b6be7db5382f026503a248e#be5b43415fb194d53b6be7db5382f026503a248e"
 dependencies = [
  "alethia-reth-primitives",
  "alloy-evm",
@@ -374,7 +376,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-primitives"
 version = "0.7.1"
-source = "git+https://github.com/taikoxyz/alethia-reth?branch=feat%2Fraiko2#1ef7cfeab0fd8d935f414c8be72ec089a7c97c42"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=be5b43415fb194d53b6be7db5382f026503a248e#be5b43415fb194d53b6be7db5382f026503a248e"
 dependencies = [
  "alloy-consensus 2.0.1",
  "alloy-primitives",
@@ -10584,9 +10586,9 @@ dependencies = [
  "reth-ethereum-consensus",
  "reth-ethereum-primitives",
  "reth-evm",
+ "reth-execution-types",
  "reth-primitives-traits",
  "reth-revm",
- "reth-storage-api",
  "reth-trie-common",
  "risc0-ethereum-trie 0.2.0 (git+https://github.com/risc0/risc0-ethereum.git?tag=v3.0.1)",
  "serde_json",

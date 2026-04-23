@@ -640,7 +640,13 @@ where
     };
     let expected_verifier = first_chain_spec
         .get_fork_verifier_address(
-            guest_input.witnesses.first().expect("checked").block.header.number,
+            guest_input
+                .witnesses
+                .first()
+                .expect("checked")
+                .block
+                .header
+                .number,
             guest_input
                 .witnesses
                 .first()
@@ -829,7 +835,7 @@ pub fn prove_shasta_proposal_for_proof_type(
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
             let outcome = reconstruct_block_from_transactions_with_witness_resources(
-                Some(anchor_tx),
+                anchor_tx,
                 expected_block
                     .transactions
                     .iter()
@@ -846,7 +852,7 @@ pub fn prove_shasta_proposal_for_proof_type(
             )
             .map_err(|e| anyhow::anyhow!(e))
             .with_context(|| format!("failed to reconstruct Shasta block at index {index}"))?;
-            let generated_block = outcome.block.into_block();
+            let generated_block = outcome.filtered_block.into_block();
             validate_generated_block_matches_canonical(&generated_block, &stateless_input.block)
                 .with_context(|| format!("generated Shasta block mismatch at index {index}"))?;
             Ok(generated_block.header.hash_slow())

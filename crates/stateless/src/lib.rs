@@ -18,8 +18,8 @@ pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witnes
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{
-    reconstruct_block_from_transactions_with_witness_resources, validate_block,
-    validate_block_with_ancestor_headers, validate_block_with_witness_resources,
+    FilteredBlockExecutionOutcome, reconstruct_block_from_transactions_with_witness_resources,
+    validate_block, validate_block_with_ancestor_headers, validate_block_with_witness_resources,
 };
 
 #[cfg(test)]

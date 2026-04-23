@@ -640,7 +640,13 @@ where
     };
     let expected_verifier = first_chain_spec
         .get_fork_verifier_address(
-            guest_input.witnesses.first().expect("checked").block.header.number,
+            guest_input
+                .witnesses
+                .first()
+                .expect("checked")
+                .block
+                .header
+                .number,
             guest_input
                 .witnesses
                 .first()

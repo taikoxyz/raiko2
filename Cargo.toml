@@ -69,15 +69,15 @@ risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 sp1-sdk = { version = "=5.2.4", features = ["network"] }
 
 # Alethia reth (raiko2 integration branch)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6005800d97c470ead3b8d249fac97e8fa1c84bd6", default-features = false, features = [
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6005800d97c470ead3b8d249fac97e8fa1c84bd6", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6005800d97c470ead3b8d249fac97e8fa1c84bd6", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6005800d97c470ead3b8d249fac97e8fa1c84bd6", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false }
 
 # Reth (v2.1.0 - aligned with the current alethia-reth main compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", tag = "v2.1.0" }

@@ -345,3 +345,128 @@ mechanical swap.
 - wire `raiko2` to the new helper and drop direct `BlockBuilder` coupling from the guest path
 - file a follow-up issue documenting that `native` is not a semantic verifier for blob/txlist/EVM
   behavior
+
+## Append Log
+
+### 2026-04-22 18:05 CST
+
+Follow-up after reviewing the newer `alethia-reth` execution surface and the current `raiko2`
+mainline state.
+
+The original "thin helper" remediation direction in this issue is no longer the preferred end
+state.
+
+What changed:
+
+- `alethia-reth` prover mode already skips invalid non-anchor transactions inside
+  `TaikoBlockExecutor::execute_block(...)`
+- `alethia-reth` already has `TaikoBlockAssembler`, which can assemble the final Taiko block once
+  it has:
+  - execution context
+  - committed transactions
+  - execution result
+  - state root
+
+Updated remediation direction:
+
+- stop expressing proposal reconstruction as `anchor + txlist + StateProvider + builder.finish`
+- replace it with a block-based prover API:
+  - `raiko2` derives a full candidate block from blob/manifest data
+  - `alethia-reth` executes that candidate block in prover mode and records committed txs
+  - `raiko2` computes the witness-backed post-state root
+  - `alethia-reth` assembles the filtered final block/header from the execution artifacts
+
+This keeps the abstraction boundary cleaner:
+
+- `alethia-reth` owns Taiko execution/filter/assembly semantics
+- `raiko2` owns witness materialization and final equality checks
+
+Additional requirement locked in during this review:
+
+- the expected Shasta block sequence must exist in proposal mode
+- `prove_shasta_proposal(...)` should fail fast if the L2-provided expected block list is absent,
+  instead of treating it as optional
+
+### 2026-04-23 00:35 CST
+
+Implementation progress on the replacement path confirmed the block-based direction.
+
+Actual dependency-side helper shape now used locally:
+
+- `execute_derived_block(evm_config, parent_header, derived_block, db)`
+- returns committed transactions as `Recovered<TransactionSigned>`, plus execution result,
+  hashed post-state, and finalized block zk gas
+- `assemble_filtered_block(...)` receives those committed transactions, the computed state root,
+  and finalized block zk gas, then lets `TaikoBlockAssembler` produce the final block/header
+
+Important implementation discovery:
+
+- the helper must execute the candidate as a next block, using `next_evm_env(...)` and
+  `context_for_next_block(...)`
+- using the already-finalized block context would incorrectly set Uzen `expected_difficulty` from
+  the candidate header during reconstruction
+
+Local `raiko2` boundary after this pass:
+
+- build a candidate `RecoveredBlock<Block>` from anchor plus derived txlist
+- recover non-anchor senders locally; failed recovery is represented by `Address::ZERO` so the
+  prover executor can skip invalid-signature non-anchor txs before EVM execution
+- execute through alethia with `WitnessDatabase`
+- compute the witness-backed post-state root locally
+- assemble the filtered block through alethia and validate it against the expected canonical block
+
+Provider-era cleanup completed locally:
+
+- `WitnessStateProvider` is no longer needed for proposal reconstruction
+- the proposal reconstruct path no longer owns `StateProvider`/builder replay semantics in
+  `raiko2`
+
+Verification run in this local patch state:
+
+- `cargo test -p alethia-reth-block execute_derived_block_skips_invalid_nonce_transaction_and_records_committed_txs --features prover`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p raiko2-stateless reconstruct_block_skips_invalid_nonce_transaction`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p raiko2-stateless`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml --test proposal_validation top_level_proposal_proof_reconstructs_block_and_skips_invalid_tx`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml --test proposal_validation`
+
+All focused tests, the full stateless crate test suite, and the full proposal validation integration
+test passed.
+
+### 2026-04-23 01:40 CST
+
+Rebase/update after latest `raiko2` main and the pushed alethia helper branch.
+
+Current dependency state:
+
+- alethia helper branch was rebased onto alethia `main`
+- `raiko2` now pins alethia to commit
+  `63c2d001bc6c0485449c253ad35423cb5d1f0d2e`
+- both root `Cargo.toml` and `guests/common/Cargo.toml` use that `rev`
+- local `/tmp/alethia-reth-derived-block-helper` patches were removed
+
+Important test-path update from latest `raiko2` main:
+
+- proposal mode now rejects inline data-source payloads before transaction matching
+- the old top-level inline one-pass fixture is intentionally a rejection test:
+  `top_level_proposal_proof_rejects_inline_one_pass_payload`
+- invalid tx reconstruction is now directly verified through `raiko2-stateless`
+- full guest proposal tests still pass and validate the new trust-boundary behavior
+
+Verification after rebase and commit pin update:
+
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p raiko2-stateless reconstruct_block_skips_invalid_nonce_transaction`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p raiko2-stateless`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml --test proposal_validation`
+- `CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml`
+
+### 2026-04-23 10:20 CST
+
+Removed the deprecated inline one-pass proposal test fixture after the latest main trust-boundary
+changes.
+
+Rationale:
+
+- proposal mode rejects inline payloads before reconstruction
+- keeping a large one-pass reconstruction fixture only to assert inline rejection duplicated the
+  smaller trust-boundary tests
+- invalid nonce filtering remains covered by `raiko2-stateless`

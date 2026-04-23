@@ -1,26 +1,28 @@
 use crate::{
     sparse::SparseState,
     trie::{StatelessTrie, StatelessTrieExt},
-    witness_db::{AncestorHashes, WitnessDatabase, WitnessStateProvider},
+    witness_db::{AncestorHashes, WitnessDatabase},
 };
 use alethia_reth_block::{
     config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    filtered_block::{FilteredBlockExecutionOutcome, execute_and_filter_block_transactions},
+    derived_block::{assemble_filtered_block, execute_derived_block},
 };
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
-use alloy_consensus::{BlockHeader, TrieAccount, transaction::Recovered};
-use alloy_primitives::{B256, map::AddressMap};
+use alloy_consensus::{BlockHeader, Header, TrieAccount, transaction::Recovered};
+use alloy_primitives::{Address, B256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
 use reth_consensus::{Consensus, HeaderValidator};
 use reth_consensus_common::validation::validate_block_pre_execution;
 use reth_ethereum_consensus::validate_block_post_execution;
-use reth_ethereum_primitives::{Block, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{ConfigureEvm, block::BlockExecutionError, execute::Executor};
+use reth_execution_types::BlockExecutionResult;
+use reth_primitives_traits::SignedTransaction;
 use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
@@ -153,8 +155,70 @@ fn sealed_parent_header(
         .ok_or(StatelessValidationError::MissingAncestorHeader)
 }
 
-fn map_block_execution_error(err: &BlockExecutionError) -> StatelessValidationError {
+fn map_block_execution_error(err: BlockExecutionError) -> StatelessValidationError {
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
+}
+
+/// Filtered block execution artifacts returned by txlist-driven reconstruction.
+#[derive(Debug)]
+pub struct FilteredBlockExecutionOutcome {
+    /// The block assembled from transactions that were actually committed.
+    pub filtered_block: RecoveredBlock<Block>,
+    /// The execution result produced while building the filtered block.
+    pub execution_result: BlockExecutionResult<Receipt>,
+    /// The hashed post-state after execution.
+    pub hashed_state: HashedPostState,
+}
+
+fn recovered_signer_or_zero(tx: &TransactionSigned) -> Address {
+    tx.clone()
+        .try_into_recovered()
+        .map_or(Address::ZERO, |recovered| recovered.signer())
+}
+
+fn build_derived_block(
+    parent_header: &SealedHeader,
+    anchor_tx: Option<Recovered<TransactionSigned>>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+) -> RecoveredBlock<Block> {
+    let mut block_transactions =
+        Vec::with_capacity(transactions.len() + usize::from(anchor_tx.is_some()));
+    let mut senders = Vec::with_capacity(block_transactions.capacity());
+
+    if let Some(anchor_tx) = anchor_tx {
+        senders.push(anchor_tx.signer());
+        block_transactions.push(anchor_tx.into_inner());
+    }
+
+    for tx in transactions {
+        senders.push(recovered_signer_or_zero(&tx));
+        block_transactions.push(tx);
+    }
+
+    let header = Header {
+        parent_hash: parent_header.hash(),
+        number: parent_header.number + 1,
+        timestamp: block_env.timestamp,
+        beneficiary: block_env.suggested_fee_recipient,
+        gas_limit: block_env.gas_limit,
+        base_fee_per_gas: Some(block_env.base_fee_per_gas),
+        mix_hash: block_env.prev_randao,
+        extra_data: block_env.extra_data,
+        ..Default::default()
+    };
+
+    RecoveredBlock::new_unhashed(
+        Block {
+            header,
+            body: BlockBody {
+                transactions: block_transactions,
+                ommers: Default::default(),
+                withdrawals: Some(Default::default()),
+            },
+        },
+        senders,
+    )
 }
 
 /// Reconstruct a candidate block from a transaction sequence using the witness-backed pre-state.
@@ -183,21 +247,32 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     let parent_header = sealed_parent_header(ancestor_headers)?;
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
     let ancestor_hashes = compute_next_block_ancestor_hashes(ancestor_headers)?;
+    let derived_block = build_derived_block(&parent_header, anchor_tx, transactions, block_env);
 
     let (mut trie, bytecode) =
         SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
     trie.append_callers(callers);
 
-    let provider = WitnessStateProvider::new(trie, bytecode, ancestor_hashes);
-    let outcome = execute_and_filter_block_transactions(
+    let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
+    let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
+        .map_err(map_block_execution_error)?;
+    let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
+    let filtered_block = assemble_filtered_block(
         evm_config,
         &parent_header,
-        block_env,
-        anchor_tx,
-        transactions,
-        provider,
+        &derived_block,
+        execution_outcome.committed_transactions,
+        &execution_outcome.execution_result,
+        execution_outcome.finalized_block_zk_gas,
+        state_root,
     )
     .map_err(map_block_execution_error)?;
+
+    let outcome = FilteredBlockExecutionOutcome {
+        filtered_block,
+        execution_result: execution_outcome.execution_result,
+        hashed_state: execution_outcome.hashed_state,
+    };
 
     validate_block_consensus(chain_spec, &outcome.filtered_block, ancestor_headers)?;
     validate_block_post_execution(
@@ -426,6 +501,7 @@ mod tests {
     use alethia_reth_chainspec::TAIKO_DEVNET;
     use alloy_consensus::{
         Header, SignableTransaction, TrieAccount, TxEip1559, constants::KECCAK_EMPTY, proofs,
+        transaction::Recovered,
     };
     use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, keccak256};
     use alloy_trie::EMPTY_ROOT_HASH;
@@ -433,7 +509,8 @@ mod tests {
         ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
     };
     use reth_consensus::ConsensusError;
-    use reth_ethereum_primitives::{Block, BlockBody};
+    use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
+    use reth_primitives_traits::SignedTransaction;
     use risc0_ethereum_trie::Trie;
 
     fn empty_shanghai_body() -> BlockBody {
@@ -573,14 +650,45 @@ mod tests {
     fn reconstruct_block_skips_invalid_nonce_transaction() {
         let chain_spec = TAIKO_DEVNET.clone();
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
-        let sender = Address::with_last_byte(0x11);
+        let candidate_tx: TransactionSigned = TxEip1559 {
+            chain_id: chain_spec.inner.chain().id(),
+            nonce: 2,
+            gas_limit: 21_000,
+            max_fee_per_gas: 25_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::with_last_byte(0x22)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+        .into_signed(Signature::test_signature())
+        .into();
+        let signer = candidate_tx
+            .clone()
+            .try_into_recovered()
+            .expect("test signature should recover")
+            .signer();
+        let anchor_tx: TransactionSigned = TxEip1559 {
+            chain_id: chain_spec.inner.chain().id(),
+            nonce: 0,
+            gas_limit: 21_000,
+            max_fee_per_gas: 25_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::with_last_byte(0x22)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+        .into_signed(Signature::test_signature())
+        .into();
+        let anchor_tx = Recovered::new_unchecked(anchor_tx, signer);
 
         let mut trie = Trie::default();
         trie.insert(
-            keccak256(sender),
+            keccak256(signer),
             alloy_rlp::encode(TrieAccount {
                 nonce: 0,
-                balance: U256::from(1_000_000u64),
+                balance: U256::from(1_000_000_000_000_000u64),
                 storage_root: EMPTY_ROOT_HASH,
                 code_hash: KECCAK_EMPTY,
             }),
@@ -595,22 +703,9 @@ mod tests {
             ..Default::default()
         };
         let witness = witness_from_state_nodes(trie.rlp_nodes(), parent_header.state_root);
-        let candidate_tx = TxEip1559 {
-            chain_id: chain_spec.inner.chain().id(),
-            nonce: 1,
-            gas_limit: 21_000,
-            max_fee_per_gas: 1,
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(Address::with_last_byte(0x22)),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: Bytes::new(),
-        }
-        .into_signed(Signature::test_signature())
-        .into();
 
         let outcome = reconstruct_block_from_transactions_with_witness_resources(
-            None,
+            Some(anchor_tx),
             vec![candidate_tx],
             TaikoNextBlockEnvAttributes {
                 timestamp: 101,
@@ -629,6 +724,6 @@ mod tests {
         )
         .expect("reconstruction should succeed while skipping invalid nonce tx");
 
-        assert_eq!(outcome.filtered_block.body().transactions().count(), 0);
+        assert_eq!(outcome.filtered_block.body().transactions().count(), 1);
     }
 }

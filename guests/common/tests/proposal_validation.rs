@@ -1,18 +1,12 @@
 #![allow(missing_docs)]
 
-use alethia_reth_block::config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes};
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
-use alloy_primitives::{keccak256, Address, Bytes, B256};
+use alloy_consensus::{SignableTransaction, TrieAccount, TxEip1559};
+use alloy_primitives::{Address, B256};
 use alloy_primitives::{Signature, TxKind, U256};
-use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{sol, SolCall, SolValue};
-use alloy_trie::EMPTY_ROOT_HASH;
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
-use raiko2_primitives::{
-    ChainSpec, ProofType, StatelessInput, SupportedChainSpecs, WitnessStateNode,
-};
+use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs};
 use raiko2_primitives_shasta::{build_proof_carry_data, GuestInput};
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
@@ -21,14 +15,6 @@ use raiko2_protocol_shasta::shasta::{
     BlobSlice, DerivationSource,
 };
 use raiko2_protocol_shasta::TaikoManifest;
-use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
-use reth_primitives_traits::SignedTransaction;
-use risc0_ethereum_trie::Trie;
-
-const GOLDEN_TOUCH_PRIVATE_KEY: &str =
-    "0x92954368afd3caa1f3ce3ead0069c1af414054aefe1ef9aeacc1bf426222ce38";
-const INVALID_TX_PRIVATE_KEY: &str =
-    "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
 
 sol! {
     #[derive(Debug)]
@@ -79,14 +65,6 @@ fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::Trans
     }
     .into_signed(Signature::test_signature())
     .into()
-}
-
-fn sign_tx(tx: TxEip1559, private_key: &str) -> reth_ethereum_primitives::TransactionSigned {
-    let signer: PrivateKeySigner = private_key.parse().expect("valid signer key");
-    let signature = signer
-        .sign_hash_sync(&tx.signature_hash())
-        .expect("sign transaction");
-    tx.into_signed(signature).into()
 }
 
 fn guest_input_with_single_block() -> GuestInput {
@@ -290,196 +268,6 @@ fn canonical_inline_source_guest_input() -> GuestInput {
     guest_input
 }
 
-fn one_pass_guest_input_with_skipped_invalid_tx() -> GuestInput {
-    let mut guest_input = canonical_inline_source_guest_input();
-    let chain_spec = guest_input.witnesses[0].chain_spec.clone();
-    let taiko_chain_spec = chain_spec
-        .to_taiko_chain_spec()
-        .expect("taiko chain spec conversion");
-    let evm_config = TaikoEvmConfig::new(taiko_chain_spec.clone());
-    let valid_base_fee = 25_000_000u64;
-    let funded_balance = U256::from(1_000_000_000_000_000_000u128);
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
-    let golden_touch_signer: PrivateKeySigner = GOLDEN_TOUCH_PRIVATE_KEY
-        .parse()
-        .expect("valid golden touch key");
-    assert_eq!(golden_touch_signer.address(), anchor_signer);
-
-    let checkpoint = AnchorV4Checkpoint {
-        blockNumber: guest_input
-            .taiko
-            .l1_header
-            .number
-            .try_into()
-            .expect("fits in uint48"),
-        blockHash: guest_input.taiko.l1_header.hash_slow(),
-        stateRoot: guest_input.taiko.l1_header.state_root,
-    };
-    let anchor_tx: reth_ethereum_primitives::TransactionSigned = sign_tx(
-        TxEip1559 {
-            chain_id: chain_spec.chain_id,
-            nonce: 0,
-            gas_limit: 1_000_000,
-            max_fee_per_gas: u128::from(valid_base_fee),
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(
-                chain_spec
-                    .l2_contract
-                    .expect("shasta chain should define l2 contract"),
-            ),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: anchorV4Call {
-                _checkpoint: checkpoint,
-            }
-            .abi_encode()
-            .into(),
-        },
-        GOLDEN_TOUCH_PRIVATE_KEY,
-    );
-    guest_input.witnesses[0].block.body.transactions = vec![anchor_tx.clone()];
-    guest_input.witnesses[0].block.header.base_fee_per_gas = Some(valid_base_fee);
-
-    let invalid_tx: reth_ethereum_primitives::TransactionSigned = sign_tx(
-        TxEip1559 {
-            chain_id: chain_spec.chain_id,
-            nonce: 1,
-            gas_limit: 21_000,
-            max_fee_per_gas: u128::from(valid_base_fee),
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(Address::repeat_byte(0x55)),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: Bytes::new(),
-        },
-        INVALID_TX_PRIVATE_KEY,
-    );
-    let invalid_signer = invalid_tx
-        .clone()
-        .try_into_recovered()
-        .expect("recover invalid tx signer")
-        .signer();
-
-    let parent_header = alloy_consensus::Header {
-        number: 0,
-        timestamp: 1_775_135_700u64,
-        gas_limit: 30_000_000,
-        base_fee_per_gas: Some(valid_base_fee),
-        state_root: B256::ZERO,
-        ..Default::default()
-    };
-
-    let mut trie = Trie::default();
-    trie.insert(
-        keccak256(anchor_signer),
-        alloy_rlp::encode(TrieAccount {
-            nonce: 0,
-            balance: funded_balance,
-            storage_root: EMPTY_ROOT_HASH,
-            code_hash: KECCAK_EMPTY,
-        }),
-    );
-    trie.insert(
-        keccak256(invalid_signer),
-        alloy_rlp::encode(TrieAccount {
-            nonce: 0,
-            balance: funded_balance,
-            storage_root: EMPTY_ROOT_HASH,
-            code_hash: KECCAK_EMPTY,
-        }),
-    );
-
-    let witness_parent_header = alloy_consensus::Header {
-        state_root: trie.hash_slow(),
-        ..parent_header
-    };
-    let witness_parent_witness_header =
-        raiko2_primitives::WitnessHeader::from_header(witness_parent_header.clone());
-    guest_input.witnesses[0].witness.headers = vec![witness_parent_witness_header.clone()];
-    guest_input.proposal_ancestor_headers = vec![witness_parent_witness_header];
-    guest_input.witnesses[0].witness.state = trie
-        .rlp_nodes()
-        .into_iter()
-        .map(WitnessStateNode::from_bytes)
-        .collect();
-    guest_input.witnesses[0].accounts.insert(
-        anchor_signer,
-        TrieAccount {
-            nonce: 0,
-            balance: funded_balance,
-            storage_root: EMPTY_ROOT_HASH,
-            code_hash: KECCAK_EMPTY,
-        },
-    );
-    guest_input.witnesses[0].accounts.insert(
-        invalid_signer,
-        TrieAccount {
-            nonce: 0,
-            balance: funded_balance,
-            storage_root: EMPTY_ROOT_HASH,
-            code_hash: KECCAK_EMPTY,
-        },
-    );
-
-    let outcome = reconstruct_block_from_transactions_with_witness_resources(
-        Some(
-            anchor_tx
-                .clone()
-                .try_into_recovered()
-                .expect("recover anchor signer"),
-        ),
-        vec![invalid_tx.clone()],
-        TaikoNextBlockEnvAttributes {
-            timestamp: guest_input.witnesses[0].block.header.timestamp,
-            suggested_fee_recipient: guest_input.witnesses[0].block.header.beneficiary,
-            prev_randao: guest_input.witnesses[0].block.header.mix_hash,
-            gas_limit: guest_input.witnesses[0].block.header.gas_limit,
-            extra_data: guest_input.witnesses[0].block.header.extra_data.clone(),
-            base_fee_per_gas: valid_base_fee,
-        },
-        &guest_input.witnesses[0].witness,
-        &guest_input.witnesses[0].witness.headers,
-        &[],
-        guest_input.witnesses[0].accounts.clone(),
-        &taiko_chain_spec,
-        &evm_config,
-    )
-    .expect("candidate block reconstruction should succeed");
-
-    guest_input.witnesses[0].block = outcome.filtered_block.into_block();
-    guest_input.witnesses[0].block.header.parent_hash = witness_parent_header.hash_slow();
-    guest_input.taiko.data_sources = vec![InputDataSource {
-        tx_data_from_calldata: DerivationSourceManifest {
-            blocks: vec![BlockManifest {
-                timestamp: guest_input.witnesses[0].block.header.timestamp,
-                coinbase: guest_input.taiko.proposal_event.proposal.proposer,
-                anchor_block_number: 7,
-                gas_limit: 30_000_000,
-                transactions: vec![invalid_tx.into()],
-            }],
-        }
-        .encode_and_compress()
-        .expect("manifest payload"),
-        ..Default::default()
-    }];
-    guest_input
-        .proof_carry_data
-        .transition_input
-        .parent_block_hash = witness_parent_header.hash_slow();
-    guest_input
-        .proof_carry_data
-        .transition_input
-        .checkpoint
-        .blockHash = guest_input.witnesses[0].block.header.hash_slow();
-    guest_input
-        .proof_carry_data
-        .transition_input
-        .checkpoint
-        .stateRoot = guest_input.witnesses[0].block.header.state_root;
-
-    guest_input
-}
-
 fn assert_rejected_with_message(guest_input: &GuestInput, expected: &str) {
     let err = prove_shasta_proposal_with_validator(
         guest_input,
@@ -617,21 +405,6 @@ fn rejects_force_inclusion_as_last_source() {
 }
 
 #[test]
-fn top_level_proposal_proof_rejects_inline_one_pass_payload() {
-    let guest_input = one_pass_guest_input_with_skipped_invalid_tx();
-
-    let err = prove_shasta_proposal(&guest_input)
-        .expect_err("inline one-pass proposal payload should be rejected");
-
-    assert!(err
-        .to_string()
-        .contains("proposal mode blob usage verification failed"));
-    assert!(err
-        .chain()
-        .any(|cause| cause.to_string().contains("inline payloads are not accepted")));
-}
-
-#[test]
 fn rejects_inline_source_payload_before_transaction_matching() {
     let mut guest_input = canonical_inline_source_guest_input();
     guest_input.witnesses[0].block.body.transactions.push(
@@ -650,10 +423,7 @@ fn rejects_inline_source_payload_before_transaction_matching() {
         .into(),
     );
 
-    assert_rejected_with_message(
-        &guest_input,
-        "inline payloads are not accepted",
-    );
+    assert_rejected_with_message(&guest_input, "inline payloads are not accepted");
 }
 
 #[test]

@@ -183,7 +183,7 @@ What is not yet proven to production standard:
 
 Recent successful latest-proposal runs rely on:
 
-- `http://34.121.5.35:8545`
+- `http://<l2-rpc-host>:8545` (literal host is internal-runbook only)
 
 The alternative “old-style local input-provider endpoint” route was investigated and is not
 currently a usable production fallback.

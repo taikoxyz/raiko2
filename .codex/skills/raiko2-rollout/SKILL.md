@@ -166,8 +166,10 @@ Default smoke depth is passive only. Run:
 
 - deployment revision check
 - pod readiness check
-- `GET /ready`
-- `GET /metrics`
+- `GET /ready` using the **internal** base URL from `references/profiles.md` (set
+  `RAIKO2_SMOKE_BASE_URL` when using `references/commands.md`; repo text uses placeholders only—no
+  literal IPs or public DNS names)
+- `GET /metrics` on the same base URL
 
 Smoke does **not** send a proof request in this skill.
 

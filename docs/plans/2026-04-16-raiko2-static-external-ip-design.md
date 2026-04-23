@@ -1,24 +1,32 @@
 # Raiko2 Static External IP Design
 
+This document uses placeholders such as `<assigned-external-ipv4>` for any live IPv4. Concrete
+addresses are internal infrastructure only (GCP console / internal runbook); do not paste them
+into revision-controlled text.
+
+Access is **organization-internal** (private networking, VPN, allowlisted paths, etc.). This
+design does **not** introduce or assume a customer-facing public DNS name.
+
 ## Summary
 
-`raiko2` already exposes a public GKE `LoadBalancer` Service at `http://34.87.10.238:8080`.
+`raiko2` already has a GKE `LoadBalancer` Service reachable at
+`http://<assigned-external-ipv4>:8080` from the intended network path.
 The missing property is not reachability, but stability: the current external IP is only the
 load balancer's assigned address and is not yet treated as a reserved, canonical static asset.
 
 This design aligns `raiko2` with old `raiko`'s access model:
 
-- keep a single public `LoadBalancer` Service
-- keep a bare IP entrypoint
+- keep a single `LoadBalancer` Service
+- keep a stable IPv4 entrypoint (placeholder above—not a literal address in docs)
 - reserve that IP in GCP as a regional static external IPv4 address
 - bind the Kubernetes Service to that reserved address through the deployment manifest source of truth
 
-The application does not gain a new "public URL" setting. This remains infrastructure-owned.
+The application does not gain a new externally visible URL knob in config. This remains infrastructure-owned.
 
 ## Goals
 
-- Give canonical `raiko2` one stable public IPv4 address that survives Service updates and rollouts.
-- Match old `raiko`'s public access model as closely as possible.
+- Give canonical `raiko2` one stable externally assigned IPv4 that survives Service updates and rollouts.
+- Match old `raiko`'s cluster-external access model as closely as possible.
 - Keep the implementation in the primary infrastructure path instead of introducing app-level URL config.
 - Preserve the existing external endpoint if possible to avoid downstream churn.
 
@@ -26,35 +34,35 @@ The application does not gain a new "public URL" setting. This remains infrastru
 
 - No DNS name or HTTPS termination in this change.
 - No Ingress or Gateway migration in this change.
-- No second public endpoint for `sp1` or other backend-specific traffic.
+- No second cluster-external endpoint for `sp1` or other backend-specific traffic.
 - No change to `raiko2` HTTP routes or config schema.
 
 ## Current State
 
-The current canonical deployment already uses a public Service:
+The current canonical deployment already uses a Service of type `LoadBalancer`:
 
 - namespace: `tolba-raiko2-host`
 - service: `raiko2`
 - type: `LoadBalancer`
-- current external address: `34.87.10.238`
+- current external address: `<assigned-external-ipv4>` (see GCP / infra repo)
 
-This is functionally correct for public access, but operationally incomplete because the IP is not
+This is functionally correct for the intended internal access path, but operationally incomplete because the IP is not
 yet modeled as an explicitly reserved regional address owned by infrastructure configuration.
 
 ## Design
 
 ### Canonical Ownership
 
-The single source of truth for the public endpoint is the Kubernetes `Service` for canonical
+The single source of truth for the cluster-external endpoint is the Kubernetes `Service` for canonical
 `raiko2`, managed from the infrastructure repository (`raiko-k8s` or equivalent deployment
 manifests), not from the Rust application repository.
 
-`raiko2` continues to bind to `0.0.0.0:8080` internally. The public address remains an
-infrastructure concern.
+Inside the container, `raiko2` continues to listen on **port `8080` on all interfaces** (bind scope
+is container-local). The IPv4 clients use to reach the Service remains an infrastructure concern.
 
-### Public Endpoint Model
+### LoadBalancer Endpoint Model
 
-The public endpoint remains:
+The cluster-external endpoint remains:
 
 - protocol: HTTP
 - port: `8080`
@@ -62,16 +70,16 @@ The public endpoint remains:
 
 The desired canonical endpoint after this change is still:
 
-- `http://34.87.10.238:8080`
+- `http://<assigned-external-ipv4>:8080`
 
-but with `34.87.10.238` backed by a reserved regional static IP resource and explicitly referenced
+but with `<assigned-external-ipv4>` backed by a reserved regional static IP resource and explicitly referenced
 by the Service manifest.
 
 ### Static IP Binding
 
 Implementation should use the standard GKE `LoadBalancer` Service static IP path:
 
-- reserve `34.87.10.238` as a regional external IPv4 address in the cluster region
+- reserve `<assigned-external-ipv4>` as a regional external IPv4 address in the cluster region
 - bind the Service to that reserved address using the Kubernetes Service manifest
 
 For compatibility and minimum change, the first implementation should use `spec.loadBalancerIP`.
@@ -99,12 +107,12 @@ No new `server.public_url`, `server.external_ip`, or similar config should be in
 ## Rollout Plan
 
 1. Confirm the cluster region and project that own the current `raiko2` Service.
-2. Verify whether `34.87.10.238` is already a reserved address resource.
+2. Verify whether `<assigned-external-ipv4>` is already a reserved address resource.
 3. If not reserved, reserve the existing IP as a regional external static IPv4 address.
 4. Update the infrastructure manifest for the canonical `raiko2` Service to pin that IP.
 5. Apply the Service change.
-6. Verify the Service still resolves to `34.87.10.238`.
-7. Verify `GET /health` and `GET /ready` over the public endpoint.
+6. Verify the Service still resolves to `<assigned-external-ipv4>`.
+7. Verify `GET /health` and `GET /ready` over the assigned Service endpoint (see internal runbook for URL).
 
 ## Risks
 
@@ -128,8 +136,8 @@ the next apply can revert the static binding. The final state must live in the d
 
 This work is complete when all of the following are true:
 
-- canonical `raiko2` has exactly one public `LoadBalancer` Service
+- canonical `raiko2` has exactly one `LoadBalancer` Service
 - that Service is explicitly bound to a reserved regional static external IPv4 address
-- the public endpoint remains reachable at a stable bare IP
-- the public endpoint survives a Service reconcile or deployment rollout without IP drift
+- the Service endpoint remains reachable at a stable `<assigned-external-ipv4>` (literal value only in runbooks)
+- that endpoint survives a Service reconcile or deployment rollout without IP drift
 - the static IP ownership is recorded in the infrastructure source of truth

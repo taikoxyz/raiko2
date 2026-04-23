@@ -26,6 +26,8 @@
             "excess_blob_gas": null,
             "parent_beacon_block_root": null,
             "requests_hash": null,
+            "block_access_list_hash": null,
+            "slot_number": null,
             "extra_data": "0x"
           },
           "body": {

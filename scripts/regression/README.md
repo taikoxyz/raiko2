@@ -70,6 +70,9 @@ Use `--rpc-url` and `--l1-rpc-url` only when you need to override the chain spec
 `--l2-chain-id` and `--l1-chain-id` only for custom chain spec files or compatibility with older
 commands.
 
+If you already know the proposal tuple, you can skip discovery and run `preflight` directly with
+the same chain-spec-derived defaults.
+
 For a host-side native replay after preflight, run the guest launcher against the generated input:
 
 ```bash

@@ -11,8 +11,8 @@ use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
-use alloy_consensus::{BlockHeader, Header, TrieAccount, transaction::Recovered};
-use alloy_primitives::{Address, B256, map::AddressMap};
+use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
+use alloy_primitives::{B256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -22,8 +22,7 @@ use reth_ethereum_consensus::validate_block_post_execution;
 use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned};
 use reth_evm::{ConfigureEvm, block::BlockExecutionError, execute::Executor};
 use reth_execution_types::BlockExecutionResult;
-use reth_primitives_traits::SignedTransaction;
-use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{Block as _, RecoveredBlock, SealedHeader, SignerRecoverable};
 use reth_trie_common::{HashedPostState, KeccakKeyHasher};
 use std::sync::Arc;
 
@@ -170,10 +169,6 @@ pub struct FilteredBlockExecutionOutcome {
     pub hashed_state: HashedPostState,
 }
 
-fn recovered_signer_or_zero(tx: &TransactionSigned) -> Address {
-    tx.recover_signer().unwrap_or(Address::ZERO)
-}
-
 fn build_derived_block(
     parent_header: &SealedHeader,
     anchor_tx: Option<Recovered<TransactionSigned>>,
@@ -190,10 +185,17 @@ fn build_derived_block(
     }
 
     for tx in transactions {
-        senders.push(recovered_signer_or_zero(&tx));
-        block_transactions.push(tx);
+        if let Ok(recovered_tx) = tx.try_into_recovered() {
+            senders.push(recovered_tx.signer());
+            block_transactions.push(recovered_tx.into_inner());
+        }
     }
 
+    let body = BlockBody {
+        transactions: block_transactions,
+        ommers: Default::default(),
+        withdrawals: Some(Default::default()),
+    };
     let header = Header {
         parent_hash: parent_header.hash(),
         number: parent_header.number + 1,
@@ -203,20 +205,13 @@ fn build_derived_block(
         base_fee_per_gas: Some(block_env.base_fee_per_gas),
         mix_hash: block_env.prev_randao,
         extra_data: block_env.extra_data,
+        transactions_root: proofs::calculate_transaction_root(body.transactions.as_slice()),
+        ommers_hash: body.calculate_ommers_root(),
+        withdrawals_root: body.calculate_withdrawals_root(),
         ..Default::default()
     };
 
-    RecoveredBlock::new_unhashed(
-        Block {
-            header,
-            body: BlockBody {
-                transactions: block_transactions,
-                ommers: Default::default(),
-                withdrawals: Some(Default::default()),
-            },
-        },
-        senders,
-    )
+    RecoveredBlock::new_unhashed(Block { header, body }, senders)
 }
 
 /// Reconstruct a candidate block from a transaction sequence using the witness-backed pre-state.
@@ -493,7 +488,10 @@ fn compute_ancestor_hashes_for_child(
 
 #[cfg(test)]
 mod tests {
-    use super::{reconstruct_block_from_transactions_with_witness_resources, validate_block};
+    use super::{
+        build_derived_block, reconstruct_block_from_transactions_with_witness_resources,
+        validate_block,
+    };
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
     use alethia_reth_chainspec::TAIKO_DEVNET;
@@ -508,7 +506,7 @@ mod tests {
     };
     use reth_consensus::ConsensusError;
     use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
-    use reth_primitives_traits::SignedTransaction;
+    use reth_primitives_traits::{SealedHeader, SignerRecoverable};
     use risc0_ethereum_trie::Trie;
 
     fn empty_shanghai_body() -> BlockBody {
@@ -553,6 +551,62 @@ mod tests {
             headers: vec![WitnessHeader::from_header(header)],
             ..Default::default()
         }
+    }
+
+    fn test_signed_tx(chain_id: u64, nonce: u64, signature: Signature) -> TransactionSigned {
+        TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit: 21_000,
+            max_fee_per_gas: 25_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::with_last_byte(0x22)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+        .into_signed(signature)
+        .into()
+    }
+
+    #[test]
+    fn build_derived_block_sets_header_body_roots() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let parent_header =
+            SealedHeader::seal_slow(shanghai_header(0, 100, alloy_primitives::B256::ZERO));
+        let tx = test_signed_tx(
+            chain_spec.inner.chain().id(),
+            0,
+            Signature::test_signature(),
+        );
+
+        let derived_block = build_derived_block(
+            &parent_header,
+            None,
+            vec![tx],
+            TaikoNextBlockEnvAttributes {
+                timestamp: 101,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: Bytes::new(),
+                base_fee_per_gas: 25_000_000,
+            },
+        );
+
+        let body = derived_block.body();
+        assert_eq!(
+            derived_block.header().transactions_root,
+            proofs::calculate_transaction_root(body.transactions.as_slice())
+        );
+        assert_eq!(
+            derived_block.header().ommers_hash,
+            body.calculate_ommers_root()
+        );
+        assert_eq!(
+            derived_block.header().withdrawals_root,
+            body.calculate_withdrawals_root()
+        );
     }
 
     #[test]
@@ -662,10 +716,8 @@ mod tests {
         .into_signed(Signature::test_signature())
         .into();
         let signer = candidate_tx
-            .clone()
-            .try_into_recovered()
-            .expect("test signature should recover")
-            .signer();
+            .recover_signer()
+            .expect("test signature should recover");
         let anchor_tx: TransactionSigned = TxEip1559 {
             chain_id: chain_spec.inner.chain().id(),
             nonce: 0,
@@ -721,6 +773,78 @@ mod tests {
             &evm_config,
         )
         .expect("reconstruction should succeed while skipping invalid nonce tx");
+
+        assert_eq!(outcome.filtered_block.body().transactions().count(), 1);
+    }
+
+    #[test]
+    fn reconstruct_block_skips_unrecoverable_non_anchor_transaction() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let chain_id = chain_spec.inner.chain().id();
+        let anchor_inner = test_signed_tx(chain_id, 0, Signature::test_signature());
+        let anchor_signer = anchor_inner
+            .recover_signer()
+            .expect("anchor signer should recover");
+        let anchor_tx = Recovered::new_unchecked(anchor_inner, anchor_signer);
+        let invalid_signature_tx =
+            test_signed_tx(chain_id, 0, Signature::new(U256::ZERO, U256::ZERO, false));
+        assert!(
+            invalid_signature_tx.recover_signer().is_err(),
+            "fixture transaction must fail signer recovery"
+        );
+
+        let mut trie = Trie::default();
+        for signer in [anchor_signer, Address::ZERO] {
+            trie.insert(
+                keccak256(signer),
+                alloy_rlp::encode(TrieAccount {
+                    nonce: 0,
+                    balance: U256::from(1_000_000_000_000_000u64),
+                    storage_root: EMPTY_ROOT_HASH,
+                    code_hash: KECCAK_EMPTY,
+                }),
+            );
+        }
+
+        let parent_header = Header {
+            number: 0,
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(25_000_000),
+            state_root: trie.hash_slow(),
+            ..Default::default()
+        };
+        let witness = witness_from_state_nodes(trie.rlp_nodes(), parent_header.state_root);
+        let block_env = || TaikoNextBlockEnvAttributes {
+            timestamp: 101,
+            suggested_fee_recipient: Address::ZERO,
+            prev_randao: alloy_primitives::B256::ZERO,
+            gas_limit: 30_000_000,
+            extra_data: Bytes::new(),
+            base_fee_per_gas: 25_000_000,
+        };
+
+        let derived_block = build_derived_block(
+            &SealedHeader::seal_slow(parent_header.clone()),
+            Some(anchor_tx.clone()),
+            vec![invalid_signature_tx.clone()],
+            block_env(),
+        );
+        assert_eq!(derived_block.body().transactions().count(), 1);
+
+        let outcome = reconstruct_block_from_transactions_with_witness_resources(
+            Some(anchor_tx),
+            vec![invalid_signature_tx],
+            block_env(),
+            &witness,
+            &witness.headers,
+            &[],
+            Default::default(),
+            &chain_spec,
+            &evm_config,
+        )
+        .expect("reconstruction should succeed while skipping unrecoverable tx");
 
         assert_eq!(outcome.filtered_block.body().transactions().count(), 1);
     }

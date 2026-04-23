@@ -409,8 +409,8 @@ Important implementation discovery:
 Local `raiko2` boundary after this pass:
 
 - build a candidate `RecoveredBlock<Block>` from anchor plus derived txlist
-- recover non-anchor senders locally; failed recovery is represented by `Address::ZERO` so the
-  prover executor can skip invalid-signature non-anchor txs before EVM execution
+- recover non-anchor senders locally; failed recovery is skipped before building the derived block,
+  so invalid-signature non-anchor txs cannot execute as `Address::ZERO`
 - execute through alethia with `WitnessDatabase`
 - compute the witness-backed post-state root locally
 - assemble the filtered block through alethia and validate it against the expected canonical block
@@ -470,3 +470,21 @@ Rationale:
 - keeping a large one-pass reconstruction fixture only to assert inline rejection duplicated the
   smaller trust-boundary tests
 - invalid nonce filtering remains covered by `raiko2-stateless`
+
+### 2026-04-23 11:30 CST
+
+Review follow-up after the alethia helper merged into `main`.
+
+Dependency state:
+
+- updated root and `guests/common` alethia pins from the helper branch commit to alethia `main`
+  commit `be5b43415fb194d53b6be7db5382f026503a248e`
+
+Derived-block fixes:
+
+- `build_derived_block` now computes candidate `transactions_root`, `ommers_hash`, and
+  `withdrawals_root` from the body it constructs
+- non-anchor txs that fail signer recovery are excluded before constructing the recovered derived
+  block, rather than being represented as `Address::ZERO`
+- added regression coverage for both header/body root consistency and unrecoverable non-anchor tx
+  skipping

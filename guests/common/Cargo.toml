@@ -9,12 +9,12 @@ raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol = { path = "../../crates/protocol" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 raiko2-stateless = { path = "../../crates/stateless" }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false }
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "be5b43415fb194d53b6be7db5382f026503a248e", default-features = false }
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "be5b43415fb194d53b6be7db5382f026503a248e", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "63c2d001bc6c0485449c253ad35423cb5d1f0d2e", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "be5b43415fb194d53b6be7db5382f026503a248e", default-features = false }
 alloy-primitives = { version = "1.5.0", default-features = false }
 alloy-consensus = { version = "2.0", default-features = false, features = ["serde"] }
 alloy-sol-types = { version = "1.5.0", default-features = false }

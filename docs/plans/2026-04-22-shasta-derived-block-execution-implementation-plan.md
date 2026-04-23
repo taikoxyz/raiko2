@@ -426,3 +426,19 @@ CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test -p raiko2-stateless
 CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml --test proposal_validation
 CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test --manifest-path guests/common/Cargo.toml
 ```
+
+### 2026-04-23 11:30 CST
+
+Review follow-up:
+
+- pulled the remote review fix that switched signer recovery to `recover_signer()`
+- updated alethia dependency pins to merged alethia `main` commit
+  `be5b43415fb194d53b6be7db5382f026503a248e`
+- fixed candidate derived block construction to fill body-derived header roots
+- changed non-anchor signer recovery failures to be skipped before EVM execution instead of using
+  `Address::ZERO` as a placeholder sender
+
+Regression tests added in `raiko2-stateless`:
+
+- `build_derived_block_sets_header_body_roots`
+- `reconstruct_block_skips_unrecoverable_non_anchor_transaction`

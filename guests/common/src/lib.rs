@@ -835,7 +835,7 @@ pub fn prove_shasta_proposal_for_proof_type(
                 .try_into_recovered()
                 .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
             let outcome = reconstruct_block_from_transactions_with_witness_resources(
-                Some(anchor_tx),
+                anchor_tx,
                 expected_block
                     .transactions
                     .iter()

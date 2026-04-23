@@ -288,7 +288,7 @@ pub fn execute_and_filter_block_transactions<P>(
     evm_config: &TaikoEvmConfig,
     parent_header: &SealedHeader,
     block_env: TaikoNextBlockEnvAttributes,
-    anchor_tx: Option<Recovered<TransactionSigned>>,
+    anchor_tx: Recovered<TransactionSigned>,
     transactions: Vec<TransactionSigned>,
     state_provider: P,
 ) -> Result<FilteredBlockExecutionOutcome, BlockExecutionError>

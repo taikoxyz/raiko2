@@ -171,18 +171,15 @@ pub struct FilteredBlockExecutionOutcome {
 
 fn build_derived_block(
     parent_header: &SealedHeader,
-    anchor_tx: Option<Recovered<TransactionSigned>>,
+    anchor_tx: Recovered<TransactionSigned>,
     transactions: Vec<TransactionSigned>,
     block_env: TaikoNextBlockEnvAttributes,
 ) -> RecoveredBlock<Block> {
-    let mut block_transactions =
-        Vec::with_capacity(transactions.len() + usize::from(anchor_tx.is_some()));
+    let mut block_transactions = Vec::with_capacity(transactions.len() + 1);
     let mut senders = Vec::with_capacity(block_transactions.capacity());
 
-    if let Some(anchor_tx) = anchor_tx {
-        senders.push(anchor_tx.signer());
-        block_transactions.push(anchor_tx.into_inner());
-    }
+    senders.push(anchor_tx.signer());
+    block_transactions.push(anchor_tx.into_inner());
 
     for tx in transactions {
         if let Ok(recovered_tx) = tx.try_into_recovered() {
@@ -216,8 +213,8 @@ fn build_derived_block(
 
 /// Reconstruct a candidate block from a transaction sequence using the witness-backed pre-state.
 ///
-/// The optional `anchor_tx` is always executed first and is treated as fatal if it cannot be
-/// recovered or executed. All transactions in `transactions` are treated as non-anchor candidates:
+/// The `anchor_tx` is always executed first and is treated as fatal if it cannot be executed.
+/// All transactions in `transactions` are treated as non-anchor candidates:
 /// unrecoverable or invalid transactions are skipped, while committed transactions are recorded in
 /// the generated block body.
 ///
@@ -227,7 +224,7 @@ fn build_derived_block(
 /// the anchor transaction fails, or the reconstructed block fails consensus/post-state validation.
 #[allow(clippy::too_many_arguments)]
 pub fn reconstruct_block_from_transactions_with_witness_resources(
-    anchor_tx: Option<Recovered<TransactionSigned>>,
+    anchor_tx: Recovered<TransactionSigned>,
     transactions: Vec<TransactionSigned>,
     block_env: TaikoNextBlockEnvAttributes,
     witness: &ExecutionWitness,
@@ -582,7 +579,9 @@ mod tests {
 
         let derived_block = build_derived_block(
             &parent_header,
-            None,
+            tx.clone()
+                .try_into_recovered()
+                .expect("test transaction should recover"),
             vec![tx],
             TaikoNextBlockEnvAttributes {
                 timestamp: 101,
@@ -755,7 +754,7 @@ mod tests {
         let witness = witness_from_state_nodes(trie.rlp_nodes(), parent_header.state_root);
 
         let outcome = reconstruct_block_from_transactions_with_witness_resources(
-            Some(anchor_tx),
+            anchor_tx,
             vec![candidate_tx],
             TaikoNextBlockEnvAttributes {
                 timestamp: 101,
@@ -827,14 +826,14 @@ mod tests {
 
         let derived_block = build_derived_block(
             &SealedHeader::seal_slow(parent_header.clone()),
-            Some(anchor_tx.clone()),
+            anchor_tx.clone(),
             vec![invalid_signature_tx.clone()],
             block_env(),
         );
         assert_eq!(derived_block.body().transactions().count(), 1);
 
         let outcome = reconstruct_block_from_transactions_with_witness_resources(
-            Some(anchor_tx),
+            anchor_tx,
             vec![invalid_signature_tx],
             block_env(),
             &witness,

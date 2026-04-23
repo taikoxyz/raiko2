@@ -32,9 +32,25 @@ python scripts/regression/shasta_regression.py --config scripts/regression/confi
 
 ## Direct Proposal Check
 
-For a single known proposal, use `preflight` directly instead of starting the `raiko2` server or
-running discovery. The proposal tuple stays explicit, while RPC URLs and chain IDs come from the
-chain specs selected by `--l1-network` and `--network`:
+For a single L2 block, use the stress discovery helper to resolve the containing Shasta proposal
+tuple without submitting work to `raiko2`:
+
+```bash
+python scripts/regression/stress_shasta_proposal.py \
+  --network taiko_hoodi \
+  --l1-network hoodi \
+  --l2-block-range 7225500,7225501 \
+  --discover-only \
+  --proposal-out /tmp/proposal-7225500.discovery.json
+```
+
+The stress helper derives the default L1 RPC, L2 RPC, and Shasta inbox contract from
+`config/chain_spec_list_default.json`. Use `--l1-rpc`, `--l2-rpc`, `--event-contract`,
+`--abi-file`, and `--anchor-abi-file` only as overrides. Fork-specific ABI files live under
+`scripts/regression/shasta/`.
+
+Then run `preflight` directly against one discovered proposal. The proposal tuple stays explicit,
+while RPC URLs and chain IDs come from the chain specs selected by `--l1-network` and `--network`:
 
 ```bash
 cargo run -r -p preflight -- \

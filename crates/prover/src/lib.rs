@@ -40,8 +40,11 @@ pub use sp1::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
 
+#[cfg(any(feature = "risc0", feature = "boundless", test))]
 use alloy::sol_types::SolValue;
-use alloy_primitives::{B256, Bytes};
+#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
+use alloy_primitives::B256;
+use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
@@ -56,7 +59,6 @@ use risc0_zkvm::Receipt as Risc0Receipt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::sp1::sp1_image_id_words_from_uuid;
 /// Encoding helper for guest inputs.
 pub trait GuestInputCodec<I>: Send + Sync {
     /// # Errors
@@ -245,7 +247,7 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
         let Some(uuid) = proof.uuid.as_deref() else {
             continue;
         };
-        let words = sp1_image_id_words_from_uuid(uuid).map_err(|err| {
+        let words = shasta_image_id_words_from_uuid(uuid).map_err(|err| {
             RaikoError::InvalidRequestConfig(format!("proof {index} invalid uuid/image id: {err}"))
         })?;
         match image_id {
@@ -260,6 +262,33 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
     }
 
     Ok(image_id.unwrap_or([0; 8]))
+}
+
+fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
+    #[cfg(feature = "sp1")]
+    {
+        return crate::sp1::sp1_image_id_words_from_uuid(raw);
+    }
+
+    #[cfg(not(feature = "sp1"))]
+    {
+        let bytes =
+            alloy_primitives::hex::decode(raw).map_err(|err| format!("invalid hex uuid: {err}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "expected 32-byte hex image id, got {}",
+                bytes.len()
+            ));
+        }
+
+        let mut words = [0u32; 8];
+        for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+            let mut word = [0u8; 4];
+            word.copy_from_slice(chunk);
+            words[index] = u32::from_le_bytes(word);
+        }
+        Ok(words)
+    }
 }
 
 /// # Errors

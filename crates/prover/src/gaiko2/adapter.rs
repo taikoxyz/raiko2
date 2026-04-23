@@ -1,4 +1,4 @@
-use raiko2_primitives::{Proof, RaikoError, RaikoResult, StatelessInput};
+use raiko2_primitives::{Proof, RaikoError, RaikoResult, StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::{GuestInput, roll_proposal_ancestor_headers_in_place};
 
 use crate::gaiko2::protocol::{
@@ -69,12 +69,13 @@ pub fn build_shasta_aggregate_request(
 
 fn build_replay_block(
     mut stateless_input: StatelessInput,
-    ancestor_headers: &[raiko2_primitives::WitnessHeader],
+    ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[raiko2_primitives::WitnessStateNode],
 ) -> RaikoResult<Gaiko2ReplayBlock> {
     if stateless_input.witness.headers.is_empty() && !ancestor_headers.is_empty() {
         stateless_input.witness.headers = ancestor_headers.to_vec();
     }
+    stateless_input.witness.headers = gaiko2_witness_headers(&stateless_input.witness.headers);
 
     if stateless_input.witness.state.is_empty() && !stateless_input.witness.state_indices.is_empty()
     {
@@ -101,4 +102,14 @@ fn build_replay_block(
     }
 
     Ok(Gaiko2ReplayBlock::from(stateless_input))
+}
+
+fn gaiko2_witness_headers(ancestor_headers: &[WitnessHeader]) -> Vec<WitnessHeader> {
+    let mut headers = ancestor_headers.to_vec();
+    let compact_len = headers.len().saturating_sub(1);
+    // gaiko2 v1 treats the only full witness header as the replay parent.
+    for header in headers.iter_mut().take(compact_len) {
+        header.compact_in_place();
+    }
+    headers
 }

@@ -55,6 +55,38 @@ fn adapter_projects_guest_input_into_execution_packet() {
 }
 
 #[test]
+fn adapter_keeps_only_replay_parent_header_full() {
+    let mut input = fixture_guest_input();
+    input.proposal_ancestor_headers.insert(
+        0,
+        WitnessHeader::from_compact_header(&Header {
+            number: 40,
+            parent_hash: B256::from([0x55; 32]),
+            timestamp: 0,
+            gas_limit: 30_000_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut next_witness = StatelessInput::default();
+    next_witness.block.header.number = 43;
+    next_witness.chain_spec.chain_id = 167_013;
+    input.witnesses.push(next_witness);
+
+    let packet = build_shasta_packet(&input).expect("build packet");
+    let first_headers = &packet.payload.blocks[0].witness.headers;
+    let second_headers = &packet.payload.blocks[1].witness.headers;
+
+    assert_eq!(first_headers.len(), 2);
+    assert!(first_headers[0].full_header().is_none());
+    assert!(first_headers[1].full_header().is_some());
+    assert_eq!(second_headers.len(), 3);
+    assert!(second_headers[0].full_header().is_none());
+    assert!(second_headers[1].full_header().is_none());
+    assert!(second_headers[2].full_header().is_some());
+}
+
+#[test]
 fn adapter_rejects_guest_input_without_witnesses() {
     let err = build_shasta_packet(&GuestInput::default()).expect_err("reject empty witness list");
     assert!(

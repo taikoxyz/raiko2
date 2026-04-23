@@ -91,15 +91,22 @@ kubectl -n tolba-raiko2-host get pod <pod-name> -o jsonpath='{.status.containerS
 
 ## 8. Passive Smoke
 
+Internal-only: set the base URL from your **internal runbook** (never commit live addresses here).
+Typical access is `kubectl port-forward` into the cluster or another private path—see infra docs.
+
 ```bash
-curl -sf http://34.87.10.238:8080/ready
-curl -sf http://34.87.10.238:8080/metrics | head -n 30
+export RAIKO2_SMOKE_BASE_URL='http://<internal-smoke-host>:<internal-smoke-port>'
+```
+
+```bash
+curl -sf "${RAIKO2_SMOKE_BASE_URL}/ready"
+curl -sf "${RAIKO2_SMOKE_BASE_URL}/metrics" | head -n 30
 ```
 
 Optional metric-family check:
 
 ```bash
-curl -sf http://34.87.10.238:8080/metrics | rg 'raiko2_request_registrations_total|raiko2_stage_task_duration_seconds|raiko2_stage_tasks_inflight|raiko2_external_submission_total'
+curl -sf "${RAIKO2_SMOKE_BASE_URL}/metrics" | rg 'raiko2_request_registrations_total|raiko2_stage_task_duration_seconds|raiko2_stage_tasks_inflight|raiko2_external_submission_total'
 ```
 
 If the optional metric-family check is empty but `/metrics` itself is reachable, explain that the

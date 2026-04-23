@@ -35,15 +35,23 @@ This skill currently supports one production profile only.
 
 ### Passive Smoke Target
 
-- Base URL: `http://34.87.10.238:8080`
-- Readiness URL: `http://34.87.10.238:8080/ready`
-- Metrics URL: `http://34.87.10.238:8080/metrics`
+Passive smoke hits `raiko2` over HTTP (`/ready`, `/metrics`). Treat this as an **internal-only**
+check: real hosts, ports, and any IPv4/IPv6 literals live **only** in your internal runbook—this
+repo keeps placeholders only (no public customer-facing DNS names here).
+
+- Base URL: `http://<internal-smoke-host>:<internal-smoke-port>`
+- Readiness URL: `http://<internal-smoke-host>:<internal-smoke-port>/ready`
+- Metrics URL: `http://<internal-smoke-host>:<internal-smoke-port>/metrics`
+
+When following `references/commands.md`, set `RAIKO2_SMOKE_BASE_URL` to the internal base URL from
+your runbook (often after `kubectl port-forward` or an equivalent private path).
 
 ### Operational Defaults
 
 - Build from the current worktree unless the user explicitly says otherwise.
 - Use digest-based rollout, not mutable tags.
-- Run `register-image` dry-run before `release-image`.
+- Run `register-image` dry-run **after** `release-image` succeeds (against the ELFs packaged into
+  that image build).
 - Default smoke depth is passive only.
 
 ### Non-Goals For This Version

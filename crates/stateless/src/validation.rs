@@ -171,9 +171,7 @@ pub struct FilteredBlockExecutionOutcome {
 }
 
 fn recovered_signer_or_zero(tx: &TransactionSigned) -> Address {
-    tx.clone()
-        .try_into_recovered()
-        .map_or(Address::ZERO, |recovered| recovered.signer())
+    tx.recover_signer().unwrap_or(Address::ZERO)
 }
 
 fn build_derived_block(

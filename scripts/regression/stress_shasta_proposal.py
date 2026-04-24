@@ -180,6 +180,7 @@ class BatchMonitor:
         l1_network: str = "hoodi",
         discover_only: bool = False,
         proposal_out: Optional[Path] = None,
+        api_key: Optional[str] = None,
     ):
         self.network = network
         self.l1_network = l1_network
@@ -206,6 +207,7 @@ class BatchMonitor:
         self.aggregate = aggregate
         self.discover_only = discover_only
         self.proposal_out = proposal_out
+        self.api_key = api_key
         self.discovered_proposals: list[Dict[str, Any]] = []
         # Initialize Shasta event decoder
         self.shasta_decoder = ShastaEventDecoder()
@@ -464,7 +466,18 @@ class BatchMonitor:
             block = await self.get_l2_block(l2_block_number)
             if block is None:
                 return None
-            
+
+            return self._parse_anchor_info_from_block(block, l2_block_number)
+        except Exception as e:
+            self.logger.error(f"Error parsing L2 block {l2_block_number}: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def _parse_anchor_info_from_block(
+        self, block: Dict[str, Any], l2_block_number: int
+    ) -> Optional[AnchorTxInfo]:
+        try:
             # Extract proposal_id from block extradata
             extradata = block.get("extraData", "0x")
             if not extradata or extradata == "0x":
@@ -605,10 +618,19 @@ class BatchMonitor:
         if l2_block_number in self.anchor_info_cache:
             return self.anchor_info_cache[l2_block_number]
 
-        anchor_info = await self.parse_l2_block_anchor_tx(l2_block_number)
-        if anchor_info is not None:
-            self.anchor_info_cache[l2_block_number] = anchor_info
+        block = await self.get_l2_block(l2_block_number)
+        if block is None:
+            return None
+
+        anchor_info = self._parse_anchor_info_from_block(block, l2_block_number)
+        self.anchor_info_cache[l2_block_number] = anchor_info
         return anchor_info
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return headers
 
     async def search_proposal_boundary_in_window(
         self,
@@ -1103,10 +1125,10 @@ class BatchMonitor:
 
     async def submit_to_raiko(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
-    ) -> Optional[str]:
+    ) -> None:
         """submit batch to Raiko"""
         try:
-            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+            headers = self._request_headers()
 
             proposal_data = {
                 "proposal_id": proposal_id,
@@ -1132,23 +1154,20 @@ class BatchMonitor:
                 self.logger.info(
                     f"Proposal {proposal_id} (L2 blocks {l2_block_numbers}) in L1 block {l1_inclusion_block} submitted to Raiko with response: {result}"
                 )
-                return None
             else:
                 self.logger.error(
                     f"Failed to submit proposal: {result.get('message', 'Unknown error')}"
                 )
-                return None
         except Exception as e:
             self.logger.error(f"Failed to submit to Raiko: {e}")
-            return None
     
-    async def submit_aggregate_to_raiko(self) -> Optional[str]:
+    async def submit_aggregate_to_raiko(self) -> None:
         """submit aggregate request to Raiko"""
         if len(self.pending_proposals) == 0:
-            return None
+            return
             
         try:
-            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+            headers = self._request_headers()
             
             # Use the collected proposals
             proposals_to_aggregate = self.pending_proposals.copy()
@@ -1179,22 +1198,19 @@ class BatchMonitor:
                     f"Aggregate request for proposals {proposal_ids} submitted to Raiko with response: {result}, "
                     f"current running aggregate requests: {self.aggregate_running_count}"
                 )
-                return None
             else:
                 self.logger.error(
                     f"Failed to submit aggregate request: {result.get('message', 'Unknown error')}"
                 )
-                return None
         except Exception as e:
             self.logger.error(f"Failed to submit aggregate to Raiko: {e}")
-            return None
 
     async def query_raiko_status(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
     ) -> RaikoResponse:
         """query Raiko status"""
         try:
-            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+            headers = self._request_headers()
             proposal_data = {
                 "proposal_id": proposal_id,
                 "l1_inclusion_block_number": l1_inclusion_block,
@@ -1225,7 +1241,7 @@ class BatchMonitor:
     async def query_aggregate_status(self, proposals: list[Dict[str, Any]]) -> RaikoResponse:
         """query aggregate request status"""
         try:
-            headers = {"x-api-key": "1", "Content-Type": "application/json"}
+            headers = self._request_headers()
             payload = self.generate_post_data(proposals, aggregate=True)
             response = requests.post(
                 f"{self.raiko_rpc}/v3/proof/batch/shasta",
@@ -1684,6 +1700,7 @@ class BatchMonitor:
             "l1_rpc": self.l1_rpc,
             "l2_rpc": self.l2_rpc,
             "raiko_rpc": self.raiko_rpc,
+            "has_api_key": bool(self.api_key),
             "l2_block_range": self.l2_block_range,
             "prove_type": self.prove_type,
             "block_running_ratio": self.block_running_ratio,
@@ -1763,6 +1780,12 @@ async def main():
         type=lambda x: parse_none_value(x, str),
         default="http://localhost:8080",
         help='Raiko RPC endpoint (use "none" for None value)',
+    )
+    parser.add_argument(
+        "--api-key",
+        type=lambda x: parse_none_value(x, str),
+        default=os.environ.get("RAIKO2_API_KEY"),
+        help='Optional x-api-key header value (defaults to RAIKO2_API_KEY when set)',
     )
 
     parser.add_argument(
@@ -1898,6 +1921,7 @@ async def main():
         l1_network=args.l1_network,
         discover_only=args.discover_only,
         proposal_out=args.proposal_out,
+        api_key=args.api_key,
     )
 
     await monitor.run()

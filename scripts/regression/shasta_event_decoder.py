@@ -9,8 +9,11 @@ the Shasta proposal information including the batch ID.
 """
 
 import struct
+import logging
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
+
+LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class InboxConfig:
@@ -363,7 +366,7 @@ class ShastaEventDecoder:
                 return None
             return int.from_bytes(data[0:6], byteorder="big")
         except Exception as e:
-            print(f"Error extracting batch ID: {e}")
+            LOGGER.debug("Error extracting batch ID: %s", e)
             return None
 
 def test_decoder():

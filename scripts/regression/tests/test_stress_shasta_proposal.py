@@ -138,6 +138,47 @@ class TestStressChainSpecResolution(unittest.TestCase):
         self.assertEqual(resolved.anchor_abi_file, "/tmp/Anchor.override.json")
 
 
+class TestBatchMonitorAnchorInfoCache(unittest.IsolatedAsyncioTestCase):
+    async def test_get_anchor_info_caches_negative_parse_results_after_fetch(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.anchor_info_cache = {}
+
+        calls = 0
+
+        async def get_l2_block(_block_number):
+            nonlocal calls
+            calls += 1
+            return {"extraData": "0x"}
+
+        monitor.get_l2_block = get_l2_block
+
+        self.assertIsNone(await monitor.get_anchor_info(11))
+        self.assertIsNone(await monitor.get_anchor_info(11))
+        self.assertEqual(calls, 1)
+        self.assertIn(11, monitor.anchor_info_cache)
+        self.assertIsNone(monitor.anchor_info_cache[11])
+
+    async def test_get_anchor_info_does_not_cache_missing_blocks(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.anchor_info_cache = {}
+
+        calls = 0
+
+        async def get_l2_block(_block_number):
+            nonlocal calls
+            calls += 1
+            return None
+
+        monitor.get_l2_block = get_l2_block
+
+        self.assertIsNone(await monitor.get_anchor_info(12))
+        self.assertIsNone(await monitor.get_anchor_info(12))
+        self.assertEqual(calls, 2)
+        self.assertNotIn(12, monitor.anchor_info_cache)
+
+
 class TestBatchMonitorRangeIteration(unittest.IsolatedAsyncioTestCase):
     async def test_get_next_batches_starts_from_range_start_when_state_is_uninitialized(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
@@ -167,6 +208,26 @@ class TestBatchMonitorRangeIteration(unittest.IsolatedAsyncioTestCase):
         result = await monitor.get_next_batches()
 
         self.assertEqual(result, (10, [42]))
+
+
+class TestBatchMonitorRequestHeaders(unittest.TestCase):
+    def test_request_headers_omits_api_key_when_unset(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.api_key = None
+
+        self.assertEqual(
+            monitor._request_headers(),
+            {"Content-Type": "application/json"},
+        )
+
+    def test_request_headers_includes_api_key_when_set(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.api_key = "secret"
+
+        self.assertEqual(
+            monitor._request_headers(),
+            {"Content-Type": "application/json", "x-api-key": "secret"},
+        )
 
 
 class TestStressDiscoveryOutput(unittest.TestCase):

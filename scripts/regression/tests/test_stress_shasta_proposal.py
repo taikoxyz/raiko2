@@ -97,6 +97,9 @@ class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
 
 class TestStressChainSpecResolution(unittest.TestCase):
     def test_resolves_hoodi_defaults_from_chain_specs(self):
+        specs = json.loads(DEFAULT_CHAIN_SPEC_LIST.read_text())
+        l1_spec = next(spec for spec in specs if spec["name"] == "hoodi")
+        l2_spec = next(spec for spec in specs if spec["name"] == "taiko_hoodi")
         resolved = resolve_monitor_config(
             chain_spec_list=DEFAULT_CHAIN_SPEC_LIST,
             network="taiko_hoodi",
@@ -108,13 +111,9 @@ class TestStressChainSpecResolution(unittest.TestCase):
             anchor_abi_file=None,
         )
 
-        self.assertEqual(
-            resolved.l1_rpc, "https://ethereum-hoodi-rpc.publicnode.com"
-        )
-        self.assertEqual(resolved.l2_rpc, "http://34.71.217.85:8545")
-        self.assertEqual(
-            resolved.event_contract, "0xeF4bB7A442Bd68150A3aa61A6a097B86b91700BF"
-        )
+        self.assertEqual(resolved.l1_rpc, l1_spec["rpc"])
+        self.assertEqual(resolved.l2_rpc, l2_spec["rpc"])
+        self.assertEqual(resolved.event_contract, l2_spec["l1_contract"]["SHASTA"])
         self.assertEqual(Path(resolved.abi_file), DEFAULT_SHASTA_IINBOX_ABI)
         self.assertEqual(Path(resolved.anchor_abi_file), DEFAULT_SHASTA_ANCHOR_ABI)
 

@@ -406,6 +406,10 @@ mod tests {
     fn resolves_networks_from_chain_specs() {
         let args = args_fixture();
         let specs = SupportedChainSpecs::default();
+        let expected_l1 = specs.get_chain_spec("hoodi").expect("hoodi spec");
+        let expected_l2 = specs
+            .get_chain_spec("taiko_hoodi")
+            .expect("taiko_hoodi spec");
 
         let resolved = resolve_preflight_config(&args, &specs).expect("resolve");
 
@@ -413,11 +417,8 @@ mod tests {
         assert_eq!(resolved.l2_chain_id, 167_013);
         assert_eq!(resolved.l1_chain_spec.name, "hoodi");
         assert_eq!(resolved.l2_chain_spec.name, "taiko_hoodi");
-        assert_eq!(
-            resolved.l1_rpc_url,
-            "https://ethereum-hoodi-rpc.publicnode.com"
-        );
-        assert_eq!(resolved.l2_rpc_url, "http://34.71.217.85:8545");
+        assert_eq!(resolved.l1_rpc_url, expected_l1.rpc);
+        assert_eq!(resolved.l2_rpc_url, expected_l2.rpc);
     }
 
     #[test]

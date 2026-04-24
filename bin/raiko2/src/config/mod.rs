@@ -445,7 +445,7 @@ port = 9090
 
 [rpc]
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "http://34.71.217.85:8545" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi.example.test", l2_rpc = "http://taiko-hoodi.example.test:8545" },
 ]
 
 [prover]
@@ -488,7 +488,7 @@ port = 9090
 
 [rpc]
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545" },
 ]
 
 [rpc.client]
@@ -513,10 +513,10 @@ maintenance_interval_ms = 200
             .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
-        assert_eq!(pair.l1_rpc, "http://34.46.244.179:8545");
-        assert_eq!(pair.l2_rpc, "http://34.172.70.130:8545");
+        assert_eq!(pair.l1_rpc, "http://hoodi.example.test:8545");
+        assert_eq!(pair.l2_rpc, "http://taiko-hoodi.example.test:8545");
         assert_eq!(pair.l2_provider, L2ProviderKind::Reth);
-        assert_eq!(pair.l2_witness_rpc, "http://34.172.70.130:8545");
+        assert_eq!(pair.l2_witness_rpc, "http://taiko-hoodi.example.test:8545");
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);
@@ -533,7 +533,7 @@ port = 8080
 
 [rpc]
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545", l2_provider = "geth" },
 ]
 
 [prover]

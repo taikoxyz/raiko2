@@ -558,6 +558,36 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
 }
 
 #[tokio::test]
+async fn e2e_shasta_request_rejects_partial_network_pair() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "native",
+            "network": "taiko_dev"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(
+        res["message"],
+        "network and l1_network must be provided together"
+    );
+}
+
+#[tokio::test]
 async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
     let config = base_config();
     let engine = native_fixture_engine();
@@ -1002,6 +1032,44 @@ async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
     assert_eq!(res["proof_type"], "native");
     assert_eq!(res["data"]["status"], "zk_any_not_drawn");
     assert!(res["data"].get("task_id").is_none(), "{res}");
+}
+
+#[tokio::test]
+async fn e2e_zk_any_still_validates_request_when_not_drawn() {
+    let mut config = base_config();
+    config.prover.zk_any = Default::default();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaNative,
+        engine,
+    );
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(
+        res["message"],
+        "proposal.l2_block_numbers must not be empty"
+    );
 }
 
 #[tokio::test]
@@ -2089,6 +2157,111 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .expect("read runtime task")
         .expect("runtime task exists");
     assert_eq!(runtime_task.runner_status, RunnerStatus::Allocated);
+}
+
+#[tokio::test]
+async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaNative,
+        engine,
+    );
+    let app = app::build_router(state.clone());
+
+    let proposal_request = ProposalTaskRequest {
+        proposal_id: 3,
+        l2_block_range: None,
+        l1_inclusion_block_number: 1,
+        last_anchor_block_number: 0,
+        checkpoint: None,
+        blob_proof_type: None,
+        prover: None,
+        graffiti: None,
+        prover_config: Default::default(),
+    };
+    let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+        pipeline: PipelineKey::ShastaNative,
+        request: proposal_request.clone(),
+        stage: ProposalStage::Prove,
+    });
+    let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
+    let metadata = HoodiTaskMetadata {
+        network_pair: "taiko_dev/ethereum".to_string(),
+        network: "taiko_dev".to_string(),
+        l1_network: "ethereum".to_string(),
+        proof_type: raiko2_primitives::ProofType::Native,
+        execution_mode: None,
+        aggregate_requested: false,
+        proposals: vec![HoodiProposalTask {
+            proposal_id: 3,
+            checkpoint: None,
+            l1_inclusion_block_number: 1,
+            l2_block_numbers: vec![3],
+            last_anchor_block_number: 0,
+            task_id: encoded_task_id.clone(),
+            request: Some(proposal_request),
+        }],
+        aggregate_task_id: None,
+        aggregate_request: None,
+        runtime: HoodiRuntimeMetadata {
+            last_event: Some("completed".to_string()),
+            ..Default::default()
+        },
+    };
+
+    state
+        .runtime
+        .register_task(TaskRegistration {
+            task_id: "task_persisted_proof".to_string(),
+            route: "native/local"
+                .parse::<PipelineRoute>()
+                .expect("parse route"),
+            task_kind: "hoodi_batch".to_string(),
+            proposal_id: Some(3),
+            proof_ids: vec![encoded_task_id],
+            metadata: serde_json::to_value(metadata).expect("serialize metadata"),
+            request_fingerprint: None,
+        })
+        .await
+        .expect("register task");
+
+    let mut record = state
+        .runtime
+        .get_task("task_persisted_proof")
+        .await
+        .expect("read task")
+        .expect("task exists");
+    let proof_path = std::path::Path::new(&record.task_dir).join("proof.json");
+    tokio::fs::write(
+        &proof_path,
+        serde_json::to_vec(&raiko2_primitives::Proof {
+            proof: Some("0xpersisted-proof".to_string()),
+            ..Default::default()
+        })
+        .expect("serialize proof"),
+    )
+    .await
+    .expect("write proof");
+    record.runner_status = RunnerStatus::Completed;
+    record.proof_path = Some(proof_path.display().to_string());
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let (status, res) = get_json(&app, "/v3/tasks/task_persisted_proof").await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["proof"], "0xpersisted-proof");
+
+    let (status, list) = get_json(&app, "/v3/proof/list").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list.as_array().expect("proof list").len(), 1);
+    assert_eq!(list[0]["proof"], "0xpersisted-proof");
 }
 
 #[tokio::test]

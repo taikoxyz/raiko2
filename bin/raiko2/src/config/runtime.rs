@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 /// Runtime workspace configuration owned by the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub root: PathBuf,
     #[serde(default = "default_inactive_ttl_secs")]

@@ -11,6 +11,7 @@ use raiko2_engine::{
 };
 use raiko2_pipeline::PipelineKey;
 use raiko2_primitives::{L2BlockRange, ProofType};
+use raiko2_primitives_shasta::instance::SHASTA_PROPOSAL_ID_MAX;
 use raiko2_prover::sp1::{
     ExecutionMode as Sp1ExecutionMode, Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
 };
@@ -20,6 +21,7 @@ use raiko2_runtime::{
 };
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::fs;
 use tracing::info;
 
 use super::super::errors::ApiError;
@@ -332,6 +334,11 @@ fn build_canonical_batch_submission(
         &pair,
         validate_public_prover_args(req.proof_type, &req.prover_args)?,
     );
+    let proposals = req
+        .proposals
+        .iter()
+        .map(canonicalize_proposal)
+        .collect::<Result<Vec<_>, _>>()?;
     let selected_proof_type = match decide_batch_proof_type(state, &req)? {
         BatchProofDecision::Selected(proof_type) => proof_type,
         BatchProofDecision::NotDrawn => return Ok(None),
@@ -345,11 +352,6 @@ fn build_canonical_batch_submission(
         &requested_prover_config,
     )?;
 
-    let proposals = req
-        .proposals
-        .iter()
-        .map(canonicalize_proposal)
-        .collect::<Result<Vec<_>, _>>()?;
     let execution_mode = requested_prover_config
         .sp1
         .as_ref()
@@ -519,6 +521,7 @@ fn validate_hosted_sp1_posture(
 }
 
 fn canonicalize_proposal(proposal: &ShastaProposal) -> Result<CanonicalProposal, ApiError> {
+    validate_shasta_proposal_id("proposal.proposal_id", proposal.proposal_id)?;
     Ok(CanonicalProposal {
         proposal_id: proposal.proposal_id,
         checkpoint: proposal.checkpoint,
@@ -537,6 +540,18 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
     }
     if req.proofs.is_empty() {
         return Err(ApiError::bad_request("proofs must not be empty"));
+    }
+    for proposal_id in &req.aggregation_ids {
+        validate_shasta_proposal_id("aggregation_ids[]", *proposal_id)?;
+    }
+    Ok(())
+}
+
+fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
+    if proposal_id > SHASTA_PROPOSAL_ID_MAX {
+        return Err(ApiError::bad_request(format!(
+            "{field} does not fit in uint48: {proposal_id}"
+        )));
     }
     Ok(())
 }
@@ -1042,6 +1057,13 @@ async fn load_task_data_from_lookup(
         lookup.metadata.has_runtime_progress(),
         lookup.record.error.as_deref(),
     );
+    let root_proof = root_state.proof;
+    let root_proof = if root_proof.is_none() && matches!(root_state.status, ProofStatus::Completed)
+    {
+        load_persisted_root_proof(&lookup.record).await?
+    } else {
+        root_proof
+    };
 
     Ok(HoodiTaskData {
         task_id: id.to_string(),
@@ -1054,9 +1076,23 @@ async fn load_task_data_from_lookup(
         current_index: root_state.current_index,
         proposals,
         aggregate,
-        proof: root_state.proof,
+        proof: root_proof,
         error: root_state.error,
     })
+}
+
+async fn load_persisted_root_proof(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<Option<String>, ApiError> {
+    let Some(path) = record.proof_path.as_deref() else {
+        return Ok(None);
+    };
+    let bytes = fs::read(path)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to read proof file {path}: {err}")))?;
+    let proof: raiko2_primitives::Proof = serde_json::from_slice(&bytes)
+        .map_err(|err| ApiError::internal(format!("failed to parse proof file {path}: {err}")))?;
+    Ok(proof.proof)
 }
 
 async fn load_all_task_data(state: &AppState) -> Result<Vec<HoodiTaskData>, ApiError> {
@@ -1426,12 +1462,20 @@ fn resolved_pair(
     network: Option<&str>,
     l1_network: Option<&str>,
 ) -> Result<ResolvedNetworkPair, ApiError> {
-    if let (Some(network), Some(l1_network)) = (network, l1_network) {
-        return state
-            .config
-            .rpc
-            .resolve_pair(network, l1_network)
-            .map_err(|err| ApiError::bad_request(err.to_string()));
+    match (network, l1_network) {
+        (Some(network), Some(l1_network)) => {
+            return state
+                .config
+                .rpc
+                .resolve_pair(network, l1_network)
+                .map_err(|err| ApiError::bad_request(err.to_string()));
+        }
+        (None, None) => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "network and l1_network must be provided together",
+            ));
+        }
     }
 
     let resolved_pairs = state
@@ -1439,22 +1483,10 @@ fn resolved_pair(
         .rpc
         .resolved_pairs()
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let default_pair = resolved_pairs
-        .first()
-        .ok_or_else(|| ApiError::internal("rpc.pairs must contain at least one network pair"))?;
-    let default_network = default_pair.network.clone();
-    let default_l1_network = default_pair.l1_network.clone();
-    let network = network.unwrap_or(default_network.as_str());
-    let l1_network = l1_network.unwrap_or(default_l1_network.as_str());
-
     resolved_pairs
-        .into_iter()
-        .find(|pair| pair.network == network && pair.l1_network == l1_network)
-        .ok_or_else(|| {
-            ApiError::bad_request(format!(
-                "unsupported network pair: network={network}, l1_network={l1_network}"
-            ))
-        })
+        .first()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("rpc.pairs must contain at least one network pair"))
 }
 
 fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, ApiError> {
@@ -1761,6 +1793,25 @@ mod tests {
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
         assert_eq!(single.proposals[0].task_id, aggregate.proposals[0].task_id);
+    }
+
+    #[test]
+    fn canonicalize_proposal_rejects_uint48_overflow() {
+        let err = canonicalize_proposal(&ShastaProposal {
+            proposal_id: SHASTA_PROPOSAL_ID_MAX + 1,
+            checkpoint: None,
+            l1_inclusion_block_number: 1,
+            l2_block_numbers: vec![1],
+            last_anchor_block_number: 0,
+        })
+        .expect_err("proposal id overflow must fail");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("uint48"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[tokio::test]

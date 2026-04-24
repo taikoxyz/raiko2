@@ -123,7 +123,14 @@ pub(crate) async fn cancel_registered_tasks(
     let mut errors = Vec::new();
 
     for proposal in &metadata.proposals {
-        if has_other_live_task_reference(runtime, public_task_id, &proposal.task_id).await? {
+        if has_other_live_task_reference(
+            runtime,
+            public_task_id,
+            &proposal.task_id,
+            &metadata.network_pair,
+        )
+        .await?
+        {
             continue;
         }
         let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
@@ -139,7 +146,8 @@ pub(crate) async fn cancel_registered_tasks(
     }
 
     if let Some(task_id) = &metadata.aggregate_task_id
-        && !has_other_live_task_reference(runtime, public_task_id, task_id).await?
+        && !has_other_live_task_reference(runtime, public_task_id, task_id, &metadata.network_pair)
+            .await?
     {
         let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) else {
             return if errors.is_empty() {
@@ -172,6 +180,7 @@ pub(crate) async fn has_other_task_reference(
     runtime: &RuntimeManager,
     public_task_id: &str,
     engine_task_id: &str,
+    network_pair: &str,
 ) -> Result<bool> {
     let records = runtime
         .find_tasks_by_task_ref(engine_task_id)
@@ -179,15 +188,19 @@ pub(crate) async fn has_other_task_reference(
         .with_context(|| {
             format!("failed to inspect runtime task references for {engine_task_id}")
         })?;
-    Ok(records
-        .into_iter()
-        .any(|record| record.task_id != public_task_id))
+    for record in records {
+        if record.task_id != public_task_id && record_matches_network_pair(&record, network_pair)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn has_other_live_task_reference(
     runtime: &RuntimeManager,
     public_task_id: &str,
     engine_task_id: &str,
+    network_pair: &str,
 ) -> Result<bool> {
     let records = runtime
         .find_tasks_by_task_ref(engine_task_id)
@@ -195,13 +208,18 @@ pub(crate) async fn has_other_live_task_reference(
         .with_context(|| {
             format!("failed to inspect runtime task references for {engine_task_id}")
         })?;
-    Ok(records.into_iter().any(|record| {
-        record.task_id != public_task_id
+    for record in records {
+        if record.task_id != public_task_id
             && matches!(
                 record.runner_status,
                 RunnerStatus::Allocated | RunnerStatus::Running
             )
-    }))
+            && record_matches_network_pair(&record, network_pair)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) async fn remove_task_children(
@@ -253,7 +271,14 @@ pub(crate) async fn remove_task_children_if_unreferenced(
             continue;
         };
         let stage_task_ids = proposal_task_chain_ids(&task_id);
-        if has_other_task_reference(runtime, public_task_id, &proposal.task_id).await? {
+        if has_other_task_reference(
+            runtime,
+            public_task_id,
+            &proposal.task_id,
+            &metadata.network_pair,
+        )
+        .await?
+        {
             outcome.skipped_shared_children += stage_task_ids.len();
             continue;
         }
@@ -266,7 +291,9 @@ pub(crate) async fn remove_task_children_if_unreferenced(
     }
 
     if let Some(task_id) = &metadata.aggregate_task_id {
-        if has_other_task_reference(runtime, public_task_id, task_id).await? {
+        if has_other_task_reference(runtime, public_task_id, task_id, &metadata.network_pair)
+            .await?
+        {
             outcome.skipped_shared_children += 1;
         } else if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
             engine
@@ -277,6 +304,12 @@ pub(crate) async fn remove_task_children_if_unreferenced(
     }
 
     Ok(outcome)
+}
+
+fn record_matches_network_pair(record: &RuntimeTaskRecord, network_pair: &str) -> Result<bool> {
+    let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        .context("failed to parse referenced task metadata")?;
+    Ok(metadata.network_pair == network_pair)
 }
 
 pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
@@ -668,6 +701,44 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn cancel_registered_tasks_does_not_treat_other_pair_as_shared_child() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "cancel-cross-pair",
+        ))?);
+        let engine = Arc::new(MockEngine::default());
+        let engine_handle: Arc<dyn EngineHandle> = engine.clone();
+        let proposal_task_id = encoded_proposal_task_id(5)?;
+
+        register_runtime_task_with_pair(
+            runtime.as_ref(),
+            "other-pair-root",
+            &proposal_task_id,
+            RunnerStatus::Running,
+            now_ts(),
+            "taiko_alt/ethereum",
+        )
+        .await?;
+
+        cancel_registered_tasks(
+            runtime.as_ref(),
+            &engine_handle,
+            "current-root",
+            PipelineKey::ShastaRisc0,
+            &metadata_for_task_with_pair(&proposal_task_id, "taiko_dev/ethereum"),
+        )
+        .await?;
+
+        let prove_task_id =
+            decode_task_id::<EngineTaskKey>(&proposal_task_id).expect("decode prove task id");
+        let expected = proposal_task_chain_ids(&prove_task_id)
+            .into_iter()
+            .map(|task_id| encode_task_id(&task_id).expect("encode stage task id"))
+            .collect::<Vec<_>>();
+        assert_eq!(engine.cancelled(), expected);
+        Ok(())
+    }
+
     fn build_factory(engine: Arc<dyn EngineHandle>) -> StaticPipelineFactory {
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaRisc0, engine);
@@ -681,6 +752,25 @@ mod tests {
         status: RunnerStatus,
         updated_at: i64,
     ) -> Result<()> {
+        register_runtime_task_with_pair(
+            runtime,
+            task_id,
+            proposal_task_id,
+            status,
+            updated_at,
+            "taiko_dev/ethereum",
+        )
+        .await
+    }
+
+    async fn register_runtime_task_with_pair(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        proposal_task_id: &str,
+        status: RunnerStatus,
+        updated_at: i64,
+        network_pair: &str,
+    ) -> Result<()> {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
@@ -688,7 +778,10 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(1),
                 proof_ids: vec![proposal_task_id.to_string()],
-                metadata: serde_json::to_value(metadata_for_task(proposal_task_id))?,
+                metadata: serde_json::to_value(metadata_for_task_with_pair(
+                    proposal_task_id,
+                    network_pair,
+                ))?,
                 request_fingerprint: None,
             })
             .await?;
@@ -700,6 +793,13 @@ mod tests {
     }
 
     fn metadata_for_task(proposal_task_id: &str) -> HoodiTaskMetadata {
+        metadata_for_task_with_pair(proposal_task_id, "taiko_dev/ethereum")
+    }
+
+    fn metadata_for_task_with_pair(
+        proposal_task_id: &str,
+        network_pair: &str,
+    ) -> HoodiTaskMetadata {
         let request = match decode_task_id::<EngineTaskKey>(proposal_task_id)
             .expect("decode proposal task id")
             .0
@@ -707,10 +807,13 @@ mod tests {
             EngineTaskKey::Proposal { request, .. } => request,
             EngineTaskKey::Aggregate { .. } => unreachable!("expected proposal task id"),
         };
+        let (network, l1_network) = network_pair
+            .split_once('/')
+            .unwrap_or((network_pair, "ethereum"));
         HoodiTaskMetadata {
-            network_pair: "taiko_dev/ethereum".to_string(),
-            network: "taiko_dev".to_string(),
-            l1_network: "ethereum".to_string(),
+            network_pair: network_pair.to_string(),
+            network: network.to_string(),
+            l1_network: l1_network.to_string(),
             proof_type: ProofType::Risc0,
             execution_mode: None,
             aggregate_requested: false,

@@ -3,24 +3,29 @@
 use alloy_primitives::keccak256;
 use num_bigint::BigUint;
 use revm_precompile::{install_crypto, Crypto, PrecompileError};
-use sp1_curves::{weierstrass::bn254::Bn254, AffinePoint};
+use sp1_curves::{
+    params::FieldParameters,
+    weierstrass::{
+        bn254::{Bn254, Bn254BaseField, Bn254Parameters},
+        WeierstrassParameters,
+    },
+    AffinePoint,
+};
 
 #[derive(Debug)]
 pub struct Sp1GuestCrypto;
 
 impl Crypto for Sp1GuestCrypto {
     fn bn254_g1_add(&self, p1: &[u8], p2: &[u8]) -> Result<[u8; 64], PrecompileError> {
-        let mut point = be_bytes_to_point(p1)?;
+        let point = be_bytes_to_point(p1)?;
         let other = be_bytes_to_point(p2)?;
-        point = point + other;
-        point_to_be_bytes(point)
+        point_to_be_bytes(g1_add(&point, &other))
     }
 
     fn bn254_g1_mul(&self, point: &[u8], scalar: &[u8]) -> Result<[u8; 64], PrecompileError> {
-        let mut point = be_bytes_to_point(point)?;
-        let scalar = BigUint::from_bytes_le(scalar);
-        point = point.sw_scalar_mul(&scalar);
-        point_to_be_bytes(point)
+        let point = be_bytes_to_point(point)?;
+        let scalar = BigUint::from_bytes_be(scalar) % Bn254Parameters::prime_group_order();
+        point_to_be_bytes(g1_mul(&point, &scalar))
     }
 
     fn sha256(&self, input: &[u8]) -> [u8; 32] {
@@ -56,17 +61,41 @@ impl Crypto for Sp1GuestCrypto {
     }
 }
 
-fn be_bytes_to_point(input: &[u8]) -> Result<AffinePoint<Bn254>, PrecompileError> {
+#[derive(Clone, Debug)]
+enum Bn254G1 {
+    Infinity,
+    Affine(AffinePoint<Bn254>),
+}
+
+fn be_bytes_to_point(input: &[u8]) -> Result<Bn254G1, PrecompileError> {
     if input.len() != 64 {
         return Err(PrecompileError::Bn254AffineGFailedToCreate);
     }
 
     let x = BigUint::from_bytes_be(&input[..32]);
     let y = BigUint::from_bytes_be(&input[32..]);
-    Ok(AffinePoint::<Bn254>::new(x, y))
+    if x == BigUint::default() && y == BigUint::default() {
+        return Ok(Bn254G1::Infinity);
+    }
+
+    let modulus = Bn254BaseField::modulus();
+    if x >= modulus || y >= modulus {
+        return Err(PrecompileError::Bn254FieldPointNotAMember);
+    }
+
+    let point = AffinePoint::<Bn254>::new(x, y);
+    if !is_on_bn254_g1(&point) {
+        return Err(PrecompileError::Bn254AffineGFailedToCreate);
+    }
+
+    Ok(Bn254G1::Affine(point))
 }
 
-fn point_to_be_bytes(point: AffinePoint<Bn254>) -> Result<[u8; 64], PrecompileError> {
+fn point_to_be_bytes(point: Bn254G1) -> Result<[u8; 64], PrecompileError> {
+    let Bn254G1::Affine(point) = point else {
+        return Ok([0u8; 64]);
+    };
+
     let x_bytes = point.x.to_bytes_be();
     let y_bytes = point.y.to_bytes_be();
     if x_bytes.len() > 32 || y_bytes.len() > 32 {
@@ -84,6 +113,95 @@ fn point_to_be_bytes(point: AffinePoint<Bn254>) -> Result<[u8; 64], PrecompileEr
         .expect("fixed-size point bytes"))
 }
 
+fn is_on_bn254_g1(point: &AffinePoint<Bn254>) -> bool {
+    let modulus = Bn254BaseField::modulus();
+    let y_squared = (&point.y * &point.y) % &modulus;
+    let x_squared = (&point.x * &point.x) % &modulus;
+    let x_cubed = (&x_squared * &point.x) % &modulus;
+    let rhs = (x_cubed + Bn254Parameters::b_int()) % &modulus;
+    y_squared == rhs
+}
+
+fn g1_add(left: &Bn254G1, right: &Bn254G1) -> Bn254G1 {
+    match (left, right) {
+        (Bn254G1::Infinity, _) => right.clone(),
+        (_, Bn254G1::Infinity) => left.clone(),
+        (Bn254G1::Affine(left), Bn254G1::Affine(right)) => add_affine_points(left, right),
+    }
+}
+
+fn add_affine_points(left: &AffinePoint<Bn254>, right: &AffinePoint<Bn254>) -> Bn254G1 {
+    let modulus = Bn254BaseField::modulus();
+    if left.x == right.x {
+        if (&left.y + &right.y) % &modulus == BigUint::default() {
+            return Bn254G1::Infinity;
+        }
+
+        return double_affine_point(left);
+    }
+
+    let numerator = mod_sub(&right.y, &left.y, &modulus);
+    let denominator = mod_sub(&right.x, &left.x, &modulus);
+    let slope = (&numerator * mod_inverse(&denominator, &modulus)) % &modulus;
+    let x = mod_sub(
+        &mod_sub(&(&slope * &slope), &left.x, &modulus),
+        &right.x,
+        &modulus,
+    );
+    let y = mod_sub(&(&slope * mod_sub(&left.x, &x, &modulus)), &left.y, &modulus);
+
+    Bn254G1::Affine(AffinePoint::<Bn254>::new(x, y))
+}
+
+fn double_affine_point(point: &AffinePoint<Bn254>) -> Bn254G1 {
+    let modulus = Bn254BaseField::modulus();
+    if point.y == BigUint::default() {
+        return Bn254G1::Infinity;
+    }
+
+    let numerator = (BigUint::from(3u8) * &point.x * &point.x) % &modulus;
+    let denominator = (BigUint::from(2u8) * &point.y) % &modulus;
+    let slope = (numerator * mod_inverse(&denominator, &modulus)) % &modulus;
+    let x = mod_sub(
+        &mod_sub(&(&slope * &slope), &point.x, &modulus),
+        &point.x,
+        &modulus,
+    );
+    let y = mod_sub(&(&slope * mod_sub(&point.x, &x, &modulus)), &point.y, &modulus);
+
+    Bn254G1::Affine(AffinePoint::<Bn254>::new(x, y))
+}
+
+fn g1_mul(point: &Bn254G1, scalar: &BigUint) -> Bn254G1 {
+    if *scalar == BigUint::default() || matches!(point, Bn254G1::Infinity) {
+        return Bn254G1::Infinity;
+    }
+
+    let mut result = Bn254G1::Infinity;
+    let mut addend = point.clone();
+    for bit in 0..scalar.bits() {
+        if scalar.bit(bit) {
+            result = g1_add(&result, &addend);
+        }
+        addend = g1_add(&addend, &addend);
+    }
+    result
+}
+
+fn mod_inverse(value: &BigUint, modulus: &BigUint) -> BigUint {
+    value.modpow(&(modulus - BigUint::from(2u8)), modulus)
+}
+
+fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
+    let left = left % modulus;
+    let right = right % modulus;
+    if left >= right {
+        left - right
+    } else {
+        modulus - (right - left)
+    }
+}
+
 pub fn install_guest_crypto() {
     let _ = install_crypto(Sp1GuestCrypto);
 }
@@ -91,6 +209,7 @@ pub fn install_guest_crypto() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::hex;
     use revm_precompile::crypto;
 
     #[test]
@@ -135,7 +254,44 @@ mod tests {
             0x0d, 0xa3, 0xf7, 0x4c, 0x9a, 0x17, 0xdf, 0x36, 0x17, 0x06, 0xa4, 0x48, 0x5c, 0x74,
             0x2b, 0xd6, 0x78, 0x84, 0x78, 0xfa, 0x17, 0xd7,
         ];
-        assert!(crypto().bn254_g1_add(&p1, &p2).is_ok());
+        let expected_add = hex!(
+            "2243525c5efd4b9c3d3c45ac0ca3fe4dd85e830a4ce6b65fa1eeaee202839703\
+             301d1d33be6da8e509df21cc35964723180eed7532537db9ae5e7d48f195c915"
+        );
+        assert_eq!(crypto().bn254_g1_add(&p1, &p2).unwrap(), expected_add);
         assert!(crypto().bn254_g1_mul(&p1, &[1]).is_ok());
+        assert_eq!(crypto().bn254_g1_add(&p1, &[0u8; 64]).unwrap(), p1);
+        assert_eq!(
+            crypto().bn254_g1_add(&[0u8; 64], &[0u8; 64]).unwrap(),
+            [0u8; 64]
+        );
+        assert_eq!(
+            crypto().bn254_g1_mul(&p1, &[0u8; 32]).unwrap(),
+            [0u8; 64]
+        );
+        assert_eq!(
+            crypto().bn254_g1_mul(&[0u8; 64], &[2]).unwrap(),
+            [0u8; 64]
+        );
+        assert_eq!(
+            crypto().bn254_g1_add(&[0x11u8; 64], &[0u8; 64]),
+            Err(PrecompileError::Bn254AffineGFailedToCreate)
+        );
+        assert_eq!(
+            crypto().bn254_g1_add(&[0xffu8; 64], &[0u8; 64]),
+            Err(PrecompileError::Bn254FieldPointNotAMember)
+        );
+
+        let doubled = crypto()
+            .bn254_g1_add(&p1, &p1)
+            .expect("point addition should succeed");
+        let mut scalar_two = [0u8; 32];
+        scalar_two[31] = 2;
+        assert_eq!(
+            crypto()
+                .bn254_g1_mul(&p1, &scalar_two)
+                .expect("point multiplication should succeed"),
+            doubled
+        );
     }
 }

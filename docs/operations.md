@@ -29,7 +29,9 @@ CLI flags and explicitly supported environment variables override values loaded 
 `--l1-rpc` and `--l2-rpc` remain available as overrides, but they only apply when the config
 defines exactly one `rpc.pairs` entry.
 
-When `--l2-rpc` overrides a single configured pair, it also overrides `rpc.pairs[*].l2_witness_rpc`.
+When `--l2-rpc` overrides a single configured pair, it updates only `rpc.pairs[*].l2_rpc`.
+Configured `rpc.pairs[*].l2_witness_rpc` values are preserved; unset witness RPCs continue to
+fall back to the effective `l2_rpc`.
 
 ## Docker Compose
 

@@ -12,6 +12,8 @@ use raiko2_protocol_shasta::libhash::{hash_commitment, hash_public_input, hash_t
 use raiko2_protocol_shasta::shasta::{Commitment, ProofCarryData, Transition};
 use serde::{Deserialize, Serialize};
 
+pub const SHASTA_PROPOSAL_ID_MAX: u64 = (1_u64 << 48) - 1;
+
 #[must_use]
 pub fn words_to_bytes_le(words: &[u32; 8]) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -50,6 +52,13 @@ pub(crate) fn validate_shasta_proof_carry_data_vec(
         return false;
     };
 
+    if !proof_carry_data_vec
+        .iter()
+        .all(|item| item.transition_input.proposal_id <= SHASTA_PROPOSAL_ID_MAX)
+    {
+        return false;
+    }
+
     let expected_actual_prover = first.transition_input.actual_prover;
     if !proof_carry_data_vec
         .iter()
@@ -62,7 +71,12 @@ pub(crate) fn validate_shasta_proof_carry_data_vec(
         let prev = &w[0];
         let next = &w[1];
         // Ensure proposal ids are sequential
-        if prev.transition_input.proposal_id + 1 != next.transition_input.proposal_id {
+        if prev
+            .transition_input
+            .proposal_id
+            .checked_add(1)
+            .is_none_or(|expected| expected != next.transition_input.proposal_id)
+        {
             return false;
         }
 
@@ -323,6 +337,24 @@ mod tests {
     fn validate_shasta_proof_carry_data_vec_rejects_non_sequential_ids() {
         let mut proof_carry_data_vec = sample_carry_sequence();
         proof_carry_data_vec[1].transition_input.proposal_id += 1;
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_wrapping_ids() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[0].transition_input.proposal_id = u64::MAX;
+        proof_carry_data_vec[1].transition_input.proposal_id = 0;
+
+        assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
+    }
+
+    #[test]
+    fn validate_shasta_proof_carry_data_vec_rejects_ids_outside_uint48() {
+        let mut proof_carry_data_vec = sample_carry_sequence();
+        proof_carry_data_vec[0].transition_input.proposal_id = SHASTA_PROPOSAL_ID_MAX;
+        proof_carry_data_vec[1].transition_input.proposal_id = SHASTA_PROPOSAL_ID_MAX + 1;
 
         assert!(!validate_shasta_proof_carry_data_vec(&proof_carry_data_vec));
     }

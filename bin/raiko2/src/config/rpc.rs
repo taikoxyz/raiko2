@@ -9,6 +9,7 @@ use raiko2_provider::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
+use url::Url;
 
 const fn default_rpc_timeout_ms() -> u64 {
     60_000
@@ -48,14 +49,15 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
 
 /// Validate that a string is a valid URL.
 pub(crate) fn is_valid_url(url: &str) -> bool {
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("ws://")
-        || url.starts_with("wss://")
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https" | "ws" | "wss") && url.host_str().is_some()
 }
 
 /// Explicitly allowed L2/L1 network pair.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkPairConfig {
     pub network: String,
     pub l1_network: String,
@@ -101,7 +103,7 @@ pub struct ResolvedNetworkPair {
 
 /// Pair-specific Boundless overrides for RISC0/Boundless routes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
     pub offer_params: BoundlessOfferParamsOverride,
@@ -133,7 +135,7 @@ impl BoundlessPairConfig {
 
 /// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BoundlessOfferParamsOverride {
     pub batch: Option<BoundlessOfferParams>,
     pub aggregation: Option<BoundlessOfferParams>,
@@ -153,7 +155,7 @@ impl ResolvedNetworkPair {
 
 /// RPC configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RpcConfig {
     #[serde(default = "default_rpc_pairs")]
     pub pairs: Vec<NetworkPairConfig>,
@@ -172,6 +174,7 @@ impl Default for RpcConfig {
 
 /// RPC client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RpcClientConfig {
     #[serde(default = "default_rpc_timeout_ms")]
     pub timeout_ms: u64,
@@ -193,6 +196,7 @@ impl Default for RpcClientConfig {
 
 /// RPC retry configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RpcRetryConfig {
     #[serde(default = "default_rpc_retry_max_attempts")]
     pub max_attempts: u32,

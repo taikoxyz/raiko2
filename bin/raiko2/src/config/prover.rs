@@ -11,6 +11,7 @@ use super::BoundlessPairConfig;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProverConfig {
     #[serde(default)]
     pub guest_system: GuestSystem,
@@ -66,7 +67,7 @@ impl ProverConfig {
 
 /// Server-side request sampling configuration for `proof_type=zk_any`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ZkAnyConfig {
     pub sp1: Option<ZkAnyTargetConfig>,
     pub risc0: Option<ZkAnyTargetConfig>,
@@ -119,7 +120,7 @@ impl ZkAnyConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ZkAnyTargetConfig {
     pub probability: f64,
     pub per_day: u64,
@@ -136,7 +137,7 @@ impl Default for ZkAnyTargetConfig {
 
 /// RISC0 configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Risc0Config {
     pub bonsai: bool,
     pub snark: bool,
@@ -163,6 +164,7 @@ fn default_risc0_execution_po2() -> u32 {
 
 /// Boundless configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundlessConfig {
     #[serde(default = "default_boundless_offchain")]
     pub offchain: bool,

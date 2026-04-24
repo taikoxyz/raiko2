@@ -119,6 +119,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   checkpoint when the proof is built.
 - `proposal.l1_inclusion_block_number` is required. The server derives canonical Shasta proposal
   data from RPC; request-time internal manifest overrides are not accepted.
+- `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
   - `native -> native/local`
@@ -142,6 +143,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proof_type=zk_any` does not accept request-scoped prover args.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
+  If either field is provided, both fields must be provided together.
 - `sp1.mode=execute` is only valid when `proof_type=sp1`.
 - `sp1.mode=execute` requires `aggregate=false`.
 - `sp1.mode=execute` does not support `sp1.prover=network`.
@@ -261,6 +263,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
+  If either field is provided, both fields must be provided together.
 - `proof_type=sp1` requires each proof to include `proof`, `input`, `uuid`, and `extra_data`.
 - Hosted `proof_type=sp1` aggregate requests expect Compressed proposal proofs and emit a Plonk
   aggregation proof.

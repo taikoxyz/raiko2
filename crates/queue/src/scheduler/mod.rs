@@ -178,7 +178,7 @@ where
         &self,
         lease: TaskLease<P, Id>,
         result: Result<O, String>,
-    ) -> Result<(), TaskStoreError> {
+    ) -> Result<bool, TaskStoreError> {
         let TaskLease {
             id,
             payload,
@@ -188,96 +188,99 @@ where
             execution_policy,
         } = lease;
 
-        let Some(current) = self.store.get_state(&id).await? else {
-            self.notify.notify_one();
-            return Ok(());
-        };
-
-        if matches!(
-            current,
-            TaskState::Cancelled | TaskState::Succeeded { .. } | TaskState::Failed { .. }
-        ) {
-            self.notify.notify_one();
-            return Ok(());
-        }
-
-        let TaskState::Running {
-            worker: current_worker,
-            attempt: current_attempt,
-        } = current
-        else {
-            self.notify.notify_one();
-            return Ok(());
-        };
-
-        if current_worker != worker || current_attempt != attempt {
-            self.notify.notify_one();
-            return Ok(());
-        }
-
         match result {
             Ok(output) => {
-                self.store
-                    .set_state(&id, TaskState::Succeeded { output })
+                let updated = self
+                    .store
+                    .set_state_if_running(
+                        &id,
+                        &worker,
+                        attempt,
+                        TaskState::Succeeded { output },
+                        None,
+                    )
                     .await?;
+                if !updated {
+                    self.notify.notify_one();
+                    return Ok(false);
+                }
             }
             Err(error) => {
                 if let Some(delay) = execution_policy.retry.retry_delay(attempt) {
-                    self.store.put_payload(&id, payload).await?;
-
                     if delay == Duration::ZERO {
-                        self.store.set_state(&id, TaskState::Ready).await?;
+                        let updated = self
+                            .store
+                            .set_state_if_running(
+                                &id,
+                                &worker,
+                                attempt,
+                                TaskState::Ready,
+                                Some(payload),
+                            )
+                            .await?;
+                        if !updated {
+                            self.notify.notify_one();
+                            return Ok(false);
+                        }
                         self.store.push_ready(priority, id).await?;
                         self.notify.notify_one();
-                        return Ok(());
+                        return Ok(true);
                     }
 
                     let now_ms = now_millis();
                     let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
                     let next_ready_at_ms = now_ms.saturating_add(delay_ms);
-                    self.store
-                        .set_state(
+                    let updated = self
+                        .store
+                        .set_state_if_running(
                             &id,
+                            &worker,
+                            attempt,
                             TaskState::Retrying {
                                 error,
                                 attempt,
                                 next_ready_at_ms,
                             },
+                            Some(payload),
                         )
                         .await?;
+                    if !updated {
+                        self.notify.notify_one();
+                        return Ok(false);
+                    }
                     self.store.schedule(id, next_ready_at_ms).await?;
                     self.notify.notify_one();
-                    return Ok(());
+                    return Ok(true);
                 }
 
-                self.store
-                    .set_state(
+                let updated = self
+                    .store
+                    .set_state_if_running(
                         &id,
+                        &worker,
+                        attempt,
                         TaskState::Failed {
-                            error: error.clone(),
+                            error,
                             caused_by_dep: None,
                         },
+                        None,
                     )
                     .await?;
+                if !updated {
+                    self.notify.notify_one();
+                    return Ok(false);
+                }
                 self.fail_dependents(id, "dependency failed".to_string())
                     .await?;
                 self.notify.notify_one();
-                return Ok(());
+                return Ok(true);
             }
         }
 
-        for dependent in self.store.dependents_of(&id).await? {
-            let remaining = self.store.dec_remaining_deps(&dependent).await?;
-            if remaining == 0
-                && let Some(priority) = self.store.try_mark_ready(&dependent).await?
-            {
-                self.store.push_ready(priority, dependent).await?;
-            }
-        }
-
+        self.release_dependents(&id).await?;
         self.notify.notify_one();
 
-        Ok(())
+        Ok(true)
     }
 
     /// # Errors
@@ -361,6 +364,19 @@ where
             self.notify.notify_one();
         }
         Ok(moved)
+    }
+
+    async fn release_dependents(&self, id: &TaskId<Id>) -> Result<(), TaskStoreError> {
+        for dependent in self.store.dependents_of(id).await? {
+            let remaining = self.store.dec_remaining_deps(&dependent).await?;
+            if remaining == 0
+                && let Some(priority) = self.store.try_mark_ready(&dependent).await?
+            {
+                self.store.push_ready(priority, dependent).await?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn fail_dependents(&self, root: TaskId<Id>, error: String) -> Result<(), TaskStoreError> {
@@ -511,6 +527,36 @@ mod tests {
                 record.state = state;
             }
             Ok(())
+        }
+
+        async fn set_state_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            state: TaskState<O, TestId>,
+            payload: Option<P>,
+        ) -> StoreResult<bool> {
+            let mut guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get_mut(id) else {
+                return Ok(false);
+            };
+            let TaskState::Running {
+                worker: current_worker,
+                attempt: current_attempt,
+            } = &record.state
+            else {
+                return Ok(false);
+            };
+            if current_worker != worker || *current_attempt != attempt {
+                return Ok(false);
+            }
+
+            if let Some(payload) = payload {
+                record.payload = Some(payload);
+            }
+            record.state = state;
+            Ok(true)
         }
 
         async fn get_view(
@@ -707,6 +753,19 @@ mod tests {
             self.inner.set_state(id, state).await
         }
 
+        async fn set_state_if_running(
+            &self,
+            id: &TestTaskId,
+            worker: &str,
+            attempt: u32,
+            state: TaskState<O, TestId>,
+            payload: Option<P>,
+        ) -> crate::StoreResult<bool> {
+            self.inner
+                .set_state_if_running(id, worker, attempt, state, payload)
+                .await
+        }
+
         async fn get_view(
             &self,
             id: &TestTaskId,
@@ -890,7 +949,7 @@ mod tests {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(MemoryStore::new());
 
-        let _a1 = sched
+        let a1 = sched
             .submit(
                 test_id(1),
                 NewTask {
@@ -900,7 +959,7 @@ mod tests {
                 vec![],
             )
             .await?;
-        let _a2 = sched
+        let a2 = sched
             .submit(
                 test_id(2),
                 NewTask {
@@ -918,7 +977,7 @@ mod tests {
                     priority: Priority::High,
                     payload: "b",
                 },
-                vec![_a1, _a2],
+                vec![a1, a2],
             )
             .await?;
 
@@ -1305,6 +1364,16 @@ mod tests {
                 vec![],
             )
             .await?;
+        let dependent = sched
+            .submit(
+                test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "dependent",
+                },
+                vec![id.clone()],
+            )
+            .await?;
 
         let lease1 = sched
             .next_ready("w")
@@ -1327,8 +1396,12 @@ mod tests {
 
         // Complete in the wrong order: the stale lease completes after the task was
         // already re-leased. The stale completion must not win.
-        sched.complete(lease1, Ok("old")).await?;
-        sched.complete(lease2, Ok("new")).await?;
+        let stale_completed = sched.complete(lease1, Ok("old")).await?;
+        assert!(!stale_completed);
+        assert!(sched.next_ready("w").await?.is_none());
+
+        let completed = sched.complete(lease2, Ok("new")).await?;
+        assert!(completed);
 
         let view = sched
             .get(id)
@@ -1342,6 +1415,11 @@ mod tests {
                 )));
             }
         }
+        let dependent_lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected dependent after valid success"))?;
+        assert_eq!(dependent_lease.id, dependent);
         Ok(())
     }
 
@@ -1506,6 +1584,158 @@ mod tests {
         assert_eq!(lease2.priority, Priority::High);
         assert_eq!(lease2.payload, "second");
         assert_eq!(lease2.attempt, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resubmit_failed_task_rebuilds_dependency_edges() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+
+        let failed_dep = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "failed-dep",
+                },
+                vec![],
+            )
+            .await?;
+        let task = sched
+            .submit(
+                test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "first",
+                },
+                vec![failed_dep.clone()],
+            )
+            .await?;
+
+        let lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected ready dependency"))?;
+        assert_eq!(lease.id, failed_dep);
+        sched.complete(lease, Err("boom".to_string())).await?;
+        assert!(matches!(
+            sched
+                .get(task.clone())
+                .await?
+                .ok_or_else(|| TaskStoreError::corrupt_msg("expected failed task"))?
+                .state,
+            TaskState::Failed { .. }
+        ));
+
+        let new_dep = sched
+            .submit(
+                test_id(3),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: "new-dep",
+                },
+                vec![],
+            )
+            .await?;
+        let resubmitted = sched
+            .submit(
+                task.clone(),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "second",
+                },
+                vec![new_dep.clone()],
+            )
+            .await?;
+        assert_eq!(resubmitted, task);
+        let new_dep_lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected new dependency"))?;
+        assert_eq!(new_dep_lease.id, new_dep);
+        assert!(sched.next_ready("w").await?.is_none());
+
+        sched.complete(new_dep_lease, Ok("ok")).await?;
+
+        let ready = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected resubmitted task"))?;
+        assert_eq!(ready.id, task);
+        assert_eq!(ready.payload, "second");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resubmit_cancelled_task_removes_stale_dependency_edges() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, &'static str, TestId> =
+            Scheduler::new(MemoryStore::new());
+
+        let old_dep = sched
+            .submit(
+                test_id(1),
+                NewTask {
+                    priority: Priority::Low,
+                    payload: "old-dep",
+                },
+                vec![],
+            )
+            .await?;
+        let task = sched
+            .submit(
+                test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "first",
+                },
+                vec![old_dep.clone()],
+            )
+            .await?;
+        sched.cancel(task.clone()).await?;
+
+        let new_dep = sched
+            .submit(
+                test_id(3),
+                NewTask {
+                    priority: Priority::Low,
+                    payload: "new-dep",
+                },
+                vec![],
+            )
+            .await?;
+        sched
+            .submit(
+                task.clone(),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "second",
+                },
+                vec![new_dep.clone()],
+            )
+            .await?;
+
+        let old_lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected old dependency"))?;
+        assert_eq!(old_lease.id, old_dep);
+        sched.complete(old_lease, Ok("old-ok")).await?;
+        let new_dep_lease = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected new dependency"))?;
+        assert_eq!(new_dep_lease.id, new_dep);
+        assert!(sched.next_ready("w").await?.is_none());
+
+        sched.complete(new_dep_lease, Ok("new-ok")).await?;
+
+        let ready = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected resubmitted task"))?;
+        assert_eq!(ready.id, task);
+        assert_eq!(ready.payload, "second");
         Ok(())
     }
 

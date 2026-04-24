@@ -50,6 +50,7 @@ impl std::str::FromStr for RetryStrategy {
 
 /// Queue retry configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     #[serde(default)]
     pub strategy: RetryStrategy,
@@ -98,6 +99,7 @@ impl std::str::FromStr for QueueBackend {
 
 /// Queue configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueueConfig {
     #[serde(default)]
     pub backend: QueueBackend,
@@ -143,6 +145,29 @@ impl QueueConfig {
         if self.retry.strategy != RetryStrategy::None && self.retry.max_attempts == 0 {
             bail!("Queue retry max_attempts must be > 0 when retry is enabled");
         }
+        match self.retry.strategy {
+            RetryStrategy::None => {}
+            RetryStrategy::Fixed => {
+                if self.retry.fixed_delay_ms == 0 {
+                    bail!("Queue retry fixed_delay_ms must be > 0 when fixed retry is enabled");
+                }
+            }
+            RetryStrategy::Exponential => {
+                if self.retry.base_delay_ms == 0 {
+                    bail!(
+                        "Queue retry base_delay_ms must be > 0 when exponential retry is enabled"
+                    );
+                }
+                if self.retry.max_delay_ms == 0 {
+                    bail!("Queue retry max_delay_ms must be > 0 when exponential retry is enabled");
+                }
+                if self.retry.max_delay_ms < self.retry.base_delay_ms {
+                    bail!(
+                        "Queue retry max_delay_ms must be greater than or equal to base_delay_ms"
+                    );
+                }
+            }
+        }
 
         match self.backend {
             QueueBackend::Memory => Ok(()),
@@ -156,5 +181,39 @@ impl QueueConfig {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueueConfig, RetryStrategy};
+
+    #[test]
+    fn queue_retry_rejects_zero_fixed_delay() {
+        let mut config = QueueConfig::default();
+        config.retry.strategy = RetryStrategy::Fixed;
+        config.retry.fixed_delay_ms = 0;
+
+        let err = config.validate().expect_err("zero fixed delay must fail");
+        assert!(
+            err.to_string().contains("fixed_delay_ms"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn queue_retry_rejects_invalid_exponential_delay_bounds() {
+        let mut config = QueueConfig::default();
+        config.retry.strategy = RetryStrategy::Exponential;
+        config.retry.base_delay_ms = 2_000;
+        config.retry.max_delay_ms = 1_000;
+
+        let err = config
+            .validate()
+            .expect_err("max delay below base delay must fail");
+        assert!(
+            err.to_string().contains("max_delay_ms"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -154,7 +154,7 @@ fn sealed_parent_header(
         .ok_or(StatelessValidationError::MissingAncestorHeader)
 }
 
-fn map_block_execution_error(err: BlockExecutionError) -> StatelessValidationError {
+fn map_block_execution_error(err: &BlockExecutionError) -> StatelessValidationError {
     StatelessValidationError::StatelessExecutionFailed(err.to_string())
 }
 
@@ -190,8 +190,8 @@ fn build_derived_block(
 
     let body = BlockBody {
         transactions: block_transactions,
-        ommers: Default::default(),
-        withdrawals: Some(Default::default()),
+        ommers: Vec::default(),
+        withdrawals: Some(Vec::default().into()),
     };
     let header = Header {
         parent_hash: parent_header.hash(),
@@ -245,7 +245,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
     let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
-        .map_err(map_block_execution_error)?;
+        .map_err(|err| map_block_execution_error(&err))?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     let filtered_block = assemble_filtered_block(
         evm_config,
@@ -256,7 +256,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         execution_outcome.finalized_block_zk_gas,
         state_root,
     )
-    .map_err(map_block_execution_error)?;
+    .map_err(|err| map_block_execution_error(&err))?;
 
     let outcome = FilteredBlockExecutionOutcome {
         filtered_block,

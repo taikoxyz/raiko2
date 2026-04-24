@@ -17,7 +17,7 @@ use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpec
 use raiko2_primitives_shasta::{
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_output,
+        shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
     verify_proposal_mode_blob_usage, GuestInput, ShastaZkAggregationGuestInput,
@@ -676,6 +676,18 @@ where
     );
 
     let proposal = &guest_input.taiko.proposal_event.proposal;
+    let proposal_event_id = proposal.id.to::<u64>();
+    ensure!(
+        guest_input.taiko.proposal_id <= SHASTA_PROPOSAL_ID_MAX,
+        "taiko.proposal_id does not fit in uint48: {}",
+        guest_input.taiko.proposal_id
+    );
+    ensure!(
+        guest_input.taiko.proposal_id == proposal_event_id,
+        "taiko.proposal_id mismatch: expected {}, got {}",
+        proposal_event_id,
+        guest_input.taiko.proposal_id
+    );
     let expected_proposal_hash = hash_proposal(proposal);
     ensure!(
         proof_carry_data.transition_input.proposal_hash == expected_proposal_hash,

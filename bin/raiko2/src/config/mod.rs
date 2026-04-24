@@ -22,6 +22,7 @@ pub use server::ServerConfig;
 
 /// Full application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub rpc: RpcConfig,
@@ -55,7 +56,6 @@ impl Config {
         if let Some(l2_rpc) = &cli.l2_rpc {
             override_single_rpc_pair(&mut config.rpc, |pair| {
                 pair.l2_rpc = Some(l2_rpc.clone());
-                pair.l2_witness_rpc = Some(l2_rpc.clone());
             })?;
         }
         if let Some(timeout_ms) = cli.rpc_timeout_ms {
@@ -525,6 +525,72 @@ maintenance_interval_ms = 200
     }
 
     #[test]
+    fn test_l2_rpc_cli_override_preserves_configured_witness_rpc() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545", l2_witness_rpc = "http://localhost:9547" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from([
+            "raiko2",
+            "--config",
+            path.to_str().expect("path utf8"),
+            "--l2-rpc",
+            "http://localhost:9555",
+        ]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l2_rpc, "http://localhost:9555");
+        assert_eq!(pair.l2_witness_rpc, "http://localhost:9547");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_rejects_unknown_fields() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+unexpected = true
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("unknown config field must fail");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("unknown field")),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_config_file_accepts_geth_l2_provider() {
         let config_toml = r#"
 [server]
@@ -658,6 +724,10 @@ maintenance_interval_ms = 200
         assert!(super::rpc::is_valid_url("wss://rpc.example.com"));
         assert!(!super::rpc::is_valid_url("localhost:8545"));
         assert!(!super::rpc::is_valid_url("ftp://files.example.com"));
+        assert!(!super::rpc::is_valid_url("http://"));
+        assert!(!super::rpc::is_valid_url("https://"));
+        assert!(!super::rpc::is_valid_url("http:///"));
+        assert!(!super::rpc::is_valid_url("http://localhost:bad-port"));
         assert!(!super::rpc::is_valid_url(""));
     }
 }

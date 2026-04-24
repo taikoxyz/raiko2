@@ -242,6 +242,7 @@ async fn fetch_preflight_chunk<P: Provider>(
             "Provider returned mismatched input lengths".to_string(),
         ));
     }
+    validate_fetched_block_numbers(block_numbers, &blocks)?;
 
     let witnesses = blocks
         .into_iter()
@@ -266,6 +267,21 @@ async fn fetch_preflight_chunk<P: Provider>(
         "completed shasta preflight chunk"
     );
     Ok((chunk_index, witnesses))
+}
+
+fn validate_fetched_block_numbers(
+    expected_block_numbers: &[u64],
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<()> {
+    for (index, (expected, block)) in expected_block_numbers.iter().zip(blocks).enumerate() {
+        if block.header.number != *expected {
+            return Err(RaikoError::Preflight(format!(
+                "provider returned block {} for requested block {} at chunk index {index}",
+                block.header.number, expected
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
@@ -801,7 +817,7 @@ mod tests {
             max_priority_fee_per_gas: 0,
             to: TxKind::Call(Address::ZERO),
             value: U256::ZERO,
-            access_list: Default::default(),
+            access_list: Vec::default().into(),
             input: anchorV4Call {
                 _checkpoint: checkpoint.clone(),
             }
@@ -813,12 +829,13 @@ mod tests {
     }
 
     fn sample_l1_header(number: u64, state_root: B256) -> Header {
-        let mut header = Header::default();
-        header.number = number;
-        header.parent_hash = B256::from([0xAA; 32]);
-        header.state_root = state_root;
-        header.timestamp = 777;
-        header
+        Header {
+            number,
+            parent_hash: B256::from([0xAA; 32]),
+            state_root,
+            timestamp: 777,
+            ..Default::default()
+        }
     }
 
     fn sample_block(
@@ -910,6 +927,27 @@ mod tests {
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_block_number_mismatch_from_provider() {
+        let provider = sample_provider();
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_block_range = Some(L2BlockRange { start: 2, end: 2 });
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let err = spec
+            .preflight(&ctx, &provider)
+            .await
+            .expect_err("provider block number mismatch should be rejected");
+
+        assert!(err.to_string().contains("provider returned block 1"));
+        assert!(err.to_string().contains("requested block 2"));
     }
 
     #[test]

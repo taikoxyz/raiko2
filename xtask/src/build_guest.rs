@@ -1,6 +1,5 @@
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -171,10 +170,12 @@ fn ensure_release_backend(
         Backend::Sp1 => "sp1",
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
-    let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag)?;
+    let outputs_exist = guest_outputs_exist(root, backend)?;
+    let fingerprint =
+        compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
     let fingerprint_path = guest_fingerprint_path(root, backend_key);
 
-    if guest_outputs_exist(root, backend)?
+    if outputs_exist
         && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
     {
         println!("[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild.");
@@ -185,6 +186,7 @@ fn ensure_release_backend(
         "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
     );
     build(root, backend, bench, sp1_docker_tag)?;
+    let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?;
     write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
     Ok(())
 }
@@ -273,17 +275,21 @@ fn compute_guest_fingerprint(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
+    include_outputs: bool,
 ) -> Result<String> {
     let mut hasher = Sha256::new();
     hash_tagged_bytes(&mut hasher, "bench", if bench { b"1" } else { b"0" });
 
     match backend {
-        Backend::Risc0 => compute_backend_fingerprint(root, &mut hasher, "risc0", None)?,
+        Backend::Risc0 => {
+            compute_backend_fingerprint(root, &mut hasher, "risc0", None, include_outputs)?
+        }
         Backend::Sp1 => compute_backend_fingerprint(
             root,
             &mut hasher,
             "sp1",
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
+            include_outputs,
         )?,
         Backend::All => unreachable!("fingerprints are computed per concrete backend"),
     }
@@ -296,11 +302,13 @@ fn compute_backend_fingerprint(
     hasher: &mut Sha256,
     backend_key: &str,
     sp1_tag: Option<String>,
+    include_outputs: bool,
 ) -> Result<()> {
     hash_tagged_bytes(hasher, "backend", backend_key.as_bytes());
     if let Some(tag) = sp1_tag {
         hash_tagged_bytes(hasher, "sp1_docker_tag", tag.as_bytes());
     }
+    hash_backend_env(hasher, backend_key);
 
     let mut paths = vec![
         root.join("rust-toolchain.toml"),
@@ -320,7 +328,108 @@ fn compute_backend_fingerprint(
     for path in paths {
         hash_file(root, hasher, &path)?;
     }
+
+    if include_outputs {
+        for output in expected_backend_outputs(root, backend_key)? {
+            hash_file_with_tags(root, hasher, &output, "output_path", "output_file")?;
+        }
+    }
+
     Ok(())
+}
+
+fn hash_backend_env(hasher: &mut Sha256, backend_key: &str) {
+    match backend_key {
+        "risc0" => {
+            hash_effective_env(
+                hasher,
+                "RISC0_TOOLCHAIN_IMAGE",
+                env::var("RISC0_TOOLCHAIN_IMAGE")
+                    .unwrap_or_else(|_| DEFAULT_RISC0_TOOLCHAIN_IMAGE.to_string())
+                    .trim(),
+            );
+            hash_effective_env(
+                hasher,
+                "RISC0_DOCKER_CONTAINER_TAG",
+                env::var("RISC0_DOCKER_CONTAINER_TAG").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "RISC0_GUEST_RUSTFLAGS",
+                env::var("RISC0_GUEST_RUSTFLAGS")
+                    .unwrap_or_else(|_| DEFAULT_RISC0_RUSTFLAGS.to_string()),
+            );
+            hash_effective_env(
+                hasher,
+                "RISC0_GUEST_CC",
+                env::var("RISC0_GUEST_CC").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "RISC0_GUEST_CFLAGS",
+                env::var("RISC0_GUEST_CFLAGS").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "DOCKER_DEFAULT_PLATFORM",
+                env::var("DOCKER_DEFAULT_PLATFORM").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "RISC0_DEV_MODE",
+                effective_mock_env("RISC0_DEV_MODE", "1"),
+            );
+        }
+        "sp1" => {
+            hash_effective_env(
+                hasher,
+                "SP1_TOOLCHAIN_IMAGE",
+                env::var("SP1_TOOLCHAIN_IMAGE")
+                    .unwrap_or_else(|_| DEFAULT_SP1_TOOLCHAIN_IMAGE.to_string())
+                    .trim(),
+            );
+            hash_effective_env(
+                hasher,
+                "SP1_GUEST_RUSTFLAGS",
+                env::var("SP1_GUEST_RUSTFLAGS")
+                    .unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string()),
+            );
+            hash_effective_env(
+                hasher,
+                "SP1_GUEST_CC",
+                env::var("SP1_GUEST_CC").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "SP1_GUEST_CFLAGS",
+                env::var("SP1_GUEST_CFLAGS").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "DOCKER_DEFAULT_PLATFORM",
+                env::var("DOCKER_DEFAULT_PLATFORM").unwrap_or_default(),
+            );
+            hash_effective_env(
+                hasher,
+                "SP1_PROVER",
+                effective_mock_env("SP1_PROVER", "mock"),
+            );
+        }
+        _ => unreachable!("unknown guest backend {backend_key}"),
+    }
+}
+
+fn effective_mock_env(name: &str, mock_value: &str) -> String {
+    if env::var("MOCK").ok().as_deref() == Some("1") {
+        mock_value.to_string()
+    } else {
+        env::var(name).unwrap_or_default()
+    }
+}
+
+fn hash_effective_env(hasher: &mut Sha256, key: &str, value: impl AsRef<str>) {
+    hash_tagged_bytes(hasher, "env_key", key.as_bytes());
+    hash_tagged_bytes(hasher, "env_value", value.as_ref().as_bytes());
 }
 
 fn collect_files_recursively(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -344,25 +453,25 @@ fn collect_files_recursively(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn hash_file(root: &Path, hasher: &mut Sha256, path: &Path) -> Result<()> {
+    hash_file_with_tags(root, hasher, path, "path", "file")
+}
+
+fn hash_file_with_tags(
+    root: &Path,
+    hasher: &mut Sha256,
+    path: &Path,
+    path_tag: &str,
+    bytes_tag: &str,
+) -> Result<()> {
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned();
-    hash_tagged_bytes(hasher, "path", relative.as_bytes());
+    hash_tagged_bytes(hasher, path_tag, relative.as_bytes());
 
-    let mut file =
-        fs::File::open(path).with_context(|| format!("open fingerprint input {path:?}"))?;
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("read fingerprint input {path:?}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
+    let bytes = fs::read(path).with_context(|| format!("read fingerprint input {path:?}"))?;
+    hash_tagged_bytes(hasher, bytes_tag, &bytes);
     Ok(())
 }
 
@@ -618,9 +727,12 @@ fn export_risc0_elves(root: &Path, manifest: &CargoManifest, target_root: &Path)
         }
 
         if !copied {
-            println!(
-                "[WARN] Missing ELF for {} (checked {:?}, {:?}, and {:?})",
-                bin.name, release_dir, target_dir, legacy_dir
+            bail!(
+                "Missing ELF for {} (checked {:?}, {:?}, and {:?})",
+                bin.name,
+                release_dir,
+                target_dir,
+                legacy_dir
             );
         }
     }
@@ -700,7 +812,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     let rustflags =
         env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
     cmd.env(
-        "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
+        "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
         rustflags,
     );
 
@@ -762,10 +874,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         None => (PathBuf::from("/target"), Some(target_root.clone())),
     };
 
-    let container_export_dir = export_dir
-        .strip_prefix(root)
-        .map(|rel| PathBuf::from("/work").join(rel))
-        .unwrap_or_else(|_| PathBuf::from("/work/target/sp1-export"));
+    let container_export_dir = container_target_dir.join("sp1-export");
 
     let rustflags =
         env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
@@ -937,9 +1046,32 @@ mod tests {
     #[test]
     fn sp1_guest_fingerprint_changes_with_docker_tag() {
         let root = util::repo_root();
-        let v1 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4")).unwrap();
-        let v2 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5")).unwrap();
+        let v1 =
+            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4"), false).unwrap();
+        let v2 =
+            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5"), false).unwrap();
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn export_risc0_elves_fails_when_expected_binary_is_missing() {
+        let temp_root = temp_test_dir();
+        let manifest = CargoManifest {
+            package: PackageSection {
+                name: "missing-risc0-guest".to_string(),
+            },
+            bin: vec![BinSection {
+                name: "missing-risc0-bin".to_string(),
+            }],
+        };
+
+        let err = export_risc0_elves(&temp_root, &manifest, &temp_root.join("target")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing ELF for missing-risc0-bin")
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

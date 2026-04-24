@@ -59,8 +59,6 @@ impl AppState {
     /// Create new application state.
     pub async fn new(config: Config) -> Result<Self> {
         let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
-        let runtime_observer: Arc<dyn EngineObserver> =
-            Arc::new(RuntimeObserver::new(Arc::clone(&runtime)));
         let scheduler_config = setup::scheduler_config(&config);
         let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
         let workers = config.queue.workers;
@@ -70,6 +68,8 @@ impl AppState {
         let mut factory = StaticPipelineFactory::default();
 
         for pair in &resolved_pairs {
+            let runtime_observer: Arc<dyn EngineObserver> =
+                Arc::new(RuntimeObserver::new(Arc::clone(&runtime), pair.key.clone()));
             let risc0_engine = build_risc0_engine(
                 &config,
                 pair,

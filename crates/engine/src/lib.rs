@@ -670,8 +670,8 @@ where
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
         let completed_id = lease.id.clone();
-        self.inner.scheduler.complete(lease, result).await?;
-        if let Some(observer) = &self.inner.observer {
+        let completed = self.inner.scheduler.complete(lease, result).await?;
+        if completed && let Some(observer) = &self.inner.observer {
             if let Some(success) = success.as_ref() {
                 observer
                     .on_task_succeeded(&completed_id, &payload, success)
@@ -1274,7 +1274,7 @@ mod tests {
         let view = engine
             .get(job_id)
             .await?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
         match view.state {
             TaskState::Succeeded {
                 output: EngineOutput::Proof(proof),
@@ -1282,11 +1282,9 @@ mod tests {
                 assert_eq!(proof.output.proof.as_deref(), Some("mock-proof"));
             }
             other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("unexpected task state: {other:?}"),
-                )
-                .into());
+                return Err(
+                    std::io::Error::other(format!("unexpected task state: {other:?}")).into(),
+                );
             }
         }
         Ok(())
@@ -1471,7 +1469,7 @@ mod tests {
         let view = engine
             .get(job_id)
             .await?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "expected task view"))?;
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
         assert!(matches!(view.state, TaskState::Failed { .. }));
         Ok(())
     }
@@ -1630,9 +1628,7 @@ mod tests {
             .scheduler
             .next_ready("w1")
             .await?
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "expected ready lease")
-            })?;
+            .ok_or_else(|| std::io::Error::other("expected ready lease"))?;
 
         // Complete it with PipelineStage::Validation instead of PipelineStage::Preflight
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(
@@ -1716,9 +1712,7 @@ mod tests {
             .scheduler
             .next_ready("w1")
             .await?
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "expected ready lease")
-            })?;
+            .ok_or_else(|| std::io::Error::other("expected ready lease"))?;
 
         // Complete it with PipelineStage::Preflight instead of PipelineStage::Validation
         let wrong_output = EngineOutput::GuestInput(Box::new(PipelineStageResult::new(

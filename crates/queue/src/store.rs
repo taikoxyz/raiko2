@@ -73,6 +73,14 @@ where
     ) -> StoreResult<bool>;
     async fn get_state(&self, id: &TaskId<Id>) -> StoreResult<Option<TaskState<O, Id>>>;
     async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()>;
+    async fn set_state_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        state: TaskState<O, Id>,
+        payload: Option<P>,
+    ) -> StoreResult<bool>;
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
     async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
@@ -202,6 +210,18 @@ where
     queue.retain(|queued| queued != target);
 }
 
+fn remove_dependent_edges<Id>(
+    dependents: &mut HashMap<TaskId<Id>, Vec<TaskId<Id>>>,
+    target: &TaskId<Id>,
+) where
+    Id: Clone + Eq + Hash,
+{
+    dependents.retain(|_, ids| {
+        ids.retain(|dependent| dependent != target);
+        !ids.is_empty()
+    });
+}
+
 #[async_trait]
 impl<P, O, Id> TaskStore<P, O, Id> for MemoryStore<P, O, Id>
 where
@@ -237,6 +257,15 @@ where
                 ),
                 DependencyInsertState::Cancelled => (0, TaskState::Cancelled),
             };
+            remove_dependent_edges(&mut g.dependents, &id);
+            if let DependencyInsertState::Pending {
+                unresolved_deps, ..
+            } = dependency_state
+            {
+                for dep in unresolved_deps {
+                    g.dependents.entry(dep).or_default().push(id.clone());
+                }
+            }
             g.remaining.insert(id.clone(), remaining);
             if let Some(existing) = g.tasks.get_mut(&id) {
                 existing.payload = Some(payload);
@@ -301,6 +330,39 @@ where
         }
 
         Ok(())
+    }
+
+    async fn set_state_if_running(
+        &self,
+        id: &TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        state: TaskState<O, Id>,
+        payload: Option<P>,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(id) else {
+            return Ok(false);
+        };
+        let TaskState::Running {
+            worker: current_worker,
+            attempt: current_attempt,
+        } = &record.state
+        else {
+            return Ok(false);
+        };
+        if current_worker != worker || *current_attempt != attempt {
+            return Ok(false);
+        }
+
+        if let Some(payload) = payload {
+            record.payload = Some(payload);
+        }
+        record.state = state;
+        if !matches!(record.state, TaskState::Running { .. }) {
+            record.lease_until_ms = None;
+        }
+        Ok(true)
     }
 
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>> {
@@ -544,10 +606,7 @@ where
 
         g.remaining.remove(id);
         g.dependents.remove(id);
-
-        for dependents in g.dependents.values_mut() {
-            dependents.retain(|dependent| dependent != id);
-        }
+        remove_dependent_edges(&mut g.dependents, id);
 
         retain_task_id(&mut g.ready_high, id);
         retain_task_id(&mut g.ready_med, id);

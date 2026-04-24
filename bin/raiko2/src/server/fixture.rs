@@ -520,7 +520,10 @@ const fn memory_scheduler_config() -> SchedulerConfig {
 }
 
 fn engine_observer(runtime: Arc<RuntimeManager>) -> Arc<dyn EngineObserver> {
-    Arc::new(RuntimeObserver::new(runtime))
+    Arc::new(RuntimeObserver::new(
+        runtime,
+        "taiko_dev/ethereum".to_string(),
+    ))
 }
 
 fn build_engine_with_observer<S>(

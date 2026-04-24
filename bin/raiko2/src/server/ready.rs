@@ -2,7 +2,10 @@ use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfi
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
-use raiko2_prover::sp1::ProverMode as Sp1ProverMode;
+use raiko2_prover::sp1::{
+    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config,
+    Sp1RemoteVerifyConfig, Sp1SystemConfig,
+};
 use raiko2_provider::rpc::build_rpc_client;
 use serde::Serialize;
 use url::Url;
@@ -222,6 +225,19 @@ fn check_sp1_prover(config: &Config) -> Result<()> {
     sp1.validate().map_err(anyhow::Error::msg)?;
 
     if sp1.prover == Sp1ProverMode::Network {
+        if matches!(sp1.mode, Sp1ExecutionMode::Prove) && sp1.verify {
+            for pair in config.rpc.resolved_pairs()? {
+                if sp1_effective_pair_config(sp1, &pair)
+                    .remote_verify
+                    .is_none()
+                {
+                    bail!(
+                        "sp1 network verification is not enabled for network pair {}",
+                        pair.key
+                    );
+                }
+            }
+        }
         let private_key = std::env::var("NETWORK_PRIVATE_KEY")
             .context("NETWORK_PRIVATE_KEY must be set for sp1.prover=network")?;
         let _: PrivateKeySigner = private_key
@@ -234,6 +250,81 @@ fn check_sp1_prover(config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn sp1_effective_pair_config(
+    global: &Sp1Config,
+    pair: &crate::config::ResolvedNetworkPair,
+) -> Sp1Config {
+    match (
+        pair.sp1_verifier_rpc_url.as_ref(),
+        pair.sp1_verifier_address.as_ref(),
+    ) {
+        (Some(rpc_url), Some(verifier_address)) => Sp1SystemConfig {
+            remote_verify: Some(Sp1RemoteVerifyConfig {
+                rpc_url: rpc_url.clone(),
+                verifier_address: verifier_address.clone(),
+            }),
+        }
+        .applied_to(global),
+        _ => global.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sp1RemoteVerifyConfig, sp1_effective_pair_config};
+    use crate::config::Config;
+
+    #[test]
+    fn sp1_effective_pair_config_honors_global_remote_verify() {
+        let mut config = Config::default();
+        config.prover.sp1.remote_verify = Some(Sp1RemoteVerifyConfig {
+            rpc_url: "https://global-verifier.example.com".to_string(),
+            verifier_address: "0x0000000000000000000000000000000000000001".to_string(),
+        });
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("resolve default pair")
+            .remove(0);
+
+        let effective = sp1_effective_pair_config(&config.prover.sp1, &pair);
+
+        assert_eq!(
+            effective
+                .remote_verify
+                .expect("global remote verifier")
+                .rpc_url,
+            "https://global-verifier.example.com"
+        );
+    }
+
+    #[test]
+    fn sp1_effective_pair_config_uses_pair_remote_verify_when_present() {
+        let mut config = Config::default();
+        config.prover.sp1.remote_verify = Some(Sp1RemoteVerifyConfig {
+            rpc_url: "https://global-verifier.example.com".to_string(),
+            verifier_address: "0x0000000000000000000000000000000000000001".to_string(),
+        });
+        let mut pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("resolve default pair")
+            .remove(0);
+        pair.sp1_verifier_rpc_url = Some("https://pair-verifier.example.com".to_string());
+        pair.sp1_verifier_address = Some("0x0000000000000000000000000000000000000002".to_string());
+
+        let effective = sp1_effective_pair_config(&config.prover.sp1, &pair);
+
+        assert_eq!(
+            effective
+                .remote_verify
+                .expect("pair remote verifier")
+                .rpc_url,
+            "https://pair-verifier.example.com"
+        );
+    }
 }
 
 #[cfg(feature = "redis-queue")]

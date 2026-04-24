@@ -1,6 +1,7 @@
 //! Shasta proof helpers for carrying protocol data.
 
 use crate::GuestInput;
+use crate::instance::SHASTA_PROPOSAL_ID_MAX;
 use raiko2_primitives::{Proof, ProofType, RaikoError, RaikoResult};
 use raiko2_protocol_shasta::libhash::hash_proposal;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -107,6 +108,19 @@ pub fn build_proof_carry_data(
             ))
         })?;
     let proposal = &input.taiko.proposal_event.proposal;
+    let proposal_event_id = proposal.id.to::<u64>();
+    if input.taiko.proposal_id > SHASTA_PROPOSAL_ID_MAX {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "proposal_id does not fit in uint48: {}",
+            input.taiko.proposal_id
+        )));
+    }
+    if input.taiko.proposal_id != proposal_event_id {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "proposal_id mismatch: expected {proposal_event_id}, got {}",
+            input.taiko.proposal_id
+        )));
+    }
     let checkpoint = raiko2_protocol_shasta::shasta::Checkpoint {
         blockNumber: last_witness.block.header.number.try_into().map_err(|_| {
             RaikoError::InvalidRequestConfig(
@@ -153,16 +167,19 @@ mod tests {
     fn build_proof_carry_data_populates_transition_fields_from_input() {
         let mut input = GuestInput::default();
         input.taiko.proposal_id = 7;
+        input.taiko.proposal_event.proposal.id = 7u64.try_into().expect("fits in uint48");
         input.taiko.prover_data.actual_prover = Address::from([0x11; 20]);
         input.taiko.proposal_event.proposal.proposer = Address::from([0x22; 20]);
         input.taiko.proposal_event.proposal.timestamp =
             123u64.try_into().expect("timestamp fits in uint48");
         input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x33; 32]);
 
-        let mut witness = raiko2_primitives::StatelessInput::default();
-        witness.chain_spec = SupportedChainSpecs::default()
-            .get_chain_spec_with_chain_id(167_000)
-            .expect("supported taiko mainnet chain spec");
+        let mut witness = raiko2_primitives::StatelessInput {
+            chain_spec: SupportedChainSpecs::default()
+                .get_chain_spec_with_chain_id(167_000)
+                .expect("supported taiko mainnet chain spec"),
+            ..Default::default()
+        };
         witness.block.header.number = 42;
         witness.block.header.timestamp = u64::MAX / 2;
         witness.block.header.parent_hash = B256::from([0x44; 32]);
@@ -202,5 +219,25 @@ mod tests {
             carry.transition_input.checkpoint.stateRoot,
             witness.block.header.state_root
         );
+    }
+
+    #[test]
+    fn build_proof_carry_data_rejects_proposal_id_mismatch() {
+        let mut input = GuestInput::default();
+        input.taiko.proposal_id = 7;
+        input.taiko.proposal_event.proposal.id = 8u64.try_into().expect("fits in uint48");
+
+        let mut witness = raiko2_primitives::StatelessInput {
+            chain_spec: SupportedChainSpecs::default()
+                .get_chain_spec_with_chain_id(167_000)
+                .expect("supported taiko mainnet chain spec"),
+            ..Default::default()
+        };
+        witness.block.header.timestamp = u64::MAX / 2;
+        input.witnesses.push(witness);
+
+        let err = build_proof_carry_data(&input, ProofType::Native)
+            .expect_err("proposal id mismatch should fail");
+        assert!(err.to_string().contains("proposal_id mismatch"));
     }
 }

@@ -381,6 +381,7 @@ impl ShastaManifestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::B256;
     use raiko2_primitives::{ProofRequest, ProofType, ProverConfig, ShastaCheckpoint};
 
     fn context_with_request(request: ProofRequest) -> ProofContext {
@@ -422,8 +423,8 @@ mod tests {
                 last_anchor_block_number: 0,
                 checkpoint: Some(ShastaCheckpoint {
                     block_number: u64::MAX,
-                    block_hash: Default::default(),
-                    state_root: Default::default(),
+                    block_hash: B256::default(),
+                    state_root: B256::default(),
                 }),
             }),
             ..Default::default()

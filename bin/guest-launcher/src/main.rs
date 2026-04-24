@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256, hex};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
@@ -525,11 +525,13 @@ fn build_sp1_output(
     carry: Option<&ProofCarryData>,
 ) -> Result<Proof> {
     let public_values = proof.public_values.as_slice();
-    let input_hash = if public_values.len() >= 32 {
-        B256::from_slice(&public_values[..32])
-    } else {
-        B256::default()
-    };
+    if public_values.len() < 32 {
+        bail!(
+            "SP1 public values must contain at least 32 bytes, got {}",
+            public_values.len()
+        );
+    }
+    let input_hash = B256::from_slice(&public_values[..32]);
     let extra_data = match carry {
         Some(data) => Some(encode_proof_carry_data(data)?),
         None => None,

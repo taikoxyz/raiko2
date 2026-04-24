@@ -138,6 +138,37 @@ class TestStressChainSpecResolution(unittest.TestCase):
         self.assertEqual(resolved.anchor_abi_file, "/tmp/Anchor.override.json")
 
 
+class TestBatchMonitorRangeIteration(unittest.IsolatedAsyncioTestCase):
+    async def test_get_next_batches_starts_from_range_start_when_state_is_uninitialized(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.l2_block_range = (10, 12)
+        monitor.ts_offset = None
+        monitor.running_count = 1
+        monitor.time_speed = 1.0
+        monitor.last_block_ts_in_real_world = 0
+
+        now = 1_700_000_000
+
+        async def align_ts_offset(first_block):
+            self.assertEqual(first_block, 10)
+            monitor.ts_offset = 0
+            monitor.last_block_ts_in_real_world = now
+            return True
+
+        async def get_block(block_number):
+            self.assertEqual(block_number, 10)
+            return {"timestamp": hex(now)}
+
+        monitor.align_ts_offset = align_ts_offset
+        monitor.get_block = get_block
+        monitor.get_batch_events_in_block = lambda block_number: [42] if block_number == 10 else []
+
+        result = await monitor.get_next_batches()
+
+        self.assertEqual(result, (10, [42]))
+
+
 class TestStressDiscoveryOutput(unittest.TestCase):
     def test_builds_preflight_ready_proposal_record(self):
         record = build_discovered_proposal_record(

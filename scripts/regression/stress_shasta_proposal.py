@@ -195,6 +195,7 @@ class BatchMonitor:
         self.batchs_in_last_block = deque()
         self.block_running_ratio = block_running_ratio
         self.l2_block_range = l2_block_range
+        self.last_block = None
         self.ts_offset: Optional[int] = None
         self.last_block_ts_in_real_world: int = 0
         self.running_count = 0
@@ -938,9 +939,8 @@ class BatchMonitor:
 
     def _ensure_in_range_state(self) -> None:
         """Initialize legacy in-range state expected by batch iteration helpers."""
-        block_range = self.block_range
-        if block_range is not None and not hasattr(self, "last_block"):
-            self.last_block = block_range[0]
+        if self.block_range is not None and not hasattr(self, "last_block"):
+            self.last_block = None
 
     async def get_next_batches(self) -> Optional[tuple[int, list[int]]]:
         """get latest block number"""

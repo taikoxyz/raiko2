@@ -73,8 +73,7 @@ struct Args {
     l1_inclusion_block_number: u64,
 
     /// Last committed anchor block number carried across proposals.
-    /// Defaults to 0 for backward compatibility; pass a non-zero value when required.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long)]
     last_anchor_block_number: u64,
 
     /// L2 block range start (inclusive).
@@ -433,6 +432,33 @@ mod tests {
 
         assert_eq!(resolved.l1_rpc_url, "http://l1.override");
         assert_eq!(resolved.l2_rpc_url, "http://l2.override");
+    }
+
+    #[test]
+    fn cli_requires_last_anchor_block_number() {
+        let err = Args::try_parse_from([
+            "preflight",
+            "--network",
+            "taiko_hoodi",
+            "--l1-network",
+            "hoodi",
+            "--proposal-id",
+            "17771",
+            "--l1-inclusion-block-number",
+            "2674375",
+            "--l2-start",
+            "7225402",
+            "--l2-end",
+            "7225593",
+            "--output",
+            "/tmp/preflight.json",
+        ])
+        .expect_err("missing last anchor should fail");
+
+        assert!(
+            err.to_string().contains("--last-anchor-block-number"),
+            "unexpected parse error: {err}"
+        );
     }
 
     #[test]

@@ -73,7 +73,8 @@ struct Args {
     l1_inclusion_block_number: u64,
 
     /// Last committed anchor block number carried across proposals.
-    #[arg(long)]
+    /// Defaults to 0 for backward compatibility; pass a non-zero value when required.
+    #[arg(long, default_value_t = 0)]
     last_anchor_block_number: u64,
 
     /// L2 block range start (inclusive).

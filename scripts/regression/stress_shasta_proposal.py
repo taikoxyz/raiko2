@@ -219,8 +219,6 @@ class BatchMonitor:
         self.aggregate_running_count = 0
         # Track aggregate requests: list of proposal data dicts
         self.aggregate_requests: list[list[Dict[str, Any]]] = []
-        # Track aggregate requests: list of proposal_ids lists
-        self.aggregate_requests: list[list[int]] = []
         # logger
         logging.basicConfig(
             level=logging.INFO,

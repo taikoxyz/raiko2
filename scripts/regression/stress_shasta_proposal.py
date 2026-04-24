@@ -927,9 +927,26 @@ class BatchMonitor:
             self.logger.error(f"Error getting events from block {block_number}: {e}")
             return []
 
+    @property
+    def block_range(self):
+        """Backward-compatible alias for the configured L2 batch scan range."""
+        return getattr(self, "l2_block_range", None)
+
+    @block_range.setter
+    def block_range(self, value):
+        self.l2_block_range = value
+
+    def _ensure_in_range_state(self) -> None:
+        """Initialize legacy in-range state expected by batch iteration helpers."""
+        block_range = self.block_range
+        if block_range is not None and not hasattr(self, "last_block"):
+            self.last_block = block_range[0]
+
     async def get_next_batches(self) -> Optional[tuple[int, list[int]]]:
         """get latest block number"""
-        if self.block_range is not None:
+        block_range = self.block_range
+        if block_range is not None:
+            self._ensure_in_range_state()
             return await self.get_in_range_next_batch()
         else:
             return await self.get_latest_block_batchs()

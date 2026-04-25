@@ -102,7 +102,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
     "network_mode": "reserved",
     "fulfillment_strategy": "reserved",
     "skip_simulation": true,
-    "cycle_limit": 1000000000,
+    "cycle_limit": 1000000000000,
     "timeout_secs": 7200
   },
   "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",

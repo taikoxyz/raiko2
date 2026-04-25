@@ -110,6 +110,11 @@ struct EngineProgressObserver {
     task: EngineTask,
 }
 
+enum LeaseInterruption {
+    Cancelled,
+    Lost,
+}
+
 #[async_trait]
 impl ProverProgressObserver for EngineProgressObserver {
     async fn on_progress(&self, progress: &ProverProgress) {
@@ -591,12 +596,8 @@ where
         let result = if remaining_timeout.is_zero() {
             Err(task_timeout_error(task_timeout))
         } else {
-            match tokio::time::timeout(remaining_timeout, self.execute(&lease.id, payload.clone()))
+            self.execute_with_task_controls(&lease.id, &lease, payload.clone(), remaining_timeout)
                 .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(task_timeout_error(task_timeout)),
-            }
         };
         renew_task.abort();
         if let Err(err) = &result {
@@ -685,6 +686,58 @@ where
                 Err(format!("{task_name} task did not produce GuestInput"))
             }
             _ => Err(format!("{task_name} task not completed")),
+        }
+    }
+
+    async fn execute_with_task_controls(
+        &self,
+        task_id: &EngineTaskId,
+        lease: &raiko2_queue::TaskLease<EngineTask, EngineTaskKey>,
+        payload: EngineTask,
+        remaining_timeout: Duration,
+    ) -> Result<EngineOutput<S::GuestInput>, String> {
+        let execute = self.execute(task_id, payload);
+        let interrupted = self.wait_lease_interruption(&lease.id, &lease.worker, lease.attempt);
+        tokio::pin!(execute);
+        tokio::pin!(interrupted);
+
+        tokio::select! {
+            result = &mut execute => result,
+            () = tokio::time::sleep(remaining_timeout) => {
+                Err(task_timeout_error(self.inner.scheduler.config().task_timeout))
+            }
+            interruption = &mut interrupted => {
+                match interruption {
+                    Ok(LeaseInterruption::Cancelled) => Err(task_cancelled_error()),
+                    Ok(LeaseInterruption::Lost) => Err(task_lease_lost_error()),
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+        }
+    }
+
+    async fn wait_lease_interruption(
+        &self,
+        id: &EngineTaskId,
+        worker: &str,
+        attempt: u32,
+    ) -> Result<LeaseInterruption, TaskStoreError> {
+        let notifier = self.inner.scheduler.notifier();
+        loop {
+            let Some(view) = self.inner.scheduler.get(id.clone()).await? else {
+                return Ok(LeaseInterruption::Lost);
+            };
+
+            match view.state {
+                TaskState::Running {
+                    worker: current_worker,
+                    attempt: current_attempt,
+                } if current_worker == worker && current_attempt == attempt => {}
+                TaskState::Cancelled => return Ok(LeaseInterruption::Cancelled),
+                _ => return Ok(LeaseInterruption::Lost),
+            }
+
+            notifier.notified().await;
         }
     }
 
@@ -891,6 +944,14 @@ fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {
 
 fn task_timeout_error(task_timeout: Duration) -> String {
     format!("task timed out after {}ms", task_timeout.as_millis())
+}
+
+fn task_cancelled_error() -> String {
+    "task cancelled".to_string()
+}
+
+fn task_lease_lost_error() -> String {
+    "task lease lost before completion".to_string()
 }
 
 fn remaining_task_timeout(deadline_at_ms: u64) -> Duration {
@@ -1640,6 +1701,43 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_one_stops_running_task_after_cancel() -> Result<(), Box<dyn std::error::Error>> {
+        let scheduler_config = SchedulerConfig {
+            lease_duration: Duration::from_secs(60),
+            task_timeout: Duration::from_secs(30),
+            retry: RetryPolicy::None,
+        };
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(SlowProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            scheduler_config,
+        );
+        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
+
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+        assert!(engine.run_one("w1").await?);
+
+        let worker_engine = engine.clone();
+        let handle = tokio::spawn(async move { worker_engine.run_one("w1").await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        engine.cancel(job_id.clone()).await?;
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .map_err(|_| std::io::Error::other("run_one did not stop after cancel"))??;
+        assert!(result?);
+
+        let view = engine
+            .get(job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected task view"))?;
+        assert!(matches!(view.state, TaskState::Cancelled));
         Ok(())
     }
 

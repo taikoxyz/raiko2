@@ -30,6 +30,8 @@ use crate::util;
 const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "http://34.46.244.179:8545";
 const DEFAULT_PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";
 const TX_TIMEOUT: Duration = Duration::from_secs(180);
+const HOODI_NETWORK: &str = "hoodi";
+const HOODI_CHAIN_ID: u64 = 560_048;
 
 sol! {
     #[sol(rpc)]
@@ -100,9 +102,18 @@ enum DigestSource {
     VkHashBytes,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlannedAction {
+    Register,
+    SkipAlreadyTrusted,
+}
+
 #[derive(Clone, Debug)]
 struct ResolvedProfile {
     profile: RegisterImageProfile,
+    network: &'static str,
+    expected_chain_id: u64,
     rpc_url: String,
     risc0_verifier: Address,
     sp1_verifier: Address,
@@ -120,6 +131,9 @@ struct PlannedRegistration {
     contract: String,
     method: &'static str,
     trusted: bool,
+    already_trusted: bool,
+    needs_registration: bool,
+    planned_action: PlannedAction,
 }
 
 #[derive(Clone, Debug)]
@@ -133,9 +147,17 @@ struct RegistrationCall {
     contract: Address,
 }
 
+#[derive(Clone, Debug)]
+struct CheckedRegistration {
+    call: RegistrationCall,
+    already_trusted: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct RegistrationReceipt {
     sequence: usize,
+    network: &'static str,
+    chain_id: u64,
     registration_key: String,
     object_name: String,
     contract_kind: ContractKind,
@@ -157,6 +179,8 @@ struct RegistrationReceipt {
 struct SummaryFile {
     mode: &'static str,
     profile: &'static str,
+    network: &'static str,
+    chain_id: u64,
     backend: &'static str,
     rpc_url: String,
     output_dir: String,
@@ -175,24 +199,45 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
 
     let plan = build_plan(args.backend, &config)?;
     let summary_path = output_dir.join("summary.json");
+    let read_provider = ProviderBuilder::new().connect_http(
+        config
+            .rpc_url
+            .parse()
+            .with_context(|| format!("invalid rpc url {}", config.rpc_url))?,
+    );
+    let chain_id = read_provider
+        .get_chain_id()
+        .await
+        .context("failed to fetch verifier chain id")?;
+    ensure_profile_chain_id(&config, chain_id)?;
+    let checked_plan = check_plan(&read_provider, &plan).await?;
 
     if !args.apply {
+        let already_trusted = checked_plan
+            .iter()
+            .filter(|registration| registration.already_trusted)
+            .count();
+        let pending = checked_plan.len().saturating_sub(already_trusted);
         let summary = SummaryFile {
             mode: "dry-run",
             profile: profile_name(config.profile),
+            network: config.network,
+            chain_id,
             backend: backend_name(args.backend),
             rpc_url: config.rpc_url.clone(),
             output_dir: output_dir.display().to_string(),
             sender: None,
             created_at_unix: unix_timestamp(),
-            registrations: materialize_plan(&plan),
+            registrations: materialize_checked_plan(&checked_plan),
             receipt_files: Vec::new(),
         };
         write_json(&summary_path, &summary)?;
         println!(
-            "Dry-run plan written to {} ({} registrations)",
+            "Dry-run checked {} registrations: {} already trusted, {} need registration. Summary: {}",
+            summary.registrations.len(),
+            already_trusted,
+            pending,
             summary_path.display(),
-            summary.registrations.len()
         );
         return Ok(());
     }
@@ -210,16 +255,33 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
         )
     })?;
     let sender = signer.address();
-    let provider = ProviderBuilder::new().wallet(signer).connect_http(
+    let write_provider = ProviderBuilder::new().wallet(signer).connect_http(
         config
             .rpc_url
             .parse()
             .with_context(|| format!("invalid rpc url {}", config.rpc_url))?,
     );
 
-    let mut receipt_files = Vec::with_capacity(plan.len());
-    for (index, call) in plan.iter().enumerate() {
-        let receipt = apply_one(&provider, call, index + 1, sender).await?;
+    let pending_count = checked_plan
+        .iter()
+        .filter(|registration| !registration.already_trusted)
+        .count();
+    let mut receipt_files = Vec::with_capacity(pending_count);
+    for (index, registration) in checked_plan.iter().enumerate() {
+        if registration.already_trusted {
+            continue;
+        }
+
+        let call = &registration.call;
+        let receipt = apply_one(
+            &write_provider,
+            call,
+            index + 1,
+            sender,
+            config.network,
+            chain_id,
+        )
+        .await?;
         let file_name = format!("{:02}-{}.json", index + 1, call.registration_key);
         let receipt_path = output_dir.join(&file_name);
         write_json(&receipt_path, &receipt)?;
@@ -229,18 +291,24 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     let summary = SummaryFile {
         mode: "apply",
         profile: profile_name(config.profile),
+        network: config.network,
+        chain_id,
         backend: backend_name(args.backend),
         rpc_url: config.rpc_url,
         output_dir: output_dir.display().to_string(),
         sender: Some(address_hex(sender)),
         created_at_unix: unix_timestamp(),
-        registrations: materialize_plan(&plan),
+        registrations: materialize_checked_plan(&checked_plan),
         receipt_files,
     };
     write_json(&summary_path, &summary)?;
     println!(
-        "Applied {} registrations. Summary: {}",
-        summary.registrations.len(),
+        "Applied {} registrations, skipped {} already trusted. Summary: {}",
+        summary.receipt_files.len(),
+        summary
+            .registrations
+            .len()
+            .saturating_sub(summary.receipt_files.len()),
         summary_path.display()
     );
     Ok(())
@@ -257,6 +325,8 @@ fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
 
     ResolvedProfile {
         profile: args.profile,
+        network: HOODI_NETWORK,
+        expected_chain_id: HOODI_CHAIN_ID,
         rpc_url: args.rpc_url.clone().unwrap_or(rpc_url),
         risc0_verifier: args.risc0_verifier.unwrap_or(risc0_verifier),
         sp1_verifier: args.sp1_verifier.unwrap_or(sp1_verifier),
@@ -405,12 +475,14 @@ async fn apply_one<P>(
     call: &RegistrationCall,
     sequence: usize,
     sender: Address,
+    network: &'static str,
+    chain_id: u64,
 ) -> Result<RegistrationReceipt>
 where
     P: Provider + Clone,
 {
     let method = call.method_name();
-    let (tx_hash, block_number, status, gas_used, readback_trusted) = match call.contract_kind {
+    let (tx_hash, block_number, status, gas_used) = match call.contract_kind {
         ContractKind::Risc0 => {
             let contract = Risc0ImageVerifierContract::new(call.contract, provider.clone());
             let pending = contract
@@ -424,17 +496,11 @@ where
                 .get_receipt()
                 .await
                 .with_context(|| format!("failed to confirm {}", call.registration_key))?;
-            let readback = contract
-                .isImageTrusted(call.digest)
-                .call()
-                .await
-                .with_context(|| format!("failed to read back {}", call.registration_key))?;
             (
                 tx_hash,
                 receipt.block_number.unwrap_or_default(),
                 receipt.status(),
                 receipt.gas_used,
-                readback,
             )
         }
         ContractKind::Sp1 => {
@@ -450,20 +516,15 @@ where
                 .get_receipt()
                 .await
                 .with_context(|| format!("failed to confirm {}", call.registration_key))?;
-            let readback = contract
-                .isProgramTrusted(call.digest)
-                .call()
-                .await
-                .with_context(|| format!("failed to read back {}", call.registration_key))?;
             (
                 tx_hash,
                 receipt.block_number.unwrap_or_default(),
                 receipt.status(),
                 receipt.gas_used,
-                readback,
             )
         }
     };
+    let readback_trusted = registration_trusted(provider.clone(), call).await?;
 
     if !readback_trusted {
         bail!("{} did not read back as trusted", call.registration_key);
@@ -480,6 +541,8 @@ where
 
     Ok(RegistrationReceipt {
         sequence,
+        network,
+        chain_id,
         registration_key: call.registration_key.clone(),
         object_name: call.object_name.clone(),
         contract_kind: call.contract_kind,
@@ -498,22 +561,86 @@ where
     })
 }
 
-fn materialize_plan(plan: &[RegistrationCall]) -> Vec<PlannedRegistration> {
-    plan.iter()
+async fn check_plan<P>(provider: P, plan: &[RegistrationCall]) -> Result<Vec<CheckedRegistration>>
+where
+    P: Provider + Clone,
+{
+    let mut checked = Vec::with_capacity(plan.len());
+    for call in plan {
+        let already_trusted = registration_trusted(provider.clone(), call).await?;
+        checked.push(CheckedRegistration {
+            call: call.clone(),
+            already_trusted,
+        });
+    }
+    Ok(checked)
+}
+
+async fn registration_trusted<P>(provider: P, call: &RegistrationCall) -> Result<bool>
+where
+    P: Provider + Clone,
+{
+    match call.contract_kind {
+        ContractKind::Risc0 => {
+            let contract = Risc0ImageVerifierContract::new(call.contract, provider);
+            contract
+                .isImageTrusted(call.digest)
+                .call()
+                .await
+                .with_context(|| format!("failed to read back {}", call.registration_key))
+        }
+        ContractKind::Sp1 => {
+            let contract = Sp1ImageVerifierContract::new(call.contract, provider);
+            contract
+                .isProgramTrusted(call.digest)
+                .call()
+                .await
+                .with_context(|| format!("failed to read back {}", call.registration_key))
+        }
+    }
+}
+
+fn materialize_checked_plan(checked_plan: &[CheckedRegistration]) -> Vec<PlannedRegistration> {
+    checked_plan
+        .iter()
         .enumerate()
-        .map(|(index, call)| PlannedRegistration {
-            sequence: index + 1,
-            registration_key: call.registration_key.clone(),
-            object_name: call.object_name.clone(),
-            contract_kind: call.contract_kind,
-            stage: call.stage,
-            digest_source: call.digest_source,
-            digest: b256_hex(call.digest),
-            contract: address_hex(call.contract),
-            method: call.method_name(),
-            trusted: true,
+        .map(|(index, registration)| {
+            let call = &registration.call;
+            let needs_registration = !registration.already_trusted;
+            PlannedRegistration {
+                sequence: index + 1,
+                registration_key: call.registration_key.clone(),
+                object_name: call.object_name.clone(),
+                contract_kind: call.contract_kind,
+                stage: call.stage,
+                digest_source: call.digest_source,
+                digest: b256_hex(call.digest),
+                contract: address_hex(call.contract),
+                method: call.method_name(),
+                trusted: true,
+                already_trusted: registration.already_trusted,
+                needs_registration,
+                planned_action: if needs_registration {
+                    PlannedAction::Register
+                } else {
+                    PlannedAction::SkipAlreadyTrusted
+                },
+            }
         })
         .collect()
+}
+
+fn ensure_profile_chain_id(config: &ResolvedProfile, chain_id: u64) -> Result<()> {
+    if chain_id != config.expected_chain_id {
+        bail!(
+            "profile {} expects {} chain id {}, got {}",
+            profile_name(config.profile),
+            config.network,
+            config.expected_chain_id,
+            chain_id
+        );
+    }
+    Ok(())
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -570,11 +697,13 @@ impl RegistrationCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestSource, RegisterImageArgs, RegisterImageProfile, backend_name, build_risc0_calls,
-        digest_source_suffix, resolve_profile,
+        CheckedRegistration, ContractKind, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK,
+        PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall, Stage,
+        backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
+        materialize_checked_plan, resolve_profile,
     };
     use crate::Backend;
-    use alloy::primitives::{Address, address};
+    use alloy::primitives::{Address, B256, address};
     use std::collections::BTreeSet;
 
     #[test]
@@ -598,14 +727,16 @@ mod tests {
         };
 
         let resolved = resolve_profile(&args);
+        assert_eq!(resolved.network, HOODI_NETWORK);
+        assert_eq!(resolved.expected_chain_id, HOODI_CHAIN_ID);
         assert_eq!(resolved.rpc_url, "http://127.0.0.1:8545");
         assert_eq!(
             resolved.risc0_verifier,
-            Address::from(address!("1111111111111111111111111111111111111111"))
+            address!("1111111111111111111111111111111111111111")
         );
         assert_eq!(
             resolved.sp1_verifier,
-            Address::from(address!("2222222222222222222222222222222222222222"))
+            address!("2222222222222222222222222222222222222222")
         );
     }
 
@@ -643,5 +774,64 @@ mod tests {
         assert!(keys.contains("risc0_shasta_proposal-image-id"));
         assert!(keys.contains("risc0_shasta_aggregation-image-id"));
         assert!(keys.contains("risc0_shasta_boundless_aggregation-image-id"));
+    }
+
+    #[test]
+    fn hoodi_profile_rejects_wrong_chain_id() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::HoodiShasta,
+            backend: Backend::All,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+        let resolved = resolve_profile(&args);
+
+        ensure_profile_chain_id(&resolved, HOODI_CHAIN_ID).expect("hoodi chain id should match");
+        let err = ensure_profile_chain_id(&resolved, HOODI_CHAIN_ID + 1)
+            .expect_err("wrong chain id should be rejected");
+
+        assert!(err.to_string().contains("expects hoodi chain id"));
+    }
+
+    #[test]
+    fn checked_plan_marks_already_trusted_registrations_as_skipped() {
+        let checked = vec![
+            CheckedRegistration {
+                call: sample_call("already_trusted"),
+                already_trusted: true,
+            },
+            CheckedRegistration {
+                call: sample_call("needs_registration"),
+                already_trusted: false,
+            },
+        ];
+
+        let registrations = materialize_checked_plan(&checked);
+
+        assert_eq!(
+            registrations[0].planned_action,
+            PlannedAction::SkipAlreadyTrusted
+        );
+        assert!(registrations[0].already_trusted);
+        assert!(!registrations[0].needs_registration);
+        assert_eq!(registrations[1].planned_action, PlannedAction::Register);
+        assert!(!registrations[1].already_trusted);
+        assert!(registrations[1].needs_registration);
+    }
+
+    fn sample_call(name: &str) -> RegistrationCall {
+        RegistrationCall {
+            registration_key: format!("{name}-image-id"),
+            object_name: name.to_string(),
+            contract_kind: ContractKind::Risc0,
+            stage: Stage::Proposal,
+            digest_source: DigestSource::ImageId,
+            digest: B256::ZERO,
+            contract: Address::ZERO,
+        }
     }
 }

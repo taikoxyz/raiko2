@@ -3,6 +3,7 @@
 pub mod aggregation;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -44,6 +45,49 @@ const STAKE_TOKEN_DECIMALS: u8 = 18;
 const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
 const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const AGGREGATION_QUOTED_MCYCLES: u32 = 200;
+const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
+const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RaikoResult<T>>,
+{
+    let mut attempt = 1_u32;
+    let mut delay = EXTERNAL_RETRY_INITIAL_DELAY;
+
+    loop {
+        match run().await {
+            Ok(value) => {
+                if attempt > 1 {
+                    tracing::info!(operation, attempt, "Boundless external operation recovered");
+                }
+                return Ok(value);
+            }
+            Err(err) if attempt < EXTERNAL_RETRY_ATTEMPTS => {
+                tracing::warn!(
+                    operation,
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    error = %err,
+                    "Retrying Boundless external operation"
+                );
+                tokio::time::sleep(delay).await;
+                attempt = attempt.saturating_add(1);
+                delay = delay.saturating_mul(2).min(EXTERNAL_RETRY_MAX_DELAY);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     let mcycles = user_cycles.div_ceil(MILLION_CYCLES);
@@ -225,6 +269,59 @@ struct Submission {
     expires_at: u64,
 }
 
+struct FreshSubmissionContext<'a> {
+    client: &'a Client,
+    input: &'a Bytes,
+    elf: &'a [u8],
+    program: &'a UploadedProgram,
+    offer_spec: &'a BoundlessOfferParams,
+    journal: &'a [u8],
+    image_ref: &'a str,
+    deployment: &'a str,
+    observer: Option<&'a Arc<dyn ProverProgressObserver>>,
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: u32,
+}
+
+enum BoundlessAttemptError {
+    Retryable(String),
+    Fatal(RaikoError),
+}
+
+impl From<RaikoError> for BoundlessAttemptError {
+    fn from(value: RaikoError) -> Self {
+        Self::Fatal(value)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_boundless_progress(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    submission: &Submission,
+    image_ref: &str,
+    deployment: &str,
+    offchain: bool,
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: u32,
+) {
+    if let Some(observer) = observer {
+        observer
+            .on_progress(&ProverProgress::BoundlessSubmission(
+                BoundlessSubmissionProgress {
+                    provider_request_id: submission.provider_request_id.clone(),
+                    remote_tx_hash: submission.remote_tx_hash.clone(),
+                    expires_at: submission.expires_at,
+                    image_ref: image_ref.to_string(),
+                    deployment: deployment.to_string(),
+                    offchain,
+                    quoted_mcycles_count: Some(quoted_mcycles_count),
+                    evaluated_mcycles_count: Some(evaluated_mcycles_count),
+                },
+            ))
+            .await;
+    }
+}
+
 impl TryFrom<BoundlessSubmissionResume> for Submission {
     type Error = RaikoError;
 
@@ -317,9 +414,12 @@ impl BoundlessProver {
             return Ok(program);
         }
 
-        let url = client.upload_program(elf).await.map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to upload boundless program: {e}"))
-        })?;
+        let url = retry_external("upload boundless program", || async {
+            client.upload_program(elf).await.map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless program: {e}"))
+            })
+        })
+        .await?;
         let expires_secs = url
             .query_pairs()
             .find(|(key, _)| key.eq_ignore_ascii_case("X-Amz-Expires"))
@@ -384,9 +484,12 @@ impl BoundlessProver {
         journal: Vec<u8>,
     ) -> RaikoResult<ProofRequest> {
         let offer = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
-        let input_url = client.upload_input(guest_env_bytes).await.map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
-        })?;
+        let input_url = retry_external("upload boundless input", || async {
+            client.upload_input(guest_env_bytes).await.map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
+            })
+        })
+        .await?;
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())
@@ -410,30 +513,51 @@ impl BoundlessProver {
         request_params = request_params
             .with_input_url(input_url)
             .expect("with_input_url is infallible for valid URLs");
-        client.build_request(request_params).await.map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to build boundless request: {e:?}"))
+        retry_external("build boundless request", || {
+            let request_params = request_params.clone();
+            async move {
+                client.build_request(request_params).await.map_err(|e| {
+                    RaikoError::InvalidRequestConfig(format!(
+                        "Failed to build boundless request: {e:?}"
+                    ))
+                })
+            }
         })
+        .await
     }
 
-    async fn submit_request(
+    async fn submit_request_offchain(
         &self,
         client: &Client,
         request: &ProofRequest,
     ) -> RaikoResult<Submission> {
-        if self.config.offchain {
-            let market_request_id = client
+        let market_request_id = retry_external("submit boundless offchain request", || async {
+            client
                 .submit_request_offchain(request)
                 .await
-                .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))?
-                .0;
-            return Ok(Submission {
-                market_request_id,
-                provider_request_id: format!("0x{market_request_id:x}"),
-                remote_tx_hash: None,
-                expires_at: request.expires_at(),
-            });
-        }
+                .map(|(id, _)| id)
+                .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
+        })
+        .await?;
+        Ok(Submission {
+            market_request_id,
+            provider_request_id: format!("0x{market_request_id:x}"),
+            remote_tx_hash: None,
+            expires_at: request.expires_at(),
+        })
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_request_onchain(
+        &self,
+        client: &Client,
+        request: &ProofRequest,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+        image_ref: &str,
+        deployment: &str,
+        quoted_mcycles_count: u32,
+        evaluated_mcycles_count: u32,
+    ) -> RaikoResult<Submission> {
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
@@ -457,21 +581,101 @@ impl BoundlessProver {
             .sign_request(signer, market_addr, chain_id)
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
-        let pending_tx = client
+        let call = client
             .boundless_market
             .instance()
             .submitRequest(request.clone(), client_sig.as_bytes().into())
             .from(client.boundless_market.caller())
-            .value(value)
-            .send()
-            .await
-            .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))?;
-        Ok(Submission {
+            .value(value);
+
+        let mut submission = Submission {
             market_request_id: request.id,
             provider_request_id: format!("0x{:x}", request.id),
-            remote_tx_hash: Some(format!("0x{:x}", pending_tx.tx_hash())),
+            remote_tx_hash: None,
             expires_at: request.expires_at(),
-        })
+        };
+        publish_boundless_progress(
+            observer,
+            &submission,
+            image_ref,
+            deployment,
+            false,
+            quoted_mcycles_count,
+            evaluated_mcycles_count,
+        )
+        .await;
+
+        match call.send().await {
+            Ok(pending_tx) => {
+                submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
+                publish_boundless_progress(
+                    observer,
+                    &submission,
+                    image_ref,
+                    deployment,
+                    false,
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    error = %error,
+                    "Boundless submitRequest returned an uncertain error; polling reserved request id"
+                );
+            }
+        }
+
+        Ok(submission)
+    }
+
+    async fn submit_fresh_request(
+        &self,
+        context: FreshSubmissionContext<'_>,
+    ) -> RaikoResult<Submission> {
+        let (guest_env, guest_env_bytes) = Self::process_input(context.input.as_ref())?;
+        let request = self
+            .build_request(
+                context.client,
+                guest_env,
+                &guest_env_bytes,
+                context.elf,
+                context.program,
+                context.offer_spec,
+                context.quoted_mcycles_count,
+                context.journal.to_vec(),
+            )
+            .await?;
+
+        if self.config.offchain {
+            let submission = self
+                .submit_request_offchain(context.client, &request)
+                .await?;
+            publish_boundless_progress(
+                context.observer,
+                &submission,
+                context.image_ref,
+                context.deployment,
+                true,
+                context.quoted_mcycles_count,
+                context.evaluated_mcycles_count,
+            )
+            .await;
+            return Ok(submission);
+        }
+
+        self.submit_request_onchain(
+            context.client,
+            &request,
+            context.observer,
+            context.image_ref,
+            context.deployment,
+            context.quoted_mcycles_count,
+            context.evaluated_mcycles_count,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -486,7 +690,7 @@ impl BoundlessProver {
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
         proposal_carry_data: Option<&ProofCarryData>,
-    ) -> RaikoResult<Proof> {
+    ) -> Result<Proof, BoundlessAttemptError> {
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
         let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
         let started_at = Instant::now();
@@ -499,8 +703,9 @@ impl BoundlessProver {
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
                     .unwrap_or_default();
-                return Err(RaikoError::Guest(format!(
-                    "Boundless request timed out before fulfillment{detail}"
+                return Err(BoundlessAttemptError::Retryable(format!(
+                    "Boundless request {} timed out before fulfillment{detail}",
+                    submission.provider_request_id
                 )));
             }
 
@@ -531,9 +736,10 @@ impl BoundlessProver {
             match status {
                 RequestStatus::Unknown | RequestStatus::Locked => {}
                 RequestStatus::Expired => {
-                    return Err(RaikoError::Guest(
-                        "Boundless request expired before fulfillment".to_string(),
-                    ));
+                    return Err(BoundlessAttemptError::Retryable(format!(
+                        "Boundless request {} expired before fulfillment",
+                        submission.provider_request_id
+                    )));
                 }
                 RequestStatus::Fulfilled => {
                     let fulfillment = match client
@@ -556,12 +762,14 @@ impl BoundlessProver {
                         }
                     };
                     let fulfillment_data = fulfillment.data().map_err(|e| {
-                        RaikoError::Guest(format!(
+                        BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
                             "Failed to decode boundless fulfillment payload: {e}"
-                        ))
+                        )))
                     })?;
                     let journal = fulfillment_data.journal().ok_or_else(|| {
-                        RaikoError::Guest("Boundless fulfillment is missing journal".to_string())
+                        BoundlessAttemptError::Fatal(RaikoError::Guest(
+                            "Boundless fulfillment is missing journal".to_string(),
+                        ))
                     })?;
                     let seal = fulfillment.seal.clone();
                     let receipt_json = if proof_type == "proposal" {
@@ -579,10 +787,10 @@ impl BoundlessProver {
                         _ => parse_shasta_aggregation_input_hash(journal)?,
                     };
                     if input_hash != expected_input_hash {
-                        return Err(RaikoError::Guest(
+                        return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
                             "Boundless fulfillment journal does not match local dry-run journal"
                                 .to_string(),
-                        ));
+                        )));
                     }
                     let stage_metadata = serde_json::json!({
                         "zkvm": "risc0",
@@ -653,9 +861,8 @@ impl BoundlessProver {
         proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
-        let client = self.create_client().await?;
+        let client = retry_external("create boundless client", || self.create_client()).await?;
         let program = self.ensure_uploaded(&client, elf_type, elf).await?;
-        let (guest_env, guest_env_bytes) = Self::process_input(input.as_ref())?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
@@ -665,78 +872,93 @@ impl BoundlessProver {
             _ => parse_shasta_aggregation_input_hash(&journal)?,
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
-        let request = self
-            .build_request(
-                &client,
-                guest_env,
-                &guest_env_bytes,
-                elf,
-                &program,
-                offer_spec,
-                quoted_mcycles_count,
-                journal,
-            )
-            .await?;
         let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
-        let submission = if let Some(observer) = observer.as_ref()
-            && let Some(stored_submission) = observer.load_boundless_submission().await
-        {
-            let submission = Submission::try_from(stored_submission)?;
+
+        let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
-                .on_progress(&ProverProgress::BoundlessSubmission(
-                    BoundlessSubmissionProgress {
-                        provider_request_id: submission.provider_request_id.clone(),
-                        remote_tx_hash: submission.remote_tx_hash.clone(),
-                        expires_at: submission.expires_at,
-                        image_ref: image_ref.clone(),
-                        deployment: deployment.clone(),
-                        offchain: self.config.offchain,
-                        quoted_mcycles_count: Some(quoted_mcycles_count),
-                        evaluated_mcycles_count: Some(evaluated_mcycles_count),
-                    },
-                ))
-                .await;
-            submission
+                .load_boundless_submission()
+                .await
+                .map(Submission::try_from)
+                .transpose()?
         } else {
-            let submission = self.submit_request(&client, &request).await?;
-            if let Some(observer) = observer.as_ref() {
-                observer
-                    .on_progress(&ProverProgress::BoundlessSubmission(
-                        BoundlessSubmissionProgress {
-                            provider_request_id: submission.provider_request_id.clone(),
-                            remote_tx_hash: submission.remote_tx_hash.clone(),
-                            expires_at: submission.expires_at,
-                            image_ref: image_ref.clone(),
-                            deployment: deployment.clone(),
-                            offchain: self.config.offchain,
-                            quoted_mcycles_count: Some(quoted_mcycles_count),
-                            evaluated_mcycles_count: Some(evaluated_mcycles_count),
-                        },
-                    ))
-                    .await;
-            }
-            submission
+            None
         };
-        if observer.is_some() {
+        let mut attempt = 1_u64;
+
+        loop {
+            let submission = if let Some(submission) = resume_submission.take() {
+                if submission.expires_at <= now_secs() {
+                    tracing::warn!(
+                        provider_request_id = %submission.provider_request_id,
+                        expires_at = submission.expires_at,
+                        "Stored Boundless submission is expired; submitting a new request"
+                    );
+                    continue;
+                }
+                publish_boundless_progress(
+                    observer.as_ref(),
+                    &submission,
+                    &image_ref,
+                    &deployment,
+                    self.config.offchain,
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
+                )
+                .await;
+                submission
+            } else {
+                self.submit_fresh_request(FreshSubmissionContext {
+                    client: &client,
+                    input: &input,
+                    elf,
+                    program: &program,
+                    offer_spec,
+                    journal: &journal,
+                    image_ref: &image_ref,
+                    deployment: &deployment,
+                    observer: observer.as_ref(),
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
+                })
+                .await?
+            };
+
             tracing::info!(
                 provider_request_id = %submission.provider_request_id,
                 expires_at = submission.expires_at,
+                attempt,
                 "Using Boundless market submission"
             );
+
+            match self
+                .poll_until_fulfilled(
+                    &client,
+                    &submission,
+                    proof_type,
+                    program.image_id,
+                    block_image_id,
+                    expected_input_hash,
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
+                    proposal_carry_data.as_ref(),
+                )
+                .await
+            {
+                Ok(proof) => return Ok(proof),
+                Err(BoundlessAttemptError::Retryable(reason)) => {
+                    tracing::warn!(
+                        provider_request_id = %submission.provider_request_id,
+                        attempt,
+                        reason,
+                        "Boundless submission did not finish; retrying with a new market request"
+                    );
+                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(EXTERNAL_RETRY_INITIAL_DELAY).await;
+                }
+                Err(BoundlessAttemptError::Fatal(error)) => return Err(error),
+            }
         }
-        self.poll_until_fulfilled(
-            &client,
-            &submission,
-            proof_type,
-            program.image_id,
-            block_image_id,
-            expected_input_hash,
-            quoted_mcycles_count,
-            evaluated_mcycles_count,
-            proposal_carry_data.as_ref(),
-        )
-        .await
     }
 }
 
@@ -1091,17 +1313,21 @@ mod tests {
 
     #[test]
     fn quoted_mcycles_count_can_use_evaluated_cycles_directly() {
-        let mut config = BoundlessConfig::default();
-        config.batch_quote_strategy = BatchQuoteStrategy::Evaluated;
+        let config = BoundlessConfig {
+            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
+            ..Default::default()
+        };
         let prover = BoundlessProver::new(config);
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_188);
     }
 
     #[test]
     fn quoted_mcycles_count_can_use_fixed_override() {
-        let mut config = BoundlessConfig::default();
-        config.batch_quoted_mcycles = Some(1_500);
-        config.batch_quote_strategy = BatchQuoteStrategy::Evaluated;
+        let config = BoundlessConfig {
+            batch_quoted_mcycles: Some(1_500),
+            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
+            ..Default::default()
+        };
         let prover = BoundlessProver::new(config);
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_500);
     }
@@ -1153,7 +1379,7 @@ mod tests {
             quote: Some("{\"receipt\":true}".to_string()),
             extra_data: Some(serde_json::json!({
                 "proof_carry_data": {
-                    "chain_id": 167013
+                    "chain_id": 167_013
                 }
             })),
             ..Default::default()
@@ -1171,7 +1397,7 @@ mod tests {
             envelope.carry_data,
             Some(serde_json::json!({
                 "proof_carry_data": {
-                    "chain_id": 167013
+                    "chain_id": 167_013
                 }
             }))
         );

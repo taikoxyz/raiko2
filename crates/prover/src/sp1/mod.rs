@@ -21,6 +21,7 @@ use serde::Deserialize;
 use sp1_sdk::{
     CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
     SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
+    network::Error as Sp1NetworkError,
 };
 use std::str::FromStr;
 use std::time::Duration;
@@ -32,6 +33,9 @@ use crate::{
     GuestInputCodec, ProverProgress, ProverProgressObserver, build_shasta_aggregation_input,
     parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
+
+const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
+const SP1_NETWORK_REQUEST_RETRY_DELAY: Duration = Duration::from_secs(15);
 
 sol!(
     #[sol(rpc)]
@@ -836,109 +840,160 @@ async fn request_network_proof(
     stage: &str,
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
-    if let Some(observer) = observer.as_ref()
-        && let Some(request_id_string) = observer.load_sp1_network_request_id().await
-    {
+    let mut stored_request_id = if let Some(observer) = observer.as_ref() {
+        observer.load_sp1_network_request_id().await
+    } else {
+        None
+    };
+    let mut request_attempt = 1_u64;
+
+    loop {
+        let request_id_string = if let Some(request_id_string) = stored_request_id.take() {
+            if let Some(observer) = observer.as_ref() {
+                observer
+                    .on_progress(&ProverProgress::Sp1NetworkSubmission(
+                        Sp1NetworkSubmissionProgress {
+                            provider_request_id: request_id_string.clone(),
+                            network_mode: config.network_mode,
+                            fulfillment_strategy: config.fulfillment_strategy,
+                            skip_simulation: config.skip_simulation,
+                            cycle_limit: config.cycle_limit,
+                            timeout_secs: config.timeout_secs,
+                        },
+                    ))
+                    .await;
+            }
+
+            tracing::info!(
+                stage,
+                request_id = %request_id_string,
+                timeout_secs = config.timeout_secs,
+                "Resuming SP1 network proof wait"
+            );
+            request_id_string
+        } else {
+            let request_id = client
+                .prove(pk, &stdin)
+                .mode(proof_mode)
+                .strategy(config.fulfillment_strategy.into())
+                .skip_simulation(config.skip_simulation)
+                .cycle_limit(config.cycle_limit)
+                .timeout(timeout)
+                .request_async()
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
+                    RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
+                })?;
+
+            let request_id_string = request_id.to_string();
+            if let Some(observer) = observer.as_ref() {
+                observer
+                    .on_progress(&ProverProgress::Sp1NetworkSubmission(
+                        Sp1NetworkSubmissionProgress {
+                            provider_request_id: request_id_string.clone(),
+                            network_mode: config.network_mode,
+                            fulfillment_strategy: config.fulfillment_strategy,
+                            skip_simulation: config.skip_simulation,
+                            cycle_limit: config.cycle_limit,
+                            timeout_secs: config.timeout_secs,
+                        },
+                    ))
+                    .await;
+            }
+
+            tracing::info!(
+                stage,
+                request_id = %request_id_string,
+                timeout_secs = config.timeout_secs,
+                request_attempt,
+                "Waiting for SP1 network proof"
+            );
+            request_id_string
+        };
+
         let request_id = B256::from_str(&request_id_string).map_err(|e| {
             RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
         })?;
-        observer
-            .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                Sp1NetworkSubmissionProgress {
-                    provider_request_id: request_id_string.clone(),
-                    network_mode: config.network_mode,
-                    fulfillment_strategy: config.fulfillment_strategy,
-                    skip_simulation: config.skip_simulation,
-                    cycle_limit: config.cycle_limit,
-                    timeout_secs: config.timeout_secs,
-                },
-            ))
-            .await;
+        match wait_sp1_network_proof(client, request_id, timeout, stage, &request_id_string).await?
+        {
+            Sp1NetworkWaitOutcome::Fulfilled(proof) => {
+                return Ok(NetworkProofRequestResult {
+                    request_id: request_id_string,
+                    proof,
+                });
+            }
+            Sp1NetworkWaitOutcome::RetryRequest(reason) => {
+                tracing::warn!(
+                    stage,
+                    request_id = %request_id_string,
+                    request_attempt,
+                    reason,
+                    "SP1 network proof request reached a retryable terminal state; submitting a new request"
+                );
+                request_attempt = request_attempt.saturating_add(1);
+                tokio::time::sleep(SP1_NETWORK_REQUEST_RETRY_DELAY).await;
+            }
+        }
+    }
+}
 
+enum Sp1NetworkWaitOutcome {
+    Fulfilled(SP1ProofWithPublicValues),
+    RetryRequest(String),
+}
+
+async fn wait_sp1_network_proof(
+    client: &NetworkProver,
+    request_id: B256,
+    timeout: Duration,
+    stage: &str,
+    request_id_string: &str,
+) -> RaikoResult<Sp1NetworkWaitOutcome> {
+    let mut attempt = 1_u64;
+    loop {
         let wait_started = std::time::Instant::now();
-        tracing::info!(
-            stage,
-            request_id = %request_id_string,
-            timeout_secs = config.timeout_secs,
-            "Resuming SP1 network proof wait"
-        );
-        let proof = client
-            .wait_proof(request_id, Some(timeout), None)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to resume SP1 {stage} proof request: {:?}", e);
-                RaikoError::Guest(format!("SP1 {stage} network proof failed: {e}"))
-            })?;
-        tracing::info!(
-            stage,
-            request_id = %request_id_string,
-            proof_mode = sp1_proof_mode_name(&proof),
-            elapsed_ms = wait_started.elapsed().as_millis(),
-            "SP1 network proof received"
-        );
-
-        return Ok(NetworkProofRequestResult {
-            request_id: request_id_string,
-            proof,
-        });
+        match client.wait_proof(request_id, Some(timeout), None).await {
+            Ok(proof) => {
+                tracing::info!(
+                    stage,
+                    request_id = %request_id_string,
+                    proof_mode = sp1_proof_mode_name(&proof),
+                    attempt,
+                    elapsed_ms = wait_started.elapsed().as_millis(),
+                    "SP1 network proof received"
+                );
+                return Ok(Sp1NetworkWaitOutcome::Fulfilled(proof));
+            }
+            Err(error) => {
+                if let Some(network_error) = error.downcast_ref::<Sp1NetworkError>() {
+                    match network_error {
+                        Sp1NetworkError::RequestUnfulfillable { .. }
+                        | Sp1NetworkError::RequestTimedOut { .. }
+                        | Sp1NetworkError::RequestAuctionTimedOut { .. } => {
+                            return Ok(Sp1NetworkWaitOutcome::RetryRequest(error.to_string()));
+                        }
+                        Sp1NetworkError::RequestUnexecutable { .. }
+                        | Sp1NetworkError::SimulationFailed => {
+                            return Err(RaikoError::Guest(format!(
+                                "SP1 {stage} network proof failed: {error}"
+                            )));
+                        }
+                        Sp1NetworkError::RpcError(_) | Sp1NetworkError::Other(_) => {}
+                    }
+                }
+                tracing::warn!(
+                    stage,
+                    request_id = %request_id_string,
+                    attempt,
+                    error = ?error,
+                    "SP1 network proof wait failed; retrying existing request id"
+                );
+                attempt = attempt.saturating_add(1);
+                tokio::time::sleep(SP1_NETWORK_WAIT_RETRY_DELAY).await;
+            }
+        }
     }
-
-    let request_id = client
-        .prove(pk, &stdin)
-        .mode(proof_mode)
-        .strategy(config.fulfillment_strategy.into())
-        .skip_simulation(config.skip_simulation)
-        .cycle_limit(config.cycle_limit)
-        .timeout(timeout)
-        .request_async()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
-            RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
-        })?;
-
-    let request_id_string = request_id.to_string();
-    if let Some(observer) = observer.as_ref() {
-        observer
-            .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                Sp1NetworkSubmissionProgress {
-                    provider_request_id: request_id_string.clone(),
-                    network_mode: config.network_mode,
-                    fulfillment_strategy: config.fulfillment_strategy,
-                    skip_simulation: config.skip_simulation,
-                    cycle_limit: config.cycle_limit,
-                    timeout_secs: config.timeout_secs,
-                },
-            ))
-            .await;
-    }
-
-    let wait_started = std::time::Instant::now();
-    tracing::info!(
-        stage,
-        request_id = %request_id_string,
-        timeout_secs = config.timeout_secs,
-        "Waiting for SP1 network proof"
-    );
-    let proof = client
-        .wait_proof(request_id, Some(timeout), None)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to wait for SP1 {stage} proof: {:?}", e);
-            RaikoError::Guest(format!("SP1 {stage} network proof failed: {e}"))
-        })?;
-    tracing::info!(
-        stage,
-        request_id = %request_id_string,
-        proof_mode = sp1_proof_mode_name(&proof),
-        elapsed_ms = wait_started.elapsed().as_millis(),
-        "SP1 network proof received"
-    );
-
-    Ok(NetworkProofRequestResult {
-        request_id: request_id_string,
-        proof,
-    })
 }
 
 fn insert_sp1_metadata(

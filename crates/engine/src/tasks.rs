@@ -212,7 +212,7 @@ mod tests {
         };
 
         let mut keys = [p2_preflight, p1_prove, p1_encode_sp1, p1_encode_risc0];
-        keys.sort_by(|left, right| left.cmp_for_ready_queue(right));
+        keys.sort_by(raiko2_queue::ReadyQueueSort::cmp_for_ready_queue);
 
         assert!(matches!(
             keys[0],

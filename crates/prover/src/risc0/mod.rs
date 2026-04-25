@@ -367,6 +367,7 @@ where
 mod tests {
     use super::{Risc0Config, Risc0Prover};
     use crate::Prover;
+    use alloy::eips::eip2930::AccessList;
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, B256, Signature, TxKind, U256};
     use alloy_sol_types::{SolCall, sol};
@@ -394,7 +395,7 @@ mod tests {
             max_priority_fee_per_gas: 0,
             to: TxKind::Call(Address::ZERO),
             value: U256::ZERO,
-            access_list: Default::default(),
+            access_list: AccessList::default(),
             input: anchorV4Call {
                 _checkpoint: checkpoint.clone(),
             }
@@ -409,11 +410,13 @@ mod tests {
         let chain_spec = SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(167_000)
             .expect("supported taiko mainnet chain spec");
-        let mut parent_header = alloy_consensus::Header::default();
-        parent_header.number = 0;
-        parent_header.timestamp = 1;
-        parent_header.parent_hash = B256::from([8u8; 32]);
-        parent_header.state_root = B256::from([0x11; 32]);
+        let parent_header = alloy_consensus::Header {
+            number: 0,
+            timestamp: 1,
+            parent_hash: B256::from([8u8; 32]),
+            state_root: B256::from([0x11; 32]),
+            ..Default::default()
+        };
 
         let mut witness = raiko2_primitives::StatelessInput {
             chain_spec,
@@ -425,10 +428,12 @@ mod tests {
         witness.block.header.state_root = B256::from([1u8; 32]);
         witness.witness.headers = vec![WitnessHeader::from_header(parent_header)];
 
-        let mut l1_header = alloy_consensus::Header::default();
-        l1_header.number = 7;
-        l1_header.parent_hash = B256::from([0xAA; 32]);
-        l1_header.state_root = B256::from([0x66; 32]);
+        let l1_header = alloy_consensus::Header {
+            number: 7,
+            parent_hash: B256::from([0xAA; 32]),
+            state_root: B256::from([0x66; 32]),
+            ..Default::default()
+        };
         let checkpoint = AnchorV4Checkpoint {
             blockNumber: l1_header.number.try_into().expect("fits in uint48"),
             blockHash: l1_header.hash_slow(),

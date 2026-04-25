@@ -43,10 +43,24 @@ pub struct AggregationTaskRequest {
     pub prover_config: ProverTaskConfig,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationSource {
     ProofTasks(Vec<EngineTaskId>),
     Proofs(Vec<Proof>),
+    Inputs(Vec<AggregationInput>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregationInput {
+    ProofTask(Box<EngineTaskId>),
+    ProofArtifact(ProofArtifactRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofArtifactRef {
+    pub network_pair: String,
+    pub proof_ref: String,
+    pub proof_path: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]

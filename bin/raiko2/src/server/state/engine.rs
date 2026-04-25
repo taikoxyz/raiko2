@@ -1,5 +1,6 @@
 use raiko2_engine::{
-    AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest,
+    AggregationInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
+    ProposalTaskRequest,
 };
 use raiko2_primitives::Proof;
 use raiko2_queue::{TaskState, TaskStoreError, TaskView};
@@ -19,15 +20,15 @@ pub trait EngineHandle: Send + Sync {
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
-    fn submit_aggregation_proof_from_tasks(
-        &self,
-        request: AggregationTaskRequest,
-        proof_tasks: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn submit_aggregation_proof_from_proofs(
         &self,
         request: AggregationTaskRequest,
         proofs: Vec<Proof>,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
+    fn submit_aggregation_proof_from_inputs(
+        &self,
+        request: AggregationTaskRequest,
+        inputs: Vec<AggregationInput>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
@@ -102,17 +103,6 @@ where
         })
     }
 
-    fn submit_aggregation_proof_from_tasks(
-        &self,
-        request: AggregationTaskRequest,
-        proof_tasks: Vec<EngineTaskId>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_aggregation_proof_from_tasks(request, proof_tasks)
-                .await
-        })
-    }
-
     fn submit_aggregation_proof_from_proofs(
         &self,
         request: AggregationTaskRequest,
@@ -120,6 +110,17 @@ where
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
         Box::pin(async move {
             self.submit_aggregation_proof_from_proofs(request, proofs)
+                .await
+        })
+    }
+
+    fn submit_aggregation_proof_from_inputs(
+        &self,
+        request: AggregationTaskRequest,
+        inputs: Vec<AggregationInput>,
+    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+        Box::pin(async move {
+            self.submit_aggregation_proof_from_inputs(request, inputs)
                 .await
         })
     }

@@ -6,8 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_engine::{
-    AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
-    ProverTaskConfig,
+    AggregationInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProofArtifactRef,
+    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::PipelineKey;
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
@@ -17,12 +17,12 @@ use raiko2_prover::sp1::{
 };
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_runtime::{
-    RunnerStatus as RuntimeRunnerStatus, TaskRegistration, TaskRegistrationOutcome,
+    RunnerStatus as RuntimeRunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::super::errors::ApiError;
 use super::proof_route::{
@@ -36,6 +36,7 @@ use super::proof_types::{
     PruneStatus, PublicProverArgs, RootTaskState, ShastaProposal,
 };
 use crate::config::ResolvedNetworkPair;
+use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
 use crate::server::state::{AppState, EngineHandle, EngineStatusView, ProofStatus};
 use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_stage_task_id, proposal_task_chain_ids, remove_task_children,
@@ -78,7 +79,15 @@ struct PlannedAggregateTask {
 #[derive(Clone)]
 struct SubmissionPlan {
     proposals: Vec<PlannedProposalTask>,
+    proposal_sources: Vec<ProposalPlanSource>,
     aggregate: Option<PlannedAggregateTask>,
+    aggregate_inputs: Vec<AggregationInput>,
+}
+
+#[derive(Clone)]
+enum ProposalPlanSource {
+    Pending,
+    Cached,
 }
 
 struct ExternalAggregateSubmission {
@@ -117,7 +126,7 @@ async fn request_batch_shasta_proof_inner(
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
     let request_fingerprint = batch_request_fingerprint(&submission)?;
-    let plan = build_submission_plan(&submission)?;
+    let plan = build_submission_plan(state.runtime.as_ref(), &submission).await?;
 
     info!(
         "Received hoodi shasta batch request: task_id={}, proposals={}, aggregate={}, route={}, pair={}",
@@ -591,7 +600,8 @@ fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> 
     })
 }
 
-fn build_submission_plan(
+async fn build_submission_plan(
+    runtime: &RuntimeManager,
     submission: &CanonicalBatchSubmission,
 ) -> Result<SubmissionPlan, ApiError> {
     let proposals = submission
@@ -624,6 +634,31 @@ fn build_submission_plan(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
+    let mut proposal_sources = Vec::with_capacity(proposals.len());
+    let mut aggregate_inputs = Vec::new();
+    if submission.aggregate_requested {
+        aggregate_inputs.reserve(proposals.len());
+        for proposal in &proposals {
+            if let Some(material) =
+                load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
+            {
+                proposal_sources.push(ProposalPlanSource::Cached);
+                aggregate_inputs.push(AggregationInput::ProofArtifact(ProofArtifactRef {
+                    network_pair: material.record.network_pair,
+                    proof_ref: material.record.proof_ref,
+                    proof_path: material.record.proof_path,
+                }));
+            } else {
+                proposal_sources.push(ProposalPlanSource::Pending);
+                aggregate_inputs.push(AggregationInput::ProofTask(Box::new(
+                    proposal.task_id.clone(),
+                )));
+            }
+        }
+    } else {
+        proposal_sources.resize(proposals.len(), ProposalPlanSource::Pending);
+    }
+
     let aggregate = if submission.aggregate_requested {
         let request = AggregationTaskRequest {
             request_id: submission.public_task_id.clone(),
@@ -649,7 +684,9 @@ fn build_submission_plan(
 
     Ok(SubmissionPlan {
         proposals,
+        proposal_sources,
         aggregate,
+        aggregate_inputs,
     })
 }
 
@@ -768,7 +805,10 @@ async fn enqueue_submission_plan(
 ) -> Result<(), ApiError> {
     let mut previous = None;
 
-    for proposal in &plan.proposals {
+    for (index, proposal) in plan.proposals.iter().enumerate() {
+        if matches!(plan.proposal_sources[index], ProposalPlanSource::Cached) {
+            continue;
+        }
         let task_id = engine
             .submit_proposal_proof_with_dependencies(
                 proposal.request.clone(),
@@ -788,12 +828,9 @@ async fn enqueue_submission_plan(
 
     if let Some(aggregate) = &plan.aggregate {
         let task_id = engine
-            .submit_aggregation_proof_from_tasks(
+            .submit_aggregation_proof_from_inputs(
                 aggregate.request.clone(),
-                plan.proposals
-                    .iter()
-                    .map(|proposal| proposal.task_id.clone())
-                    .collect(),
+                plan.aggregate_inputs.clone(),
             )
             .await
             .map_err(|err| {
@@ -825,14 +862,17 @@ async fn cleanup_submission_plan(
         proposals: plan
             .proposals
             .iter()
-            .map(|proposal| ProposalTask {
-                proposal_id: proposal.proposal.proposal_id,
-                checkpoint: proposal.proposal.checkpoint,
-                l1_inclusion_block_number: proposal.proposal.l1_inclusion_block_number,
-                l2_block_numbers: proposal.proposal.l2_block_numbers.clone(),
-                last_anchor_block_number: proposal.proposal.last_anchor_block_number,
-                task_id: proposal.task_ref.clone(),
-                request: Some(proposal.request.clone()),
+            .zip(plan.proposal_sources.iter())
+            .filter_map(|(proposal, source)| {
+                matches!(source, ProposalPlanSource::Pending).then_some(ProposalTask {
+                    proposal_id: proposal.proposal.proposal_id,
+                    checkpoint: proposal.proposal.checkpoint,
+                    l1_inclusion_block_number: proposal.proposal.l1_inclusion_block_number,
+                    l2_block_numbers: proposal.proposal.l2_block_numbers.clone(),
+                    last_anchor_block_number: proposal.proposal.last_anchor_block_number,
+                    task_id: proposal.task_ref.clone(),
+                    request: Some(proposal.request.clone()),
+                })
             })
             .collect(),
         aggregate_task_id: plan
@@ -899,10 +939,14 @@ async fn reenqueue_existing_batch_task(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<(), ApiError> {
-    let recovery_plan = build_submission_plan(&CanonicalBatchSubmission {
-        public_task_id: existing.task_id.clone(),
-        ..submission.clone()
-    })?;
+    let recovery_plan = build_submission_plan(
+        state.runtime.as_ref(),
+        &CanonicalBatchSubmission {
+            public_task_id: existing.task_id.clone(),
+            ..submission.clone()
+        },
+    )
+    .await?;
     let engine = resolve_engine(
         state,
         &existing_metadata.network_pair,
@@ -1095,17 +1139,30 @@ async fn cleanup_external_aggregate_submission(
 
 async fn load_task_data(state: &AppState, id: &str) -> Result<HoodiTaskData, ApiError> {
     let lookup = load_task_lookup(state, id).await?;
-    load_task_data_from_lookup(id, &lookup).await
+    load_task_data_from_lookup(state, id, &lookup).await
 }
 
 async fn load_task_data_from_lookup(
+    state: &AppState,
     id: &str,
     lookup: &TaskLookup,
 ) -> Result<HoodiTaskData, ApiError> {
     let (proposals, proposal_engine_state_present): (Vec<HoodiProposalStatus>, bool) =
-        load_proposal_statuses(&lookup.engine, &lookup.metadata, &lookup.record).await?;
+        load_proposal_statuses(
+            state.runtime.as_ref(),
+            &lookup.engine,
+            &lookup.metadata,
+            &lookup.record,
+        )
+        .await?;
     let (aggregate, aggregate_engine_state_present): (Option<HoodiAggregateStatus>, bool) =
-        load_aggregate_status(&lookup.engine, &lookup.metadata, &lookup.record).await?;
+        load_aggregate_status(
+            state.runtime.as_ref(),
+            &lookup.engine,
+            &lookup.metadata,
+            &lookup.record,
+        )
+        .await?;
     let root_engine_state_present = proposal_engine_state_present || aggregate_engine_state_present;
     let root_state = resolve_root_task_state(
         lookup.record.runner_status,
@@ -1144,6 +1201,49 @@ async fn load_persisted_root_proof(
     Ok(load_persisted_root_proof_material(record)
         .await?
         .and_then(|proof| proof.proof))
+}
+
+async fn load_cached_proposal_artifact(
+    runtime: &RuntimeManager,
+    submission: &CanonicalBatchSubmission,
+    proof_ref: &str,
+) -> Result<Option<ProofArtifactMaterial>, ApiError> {
+    let Some(material) = load_proof_artifact_material(runtime, &submission.pair.key, proof_ref)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+    else {
+        return Ok(None);
+    };
+
+    if material.record.pipeline_key != submission.route.pipeline_key()
+        || material.record.route != submission.route.route
+    {
+        warn!(
+            network_pair = material.record.network_pair,
+            proof_ref = material.record.proof_ref,
+            artifact_pipeline = material.record.pipeline_key.as_str(),
+            artifact_route = %material.record.route,
+            request_pipeline = submission.route.pipeline_key().as_str(),
+            request_route = %submission.route.route,
+            "proof artifact route does not match request; treating it as a cache miss"
+        );
+        return Ok(None);
+    }
+
+    if let Err(err) = validate_external_aggregate_proofs(
+        submission.route.route,
+        std::slice::from_ref(&material.proof),
+    ) {
+        warn!(
+            network_pair = material.record.network_pair,
+            proof_ref = material.record.proof_ref,
+            error = %err,
+            "proof artifact is not valid aggregate input; treating it as a cache miss"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(material))
 }
 
 async fn load_persisted_root_proof_material(
@@ -1192,6 +1292,7 @@ async fn load_task_lookup(state: &AppState, id: &str) -> Result<TaskLookup, ApiE
 }
 
 async fn load_proposal_statuses(
+    runtime_manager: &RuntimeManager,
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
@@ -1218,6 +1319,22 @@ async fn load_proposal_statuses(
             runtime.is_some() || metadata.has_runtime_progress(),
             record.error.as_deref(),
         );
+        let status = if let Some(material) =
+            load_proof_artifact_material(runtime_manager, &metadata.network_pair, &proposal.task_id)
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to load proof artifact: {err}"))
+                })? {
+            let proof = material.proof;
+            EngineStatusView {
+                status: ProofStatus::Completed,
+                proof: proof.proof,
+                error: None,
+                extra_data: proof.extra_data,
+            }
+        } else {
+            status
+        };
         proposals.push(HoodiProposalStatus {
             index,
             proposal_id: proposal.proposal_id,
@@ -1238,6 +1355,7 @@ async fn load_proposal_statuses(
 }
 
 async fn load_aggregate_status(
+    runtime_manager: &RuntimeManager,
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
@@ -1265,6 +1383,27 @@ async fn load_aggregate_status(
         metadata.aggregate_runtime().is_some() || metadata.has_runtime_progress(),
         record.error.as_deref(),
     );
+    let status = if let Some(task_id) = metadata.aggregate_task_id.as_deref() {
+        if let Some(material) =
+            load_proof_artifact_material(runtime_manager, &metadata.network_pair, task_id)
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to load proof artifact: {err}"))
+                })?
+        {
+            let proof = material.proof;
+            EngineStatusView {
+                status: ProofStatus::Completed,
+                proof: proof.proof,
+                error: None,
+                extra_data: proof.extra_data,
+            }
+        } else {
+            status
+        }
+    } else {
+        status
+    };
 
     Ok((
         Some(HoodiAggregateStatus {
@@ -1760,7 +1899,7 @@ async fn compatibility_response_for_task(
 ) -> Result<Response, ApiError> {
     let lookup = load_task_lookup(state, task_id).await?;
     let proof_type = HoodiProofType::from_canonical(lookup.metadata.proof_type);
-    let task = load_task_data_from_lookup(task_id, &lookup).await?;
+    let task = load_task_data_from_lookup(state, task_id, &lookup).await?;
 
     Ok(match task.status {
         ProofStatus::Pending => legacy_status_response(proof_type, LegacyTaskStatus::Registered),
@@ -1848,10 +1987,12 @@ mod tests {
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
     use raiko2_primitives::SupportedChainSpecs;
     use raiko2_queue::TaskStoreError;
-    use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, RuntimeTaskRecord};
+    use raiko2_runtime::{
+        ProofArtifactRegistration, RunnerStatus as RuntimeRunnerStatus, RuntimeTaskRecord,
+    };
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1866,12 +2007,71 @@ mod tests {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
 
-        fn submit_aggregation_proof_from_tasks(
+        fn submit_aggregation_proof_from_proofs(
             &self,
             _request: AggregationTaskRequest,
-            _proof_tasks: Vec<EngineTaskId>,
+            _proofs: Vec<raiko2_primitives::Proof>,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation task submission") })
+            Box::pin(async { panic!("unexpected external aggregation submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregationInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregation input submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct RecordingEngine {
+        pipeline_key: PipelineKey,
+        proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
+        aggregate_inputs: Mutex<Vec<AggregationInput>>,
+    }
+
+    impl RecordingEngine {
+        const fn new(pipeline_key: PipelineKey) -> Self {
+            Self {
+                pipeline_key,
+                proposals: Mutex::new(Vec::new()),
+                aggregate_inputs: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EngineHandle for RecordingEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            request: ProposalTaskRequest,
+            dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async move {
+                self.proposals
+                    .lock()
+                    .expect("proposal submissions mutex")
+                    .push((request.clone(), dependencies));
+                Ok(proposal_stage_task_id(
+                    self.pipeline_key,
+                    request,
+                    ProposalStage::Prove,
+                ))
+            })
         }
 
         fn submit_aggregation_proof_from_proofs(
@@ -1880,6 +2080,23 @@ mod tests {
             _proofs: Vec<raiko2_primitives::Proof>,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected external aggregation submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            request: AggregationTaskRequest,
+            inputs: Vec<AggregationInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async move {
+                *self
+                    .aggregate_inputs
+                    .lock()
+                    .expect("aggregate inputs mutex") = inputs;
+                Ok(EngineTaskId::new(EngineTaskKey::Aggregate {
+                    pipeline: self.pipeline_key,
+                    request,
+                }))
+            })
         }
 
         fn get_status(
@@ -1943,6 +2160,60 @@ mod tests {
             graffiti: None,
             execution_mode: None,
         }
+    }
+
+    fn canonical_multi_submission(route: CanonicalProofRoute) -> CanonicalBatchSubmission {
+        let mut submission = canonical_submission(route, true);
+        submission.public_task_id = "task-mixed-cache".to_string();
+        submission.proposals = vec![
+            CanonicalProposal {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_numbers: vec![7],
+                l2_block_range: L2BlockRange { start: 7, end: 7 },
+                last_anchor_block_number: 6,
+            },
+            CanonicalProposal {
+                proposal_id: 8,
+                checkpoint: None,
+                l1_inclusion_block_number: 12,
+                l2_block_numbers: vec![8],
+                l2_block_range: L2BlockRange { start: 8, end: 8 },
+                last_anchor_block_number: 7,
+            },
+        ];
+        submission
+    }
+
+    fn valid_native_proof() -> Proof {
+        Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            extra_data: Some(serde_json::json!({ "native": true })),
+            ..Proof::default()
+        }
+    }
+
+    async fn write_test_proof_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        proof_ref: &str,
+        proof: &Proof,
+    ) -> Result<()> {
+        let proof_path = runtime
+            .write_proof_artifact_bytes(network_pair, proof_ref, &serde_json::to_vec_pretty(proof)?)
+            .await?;
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaNative,
+                route: "native/local".parse().expect("route"),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await?;
+        Ok(())
     }
 
     fn runtime_record(
@@ -2176,19 +2447,151 @@ mod tests {
         assert!(should_reenqueue_existing_submission(&record, &metadata));
     }
 
-    #[test]
-    fn native_proposal_task_id_is_reused_across_aggregate_flags() {
+    #[tokio::test]
+    async fn native_proposal_task_id_is_reused_across_aggregate_flags() {
         let route = CanonicalProofRoute {
             route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
         };
-        let single = build_submission_plan(&canonical_submission(route, false))
+        let runtime =
+            RuntimeManager::new(unique_test_runtime_root("plan-task-id")).expect("runtime manager");
+        let single = build_submission_plan(&runtime, &canonical_submission(route, false))
+            .await
             .expect("single submission plan");
-        let aggregate = build_submission_plan(&canonical_submission(route, true))
+        let aggregate = build_submission_plan(&runtime, &canonical_submission(route, true))
+            .await
             .expect("aggregate submission plan");
 
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
         assert_eq!(single.proposals[0].task_id, aggregate.proposals[0].task_id);
+    }
+
+    #[tokio::test]
+    async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals() {
+        let route = CanonicalProofRoute {
+            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
+        };
+        let runtime = RuntimeManager::new(unique_test_runtime_root("mixed-cache-plan"))
+            .expect("runtime manager");
+        let submission = canonical_multi_submission(route);
+        let first_request = ProposalTaskRequest {
+            proposal_id: 7,
+            l2_block_range: Some(L2BlockRange { start: 7, end: 7 }),
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: 6,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let cached_ref = proposal_task_ref(PipelineKey::ShastaNative, &first_request);
+        write_test_proof_artifact(
+            &runtime,
+            &submission.pair.key,
+            &cached_ref,
+            &valid_native_proof(),
+        )
+        .await
+        .expect("write cached proof");
+
+        let plan = build_submission_plan(&runtime, &submission)
+            .await
+            .expect("submission plan");
+        assert!(matches!(
+            plan.proposal_sources[0],
+            ProposalPlanSource::Cached
+        ));
+        assert!(matches!(
+            plan.proposal_sources[1],
+            ProposalPlanSource::Pending
+        ));
+
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        enqueue_submission_plan(&engine, &plan)
+            .await
+            .expect("enqueue plan");
+
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].0.proposal_id, 8);
+        assert!(proposals[0].1.is_empty());
+        drop(proposals);
+
+        let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
+        assert_eq!(aggregate_inputs.len(), 2);
+        assert_eq!(
+            aggregate_inputs[0],
+            AggregationInput::ProofArtifact(ProofArtifactRef {
+                network_pair: submission.pair.key.clone(),
+                proof_ref: cached_ref.clone(),
+                proof_path: runtime
+                    .proof_artifact_path(&submission.pair.key, &cached_ref)
+                    .display()
+                    .to_string(),
+            })
+        );
+        assert!(matches!(
+            aggregate_inputs[1],
+            AggregationInput::ProofTask(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn corrupt_proof_artifact_is_treated_as_cache_miss() {
+        let route = CanonicalProofRoute {
+            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
+        };
+        let runtime = RuntimeManager::new(unique_test_runtime_root("corrupt-cache-plan"))
+            .expect("runtime manager");
+        let submission = canonical_submission(route, true);
+        let request = ProposalTaskRequest {
+            proposal_id: 7,
+            l2_block_range: Some(L2BlockRange { start: 7, end: 7 }),
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: 6,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proof_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        let proof_path = runtime
+            .write_proof_artifact_bytes(&submission.pair.key, &proof_ref, b"{bad-json")
+            .await
+            .expect("write corrupt artifact");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: submission.pair.key.clone(),
+                proof_ref,
+                pipeline_key: PipelineKey::ShastaNative,
+                route: "native/local".parse().expect("route"),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await
+            .expect("register corrupt artifact");
+
+        let plan = build_submission_plan(&runtime, &submission)
+            .await
+            .expect("submission plan");
+        assert!(matches!(
+            plan.proposal_sources[0],
+            ProposalPlanSource::Pending
+        ));
+        assert!(matches!(
+            plan.aggregate_inputs[0],
+            AggregationInput::ProofTask(_)
+        ));
+    }
+
+    fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("raiko2-{prefix}-{unique}"))
     }
 
     fn proposal_status(status: ProofStatus, proof: Option<&str>) -> HoodiProposalStatus {
@@ -2331,9 +2734,12 @@ mod tests {
             updated_at: 1,
         };
 
-        let (proposals, engine_state_present) = load_proposal_statuses(&engine, &metadata, &record)
-            .await
-            .expect("legacy child id should not fail task loading");
+        let runtime = RuntimeManager::new(unique_test_runtime_root("legacy-child-id"))
+            .expect("runtime manager");
+        let (proposals, engine_state_present) =
+            load_proposal_statuses(&runtime, &engine, &metadata, &record)
+                .await
+                .expect("legacy child id should not fail task loading");
 
         assert!(!engine_state_present);
         assert_eq!(proposals.len(), 1);

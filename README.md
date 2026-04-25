@@ -16,7 +16,7 @@ Hoodi-compatible v3 API.
 - Canonical routes: `native/local`, `risc0/local`, `risc0/boundless`, `sp1/local`
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
-- Persisted runtime state and task workdirs under `./data/runtime` by default
+- Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
 - In-process memory queue by default, with an optional Redis-backed queue
 
 ## Quickstart

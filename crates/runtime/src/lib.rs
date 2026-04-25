@@ -6,10 +6,13 @@ use anyhow::{Context, Result};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fs as stdfs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::OnceCell;
 
 /// Runtime root managed by the host process.
@@ -30,6 +33,25 @@ pub struct ExpiredTaskCursor {
 pub enum TaskRegistrationOutcome {
     Created(RuntimeTaskRecord),
     Existing(RuntimeTaskRecord),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProofArtifactRegistration {
+    pub network_pair: String,
+    pub proof_ref: String,
+    pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
+    pub proof_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofArtifactRecord {
+    pub network_pair: String,
+    pub proof_ref: String,
+    pub pipeline_key: PipelineKey,
+    pub route: PipelineRoute,
+    pub proof_path: String,
+    pub updated_at: i64,
 }
 
 impl RuntimeManager {
@@ -60,6 +82,7 @@ impl RuntimeManager {
             self.root.join("tasks"),
             self.root.join("images"),
             self.root.join("cache"),
+            self.root.join("cache").join("proofs"),
             self.root.join("tmp"),
         ] {
             stdfs::create_dir_all(&dir)
@@ -119,6 +142,29 @@ impl RuntimeManager {
             .join("tasks")
             .join(pipeline_key.as_str())
             .join(task_id)
+    }
+
+    #[must_use]
+    pub fn proof_artifact_path(&self, network_pair: &str, proof_ref: &str) -> PathBuf {
+        self.root
+            .join("cache")
+            .join("proofs")
+            .join(safe_path_component(network_pair))
+            .join(format!("{}.json", safe_path_component(proof_ref)))
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact cannot be atomically published.
+    pub async fn write_proof_artifact_bytes(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf> {
+        let path = self.proof_artifact_path(network_pair, proof_ref);
+        write_file_atomic(&path, bytes).await?;
+        Ok(path)
     }
 
     /// # Errors
@@ -379,6 +425,73 @@ impl RuntimeManager {
         }
         record.updated_at = now_ts();
         self.upsert_task(&record).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be stored.
+    pub async fn upsert_proof_artifact(
+        &self,
+        registration: ProofArtifactRegistration,
+    ) -> Result<()> {
+        let conn = self.connection().await?;
+        let updated_at = now_ts();
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                INSERT INTO proof_artifacts (
+                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
+                    pipeline_key = excluded.pipeline_key,
+                    route = excluded.route,
+                    proof_path = excluded.proof_path,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    registration.network_pair,
+                    registration.proof_ref,
+                    registration.pipeline_key.as_str(),
+                    registration.route.to_string(),
+                    registration.proof_path,
+                    updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to upsert proof artifact")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be loaded.
+    pub async fn get_proof_artifact(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactRecord>> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let artifact = conn
+            .call(move |conn| {
+                Ok(conn
+                    .query_row(
+                        r"
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                        params![network_pair, proof_ref],
+                        proof_artifact_record_from_row,
+                    )
+                    .optional()?)
+            })
+            .await
+            .context("failed to query proof artifact")?;
+        Ok(artifact)
     }
 
     /// # Errors
@@ -712,6 +825,30 @@ fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
     })
 }
 
+fn proof_artifact_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProofArtifactRecord> {
+    let pipeline_key_raw: String = row.get(2)?;
+    let route_raw: String = row.get(3)?;
+    let pipeline_key = pipeline_key_raw.parse::<PipelineKey>().map_err(|err| {
+        invalid_runtime_task_row(
+            2,
+            format!("invalid pipeline_key '{pipeline_key_raw}': {err}"),
+        )
+    })?;
+    let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
+        invalid_runtime_task_row(3, format!("invalid route '{route_raw}': {err}"))
+    })?;
+    Ok(ProofArtifactRecord {
+        network_pair: row.get(0)?,
+        proof_ref: row.get(1)?,
+        pipeline_key,
+        route,
+        proof_path: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
 fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let request_fingerprint_exists: Option<i64> = conn
         .query_row(
@@ -734,6 +871,21 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         ",
         [],
     )?;
+    conn.execute_batch(
+        r"
+        CREATE TABLE IF NOT EXISTS proof_artifacts (
+            network_pair TEXT NOT NULL,
+            proof_ref TEXT NOT NULL,
+            pipeline_key TEXT NOT NULL,
+            route TEXT NOT NULL,
+            proof_path TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(network_pair, proof_ref)
+        );
+        CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx
+        ON proof_artifacts(updated_at);
+        ",
+    )?;
     Ok(())
 }
 
@@ -744,6 +896,72 @@ async fn remove_task_workspace(task_dir: &Path) -> Result<()> {
             .with_context(|| format!("failed to remove task workspace {}", task_dir.display()))?;
     }
     Ok(())
+}
+
+async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("path {} has no parent", path.display()))?;
+    fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
+
+    let temp_path = atomic_temp_path(path);
+    let result = async {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await
+            .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
+        file.write_all(bytes)
+            .await
+            .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("failed to sync temp file {}", temp_path.display()))?;
+        drop(file);
+        fs::rename(&temp_path, path).await.with_context(|| {
+            format!(
+                "failed to publish temp file {} to {}",
+                temp_path.display(),
+                path.display()
+            )
+        })?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+    result
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    path.with_file_name(format!(".{file_name}.tmp.{}.{}", process::id(), unique))
+}
+
+fn safe_path_component(raw: &str) -> String {
+    let mut component = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                component.push(char::from(byte));
+            }
+            _ => {
+                write!(&mut component, "%{byte:02x}").expect("writing to String should not fail");
+            }
+        }
+    }
+    component
 }
 
 fn invalid_runtime_task_row(column: usize, message: String) -> rusqlite::Error {
@@ -802,7 +1020,8 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
+        ExpiredTaskCursor, ProofArtifactRegistration, RunnerStatus, RuntimeManager,
+        TaskRegistration, TaskRegistrationOutcome,
     };
     use raiko2_pipeline::PipelineRoute;
     use rusqlite::OptionalExtension;
@@ -842,6 +1061,36 @@ mod tests {
         assert_eq!(task.runner_status, RunnerStatus::Allocated);
         assert_eq!(task.proposal_id, Some(7));
         assert!(Path::new(&task.task_dir).exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_persists_proof_artifact_paths() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-proof-artifact");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", "proposal_0xabc");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: "proposal_0xabc".to_string(),
+                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+            })
+            .await?;
+
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
+            .await?
+            .expect("proof artifact");
+        assert_eq!(artifact.proof_path, proof_path.display().to_string());
+        assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
+        assert_eq!(artifact.proof_ref, "proposal_0xabc");
+
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

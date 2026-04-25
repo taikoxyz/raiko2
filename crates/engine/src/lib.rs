@@ -16,8 +16,8 @@ pub mod tasks;
 pub mod worker;
 
 pub use tasks::{
-    AggregationSource, AggregationTaskRequest, EncodedGuestInput, EngineTaskId, EngineTaskKey,
-    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
+    AggregationInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput, EngineTaskId,
+    EngineTaskKey, ProofArtifactRef, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 
 use std::sync::Arc;
@@ -490,6 +490,65 @@ where
 
     /// # Errors
     ///
+    /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
+    /// task input does not point to a proposal prove stage in this pipeline.
+    pub async fn submit_aggregation_proof_from_inputs(
+        &self,
+        request: AggregationTaskRequest,
+        inputs: Vec<AggregationInput>,
+    ) -> Result<EngineTaskId, TaskStoreError> {
+        if inputs.is_empty() {
+            return Err(TaskStoreError::corrupt_msg(
+                "aggregation requires at least 1 proof input",
+            ));
+        }
+
+        let mut proof_tasks = Vec::new();
+        for input in &inputs {
+            let AggregationInput::ProofTask(proof_task) = input else {
+                continue;
+            };
+            match &proof_task.0 {
+                EngineTaskKey::Proposal {
+                    pipeline,
+                    stage: ProposalStage::Prove,
+                    ..
+                } if *pipeline == self.inner.spec.pipeline_key() => {
+                    proof_tasks.push((**proof_task).clone());
+                }
+                EngineTaskKey::Proposal { stage, .. } => {
+                    return Err(TaskStoreError::corrupt_msg(format!(
+                        "aggregation input must reference proposal prove tasks, got {stage:?}"
+                    )));
+                }
+                EngineTaskKey::Aggregate { .. } => {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "aggregation input cannot reference an aggregate task",
+                    ));
+                }
+            }
+        }
+
+        let aggregate_id = self.aggregate_task_id(request.clone());
+        self.inner
+            .scheduler
+            .submit_with_execution_policy(
+                aggregate_id,
+                NewTask {
+                    priority: Priority::High,
+                    payload: EngineTask::Aggregate {
+                        request,
+                        source: AggregationSource::Inputs(inputs),
+                    },
+                },
+                proof_tasks,
+                self.externally_stateful_stage_execution_policy(),
+            )
+            .await
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the task store cannot enqueue the aggregation task or if the proof set
     /// is invalid.
     pub async fn submit_aggregation_proof_from_proofs(
@@ -796,6 +855,54 @@ where
         }
     }
 
+    async fn get_proof_artifact(
+        &self,
+        artifact: ProofArtifactRef,
+    ) -> Result<raiko2_primitives::Proof, String> {
+        let bytes = tokio::fs::read(&artifact.proof_path).await.map_err(|err| {
+            format!(
+                "failed to read proof artifact {} for {}: {err}",
+                artifact.proof_path, artifact.proof_ref
+            )
+        })?;
+        serde_json::from_slice(&bytes).map_err(|err| {
+            format!(
+                "failed to parse proof artifact {} for {}: {err}",
+                artifact.proof_path, artifact.proof_ref
+            )
+        })
+    }
+
+    async fn resolve_aggregation_source(
+        &self,
+        source: AggregationSource,
+    ) -> Result<Vec<raiko2_primitives::Proof>, String> {
+        match source {
+            AggregationSource::ProofTasks(proof_tasks) => {
+                let mut proofs = Vec::with_capacity(proof_tasks.len());
+                for proof_task in proof_tasks {
+                    proofs.push(self.get_proof(proof_task).await?);
+                }
+                Ok(proofs)
+            }
+            AggregationSource::Proofs(proofs) => Ok(proofs),
+            AggregationSource::Inputs(inputs) => {
+                let mut proofs = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    match input {
+                        AggregationInput::ProofArtifact(artifact) => {
+                            proofs.push(self.get_proof_artifact(artifact).await?);
+                        }
+                        AggregationInput::ProofTask(proof_task) => {
+                            proofs.push(self.get_proof(*proof_task).await?);
+                        }
+                    }
+                }
+                Ok(proofs)
+            }
+        }
+    }
+
     async fn prove_proposal(
         &self,
         task_id: &EngineTaskId,
@@ -894,16 +1001,7 @@ where
                     request: request.clone(),
                     source: source.clone(),
                 };
-                let proofs = match source {
-                    AggregationSource::ProofTasks(proof_tasks) => {
-                        let mut proofs = Vec::with_capacity(proof_tasks.len());
-                        for proof_task in proof_tasks {
-                            proofs.push(self.get_proof(proof_task).await?);
-                        }
-                        proofs
-                    }
-                    AggregationSource::Proofs(proofs) => proofs,
-                };
+                let proofs = self.resolve_aggregation_source(source).await?;
                 let proof = self
                     .inner
                     .spec

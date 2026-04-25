@@ -5,12 +5,12 @@ use raiko2_engine::{
     tasks::EngineTask,
 };
 use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
-use raiko2_runtime::{RunnerStatus, RuntimeManager, RuntimeTaskRecord};
+use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::fs;
 
 use crate::server::task_metadata::{
     TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref,
@@ -325,9 +325,29 @@ impl RuntimeObserver {
             anyhow::bail!("runtime task not registered for task ref {root_ref}");
         }
         let records = self.matching_active_root_records(id, records)?;
+        let Some(first_record) = records.first() else {
+            return Ok(HashMap::new());
+        };
 
         let proof_bytes =
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
+        let proof_path = self
+            .runtime
+            .write_proof_artifact_bytes(&self.network_pair, &root_ref, &proof_bytes)
+            .await
+            .context("failed to write proof artifact")?;
+        let proof_path = proof_path.display().to_string();
+        self.runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: self.network_pair.clone(),
+                proof_ref: root_ref,
+                pipeline_key: first_record.pipeline_key,
+                route: first_record.route,
+                proof_path: proof_path.clone(),
+            })
+            .await
+            .context("failed to register proof artifact")?;
+
         let mut proof_paths = HashMap::with_capacity(records.len());
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
@@ -338,11 +358,7 @@ impl RuntimeObserver {
                 continue;
             }
 
-            let proof_path = Path::new(&record.task_dir).join("proof.json");
-            fs::write(&proof_path, &proof_bytes)
-                .await
-                .with_context(|| format!("failed to write proof file {}", proof_path.display()))?;
-            proof_paths.insert(record.task_id, proof_path.display().to_string());
+            proof_paths.insert(record.task_id, proof_path.clone());
         }
         Ok(proof_paths)
     }
@@ -1126,6 +1142,11 @@ mod tests {
             !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
             "proposal proof must not become the root proof for aggregate requests"
         );
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+            .await?
+            .expect("proposal proof artifact");
+        assert!(tokio::fs::try_exists(Path::new(&artifact.proof_path)).await?);
         Ok(())
     }
 
@@ -1350,7 +1371,7 @@ mod tests {
             .on_task_succeeded(
                 &first_task_id,
                 &EngineTask::ProveProposal {
-                    request: first_request,
+                    request: first_request.clone(),
                     input_task: first_task_id.clone(),
                 },
                 &EngineTaskSuccess::Proof {
@@ -1370,6 +1391,12 @@ mod tests {
             !tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
             "partial proposal proof must not be persisted as final root proof"
         );
+        let first_ref = proposal_task_ref(pipeline, &first_request);
+        let first_artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &first_ref)
+            .await?
+            .expect("first proposal proof artifact");
+        assert!(tokio::fs::try_exists(Path::new(&first_artifact.proof_path)).await?);
 
         observer
             .on_task_succeeded(
@@ -1393,10 +1420,9 @@ mod tests {
         assert_eq!(record.runner_status, RunnerStatus::Completed);
         assert!(record.proof_path.is_some());
         assert_eq!(metadata.runtime.last_event.as_deref(), Some("completed"));
-        assert!(
-            tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?,
-            "final proof should be written after all proposal proofs complete"
-        );
+        let proof_path = record.proof_path.expect("root proof path");
+        assert!(tokio::fs::try_exists(Path::new(&proof_path)).await?);
+        assert!(!tokio::fs::try_exists(Path::new(&record.task_dir).join("proof.json")).await?);
         Ok(())
     }
 

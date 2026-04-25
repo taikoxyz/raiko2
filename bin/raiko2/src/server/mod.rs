@@ -4,6 +4,7 @@ mod app;
 mod fixture;
 mod handlers;
 mod net;
+mod proof_artifact;
 mod ready;
 mod routes;
 mod run;

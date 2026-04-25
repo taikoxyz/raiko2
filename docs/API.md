@@ -325,7 +325,7 @@ POST /proof/prune
 ```
 
 Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
-directories.
+directories. Reusable proof artifacts under `cache/proofs/...` are retained.
 
 ### Response
 
@@ -400,6 +400,8 @@ Returns the root-task view derived from the original batch request.
   `evaluated_mcycles_count`.
 - Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
   `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
+  Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
+  stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
   execute report under `proposals[].extra_data.sp1`.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the

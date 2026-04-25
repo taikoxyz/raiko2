@@ -16,6 +16,7 @@ use raiko2_engine::{
     Engine, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
+use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
@@ -33,9 +34,11 @@ use super::fixture::{
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
-use super::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata};
+use super::task_metadata::{
+    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
+};
 use crate::config::{GuestSystem, RunnerKind};
-use raiko2_runtime::RuntimeManager;
+use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
     let status = res.status();
@@ -532,7 +535,7 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["status"], "completed", "{res}");
     assert!(
         res["data"].get("error").is_none(),
         "unexpected error: {res}"
@@ -570,7 +573,7 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["status"], "completed", "{res}");
     assert_eq!(res["data"]["network"], "taiko_dev");
     assert_eq!(res["data"]["l1_network"], "ethereum");
 }
@@ -1438,6 +1441,95 @@ async fn e2e_batch_single_proof_aggregate_sp1_completes_from_fixture() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["status"], "completed");
+    assert_eq!(res["data"]["aggregate"]["status"], "completed");
+    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    let proposal_request = ProposalTaskRequest {
+        proposal_id: 3,
+        l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 3, end: 3 }),
+        l1_inclusion_block_number: 1,
+        last_anchor_block_number: 0,
+        checkpoint: None,
+        blob_proof_type: None,
+        prover: None,
+        graffiti: None,
+        prover_config: ProverTaskConfig::default(),
+    };
+    let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request);
+    let proof: Proof = serde_json::from_value(sp1_external_proof("0xcached-sp1-proof".to_string()))
+        .expect("cached proof");
+    let proof_path = state
+        .runtime
+        .proof_artifact_path("taiko_dev/ethereum", &proof_ref);
+    tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+        .await
+        .expect("create proof dir");
+    tokio::fs::write(
+        &proof_path,
+        serde_json::to_vec_pretty(&proof).expect("serialize proof"),
+    )
+    .await
+    .expect("write proof artifact");
+    state
+        .runtime
+        .upsert_proof_artifact(ProofArtifactRegistration {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref,
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: "sp1/local".parse().expect("route"),
+            proof_path: proof_path.display().to_string(),
+        })
+        .await
+        .expect("register proof artifact");
+
+    let app = app::build_router(state);
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [
+                {
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                }
+            ],
+            "aggregate": true,
+            "proof_type": "sp1",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let id = single_report_task_id(&app).await;
+
+    assert!(engine.run_one("e2e").await.expect("run aggregate"));
+    assert!(
+        !engine.run_one("e2e").await.expect("queue drained"),
+        "cached proposal proof should avoid preflight/proposal tasks"
+    );
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["status"], "completed", "{res}");
+    assert_eq!(res["data"]["proposals"][0]["status"], "completed");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
 }

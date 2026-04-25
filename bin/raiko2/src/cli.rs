@@ -83,25 +83,9 @@ pub struct Cli {
     #[arg(long, env = "RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS")]
     pub queue_maintenance_interval_ms: Option<u64>,
 
-    /// Queue retry strategy (none, fixed, exponential)
-    #[arg(long, env = "RAIKO2_QUEUE_RETRY_STRATEGY")]
-    pub queue_retry_strategy: Option<String>,
-
-    /// Maximum attempts for retry (when retry is enabled)
-    #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_ATTEMPTS")]
-    pub queue_retry_max_attempts: Option<u32>,
-
-    /// Fixed retry delay in milliseconds (when `retry_strategy=fixed`)
-    #[arg(long, env = "RAIKO2_QUEUE_RETRY_FIXED_DELAY_MS")]
-    pub queue_retry_fixed_delay_ms: Option<u64>,
-
-    /// Exponential retry base delay in milliseconds (when `retry_strategy=exponential`)
-    #[arg(long, env = "RAIKO2_QUEUE_RETRY_BASE_DELAY_MS")]
-    pub queue_retry_base_delay_ms: Option<u64>,
-
-    /// Exponential retry maximum delay in milliseconds (when `retry_strategy=exponential`)
-    #[arg(long, env = "RAIKO2_QUEUE_RETRY_MAX_DELAY_MS")]
-    pub queue_retry_max_delay_ms: Option<u64>,
+    /// Task execution timeout in seconds, applied regardless of proof type
+    #[arg(long, env = "RAIKO2_QUEUE_TASK_TIMEOUT_SECS")]
+    pub queue_task_timeout_secs: Option<u64>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -9,71 +9,8 @@ const fn default_queue_maintenance_interval_ms() -> u64 {
     200
 }
 
-const fn default_queue_retry_max_attempts() -> u32 {
-    3
-}
-
-const fn default_queue_retry_fixed_delay_ms() -> u64 {
-    1_000
-}
-
-const fn default_queue_retry_base_delay_ms() -> u64 {
-    1_000
-}
-
-const fn default_queue_retry_max_delay_ms() -> u64 {
-    30_000
-}
-
-/// Queue retry strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum RetryStrategy {
-    None,
-    Fixed,
-    #[default]
-    Exponential,
-}
-
-impl std::str::FromStr for RetryStrategy {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_lowercase().as_str() {
-            "none" => Ok(RetryStrategy::None),
-            "fixed" => Ok(RetryStrategy::Fixed),
-            "exponential" | "exp" => Ok(RetryStrategy::Exponential),
-            _ => Err(format!("Unknown retry strategy: {s}")),
-        }
-    }
-}
-
-/// Queue retry configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetryConfig {
-    #[serde(default)]
-    pub strategy: RetryStrategy,
-    #[serde(default = "default_queue_retry_max_attempts")]
-    pub max_attempts: u32,
-    #[serde(default = "default_queue_retry_fixed_delay_ms")]
-    pub fixed_delay_ms: u64,
-    #[serde(default = "default_queue_retry_base_delay_ms")]
-    pub base_delay_ms: u64,
-    #[serde(default = "default_queue_retry_max_delay_ms")]
-    pub max_delay_ms: u64,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            strategy: RetryStrategy::default(),
-            max_attempts: default_queue_retry_max_attempts(),
-            fixed_delay_ms: default_queue_retry_fixed_delay_ms(),
-            base_delay_ms: default_queue_retry_base_delay_ms(),
-            max_delay_ms: default_queue_retry_max_delay_ms(),
-        }
-    }
+const fn default_queue_task_timeout_secs() -> u64 {
+    14_400
 }
 
 /// Queue backend type.
@@ -111,12 +48,12 @@ pub struct QueueConfig {
     pub workers: usize,
     #[serde(default = "default_queue_maintenance_interval_ms")]
     pub maintenance_interval_ms: u64,
-    #[serde(default)]
-    pub retry: RetryConfig,
+    #[serde(default = "default_queue_task_timeout_secs")]
+    pub task_timeout_secs: u64,
 }
 
 const fn default_queue_workers() -> usize {
-    3
+    6
 }
 
 impl Default for QueueConfig {
@@ -127,7 +64,7 @@ impl Default for QueueConfig {
             redis_url: None,
             workers: default_queue_workers(),
             maintenance_interval_ms: default_queue_maintenance_interval_ms(),
-            retry: RetryConfig::default(),
+            task_timeout_secs: default_queue_task_timeout_secs(),
         }
     }
 }
@@ -142,31 +79,8 @@ impl QueueConfig {
             bail!("Queue maintenance_interval_ms must be > 0");
         }
 
-        if self.retry.strategy != RetryStrategy::None && self.retry.max_attempts == 0 {
-            bail!("Queue retry max_attempts must be > 0 when retry is enabled");
-        }
-        match self.retry.strategy {
-            RetryStrategy::None => {}
-            RetryStrategy::Fixed => {
-                if self.retry.fixed_delay_ms == 0 {
-                    bail!("Queue retry fixed_delay_ms must be > 0 when fixed retry is enabled");
-                }
-            }
-            RetryStrategy::Exponential => {
-                if self.retry.base_delay_ms == 0 {
-                    bail!(
-                        "Queue retry base_delay_ms must be > 0 when exponential retry is enabled"
-                    );
-                }
-                if self.retry.max_delay_ms == 0 {
-                    bail!("Queue retry max_delay_ms must be > 0 when exponential retry is enabled");
-                }
-                if self.retry.max_delay_ms < self.retry.base_delay_ms {
-                    bail!(
-                        "Queue retry max_delay_ms must be greater than or equal to base_delay_ms"
-                    );
-                }
-            }
+        if self.task_timeout_secs == 0 {
+            bail!("Queue task_timeout_secs must be > 0");
         }
 
         match self.backend {
@@ -186,33 +100,16 @@ impl QueueConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueueConfig, RetryStrategy};
+    use super::QueueConfig;
 
     #[test]
-    fn queue_retry_rejects_zero_fixed_delay() {
+    fn queue_rejects_zero_task_timeout() {
         let mut config = QueueConfig::default();
-        config.retry.strategy = RetryStrategy::Fixed;
-        config.retry.fixed_delay_ms = 0;
+        config.task_timeout_secs = 0;
 
-        let err = config.validate().expect_err("zero fixed delay must fail");
+        let err = config.validate().expect_err("zero task timeout must fail");
         assert!(
-            err.to_string().contains("fixed_delay_ms"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn queue_retry_rejects_invalid_exponential_delay_bounds() {
-        let mut config = QueueConfig::default();
-        config.retry.strategy = RetryStrategy::Exponential;
-        config.retry.base_delay_ms = 2_000;
-        config.retry.max_delay_ms = 1_000;
-
-        let err = config
-            .validate()
-            .expect_err("max delay below base delay must fail");
-        assert!(
-            err.to_string().contains("max_delay_ms"),
+            err.to_string().contains("task_timeout_secs"),
             "unexpected error: {err}"
         );
     }

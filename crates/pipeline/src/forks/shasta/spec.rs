@@ -19,10 +19,11 @@ use raiko2_protocol_shasta::shasta::{ShastaEventData, decode_proposal_id_from_ex
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
+    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
-    time::Instant,
+    time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 sol! {
     #[derive(Debug)]
@@ -35,8 +36,12 @@ sol! {
     function anchorV4(AnchorV4Checkpoint _checkpoint) external;
 }
 
-const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 10;
-const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 64;
+const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
+const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
+#[cfg(not(test))]
+const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+const PREFLIGHT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Shasta hardfork specification.
 #[derive(Debug)]
@@ -114,12 +119,19 @@ where
                 .map(|(chunk_index, chunk_block_numbers)| {
                     let chain_spec = chain_spec.clone();
                     async move {
-                        fetch_preflight_chunk(
-                            provider,
-                            chunk_index,
-                            &chunk_block_numbers,
-                            chain_spec,
-                        )
+                        let operation = format!("shasta preflight chunk {chunk_index}");
+                        retry_shasta_preflight_operation(&operation, || {
+                            let chain_spec = chain_spec.clone();
+                            async {
+                                fetch_preflight_chunk(
+                                    provider,
+                                    chunk_index,
+                                    &chunk_block_numbers,
+                                    chain_spec,
+                                )
+                                .await
+                            }
+                        })
                         .await
                     }
                 })
@@ -147,12 +159,16 @@ where
         if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty()
         {
             let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
-            manifest.data_sources = provider
-                .shasta_data_sources(
-                    &l1_chain_spec,
-                    &manifest.proposal_event,
-                    manifest.blob_proof_type,
-                )
+            manifest.data_sources =
+                retry_shasta_preflight_operation("fetch shasta data sources", || async {
+                    provider
+                        .shasta_data_sources(
+                            &l1_chain_spec,
+                            &manifest.proposal_event,
+                            manifest.blob_proof_type,
+                        )
+                        .await
+                })
                 .await?;
         }
 
@@ -193,6 +209,77 @@ fn preflight_chunk_concurrency() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY)
+}
+
+const fn preflight_retry_initial_delay() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(1)
+    }
+    #[cfg(not(test))]
+    {
+        PREFLIGHT_RETRY_INITIAL_DELAY
+    }
+}
+
+const fn preflight_retry_max_delay() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(2)
+    }
+    #[cfg(not(test))]
+    {
+        PREFLIGHT_RETRY_MAX_DELAY
+    }
+}
+
+async fn retry_shasta_preflight_operation<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = RaikoResult<T>>,
+{
+    let mut attempt = 1_u64;
+    let mut delay = preflight_retry_initial_delay();
+    let max_delay = preflight_retry_max_delay();
+
+    loop {
+        match run().await {
+            Ok(value) => {
+                if attempt > 1 {
+                    info!(
+                        operation,
+                        attempts = attempt,
+                        "shasta preflight operation succeeded after retry"
+                    );
+                }
+                return Ok(value);
+            }
+            Err(err) if retryable_shasta_preflight_error(&err) => {
+                warn!(
+                    operation,
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    error = %err,
+                    "retrying shasta preflight operation"
+                );
+                tokio::time::sleep(delay).await;
+                attempt = attempt.saturating_add(1);
+                delay = delay.saturating_mul(2).min(max_delay);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
+    matches!(
+        err,
+        RaikoError::RPC(_)
+            | RaikoError::RpcWithContext { .. }
+            | RaikoError::Provider(_)
+            | RaikoError::Io(_)
+            | RaikoError::IoWithPath { .. }
+    )
 }
 
 fn collect_block_signers(
@@ -335,13 +422,16 @@ async fn resolve_shasta_proposal_event<P: Provider>(
                 proposal_block.header.number, proposal_block.header.timestamp
             ))
         })?;
-    provider
-        .shasta_proposal_event(
-            l1_contract,
-            l1_inclusion_block_number,
-            ctx.request.proposal_id,
-        )
-        .await
+    retry_shasta_preflight_operation("fetch shasta proposal event", || async {
+        provider
+            .shasta_proposal_event(
+                l1_contract,
+                l1_inclusion_block_number,
+                ctx.request.proposal_id,
+            )
+            .await
+    })
+    .await
 }
 
 const fn proof_type_from_context(ctx: &ProofContext) -> ProofType {
@@ -425,7 +515,10 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
     let first_required_header_block_number = min_anchor_block_number.max(last_anchor_block_number);
     let l1_block_numbers =
         (first_required_header_block_number..=origin_block_number).collect::<Vec<_>>();
-    let l1_headers = provider.batch_l1_headers(&l1_block_numbers).await?;
+    let l1_headers = retry_shasta_preflight_operation("fetch shasta l1 headers", || async {
+        provider.batch_l1_headers(&l1_block_numbers).await
+    })
+    .await?;
     if l1_headers.len() != l1_block_numbers.len() {
         return Err(RaikoError::Preflight(format!(
             "provider returned {} L1 headers for {} requested block numbers",
@@ -728,6 +821,10 @@ mod tests {
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
     use raiko2_provider::Provider;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use crate::{NativeBackend, PipelineKey};
 
@@ -737,6 +834,8 @@ mod tests {
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        witness_failures: Arc<AtomicUsize>,
+        witness_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -757,6 +856,16 @@ mod tests {
         }
 
         async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+            self.witness_calls.fetch_add(1, Ordering::SeqCst);
+            if self
+                .witness_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    (remaining > 0).then(|| remaining - 1)
+                })
+                .is_ok()
+            {
+                return Err(RaikoError::RPC("transient witness rpc error".to_string()));
+            }
             Ok(vec![ExecutionWitness::default()])
         }
 
@@ -893,6 +1002,8 @@ mod tests {
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            witness_failures: Arc::new(AtomicUsize::new(0)),
+            witness_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -948,6 +1059,24 @@ mod tests {
 
         assert!(err.to_string().contains("provider returned block 1"));
         assert!(err.to_string().contains("requested block 2"));
+    }
+
+    #[tokio::test]
+    async fn preflight_retries_transient_witness_rpc_errors() {
+        let provider = sample_provider();
+        provider.witness_failures.store(1, Ordering::SeqCst);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

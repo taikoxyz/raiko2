@@ -33,9 +33,10 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use crate::{
-    BoundlessSubmissionProgress, ProverProgress, ProverProgressObserver, RISC0_SEAL_PAYLOAD_KIND,
-    decode_hex_payload, encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
+    RISC0_SEAL_PAYLOAD_KIND, decode_hex_payload, encode_risc0_aggregation_seal_payload,
+    encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -222,6 +223,36 @@ struct Submission {
     provider_request_id: String,
     remote_tx_hash: Option<String>,
     expires_at: u64,
+}
+
+impl TryFrom<BoundlessSubmissionResume> for Submission {
+    type Error = RaikoError;
+
+    fn try_from(value: BoundlessSubmissionResume) -> Result<Self, Self::Error> {
+        let raw_id = value.provider_request_id.trim_start_matches("0x");
+        let market_request_id = U256::from_str_radix(raw_id, 16).map_err(|e| {
+            RaikoError::Guest(format!(
+                "Invalid stored Boundless provider_request_id {}: {e}",
+                value.provider_request_id
+            ))
+        })?;
+        if market_request_id == U256::ZERO {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless provider_request_id: zero".to_string(),
+            ));
+        }
+        if value.expires_at == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: missing expires_at".to_string(),
+            ));
+        }
+        Ok(Self {
+            market_request_id,
+            provider_request_id: value.provider_request_id,
+            remote_tx_hash: value.remote_tx_hash,
+            expires_at: value.expires_at,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -451,6 +482,7 @@ impl BoundlessProver {
         proof_type: &'static str,
         image_id: Digest,
         block_image_id: Option<Digest>,
+        expected_input_hash: B256,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
         proposal_carry_data: Option<&ProofCarryData>,
@@ -546,6 +578,12 @@ impl BoundlessProver {
                         "proposal" => parse_shasta_proposal_input_hash(journal)?,
                         _ => parse_shasta_aggregation_input_hash(journal)?,
                     };
+                    if input_hash != expected_input_hash {
+                        return Err(RaikoError::Guest(
+                            "Boundless fulfillment journal does not match local dry-run journal"
+                                .to_string(),
+                        ));
+                    }
                     let stage_metadata = serde_json::json!({
                         "zkvm": "risc0",
                         "runner": "boundless",
@@ -556,6 +594,7 @@ impl BoundlessProver {
                         "boundless": {
                             "provider_request_id": submission.provider_request_id,
                             "remote_tx_hash": submission.remote_tx_hash,
+                            "expires_at": submission.expires_at,
                             "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                             "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
                             "offchain": self.config.offchain,
@@ -621,6 +660,10 @@ impl BoundlessProver {
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
             Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
+        let expected_input_hash = match proof_type {
+            "proposal" => parse_shasta_proposal_input_hash(&journal)?,
+            _ => parse_shasta_aggregation_input_hash(&journal)?,
+        };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         let request = self
             .build_request(
@@ -634,24 +677,53 @@ impl BoundlessProver {
                 journal,
             )
             .await?;
-        let submission = self.submit_request(&client, &request).await?;
-        if let Some(observer) = observer {
+        let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
+        let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
+        let submission = if let Some(observer) = observer.as_ref()
+            && let Some(stored_submission) = observer.load_boundless_submission().await
+        {
+            let submission = Submission::try_from(stored_submission)?;
             observer
                 .on_progress(&ProverProgress::BoundlessSubmission(
                     BoundlessSubmissionProgress {
                         provider_request_id: submission.provider_request_id.clone(),
                         remote_tx_hash: submission.remote_tx_hash.clone(),
-                        image_ref: alloy_primitives::hex::encode_prefixed(
-                            program.image_id.as_bytes(),
-                        ),
-                        deployment: format!("{:?}", self.config.get_deployment_type())
-                            .to_lowercase(),
+                        expires_at: submission.expires_at,
+                        image_ref: image_ref.clone(),
+                        deployment: deployment.clone(),
                         offchain: self.config.offchain,
                         quoted_mcycles_count: Some(quoted_mcycles_count),
                         evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     },
                 ))
                 .await;
+            submission
+        } else {
+            let submission = self.submit_request(&client, &request).await?;
+            if let Some(observer) = observer.as_ref() {
+                observer
+                    .on_progress(&ProverProgress::BoundlessSubmission(
+                        BoundlessSubmissionProgress {
+                            provider_request_id: submission.provider_request_id.clone(),
+                            remote_tx_hash: submission.remote_tx_hash.clone(),
+                            expires_at: submission.expires_at,
+                            image_ref: image_ref.clone(),
+                            deployment: deployment.clone(),
+                            offchain: self.config.offchain,
+                            quoted_mcycles_count: Some(quoted_mcycles_count),
+                            evaluated_mcycles_count: Some(evaluated_mcycles_count),
+                        },
+                    ))
+                    .await;
+            }
+            submission
+        };
+        if observer.is_some() {
+            tracing::info!(
+                provider_request_id = %submission.provider_request_id,
+                expires_at = submission.expires_at,
+                "Using Boundless market submission"
+            );
         }
         self.poll_until_fulfilled(
             &client,
@@ -659,6 +731,7 @@ impl BoundlessProver {
             proof_type,
             program.image_id,
             block_image_id,
+            expected_input_hash,
             quoted_mcycles_count,
             evaluated_mcycles_count,
             proposal_carry_data.as_ref(),

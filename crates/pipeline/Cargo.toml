@@ -29,8 +29,8 @@ async-trait.workspace = true
 futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
 alloy-trie.workspace = true
 alloy-primitives.workspace = true

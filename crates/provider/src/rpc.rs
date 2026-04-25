@@ -11,9 +11,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tower::{Layer, Service, ServiceExt};
 
-const fn default_timeout_ms() -> u64 {
-    60_000
-}
+pub const DEFAULT_RPC_TIMEOUT_MS: u64 = 600_000;
 
 const fn default_concurrency_limit() -> usize {
     32
@@ -63,6 +61,10 @@ impl Default for RpcClientConfig {
             retry: RpcRetryConfig::default(),
         }
     }
+}
+
+const fn default_timeout_ms() -> u64 {
+    DEFAULT_RPC_TIMEOUT_MS
 }
 
 #[derive(Clone)]
@@ -187,4 +189,17 @@ pub fn build_rpc_client(rpc_url: &str, config: &RpcClientConfig) -> RaikoResult<
     }
 
     Ok(RpcClient::new(transport, is_local))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_rpc_timeout_uses_exported_constant() {
+        assert_eq!(
+            RpcClientConfig::default().timeout_ms,
+            DEFAULT_RPC_TIMEOUT_MS
+        );
+    }
 }

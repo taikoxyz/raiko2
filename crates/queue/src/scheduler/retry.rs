@@ -50,3 +50,35 @@ impl RetryPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RetryPolicy;
+    use std::time::Duration;
+
+    fn bincode_variant_index(policy: &RetryPolicy) -> u32 {
+        let bytes = bincode::serialize(policy).expect("serialize retry policy");
+        let index_bytes: [u8; 4] = bytes[..4].try_into().expect("variant index bytes");
+        u32::from_le_bytes(index_bytes)
+    }
+
+    #[test]
+    fn bincode_variant_indices_keep_legacy_order() {
+        assert_eq!(bincode_variant_index(&RetryPolicy::None), 0);
+        assert_eq!(
+            bincode_variant_index(&RetryPolicy::Fixed {
+                max_attempts: 1,
+                delay: Duration::from_secs(1),
+            }),
+            1
+        );
+        assert_eq!(
+            bincode_variant_index(&RetryPolicy::Exponential {
+                max_attempts: 1,
+                base_delay: Duration::from_secs(1),
+                max_delay: Duration::from_secs(2),
+            }),
+            2
+        );
+    }
+}

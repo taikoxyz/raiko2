@@ -60,8 +60,9 @@ impl Error for TaskStoreError {
 #[async_trait]
 pub trait TaskStore<P, O, Id>: Send + Sync
 where
+    P: Send + 'static,
     O: Clone,
-    Id: Send + Sync,
+    Id: Send + Sync + 'static,
 {
     async fn insert_task(
         &self,
@@ -81,6 +82,49 @@ where
         state: TaskState<O, Id>,
         payload: Option<P>,
     ) -> StoreResult<bool>;
+    async fn retry_now_if_running(
+        &self,
+        id: TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        priority: Priority,
+        payload: P,
+    ) -> StoreResult<bool> {
+        let updated = self
+            .set_state_if_running(&id, worker, attempt, TaskState::Ready, Some(payload))
+            .await?;
+        if updated {
+            self.push_ready(priority, id).await?;
+        }
+        Ok(updated)
+    }
+    async fn retry_later_if_running(
+        &self,
+        id: TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        error: String,
+        payload: P,
+        next_ready_at_ms: u64,
+    ) -> StoreResult<bool> {
+        let updated = self
+            .set_state_if_running(
+                &id,
+                worker,
+                attempt,
+                TaskState::Retrying {
+                    error,
+                    attempt,
+                    next_ready_at_ms,
+                },
+                Some(payload),
+            )
+            .await?;
+        if updated {
+            self.schedule(id, next_ready_at_ms).await?;
+        }
+        Ok(updated)
+    }
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
     async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
@@ -91,22 +135,31 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>>;
+        task_timeout: Duration,
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>>;
     async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
+        task_timeout: Duration,
+    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy, u64)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
-            if let Some((payload, priority, attempt, execution_policy)) =
-                self.take_ready(&id, worker).await?
+            if let Some((payload, priority, attempt, execution_policy, deadline_at_ms)) =
+                self.take_ready(&id, worker, task_timeout).await?
             {
-                return Ok(Some((id, payload, priority, attempt, execution_policy)));
+                return Ok(Some((
+                    id,
+                    payload,
+                    priority,
+                    attempt,
+                    execution_policy,
+                    deadline_at_ms,
+                )));
             }
         }
     }
@@ -130,6 +183,7 @@ struct Inner<P, O, Id> {
     ready_med: VecDeque<TaskId<Id>>,
     ready_low: VecDeque<TaskId<Id>>,
     scheduled: BTreeMap<u64, VecDeque<TaskId<Id>>>,
+    next_sequence: u64,
 }
 
 struct TaskRecord<P, O, Id> {
@@ -138,6 +192,8 @@ struct TaskRecord<P, O, Id> {
     priority: Priority,
     attempt: u32,
     lease_until_ms: Option<u64>,
+    lease_sequence: u64,
+    deadline_at_ms: Option<u64>,
     execution_policy: TaskExecutionPolicy,
 }
 
@@ -191,6 +247,7 @@ impl<P, O, Id> MemoryStore<P, O, Id> {
                 ready_med: VecDeque::new(),
                 ready_low: VecDeque::new(),
                 scheduled: BTreeMap::new(),
+                next_sequence: 0,
             }),
             lease,
         }
@@ -208,6 +265,42 @@ where
     Id: Clone + Eq + Hash,
 {
     queue.retain(|queued| queued != target);
+}
+
+const fn next_sequence<P, O, Id>(inner: &mut Inner<P, O, Id>) -> u64 {
+    let sequence = inner.next_sequence;
+    inner.next_sequence = inner.next_sequence.saturating_add(1);
+    sequence
+}
+
+fn remove_queue_memberships<P, O, Id>(inner: &mut Inner<P, O, Id>, id: &TaskId<Id>)
+where
+    Id: Clone + Eq + Hash,
+{
+    retain_task_id(&mut inner.ready_high, id);
+    retain_task_id(&mut inner.ready_med, id);
+    retain_task_id(&mut inner.ready_low, id);
+
+    let scheduled_keys = inner.scheduled.keys().copied().collect::<Vec<_>>();
+    for key in scheduled_keys {
+        if let Some(queue) = inner.scheduled.get_mut(&key) {
+            retain_task_id(queue, id);
+            if queue.is_empty() {
+                inner.scheduled.remove(&key);
+            }
+        }
+    }
+}
+
+fn push_ready_locked<P, O, Id>(inner: &mut Inner<P, O, Id>, priority: Priority, id: TaskId<Id>)
+where
+    Id: ReadyQueueSort,
+{
+    match priority {
+        Priority::High => inner.ready_high.push_back(id),
+        Priority::Medium => insert_ready_sorted(&mut inner.ready_med, id),
+        Priority::Low => insert_ready_sorted(&mut inner.ready_low, id),
+    }
 }
 
 fn remove_dependent_edges<Id>(
@@ -267,11 +360,14 @@ where
                 }
             }
             g.remaining.insert(id.clone(), remaining);
+            remove_queue_memberships(&mut g, &id);
             if let Some(existing) = g.tasks.get_mut(&id) {
                 existing.payload = Some(payload);
                 existing.priority = prio;
                 existing.attempt = 0;
                 existing.lease_until_ms = None;
+                existing.lease_sequence = 0;
+                existing.deadline_at_ms = None;
                 existing.state = next_state;
                 existing.execution_policy = execution_policy;
             }
@@ -308,6 +404,8 @@ where
                 priority: prio,
                 attempt: 0,
                 lease_until_ms: None,
+                lease_sequence: 0,
+                deadline_at_ms: None,
                 execution_policy,
             },
         );
@@ -322,6 +420,9 @@ where
 
     async fn set_state(&self, id: &TaskId<Id>, state: TaskState<O, Id>) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
+        if !matches!(state, TaskState::Running { .. }) {
+            remove_queue_memberships(&mut g, id);
+        }
         if let Some(r) = g.tasks.get_mut(id) {
             r.state = state;
             if !matches!(r.state, TaskState::Running { .. }) {
@@ -362,6 +463,75 @@ where
         if !matches!(record.state, TaskState::Running { .. }) {
             record.lease_until_ms = None;
         }
+        Ok(true)
+    }
+
+    async fn retry_now_if_running(
+        &self,
+        id: TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        priority: Priority,
+        payload: P,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(&id) else {
+            return Ok(false);
+        };
+        let TaskState::Running {
+            worker: current_worker,
+            attempt: current_attempt,
+        } = &record.state
+        else {
+            return Ok(false);
+        };
+        if current_worker != worker || *current_attempt != attempt {
+            return Ok(false);
+        }
+
+        debug_assert_eq!(record.priority, priority);
+        record.payload = Some(payload);
+        record.state = TaskState::Ready;
+        record.lease_until_ms = None;
+        push_ready_locked(&mut g, priority, id);
+        Ok(true)
+    }
+
+    async fn retry_later_if_running(
+        &self,
+        id: TaskId<Id>,
+        worker: &str,
+        attempt: u32,
+        error: String,
+        payload: P,
+        next_ready_at_ms: u64,
+    ) -> StoreResult<bool> {
+        let mut g = self.inner.lock().await;
+        let Some(record) = g.tasks.get_mut(&id) else {
+            return Ok(false);
+        };
+        let TaskState::Running {
+            worker: current_worker,
+            attempt: current_attempt,
+        } = &record.state
+        else {
+            return Ok(false);
+        };
+        if current_worker != worker || *current_attempt != attempt {
+            return Ok(false);
+        }
+
+        record.payload = Some(payload);
+        record.state = TaskState::Retrying {
+            error,
+            attempt,
+            next_ready_at_ms,
+        };
+        record.lease_until_ms = None;
+        g.scheduled
+            .entry(next_ready_at_ms)
+            .or_default()
+            .push_back(id);
         Ok(true)
     }
 
@@ -415,11 +585,7 @@ where
 
     async fn push_ready(&self, prio: Priority, id: TaskId<Id>) -> StoreResult<()> {
         let mut g = self.inner.lock().await;
-        match prio {
-            Priority::High => g.ready_high.push_back(id),
-            Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
-            Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
-        }
+        push_ready_locked(&mut g, prio, id);
 
         Ok(())
     }
@@ -438,33 +604,50 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
+        task_timeout: Duration,
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>> {
         let mut g = self.inner.lock().await;
-        let Some(record) = g.tasks.get_mut(id) else {
-            return Ok(None);
+        let (payload, deadline_at_ms, now_ms) = {
+            let Some(record) = g.tasks.get_mut(id) else {
+                return Ok(None);
+            };
+            if !matches!(record.state, TaskState::Ready) {
+                return Ok(None);
+            }
+            let Some(payload) = record.payload.as_ref() else {
+                return Ok(None);
+            };
+            let payload = payload.clone();
+            let now_ms = now_millis();
+            let task_timeout_ms = duration_millis_saturating(task_timeout);
+            let deadline_at_ms = *record
+                .deadline_at_ms
+                .get_or_insert_with(|| now_ms.saturating_add(task_timeout_ms));
+            (payload, deadline_at_ms, now_ms)
         };
-        if !matches!(record.state, TaskState::Ready) {
-            return Ok(None);
-        }
-        let Some(payload) = record.payload.as_ref() else {
-            return Ok(None);
-        };
-        let payload = payload.clone();
+
+        let lease_sequence = next_sequence(&mut g);
+        let record = g
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskStoreError::corrupt_msg("ready task disappeared"))?;
         record.attempt = record.attempt.saturating_add(1);
         let attempt = record.attempt;
         record.state = TaskState::Running {
             worker: worker.to_string(),
             attempt,
         };
+        record.lease_sequence = lease_sequence;
         let lease_duration = record.execution_policy.lease_duration.max(self.lease);
         let lease_ms =
             u64::try_from(lease_duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
-        record.lease_until_ms = Some(now_millis().saturating_add(lease_ms));
+        record.lease_until_ms = Some(now_ms.saturating_add(lease_ms));
         Ok(Some((
             payload,
             record.priority,
             attempt,
             record.execution_policy.clone(),
+            deadline_at_ms,
         )))
     }
 
@@ -543,11 +726,8 @@ where
 
                     record.state = TaskState::Ready;
                     record.lease_until_ms = None;
-                    match record.priority {
-                        Priority::High => g.ready_high.push_back(id),
-                        Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
-                        Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
-                    }
+                    let priority = record.priority;
+                    push_ready_locked(&mut g, priority, id);
                     moved += 1;
                 }
             }
@@ -564,11 +744,7 @@ where
         let mut g = self.inner.lock().await;
         let mut expired = Vec::new();
 
-        for (id, record) in &mut g.tasks {
-            if expired.len() >= limit {
-                break;
-            }
-
+        for (id, record) in &g.tasks {
             if !matches!(record.state, TaskState::Running { .. }) {
                 continue;
             }
@@ -579,23 +755,24 @@ where
                 continue;
             }
 
-            record.state = TaskState::Ready;
-            record.lease_until_ms = None;
-            expired.push(id.clone());
+            expired.push((lease_until_ms, record.lease_sequence, id.clone()));
         }
+        expired.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
-        for id in expired.iter().cloned() {
-            let Some(record) = g.tasks.get(&id) else {
-                continue;
+        let moved = expired.len().min(limit);
+        for (_, _, id) in expired.into_iter().take(limit) {
+            let priority = {
+                let Some(record) = g.tasks.get_mut(&id) else {
+                    continue;
+                };
+                record.state = TaskState::Ready;
+                record.lease_until_ms = None;
+                record.priority
             };
-            match record.priority {
-                Priority::High => g.ready_high.push_back(id),
-                Priority::Medium => insert_ready_sorted(&mut g.ready_med, id),
-                Priority::Low => insert_ready_sorted(&mut g.ready_low, id),
-            }
+            push_ready_locked(&mut g, priority, id);
         }
 
-        Ok(expired.len())
+        Ok(moved)
     }
 
     async fn remove_task(&self, id: &TaskId<Id>) -> StoreResult<bool> {
@@ -608,19 +785,7 @@ where
         g.dependents.remove(id);
         remove_dependent_edges(&mut g.dependents, id);
 
-        retain_task_id(&mut g.ready_high, id);
-        retain_task_id(&mut g.ready_med, id);
-        retain_task_id(&mut g.ready_low, id);
-
-        let scheduled_keys = g.scheduled.keys().copied().collect::<Vec<_>>();
-        for key in scheduled_keys {
-            if let Some(queue) = g.scheduled.get_mut(&key) {
-                retain_task_id(queue, id);
-                if queue.is_empty() {
-                    g.scheduled.remove(&key);
-                }
-            }
-        }
+        remove_queue_memberships(&mut g, id);
 
         Ok(true)
     }
@@ -636,6 +801,10 @@ fn now_millis() -> u64 {
             .as_millis(),
     )
     .unwrap_or_default()
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -670,6 +839,21 @@ mod tests {
         );
         assert_eq!(
             store.pop_ready(Priority::Medium).await?,
+            Some(TaskId::new(100))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn low_ready_sorted_by_sort_prefix() -> StoreResult<()> {
+        let store: MemoryStore<(), (), u64> = MemoryStore::new();
+        store.push_ready(Priority::Low, TaskId::new(100)).await?;
+        store.push_ready(Priority::Low, TaskId::new(5)).await?;
+        store.push_ready(Priority::Low, TaskId::new(42)).await?;
+        assert_eq!(store.pop_ready(Priority::Low).await?, Some(TaskId::new(5)));
+        assert_eq!(store.pop_ready(Priority::Low).await?, Some(TaskId::new(42)));
+        assert_eq!(
+            store.pop_ready(Priority::Low).await?,
             Some(TaskId::new(100))
         );
         Ok(())

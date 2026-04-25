@@ -188,6 +188,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn proposal_ready_sort_orders_by_proposal_stage_then_pipeline() {
+        let p2_preflight = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request: proposal_request(2),
+            stage: ProposalStage::Preflight,
+        };
+        let p1_prove = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request: proposal_request(1),
+            stage: ProposalStage::Prove,
+        };
+        let p1_encode_sp1 = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSp1,
+            request: proposal_request(1),
+            stage: ProposalStage::Encode,
+        };
+        let p1_encode_risc0 = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0,
+            request: proposal_request(1),
+            stage: ProposalStage::Encode,
+        };
+
+        let mut keys = [p2_preflight, p1_prove, p1_encode_sp1, p1_encode_risc0];
+        keys.sort_by(|left, right| left.cmp_for_ready_queue(right));
+
+        assert!(matches!(
+            keys[0],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 1, .. },
+                stage: ProposalStage::Encode,
+                pipeline: PipelineKey::ShastaRisc0
+            }
+        ));
+        assert!(matches!(
+            keys[1],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 1, .. },
+                stage: ProposalStage::Encode,
+                pipeline: PipelineKey::ShastaSp1
+            }
+        ));
+        assert!(matches!(
+            keys[2],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 1, .. },
+                stage: ProposalStage::Prove,
+                pipeline: PipelineKey::ShastaNative
+            }
+        ));
+        assert!(matches!(
+            keys[3],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 2, .. },
+                stage: ProposalStage::Preflight,
+                pipeline: PipelineKey::ShastaNative
+            }
+        ));
+    }
+
     #[tokio::test]
     async fn aggregation_depends_on_proposals() -> StoreResult<()> {
         let sched: Scheduler<EngineTask, EngineOutput<GuestInput>, EngineTaskKey> =

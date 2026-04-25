@@ -57,11 +57,19 @@ pub trait GuestInputCodec<I>: Send + Sync {
 pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
+    pub expires_at: u64,
     pub image_ref: String,
     pub deployment: String,
     pub offchain: bool,
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoundlessSubmissionResume {
+    pub provider_request_id: String,
+    pub remote_tx_hash: Option<String>,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +84,10 @@ pub trait ProverProgressObserver: Send + Sync {
     async fn on_progress(&self, progress: &ProverProgress);
 
     async fn load_sp1_network_request_id(&self) -> Option<String> {
+        None
+    }
+
+    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
         None
     }
 }

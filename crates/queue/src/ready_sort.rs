@@ -30,23 +30,26 @@ pub fn sort_prefix_hex(prefix: &[u8; 16]) -> String {
 
 /// Hex length for [`sort_prefix_hex`].
 pub const READY_SORT_PREFIX_HEX_LEN: usize = 32;
+const READY_SORT_SEQUENCE_DEC_LEN: usize = 20;
+const READY_ZSET_MEMBER_PREFIX_LEN: usize = READY_SORT_PREFIX_HEX_LEN + READY_SORT_SEQUENCE_DEC_LEN;
 
 #[must_use]
 pub fn zset_member_from_encoded<Id: ReadyQueueSort>(
     id: &TaskId<Id>,
     encoded_task_id: &str,
+    sequence: u64,
 ) -> String {
     format!(
-        "{}{}",
+        "{}{sequence:020}{}",
         sort_prefix_hex(&id.0.ready_queue_sort_prefix()),
         encoded_task_id
     )
 }
 
-/// Strip [`sort_prefix_hex`] prefix and return the encoded task id substring.
+/// Strip the ready sort prefix plus FIFO sequence and return the encoded task id substring.
 #[must_use]
 pub fn encoded_from_zset_member(member: &str) -> Option<&str> {
-    member.get(READY_SORT_PREFIX_HEX_LEN..)
+    member.get(READY_ZSET_MEMBER_PREFIX_LEN..)
 }
 
 /// Insert `id` into `deque` sorted ascending by [`ReadyQueueSort`], stable for equal keys

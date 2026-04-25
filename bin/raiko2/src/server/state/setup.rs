@@ -1,4 +1,4 @@
-use crate::config::{Config, ResolvedNetworkPair, RetryStrategy};
+use crate::config::{Config, ResolvedNetworkPair};
 use anyhow::Result;
 use raiko2_primitives::{ProofContext, ProofRequest, ProofType};
 use raiko2_provider::NetworkProvider;
@@ -59,6 +59,20 @@ pub(crate) fn build_provider(
 
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
+    SchedulerConfig {
+        lease_duration: task_lease_duration(config),
+        task_timeout: Duration::from_secs(config.queue.task_timeout_secs),
+        retry: RetryPolicy::None,
+    }
+}
+
+#[allow(clippy::missing_const_for_fn)]
+pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
+    scheduler_config(config)
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn task_lease_duration(config: &Config) -> Duration {
     let retries = u64::from(config.rpc.client.retry.max_attempts);
     let total_attempts = retries.saturating_add(1);
     let timeout_ms = config.rpc.client.timeout_ms;
@@ -72,42 +86,11 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
         .saturating_mul(total_attempts)
         .saturating_add(backoff_ms)
         .saturating_add(30_000);
-    let retry_policy = match config.queue.retry.strategy {
-        RetryStrategy::None => RetryPolicy::None,
-        RetryStrategy::Fixed => RetryPolicy::Fixed {
-            max_attempts: config.queue.retry.max_attempts,
-            delay: Duration::from_millis(config.queue.retry.fixed_delay_ms),
-        },
-        RetryStrategy::Exponential => RetryPolicy::Exponential {
-            max_attempts: config.queue.retry.max_attempts,
-            base_delay: Duration::from_millis(config.queue.retry.base_delay_ms),
-            max_delay: Duration::from_millis(config.queue.retry.max_delay_ms),
-        },
-    };
 
-    SchedulerConfig {
-        // Preflight and local witness generation can run longer than a single RPC timeout,
-        // especially when provider retries are enabled. Keep the lease aligned with the
-        // effective RPC wait window so maintenance does not requeue the same long-running task.
-        lease_duration: Duration::from_millis(lease_ms.max(60_000)),
-        retry: retry_policy,
-    }
-}
-
-#[allow(clippy::missing_const_for_fn)]
-pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
-    let timeout_ms = config.prover.boundless.timeout_ms;
-    let poll_interval_ms = config.prover.boundless.poll_interval_ms;
-    let lease_ms = timeout_ms
-        .saturating_add(poll_interval_ms)
-        .saturating_add(30_000);
-
-    SchedulerConfig {
-        lease_duration: Duration::from_millis(lease_ms.max(60_000)),
-        // Agent requests are externally stateful. Once submitted, the outer queue must not
-        // retry or lease-expire into a second remote proof request for the same logical task.
-        retry: RetryPolicy::None,
-    }
+    // Preflight and local witness generation can run longer than a single RPC timeout,
+    // especially when provider retries are enabled. Keep lease renewal aligned with the
+    // effective RPC wait window, while execution timeout remains the queue-level task timeout.
+    Duration::from_millis(lease_ms.max(60_000))
 }
 
 #[allow(clippy::missing_const_for_fn)]
@@ -165,26 +148,35 @@ mod tests {
         boundless_prover_config, boundless_scheduler_config, risc0_prover_config, scheduler_config,
     };
     use crate::config::Config;
+    use raiko2_queue::RetryPolicy;
     use std::time::Duration;
 
     #[test]
-    fn boundless_scheduler_lease_covers_boundless_timeout() {
+    fn boundless_scheduler_uses_general_task_policy() {
         let mut config = Config::default();
-        config.prover.boundless.timeout_ms = 300_000;
-        config.prover.boundless.poll_interval_ms = 1_000;
+        config.queue.task_timeout_secs = 321;
 
-        let scheduler = boundless_scheduler_config(&config);
-        assert_eq!(scheduler.lease_duration, Duration::from_millis(331_000));
+        assert_eq!(
+            boundless_scheduler_config(&config),
+            scheduler_config(&config)
+        );
     }
 
     #[test]
-    fn boundless_scheduler_lease_has_one_minute_floor() {
+    fn scheduler_task_timeout_uses_queue_config() {
         let mut config = Config::default();
-        config.prover.boundless.timeout_ms = 5_000;
-        config.prover.boundless.poll_interval_ms = 1_000;
+        config.queue.task_timeout_secs = 321;
 
-        let scheduler = boundless_scheduler_config(&config);
-        assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
+        let scheduler = scheduler_config(&config);
+        assert_eq!(scheduler.task_timeout, Duration::from_secs(321));
+    }
+
+    #[test]
+    fn scheduler_disables_queue_retry() {
+        let config = Config::default();
+        let scheduler = scheduler_config(&config);
+
+        assert_eq!(scheduler.retry, RetryPolicy::None);
     }
 
     #[test]

@@ -5,10 +5,11 @@
 Raiko2 exposes a Shasta-first `/v3` API aligned with the current upstream `raiko` proof surface,
 plus `raiko2` task-inspection extensions under `/v3/tasks/*`.
 
-Proof submission is asynchronous. Successful `POST` requests return a `task_id`, and clients can:
+Proof submission is asynchronous. The legacy `POST /proof/*` responses intentionally match old
+`raiko` v3 response shapes and do not expose raiko2 task IDs. Operators can:
 
-- poll `GET /v3/tasks/{id}` for the full root-task view
-- query `GET /v3/proof/report` for all root tasks
+- query `GET /v3/proof/report` for all root task IDs and full root-task views
+- poll `GET /v3/tasks/{id}` for one full root-task view
 - query `GET /v3/proof/list` for completed root tasks with final proof material
 
 The proof routes are available both under `/v3/proof/*` and `/proof/*`.
@@ -126,7 +127,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sp1 -> sp1/local`
   - `risc0 -> risc0/<server default runner>`
   - `zk_any -> admission-time draw to sp1 or risc0`
-  - `sgx -> 400`
+  - `sgx -> unsupported legacy error response`
+  - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the same draw is
   reused for both proposal proving and aggregation.
@@ -134,12 +136,12 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
   - `proof_type = "native"`
+  - `batch_id = first proposal_id`
   - `data.status = "zk_any_not_drawn"`
-  - no `task_id`
 - Request-scoped prover overrides are strict and typed. The public API accepts flattened
   top-level prover namespaces:
   - `sp1` is supported
-  - `native`, `risc0`, and `sgx` request-scoped prover args are rejected
+  - `native`, `risc0`, `sgx`, and `sgxgeth` request-scoped prover args are rejected
 - `proof_type=zk_any` does not accept request-scoped prover args.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
@@ -161,21 +163,23 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 
 `POST /v3/proof/batch/shasta` is idempotent for canonically identical requests.
 
-- The first accepted request returns `registered + task_id`.
+- The first accepted request returns old-raiko `registered`.
 - A repeated identical request may return:
   - `data.status = "registered"`
   - `data.status = "work_in_progress"`
-  - `data.status = "completed"` with a legacy-compatible `data.proof` object
-  - top-level `status = "error"` with `error/message` for terminal failure
-- `GET /v3/tasks/{id}` remains the canonical async inspection API.
+  - `data.proof` when the proof is ready
+  - `data.status = {"anyhow_error": "..."}` for a terminal stored task failure
+- A failed repeated task is re-enqueued when it failed before remote submission, or when stored
+  remote-submission metadata is sufficient to resume it. This decision is independent of proof type.
+- Request validation errors return old-raiko top-level `status = "error"` with HTTP 200.
+- `GET /v3/proof/report` and `GET /v3/tasks/{id}` remain the raiko2 task-inspection APIs.
 
 ```json
 {
   "status": "ok",
   "proof_type": "sp1",
   "data": {
-    "status": "registered",
-    "task_id": "task_..."
+    "status": "registered"
   }
 }
 ```
@@ -187,25 +191,29 @@ Example repeated-request success after completion:
   "status": "ok",
   "proof_type": "sp1",
   "data": {
-    "status": "completed",
-    "task_id": "task_...",
     "proof": {
       "proof": "0x...",
-      "kzg_proof": "",
-      "quote": ""
+      "input": null,
+      "quote": null,
+      "uuid": null,
+      "kzg_proof": null,
+      "extra_data": null
     }
   }
 }
 ```
 
-Example repeated-request terminal failure:
+Example stored task failure:
 
 ```json
 {
-  "status": "error",
+  "status": "ok",
   "proof_type": "sp1",
-  "error": "task_failed",
-  "message": "..."
+  "data": {
+    "status": {
+      "anyhow_error": "..."
+    }
+  }
 }
 ```
 
@@ -215,6 +223,7 @@ Example not-drawn response:
 {
   "status": "ok",
   "proof_type": "native",
+  "batch_id": 42,
   "data": {
     "status": "zk_any_not_drawn"
   }
@@ -279,15 +288,14 @@ Registers an aggregation root task from externally supplied proposal proofs.
   "status": "ok",
   "proof_type": "sp1",
   "data": {
-    "status": "registered",
-    "task_id": "task_..."
+    "status": "registered"
   }
 }
 ```
 
 Repeated `POST /v3/proof/aggregate` with the same logical request is idempotent. It reuses the
 existing root task and returns the same legacy-compatible `registered` / `work_in_progress` /
-`completed + proof` / terminal `error` response semantics as `POST /v3/proof/batch/shasta`.
+`proof` / stored failure status response semantics as `POST /v3/proof/batch/shasta`.
 
 ## Report All Root Tasks
 
@@ -388,7 +396,7 @@ Returns the root-task view derived from the original batch request.
   `pending`, `proving`, `completed`, `failed`, or `cancelled`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
-  `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
+  `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
 - Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
   `runtime.inactive_ttl_secs` of inactivity. Active root tasks are never removed by TTL cleanup.
@@ -425,16 +433,38 @@ All API errors use the Hoodi-style envelope:
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
 - `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
   set it to `geth` when `l2_rpc`/`l2_witness_rpc` points at a geth endpoint with native
-  `debug_executionWitness`.
+  `debug_executionWitness`, or `geth_local_witness` when blocks and accounts come from a regular
+  geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
+- `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
+  `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
+- Shasta preflight splits proposals into chunks of `8` blocks by default and runs at most `6`
+  chunks concurrently. Operators may override those values with `PREFLIGHT_CHUNK_SIZE`
+  (`PREFETCH_CHUNK_SIZE` is accepted for old-raiko compatibility) and
+  `PREFLIGHT_CHUNK_CONCURRENCY`.
+- On-the-spot local witness construction uses `WITNESS_BATCH_SIZE`, defaulting to `2` block
+  witnesses at a time per preflight chunk, to keep regular geth RPC endpoints from being flooded.
+- `queue.workers` defaults to `6`, aligned with the old raiko hosted proving concurrency. Each
+  worker runs one queue task at a time; preflight chunk concurrency is controlled separately.
+- Shasta preflight retries retryable provider/RPC/IO failures inside the preflight stage with
+  exponential backoff, while invalid request/configuration and deterministic validation failures
+  still fail fast. The queue task timeout remains the outer deadline for the whole stage.
 - `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional
   pair-level settings that enable hosted `sp1.prover=network` verification through a remote
   verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network proving.
+- `queue.task_timeout_secs` defaults to `14400` and is the total deadline for each queue task,
+  independent of proof type. Queue-level retry is disabled; each stage owns its own retry/resume
+  behavior within this timeout, so remote proof submissions are not blindly replayed by the
+  scheduler. `prove` and `aggregate` stages still use the configured queue lease and renew it while
+  the worker is healthy; if a worker exits, the next lease holder resumes from persisted remote
+  submission metadata or submits a fresh request when the previous remote request expired.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
 - `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.
   `l2_provider = "geth"` expects geth's native witness response with JSON header objects.
+  `l2_provider = "geth_local_witness"` does not call `debug_executionWitness`; it executes the
+  block locally against RPC-backed state to build the witness.
 - Geth witness endpoints should run geth v1.17.2 or newer to include the upstream
   `debug_executionWitness` corruption fix.
 - If the upstream L2 does not expose `debug_executionWitness` and predictable latency matters,

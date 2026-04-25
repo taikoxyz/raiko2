@@ -15,21 +15,22 @@ port = 8080
 # Explicitly allowed (network, l1_network) combinations for the hoodi-compatible API.
 # Canonical configs should declare RPC endpoints here.
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth_local_witness" },
   # Optional: route witness/debug traffic to a dedicated L2 endpoint.
   # l2_provider defaults to "reth". Set l2_provider = "geth" for geth native debug_executionWitness.
+  # Set l2_provider = "geth_local_witness" for a regular geth endpoint with locally assembled witnesses.
   # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth", l2_witness_rpc = "http://34.121.5.35:8545" },
   # Optional: enable hosted SP1 network verification for a specific pair.
   # Leave these fields unset to keep that line closed.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "http://34.121.5.35:8545", l2_witness_rpc = "http://34.121.5.35:8545", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x0000000000000000000000000000000000000000" },
   # Optional: override Boundless quote and offer params per pair.
   # This only affects the `risc0/boundless` route. SP1 ignores it.
-  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 1500 } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi-rpc.example.com", l2_rpc = "https://taiko-hoodi-rpc.example.com", boundless = { batch_quoted_mcycles = 5000, offer_params = { batch = { ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, max_price_per_mcycle = "0.000000085", min_price_per_mcycle = "0.000000010", lock_collateral = "20" } } } },
+  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 6000 } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi-rpc.example.com", l2_rpc = "https://taiko-hoodi-rpc.example.com", boundless = { batch_quoted_mcycles = 6000, offer_params = { batch = { ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, max_price_per_mcycle = "0.000000085", min_price_per_mcycle = "0.000000010", lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
-timeout_ms = 60000
+timeout_ms = 600000
 concurrency_limit = 32
 
 [rpc.client.retry]
@@ -72,7 +73,7 @@ timeout_secs = 7200
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
-batch_quoted_mcycles = 1500
+batch_quoted_mcycles = 6000
 batch_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
@@ -116,13 +117,7 @@ lock_collateral = "20"
 [queue]
 backend = "memory"
 namespace = "raiko2:queue"
-workers = 3
+workers = 6
 maintenance_interval_ms = 200
+task_timeout_secs = 14400
 # redis_url = "redis://localhost:6379/"
-
-[queue.retry]
-strategy = "exponential"
-max_attempts = 3
-fixed_delay_ms = 1000
-base_delay_ms = 1000
-max_delay_ms = 30000

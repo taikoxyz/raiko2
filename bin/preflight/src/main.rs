@@ -10,7 +10,7 @@ use raiko2_primitives::{
     ProofContext, ProofRequest, ProofType, ProverConfig, ShastaRequest, SupportedChainSpecs,
 };
 use raiko2_primitives_shasta::{DEFAULT_GUEST_INPUT_ROOT, GuestInput, guest_input_proposal_path};
-use raiko2_provider::{NetworkProvider, RpcClientConfig, RpcRetryConfig};
+use raiko2_provider::{DEFAULT_RPC_TIMEOUT_MS, NetworkProvider, RpcClientConfig, RpcRetryConfig};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -28,7 +28,7 @@ struct Args {
     l1_rpc_url: Option<String>,
 
     /// RPC client timeout in milliseconds for both L1 and L2 providers.
-    #[arg(long, default_value_t = 60_000)]
+    #[arg(long, default_value_t = DEFAULT_RPC_TIMEOUT_MS)]
     rpc_timeout_ms: u64,
 
     /// Maximum number of concurrent RPC requests.

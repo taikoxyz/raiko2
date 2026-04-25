@@ -57,8 +57,11 @@ pub(super) fn route_for_proof_type(
         HoodiProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        HoodiProofType::Sgx => {
-            return Err(ApiError::bad_request("proof_type=sgx is not supported"));
+        HoodiProofType::Sgx | HoodiProofType::SgxGeth => {
+            return Err(ApiError::bad_request(format!(
+                "proof_type={} is not supported",
+                proof_type.as_str()
+            )));
         }
         HoodiProofType::ZkAny => {
             return Err(ApiError::bad_request(

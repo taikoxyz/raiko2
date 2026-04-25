@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct HoodiTaskMetadata {
+pub(crate) struct TaskMetadata {
     pub(crate) network_pair: String,
     pub(crate) network: String,
     pub(crate) l1_network: String,
@@ -22,17 +22,26 @@ pub(crate) struct HoodiTaskMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
-    pub(crate) proposals: Vec<HoodiProposalTask>,
+    pub(crate) proposals: Vec<ProposalTask>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate_request: Option<AggregationTaskRequest>,
     #[serde(default)]
-    pub(crate) runtime: HoodiRuntimeMetadata,
+    pub(crate) runtime: RuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuildTaskMetadataParams<'a> {
+    pub(crate) network: &'a str,
+    pub(crate) l1_network: &'a str,
+    pub(crate) proof_type: ProofType,
+    pub(crate) execution_mode: Option<ExecutionMode>,
+    pub(crate) aggregate_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct HoodiProposalTask {
+pub(crate) struct ProposalTask {
     pub(crate) proposal_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint: Option<ShastaCheckpoint>,
@@ -45,21 +54,21 @@ pub(crate) struct HoodiProposalTask {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct HoodiRuntimeMetadata {
+pub(crate) struct RuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) active_stage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_event: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) stage_timings: BTreeMap<String, HoodiStageTimingMetadata>,
+    pub(crate) stage_timings: BTreeMap<String, StageTimingMetadata>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) proposals: BTreeMap<String, HoodiTaskRuntimeMetadata>,
+    pub(crate) proposals: BTreeMap<String, TaskRuntimeMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) aggregate: Option<HoodiTaskRuntimeMetadata>,
+    pub(crate) aggregate: Option<TaskRuntimeMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct HoodiStageTimingMetadata {
+pub(crate) struct StageTimingMetadata {
     pub(crate) stage: String,
     pub(crate) started_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,7 +78,7 @@ pub(crate) struct HoodiStageTimingMetadata {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct HoodiTaskRuntimeMetadata {
+pub(crate) struct TaskRuntimeMetadata {
     pub(crate) updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider_request_id: Option<String>,
@@ -81,6 +90,8 @@ pub(crate) struct HoodiTaskRuntimeMetadata {
     pub(crate) deployment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) offchain: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,7 +108,7 @@ pub(crate) struct HoodiTaskRuntimeMetadata {
     pub(crate) sp1_timeout_secs: Option<u64>,
 }
 
-impl HoodiTaskMetadata {
+impl TaskMetadata {
     pub(crate) fn execution_mode_str(&self) -> Option<String> {
         self.execution_mode.map(|mode| mode.as_str().to_string())
     }
@@ -110,11 +121,23 @@ impl HoodiTaskMetadata {
             || self.runtime.aggregate.is_some()
     }
 
-    pub(crate) fn proposal_runtime(&self, task_id: &str) -> Option<&HoodiTaskRuntimeMetadata> {
+    pub(crate) fn has_remote_submission_progress(&self) -> bool {
+        self.runtime
+            .proposals
+            .values()
+            .any(TaskRuntimeMetadata::has_remote_submission_progress)
+            || self
+                .runtime
+                .aggregate
+                .as_ref()
+                .is_some_and(TaskRuntimeMetadata::has_remote_submission_progress)
+    }
+
+    pub(crate) fn proposal_runtime(&self, task_id: &str) -> Option<&TaskRuntimeMetadata> {
         self.runtime.proposals.get(task_id)
     }
 
-    pub(crate) const fn aggregate_runtime(&self) -> Option<&HoodiTaskRuntimeMetadata> {
+    pub(crate) const fn aggregate_runtime(&self) -> Option<&TaskRuntimeMetadata> {
         self.runtime.aggregate.as_ref()
     }
 
@@ -157,7 +180,7 @@ impl HoodiTaskMetadata {
     ) {
         self.runtime
             .aggregate
-            .get_or_insert_with(HoodiTaskRuntimeMetadata::default)
+            .get_or_insert_with(TaskRuntimeMetadata::default)
             .apply_boundless_submission(progress, updated_at);
     }
 
@@ -181,14 +204,14 @@ impl HoodiTaskMetadata {
     ) {
         self.runtime
             .aggregate
-            .get_or_insert_with(HoodiTaskRuntimeMetadata::default)
+            .get_or_insert_with(TaskRuntimeMetadata::default)
             .apply_sp1_network_submission(progress, updated_at);
     }
 
     pub(crate) fn mark_stage_started(&mut self, task_id: &str, stage: &str, started_at_ms: i64) {
         self.runtime.stage_timings.insert(
             task_id.to_string(),
-            HoodiStageTimingMetadata {
+            StageTimingMetadata {
                 stage: stage.to_string(),
                 started_at_ms,
                 finished_at_ms: None,
@@ -217,7 +240,7 @@ impl HoodiTaskMetadata {
             .runtime
             .stage_timings
             .entry(task_id.to_string())
-            .or_insert_with(|| HoodiStageTimingMetadata {
+            .or_insert_with(|| StageTimingMetadata {
                 stage: stage.to_string(),
                 started_at_ms: finished_at_ms,
                 finished_at_ms: None,
@@ -229,7 +252,7 @@ impl HoodiTaskMetadata {
     }
 }
 
-impl HoodiProposalTask {
+impl ProposalTask {
     pub(crate) fn engine_task_id(&self, pipeline_key: PipelineKey) -> Option<EngineTaskId> {
         self.request
             .clone()
@@ -333,7 +356,31 @@ const fn stage_name(stage: ProposalStage) -> &'static str {
     }
 }
 
-impl HoodiTaskRuntimeMetadata {
+impl TaskRuntimeMetadata {
+    pub(crate) const fn has_remote_submission_progress(&self) -> bool {
+        self.provider_request_id.is_some()
+            || self.remote_tx_hash.is_some()
+            || self.image_ref.is_some()
+            || self.expires_at.is_some()
+            || self.sp1_network_mode.is_some()
+            || self.sp1_fulfillment_strategy.is_some()
+    }
+
+    const fn has_boundless_submission_resume(&self) -> bool {
+        self.provider_request_id.is_some() && self.expires_at.is_some()
+    }
+
+    const fn has_sp1_network_submission_progress(&self) -> bool {
+        self.provider_request_id.is_some()
+            && (self.sp1_network_mode.is_some()
+                || self.sp1_fulfillment_strategy.is_some()
+                || self.sp1_timeout_secs.is_some())
+    }
+
+    pub(crate) const fn has_resumable_remote_submission(&self) -> bool {
+        self.has_boundless_submission_resume() || self.has_sp1_network_submission_progress()
+    }
+
     fn apply_boundless_submission(
         &mut self,
         progress: &BoundlessSubmissionProgress,
@@ -345,6 +392,7 @@ impl HoodiTaskRuntimeMetadata {
         self.image_ref = Some(progress.image_ref.clone());
         self.deployment = Some(progress.deployment.clone());
         self.offchain = Some(progress.offchain);
+        self.expires_at = Some(progress.expires_at);
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
     }
@@ -364,7 +412,7 @@ impl HoodiTaskRuntimeMetadata {
     }
 }
 
-impl HoodiStageTimingMetadata {
+impl StageTimingMetadata {
     fn duration_secs(&self, finished_at_ms: i64) -> f64 {
         let elapsed_ms =
             u64::try_from(finished_at_ms.saturating_sub(self.started_at_ms)).unwrap_or_default();
@@ -378,7 +426,7 @@ mod tests {
 
     #[test]
     fn task_metadata_roundtrips_canonical_proof_type() {
-        let metadata = HoodiTaskMetadata {
+        let metadata = TaskMetadata {
             network_pair: "taiko_hoodi/hoodi".to_string(),
             network: "taiko_hoodi".to_string(),
             l1_network: "hoodi".to_string(),
@@ -388,18 +436,17 @@ mod tests {
             proposals: Vec::new(),
             aggregate_task_id: None,
             aggregate_request: None,
-            runtime: HoodiRuntimeMetadata::default(),
+            runtime: RuntimeMetadata::default(),
         };
         let json = serde_json::to_value(&metadata).expect("serialize metadata");
-        let roundtrip: HoodiTaskMetadata =
-            serde_json::from_value(json).expect("deserialize metadata");
+        let roundtrip: TaskMetadata = serde_json::from_value(json).expect("deserialize metadata");
 
         assert_eq!(roundtrip.proof_type, ProofType::Risc0);
     }
 
     #[test]
     fn task_metadata_tracks_stage_timing_durations() {
-        let mut metadata = HoodiTaskMetadata {
+        let mut metadata = TaskMetadata {
             network_pair: "taiko_dev/ethereum".to_string(),
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
@@ -409,7 +456,7 @@ mod tests {
             proposals: Vec::new(),
             aggregate_task_id: None,
             aggregate_request: None,
-            runtime: HoodiRuntimeMetadata::default(),
+            runtime: RuntimeMetadata::default(),
         };
 
         metadata.mark_stage_started("task-proof", "prove", 1_000);

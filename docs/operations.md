@@ -205,6 +205,9 @@ without changing the rest of the endpoint posture.
 `debug_executionWitness` response carries RLP-encoded headers. Use `geth` for geth's native
 `debug_executionWitness` response, where headers are JSON objects.
 
+Use `geth_local_witness` for a regular geth L2 endpoint when `raiko2` should always build witnesses
+locally from RPC state instead of calling `debug_executionWitness`.
+
 For geth witness endpoints, run a version that includes the upstream `debug_executionWitness`
 corruption fix from geth v1.17.2 or newer.
 
@@ -217,6 +220,24 @@ verifier contract used after a network proof is fulfilled.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.
+
+## Preflight Concurrency
+
+Shasta preflight defaults are aligned with the old raiko hosted deployment shape:
+
+- `queue.workers=6` runs up to six queue tasks in parallel, matching the old hosted proving
+  concurrency.
+- `PREFLIGHT_CHUNK_SIZE=8` splits proposal blocks into moderate batches.
+- `PREFLIGHT_CHUNK_CONCURRENCY=6` limits the number of chunks fetched at the same time.
+- `WITNESS_BATCH_SIZE=2` limits locally assembled geth witnesses inside each chunk.
+
+`PREFETCH_CHUNK_SIZE` is still accepted as an alias for old-raiko deployment compatibility.
+Increase these values only when the L2 RPC can sustain the additional concurrent state and witness
+traffic.
+
+Preflight retries retryable provider/RPC/IO failures inside the stage with exponential backoff.
+Invalid request/configuration errors and deterministic validation failures fail fast. The queue task
+timeout remains the outer deadline for all preflight attempts.
 
 If the upstream L2 does not expose that method and you need predictable proving latency, place
 [`zeth-rpc-proxy`](../bin/rpc-proxy) in front of it and point `rpc.pairs[*].l2_witness_rpc` at

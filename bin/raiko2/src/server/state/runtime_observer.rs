@@ -4,7 +4,7 @@ use raiko2_engine::{
     EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
     tasks::EngineTask,
 };
-use raiko2_prover::ProverProgress;
+use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
 use raiko2_runtime::{RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 
-use crate::server::task_metadata::{HoodiTaskMetadata, proposal_task_ref, stage_task_ref};
+use crate::server::task_metadata::{
+    TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref,
+};
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
 use raiko2_pipeline::PipelineRoute;
@@ -22,6 +24,12 @@ pub(crate) struct RuntimeObserver {
     runtime: Arc<RuntimeManager>,
     network_pair: String,
     started_stage_tasks: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailedRootPolicy {
+    Exclude,
+    Include,
 }
 
 impl RuntimeObserver {
@@ -58,12 +66,33 @@ impl RuntimeObserver {
     where
         F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
     {
+        self.update_root_records_with_policy(id, FailedRootPolicy::Exclude, mutator)
+            .await
+    }
+
+    async fn update_retry_root_records<F>(&self, id: &EngineTaskId, mutator: F) -> Result<()>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
+        self.update_root_records_with_policy(id, FailedRootPolicy::Include, mutator)
+            .await
+    }
+
+    async fn update_root_records_with_policy<F>(
+        &self,
+        id: &EngineTaskId,
+        failed_policy: FailedRootPolicy,
+        mutator: F,
+    ) -> Result<()>
+    where
+        F: Fn(&mut RuntimeTaskRecord, i64, i64) -> Result<()>,
+    {
         let root_ref = Self::root_task_ref(id);
         let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
         if records.is_empty() {
             anyhow::bail!("runtime task not registered for task ref {root_ref}");
         }
-        let mut records = self.matching_active_root_records(id, records)?;
+        let mut records = self.matching_root_records(id, records, failed_policy)?;
         let updated_at = now_ts();
         let observed_at_ms = now_ms();
         for record in &mut records {
@@ -88,14 +117,76 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         records: Vec<RuntimeTaskRecord>,
     ) -> Result<Vec<RuntimeTaskRecord>> {
+        self.matching_root_records(id, records, FailedRootPolicy::Exclude)
+    }
+
+    fn matching_root_records(
+        &self,
+        id: &EngineTaskId,
+        records: Vec<RuntimeTaskRecord>,
+        failed_policy: FailedRootPolicy,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
         records
             .into_iter()
             .filter_map(|record| match self.record_matches_observer(id, &record) {
                 Ok(true) if !is_terminal_status(record.runner_status) => Some(Ok(record)),
+                Ok(true)
+                    if failed_policy == FailedRootPolicy::Include
+                        && record.runner_status == RunnerStatus::Failed =>
+                {
+                    Some(Ok(record))
+                }
                 Ok(_) => None,
                 Err(err) => Some(Err(err)),
             })
             .collect()
+    }
+
+    async fn load_root_record_for_resume(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Result<Option<RuntimeTaskRecord>> {
+        let root_ref = Self::root_task_ref(id);
+        let records = self.runtime.find_tasks_by_task_ref(&root_ref).await?;
+        let mut resumable_failed = None;
+
+        for record in records {
+            if !self.record_matches_observer(id, &record)? {
+                continue;
+            }
+            if !is_terminal_status(record.runner_status) {
+                return Ok(Some(record));
+            }
+            if record.runner_status == RunnerStatus::Failed
+                && Self::record_has_resumable_remote_submission_for_task(&record, id, task)?
+            {
+                resumable_failed.get_or_insert(record);
+            }
+        }
+
+        Ok(resumable_failed)
+    }
+
+    fn record_has_resumable_remote_submission_for_task(
+        record: &RuntimeTaskRecord,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Result<bool> {
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+            .context("failed to parse runtime task metadata")?;
+        let task_ref = Self::root_task_ref(id);
+        Ok(match task {
+            EngineTask::ProveProposal { .. } => metadata
+                .proposal_runtime(&task_ref)
+                .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
+            EngineTask::Aggregate { .. } => metadata
+                .aggregate_runtime()
+                .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
+            EngineTask::Preflight { .. }
+            | EngineTask::Validate { .. }
+            | EngineTask::Encode { .. } => false,
+        })
     }
 
     fn record_matches_observer(
@@ -106,13 +197,13 @@ impl RuntimeObserver {
         if record.pipeline_key != id.0.pipeline_key() {
             return Ok(false);
         }
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata")?;
         Ok(metadata.network_pair == self.network_pair)
     }
 
     fn metric_context(record: &RuntimeTaskRecord) -> Result<MetricContext> {
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata for telemetry")?;
         Ok(MetricContext::new(
             record.route.to_string(),
@@ -168,7 +259,7 @@ impl RuntimeObserver {
         id: &EngineTaskId,
         finished_at_ms: i64,
     ) -> Result<Option<f64>> {
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata for stage duration")?;
         let task_id = Self::timing_key(id);
         Ok(metadata.observe_stage_terminal_duration_secs(&task_id, finished_at_ms))
@@ -239,8 +330,8 @@ impl RuntimeObserver {
             serde_json::to_vec_pretty(proof).context("failed to serialize proof output")?;
         let mut proof_paths = HashMap::with_capacity(records.len());
         for record in records {
-            let mut metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
-                .context("failed to parse hoodi task metadata")?;
+            let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+                .context("failed to parse task metadata")?;
             let task_id = Self::timing_key(id);
             metadata.mark_stage_terminal(&task_id, stage, 0, "completed");
             if !Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key) {
@@ -289,7 +380,7 @@ impl RuntimeObserver {
 
     fn root_completed_by_proof_success(
         id: &EngineTaskId,
-        metadata: &HoodiTaskMetadata,
+        metadata: &TaskMetadata,
         pipeline_key: raiko2_pipeline::PipelineKey,
     ) -> bool {
         match &id.0 {
@@ -343,7 +434,7 @@ impl EngineObserver for RuntimeObserver {
             }
         }
         if let Err(err) = self
-            .update_root_records(id, |record, updated_at, observed_at_ms| {
+            .update_retry_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
                 let task_id = Self::timing_key(id);
@@ -389,7 +480,7 @@ impl EngineObserver for RuntimeObserver {
             }
         }
         let result = self
-            .update_root_records(id, |record, updated_at, _observed_at_ms| {
+            .update_retry_root_records(id, |record, updated_at, _observed_at_ms| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
                 record.provider_request_id = match progress {
@@ -474,9 +565,9 @@ impl EngineObserver for RuntimeObserver {
                 self.update_root_records(id, move |record, updated_at, observed_at_ms| {
                     record.error = None;
                     let task_id = Self::timing_key(id);
-                    let mut metadata: HoodiTaskMetadata =
+                    let mut metadata: TaskMetadata =
                         serde_json::from_value(record.metadata.clone())
-                            .context("failed to parse hoodi task metadata")?;
+                            .context("failed to parse task metadata")?;
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "completed");
                     let root_completed =
                         Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key);
@@ -594,15 +685,17 @@ impl EngineObserver for RuntimeObserver {
         task: &EngineTask,
     ) -> Option<String> {
         let record = match task {
-            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => {
-                self.load_root_record(id).await.ok().flatten()
-            }
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
+                .load_root_record_for_resume(id, task)
+                .await
+                .ok()
+                .flatten(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. } => None,
         }?;
 
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
         let task_id = Self::root_task_ref(id);
         match task {
             EngineTask::ProveProposal { .. } => metadata
@@ -619,14 +712,52 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Encode { .. } => None,
         }
     }
+
+    async fn load_boundless_submission(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+    ) -> Option<BoundlessSubmissionResume> {
+        let record = match task {
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
+                .load_root_record_for_resume(id, task)
+                .await
+                .ok()
+                .flatten(),
+            EngineTask::Preflight { .. }
+            | EngineTask::Validate { .. }
+            | EngineTask::Encode { .. } => None,
+        }?;
+
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let task_id = Self::root_task_ref(id);
+        let runtime = match task {
+            EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
+            EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
+            EngineTask::Preflight { .. }
+            | EngineTask::Validate { .. }
+            | EngineTask::Encode { .. } => None,
+        }?;
+
+        let expires_at = runtime.expires_at?;
+        if expires_at <= now_secs() {
+            return None;
+        }
+
+        Some(BoundlessSubmissionResume {
+            provider_request_id: runtime.provider_request_id.clone()?,
+            remote_tx_hash: runtime.remote_tx_hash.clone(),
+            expires_at,
+        })
+    }
 }
 
 fn update_task_metadata<F>(record: &mut RuntimeTaskRecord, mutator: F) -> Result<()>
 where
-    F: FnOnce(&mut HoodiTaskMetadata),
+    F: FnOnce(&mut TaskMetadata),
 {
-    let mut metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
-        .context("failed to parse hoodi task metadata")?;
+    let mut metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).context("failed to parse task metadata")?;
     mutator(&mut metadata);
     record.metadata =
         serde_json::to_value(metadata).context("failed to serialize task metadata")?;
@@ -658,6 +789,13 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn now_ms() -> i64 {
     i64::try_from(
         SystemTime::now()
@@ -672,8 +810,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::server::task_metadata::{
-        HoodiProposalTask, HoodiRuntimeMetadata, aggregate_task_ref, proposal_task_ref,
-        stage_task_ref,
+        ProposalTask, RuntimeMetadata, aggregate_task_ref, proposal_task_ref, stage_task_ref,
     };
     use crate::server::telemetry;
     use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
@@ -719,9 +856,9 @@ mod tests {
     fn proposal_metadata_task(
         pipeline: PipelineKey,
         request: &ProposalTaskRequest,
-    ) -> HoodiProposalTask {
+    ) -> ProposalTask {
         let task_ref = proposal_task_ref(pipeline, request);
-        HoodiProposalTask {
+        ProposalTask {
             proposal_id: request.proposal_id,
             checkpoint: None,
             l1_inclusion_block_number: request.l1_inclusion_block_number,
@@ -764,7 +901,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(request.proposal_id),
                 proof_ids: vec![task_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: network_pair.to_string(),
                     network: network.to_string(),
                     l1_network: l1_network.to_string(),
@@ -774,7 +911,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, request)],
                     aggregate_task_id: None,
                     aggregate_request: None,
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -805,14 +942,14 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![task_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Risc0,
                     execution_mode: None,
                     aggregate_requested: false,
-                    proposals: vec![HoodiProposalTask {
+                    proposals: vec![ProposalTask {
                         proposal_id: 42,
                         checkpoint: None,
                         l1_inclusion_block_number: 1,
@@ -823,13 +960,14 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
             .await?;
 
         let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        let future_expires_at = now_secs().saturating_add(3_600);
         observer
             .on_task_progress(
                 &proposal_task_id,
@@ -840,6 +978,7 @@ mod tests {
                 &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
                     provider_request_id: "0x1234".to_string(),
                     remote_tx_hash: Some("0xabcd".to_string()),
+                    expires_at: future_expires_at,
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
                     offchain: false,
@@ -853,7 +992,7 @@ mod tests {
             .get_task("task_public")
             .await?
             .expect("runtime task exists");
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         let runtime_entry = metadata
             .proposal_runtime(&task_ref)
             .expect("proposal runtime exists");
@@ -863,9 +1002,55 @@ mod tests {
         );
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task");
+        record.runner_status = RunnerStatus::Failed;
+        runtime.upsert_task(&record).await?;
+        let resumed = observer
+            .load_boundless_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("boundless submission can resume");
+        assert_eq!(resumed.provider_request_id, "0x1234");
+        assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(resumed.expires_at, future_expires_at);
+
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task");
+        let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
+        metadata
+            .runtime
+            .proposals
+            .get_mut(&task_ref)
+            .expect("proposal runtime exists")
+            .expires_at = Some(now_secs().saturating_sub(1));
+        record.metadata = serde_json::to_value(metadata)?;
+        runtime.upsert_task(&record).await?;
+        assert!(
+            observer
+                .load_boundless_submission(
+                    &proposal_task_id,
+                    &EngineTask::ProveProposal {
+                        request: proposal_request(),
+                        input_task: proposal_task_id.clone(),
+                    },
+                )
+                .await
+                .is_none()
+        );
         Ok(())
     }
 
@@ -895,7 +1080,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![proposal_ref.clone(), aggregate_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
@@ -905,7 +1090,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, &request)],
                     aggregate_task_id: Some(aggregate_ref),
                     aggregate_request: Some(aggregate_request),
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -930,7 +1115,7 @@ mod tests {
             .get_task("task_public_aggregate_pending")
             .await?
             .expect("runtime task exists");
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Allocated);
         assert_eq!(record.proof_path, None);
         assert_eq!(
@@ -1047,18 +1232,70 @@ mod tests {
             .get_task("task_current_pair")
             .await?
             .expect("current pair task");
-        let current_metadata: HoodiTaskMetadata = serde_json::from_value(current.metadata)?;
+        let current_metadata: TaskMetadata = serde_json::from_value(current.metadata)?;
         let other = runtime
             .get_task("task_other_pair")
             .await?
             .expect("other pair task");
-        let other_metadata: HoodiTaskMetadata = serde_json::from_value(other.metadata)?;
+        let other_metadata: TaskMetadata = serde_json::from_value(other.metadata)?;
 
         assert_eq!(
             current_metadata.runtime.last_event.as_deref(),
             Some("started:worker-a")
         );
         assert_eq!(other_metadata.runtime.last_event, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_retry_start_recovers_failed_root() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-retry-start",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+            stage: ProposalStage::Preflight,
+        });
+        let task = EngineTask::Preflight {
+            request: request.clone(),
+        };
+
+        register_observer_task(
+            runtime.as_ref(),
+            "task_failed_retry",
+            "taiko_dev/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Failed,
+        )
+        .await?;
+        let mut record = runtime
+            .get_task("task_failed_retry")
+            .await?
+            .expect("failed task");
+        record.error = Some("transient preflight failure".to_string());
+        runtime.upsert_task(&record).await?;
+
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), "taiko_dev/ethereum".to_string());
+        observer
+            .on_task_started(&proposal_task_id, &task, "worker-a")
+            .await;
+
+        let record = runtime
+            .get_task("task_failed_retry")
+            .await?
+            .expect("recovered task");
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
+        assert_eq!(record.runner_status, RunnerStatus::Allocated);
+        assert_eq!(record.error, None);
+        assert_eq!(metadata.runtime.active_stage.as_deref(), Some("preflight"));
+        assert_eq!(
+            metadata.runtime.last_event.as_deref(),
+            Some("started:worker-a")
+        );
         Ok(())
     }
 
@@ -1089,7 +1326,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
                 proof_ids: vec![first_ref, second_ref],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
@@ -1102,7 +1339,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -1152,7 +1389,7 @@ mod tests {
             .get_task("task_public_multi_proposal")
             .await?
             .expect("runtime task exists");
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         assert_eq!(record.runner_status, RunnerStatus::Completed);
         assert!(record.proof_path.is_some());
         assert_eq!(metadata.runtime.last_event.as_deref(), Some("completed"));
@@ -1181,14 +1418,14 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![task_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
-                    proposals: vec![HoodiProposalTask {
+                    proposals: vec![ProposalTask {
                         proposal_id: 42,
                         checkpoint: None,
                         l1_inclusion_block_number: 1,
@@ -1199,7 +1436,7 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -1228,7 +1465,7 @@ mod tests {
             .get_task("task_public_sp1")
             .await?
             .expect("runtime task exists");
-        let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata)?;
+        let metadata: TaskMetadata = serde_json::from_value(record.metadata)?;
         let runtime_entry = metadata
             .proposal_runtime(&task_ref)
             .expect("proposal runtime exists");
@@ -1244,6 +1481,25 @@ mod tests {
         assert_eq!(runtime_entry.sp1_skip_simulation, Some(true));
         assert_eq!(runtime_entry.sp1_cycle_limit, Some(1_000_000_000_000));
         assert_eq!(runtime_entry.sp1_timeout_secs, Some(3_600));
+        let mut record = runtime
+            .get_task("task_public_sp1")
+            .await?
+            .expect("runtime task exists");
+        record.runner_status = RunnerStatus::Failed;
+        runtime.upsert_task(&record).await?;
+        assert_eq!(
+            observer
+                .load_sp1_network_request_id(
+                    &proposal_task_id,
+                    &EngineTask::ProveProposal {
+                        request: proposal_request(),
+                        input_task: proposal_task_id.clone(),
+                    },
+                )
+                .await
+                .as_deref(),
+            Some("0xsp1")
+        );
         Ok(())
     }
 
@@ -1275,7 +1531,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
                 proof_ids: vec![task_ref.clone(), other_task_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
@@ -1283,7 +1539,7 @@ mod tests {
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
                     proposals: vec![
-                        HoodiProposalTask {
+                        ProposalTask {
                             proposal_id: 42,
                             checkpoint: None,
                             l1_inclusion_block_number: 1,
@@ -1292,7 +1548,7 @@ mod tests {
                             task_id: task_ref.clone(),
                             request: Some(proposal_request()),
                         },
-                        HoodiProposalTask {
+                        ProposalTask {
                             proposal_id: 43,
                             checkpoint: None,
                             l1_inclusion_block_number: 1,
@@ -1304,7 +1560,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -1380,7 +1636,7 @@ mod tests {
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
                 proof_ids: vec![task_ref.clone()],
-                metadata: serde_json::to_value(HoodiTaskMetadata {
+                metadata: serde_json::to_value(TaskMetadata {
                     network_pair: "taiko_dev/ethereum".to_string(),
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
@@ -1390,7 +1646,7 @@ mod tests {
                     proposals: vec![],
                     aggregate_task_id: Some(task_ref),
                     aggregate_request: Some(aggregate_request.clone()),
-                    runtime: HoodiRuntimeMetadata::default(),
+                    runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
             })
@@ -1463,14 +1719,14 @@ mod tests {
         });
         let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &proposal_request());
         let preflight_ref = stage_task_ref(&proposal_task_id);
-        let mut metadata = HoodiTaskMetadata {
+        let mut metadata = TaskMetadata {
             network_pair: "telemetry_restart/ethereum".to_string(),
             network: "telemetry_restart".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
             execution_mode: None,
             aggregate_requested: false,
-            proposals: vec![HoodiProposalTask {
+            proposals: vec![ProposalTask {
                 proposal_id: 42,
                 checkpoint: None,
                 l1_inclusion_block_number: 1,
@@ -1481,7 +1737,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
-            runtime: HoodiRuntimeMetadata::default(),
+            runtime: RuntimeMetadata::default(),
         };
         metadata.mark_stage_started(&preflight_ref, "preflight", now_ms() - 1_000);
         runtime

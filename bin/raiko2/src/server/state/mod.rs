@@ -235,13 +235,12 @@ async fn build_sp1_engine(
                 SP1_SHASTA_BACKEND,
                 provider,
             );
-            Engine::with_store_scheduler_config_observer_and_sp1_config(
+            Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
                 MemoryStore::with_lease(scheduler_config.lease_duration),
                 scheduler_config,
                 Some(Arc::clone(&observer)),
-                Some(config.prover.sp1.clone()),
             )
         }
         QueueBackend::Redis => {
@@ -267,13 +266,12 @@ async fn build_sp1_engine(
                     SP1_SHASTA_BACKEND,
                     provider,
                 );
-                Engine::with_store_scheduler_config_observer_and_sp1_config(
+                Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,
                     store,
                     scheduler_config,
                     Some(Arc::clone(&observer)),
-                    Some(config.prover.sp1.clone()),
                 )
             }
 

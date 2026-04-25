@@ -13,7 +13,7 @@ mod server;
 mod validation;
 
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
-pub use queue::{QueueBackend, QueueConfig, RetryStrategy};
+pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use raiko2_provider::L2ProviderKind;
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
@@ -94,21 +94,8 @@ impl Config {
         if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
             config.queue.maintenance_interval_ms = interval_ms;
         }
-        if let Some(strategy) = &cli.queue_retry_strategy {
-            config.queue.retry.strategy =
-                strategy.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-        }
-        if let Some(max_attempts) = cli.queue_retry_max_attempts {
-            config.queue.retry.max_attempts = max_attempts;
-        }
-        if let Some(fixed_delay_ms) = cli.queue_retry_fixed_delay_ms {
-            config.queue.retry.fixed_delay_ms = fixed_delay_ms;
-        }
-        if let Some(base_delay_ms) = cli.queue_retry_base_delay_ms {
-            config.queue.retry.base_delay_ms = base_delay_ms;
-        }
-        if let Some(max_delay_ms) = cli.queue_retry_max_delay_ms {
-            config.queue.retry.max_delay_ms = max_delay_ms;
+        if let Some(timeout_secs) = cli.queue_task_timeout_secs {
+            config.queue.task_timeout_secs = timeout_secs;
         }
         if let Some(redis_url) = &cli.redis_url {
             config.queue.redis_url = Some(redis_url.clone());
@@ -591,6 +578,41 @@ runner = "local"
     }
 
     #[test]
+    fn test_config_rejects_legacy_queue_retry_table() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+
+[queue.retry]
+strategy = "fixed"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("legacy queue retry config must fail");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("unknown field")),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_config_file_accepts_geth_l2_provider() {
         let config_toml = r#"
 [server]
@@ -622,6 +644,42 @@ maintenance_interval_ms = 200
             .expect("resolved pair");
 
         assert_eq!(pair.l2_provider, L2ProviderKind::Geth);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_accepts_geth_local_witness_l2_provider() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth_local_witness" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+
+        assert_eq!(pair.l2_provider, L2ProviderKind::GethLocalWitness);
 
         let _ = std::fs::remove_file(path);
     }

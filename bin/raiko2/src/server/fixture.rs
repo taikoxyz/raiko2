@@ -515,6 +515,7 @@ pub(crate) fn base_config() -> Config {
 const fn memory_scheduler_config() -> SchedulerConfig {
     SchedulerConfig {
         lease_duration: Duration::from_secs(60),
+        task_timeout: Duration::from_secs(60),
         retry: RetryPolicy::None,
     }
 }

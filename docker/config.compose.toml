@@ -31,12 +31,6 @@ plonk = true
 [queue]
 backend = "memory"
 namespace = "raiko2:docker"
-workers = 3
+workers = 6
 maintenance_interval_ms = 200
-
-[queue.retry]
-strategy = "exponential"
-max_attempts = 3
-fixed_delay_ms = 1000
-base_delay_ms = 1000
-max_delay_ms = 30000
+task_timeout_secs = 14400

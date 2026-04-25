@@ -33,9 +33,7 @@ use super::fixture::{
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
-use super::task_metadata::{
-    HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata, HoodiTaskRuntimeMetadata,
-};
+use super::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata};
 use crate::config::{GuestSystem, RunnerKind};
 use raiko2_runtime::RuntimeManager;
 
@@ -92,6 +90,28 @@ async fn post_json(app: &Router, uri: &str, payload: Value) -> (StatusCode, Valu
         .expect("build POST request");
     let res = app.clone().oneshot(req).await.expect("dispatch request");
     read_json(res).await
+}
+
+async fn report_task_ids(app: &Router) -> Vec<String> {
+    let (status, report) = get_json(app, "/v3/proof/report").await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    report
+        .as_array()
+        .expect("report array")
+        .iter()
+        .map(|entry| {
+            entry["task_id"]
+                .as_str()
+                .expect("report task_id")
+                .to_string()
+        })
+        .collect()
+}
+
+async fn single_report_task_id(app: &Router) -> String {
+    let ids = report_task_ids(app).await;
+    assert_eq!(ids.len(), 1, "expected one runtime task, got {ids:?}");
+    ids.into_iter().next().expect("single task id")
 }
 
 fn duplicate_request_fingerprint(
@@ -504,10 +524,9 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -543,10 +562,9 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -580,11 +598,81 @@ async fn e2e_shasta_request_rejects_partial_network_pair() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "network and l1_network must be provided together"
     );
+}
+
+#[tokio::test]
+async fn e2e_shasta_request_rejects_unknown_fields() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0,
+                "unexpected_proposal_field": true
+            }],
+            "aggregate": false,
+            "proof_type": "native",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert!(
+        res["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("unexpected_proposal_field")),
+        "{res}"
+    );
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "sgxgeth",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=sgxgeth is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -607,16 +695,16 @@ async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let first_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let first_id = single_report_task_id(&app).await;
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["data"]["status"], "registered");
-    assert_eq!(second["data"]["task_id"], first_id);
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    assert_eq!(single_report_task_id(&app).await, first_id);
 }
 
 #[tokio::test]
@@ -645,10 +733,9 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let task_id = single_report_task_id(&app).await;
 
     let mut record = state
         .runtime
@@ -656,7 +743,7 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
         .await
         .expect("read task")
         .expect("task exists");
-    let mut metadata: HoodiTaskMetadata =
+    let mut metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
     metadata.runtime.active_stage = Some("prove".to_string());
     metadata.runtime.last_event = Some("submission_registered".to_string());
@@ -671,7 +758,8 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["data"]["status"], "work_in_progress");
-    assert_eq!(second["data"]["task_id"], task_id);
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    assert_eq!(single_report_task_id(&app).await, task_id);
 }
 
 #[tokio::test]
@@ -694,21 +782,16 @@ async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
 
     drive_engine_to_idle(&engine).await;
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
-    assert_eq!(second["data"]["status"], "completed");
-    assert_eq!(second["data"]["task_id"], task_id);
     assert!(second["data"]["proof"]["proof"].is_string(), "{second}");
-    assert_eq!(second["data"]["proof"]["kzg_proof"], "");
-    assert_eq!(second["data"]["proof"]["quote"], "");
+    assert!(second["data"]["proof"].get("status").is_none(), "{second}");
 }
 
 #[tokio::test]
@@ -752,14 +835,14 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         stage: ProposalStage::Prove,
     });
     let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
-    let metadata = HoodiTaskMetadata {
+    let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Native,
         execution_mode: None,
         aggregate_requested: false,
-        proposals: vec![HoodiProposalTask {
+        proposals: vec![ProposalTask {
             proposal_id: 3,
             checkpoint: None,
             l1_inclusion_block_number: 1,
@@ -770,7 +853,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         }],
         aggregate_task_id: None,
         aggregate_request: None,
-        runtime: HoodiRuntimeMetadata::default(),
+        runtime: RuntimeMetadata::default(),
     };
     let canonical_proposals = vec![json!({
         "proposal_id": 3,
@@ -808,7 +891,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["data"]["status"], "registered");
-    assert_eq!(second["data"]["task_id"], "task_orphan_registered");
+    assert!(second["data"].get("task_id").is_none(), "{second}");
 
     drive_engine_to_idle(&engine).await;
 
@@ -843,10 +926,8 @@ async fn e2e_duplicate_shasta_post_keeps_completed_without_root_proof_as_success
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
 
     drive_engine_to_idle(&engine).await;
 
@@ -854,16 +935,12 @@ async fn e2e_duplicate_shasta_post_keeps_completed_without_root_proof_as_success
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["proof_type"], "sp1");
-    assert_eq!(second["data"]["status"], "completed");
-    assert_eq!(second["data"]["task_id"], task_id);
-    assert!(
-        second["data"].get("proof").is_none(),
-        "unexpected root proof in duplicate response: {second}"
-    );
+    assert!(second["data"]["proof"].is_object(), "{second}");
+    assert!(second["data"]["proof"]["proof"].is_null(), "{second}");
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_returns_error_after_failure() {
+async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission() {
     let config = base_config();
     let engine = native_fixture_engine();
     let state = app_with_engine(
@@ -888,10 +965,9 @@ async fn e2e_duplicate_shasta_post_returns_error_after_failure() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let task_id = single_report_task_id(&app).await;
 
     state
         .runtime
@@ -906,10 +982,66 @@ async fn e2e_duplicate_shasta_post_returns_error_after_failure() {
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
-    assert_eq!(second["status"], "error");
+    assert_eq!(second["status"], "ok");
     assert_eq!(second["proof_type"], "native");
-    assert_eq!(second["error"], "task_failed");
-    assert_eq!(second["message"], "fixture failed");
+    assert_eq!(second["data"]["status"], "registered");
+    assert_eq!(single_report_task_id(&app).await, task_id);
+}
+
+#[tokio::test]
+async fn e2e_duplicate_aggregate_shasta_post_recovers_failed_root_before_remote_submission() {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSp1, engine);
+    let app = app::build_router(state.clone());
+    let payload = json!({
+        "proposals": [
+            {
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            },
+            {
+                "proposal_id": 4,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [4],
+                "last_anchor_block_number": 0
+            }
+        ],
+        "aggregate": true,
+        "proof_type": "sp1",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let task_id = single_report_task_id(&app).await;
+
+    state
+        .runtime
+        .sync_status(
+            &task_id,
+            RunnerStatus::Failed,
+            Some("fixture aggregate failed".to_string()),
+            None,
+        )
+        .await
+        .expect("sync failed task status");
+
+    let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(second["proof_type"], "sp1");
+    assert_eq!(second["data"]["status"], "registered");
+    assert_eq!(single_report_task_id(&app).await, task_id);
 }
 
 #[tokio::test]
@@ -938,10 +1070,8 @@ async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
 
     drive_engine_to_idle(&engine).await;
 
@@ -949,8 +1079,6 @@ async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["proof_type"], "sp1");
-    assert_eq!(second["data"]["status"], "completed");
-    assert_eq!(second["data"]["task_id"], task_id);
     assert_eq!(
         second["data"]["proof"]["proof"],
         "0xfixture-sp1-aggregation"
@@ -1031,6 +1159,7 @@ async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
     assert_eq!(res["status"], "ok");
     assert_eq!(res["proof_type"], "native");
     assert_eq!(res["data"]["status"], "zk_any_not_drawn");
+    assert_eq!(res["batch_id"], 3);
     assert!(res["data"].get("task_id").is_none(), "{res}");
 }
 
@@ -1065,7 +1194,9 @@ async fn e2e_zk_any_still_validates_request_when_not_drawn() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "proposal.l2_block_numbers must not be empty"
@@ -1109,10 +1240,8 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["proof_type"], "sp1");
     assert_eq!(res["data"]["status"], "registered");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1149,7 +1278,9 @@ async fn e2e_zk_any_rejects_prover_args() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "proof_type=zk_any does not support prover args"
@@ -1194,10 +1325,9 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1262,10 +1392,9 @@ async fn e2e_batch_aggregate_sp1_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1300,10 +1429,9 @@ async fn e2e_batch_single_proof_aggregate_sp1_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1333,10 +1461,9 @@ async fn e2e_aggregate_sp1_external_proofs_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1367,10 +1494,9 @@ async fn e2e_aggregate_request_accepts_legacy_aggregation_ids() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1397,16 +1523,16 @@ async fn e2e_duplicate_aggregate_post_reuses_same_root_task() {
 
     let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let first_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let first_id = single_report_task_id(&app).await;
 
     let (status, second) = post_json(&app, "/v3/proof/aggregate", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["data"]["status"], "registered");
-    assert_eq!(second["data"]["task_id"], first_id);
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    assert_eq!(single_report_task_id(&app).await, first_id);
 }
 
 #[tokio::test]
@@ -1428,10 +1554,9 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
 
     let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let task_id = single_report_task_id(&app).await;
 
     let mut record = state
         .runtime
@@ -1439,14 +1564,14 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
         .await
         .expect("read task")
         .expect("task exists");
-    let mut metadata: HoodiTaskMetadata =
+    let mut metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
     metadata.runtime.active_stage = Some("aggregate".to_string());
     metadata.runtime.last_event = Some("submission_registered".to_string());
-    metadata.runtime.aggregate = Some(HoodiTaskRuntimeMetadata {
+    metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
         updated_at: 1,
         provider_request_id: Some("0xsp1-aggregate".to_string()),
-        ..HoodiTaskRuntimeMetadata::default()
+        ..TaskRuntimeMetadata::default()
     });
     record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
     state
@@ -1459,7 +1584,8 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
     assert_eq!(second["data"]["status"], "work_in_progress");
-    assert_eq!(second["data"]["task_id"], task_id);
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    assert_eq!(single_report_task_id(&app).await, task_id);
 }
 
 #[tokio::test]
@@ -1478,21 +1604,16 @@ async fn e2e_duplicate_aggregate_post_returns_completed_legacy_proof() {
 
     let (status, first) = post_json(&app, "/v3/proof/aggregate", payload.clone()).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let task_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
 
     drive_engine_to_idle(&engine).await;
 
     let (status, second) = post_json(&app, "/v3/proof/aggregate", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
-    assert_eq!(second["data"]["status"], "completed");
-    assert_eq!(second["data"]["task_id"], task_id);
     assert!(second["data"]["proof"]["proof"].is_string(), "{second}");
-    assert_eq!(second["data"]["proof"]["kzg_proof"], "");
-    assert_eq!(second["data"]["proof"]["quote"], "");
+    assert!(second["data"]["proof"].get("status").is_none(), "{second}");
 }
 
 #[tokio::test]
@@ -1513,10 +1634,9 @@ async fn e2e_aggregate_single_sp1_external_proof_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1544,10 +1664,9 @@ async fn e2e_aggregate_request_uses_default_pair_when_network_fields_are_omitted
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1577,10 +1696,9 @@ async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
@@ -1611,11 +1729,39 @@ async fn e2e_aggregate_rejects_zk_any() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "proof_type=zk_any is not supported for aggregate requests"
     );
+}
+
+#[tokio::test]
+async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
+    let (app, _engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "sgxgeth",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=sgxgeth is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -1641,19 +1787,21 @@ async fn e2e_report_and_list_expose_root_tasks_only() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload(3)).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let first_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first task id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let first_id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload(4)).await;
     assert_eq!(status, StatusCode::OK, "{second}");
-    let second_id = second["data"]["task_id"]
-        .as_str()
-        .expect("second task id")
-        .to_string();
+    assert_eq!(second["data"]["status"], "registered");
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    let ids = report_task_ids(&app).await;
+    let second_id = ids
+        .into_iter()
+        .find(|id| id != &first_id)
+        .expect("second task id");
 
     let (status, report) = get_json(&app, "/proof/report").await;
     assert_eq!(status, StatusCode::OK);
@@ -1693,10 +1841,9 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     let (status, prune) = post_json(&app, "/proof/prune", json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -1738,7 +1885,9 @@ async fn e2e_sp1_execute_rejects_aggregate_requests() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "sp1.mode=execute does not support aggregate=true"
@@ -1775,7 +1924,9 @@ async fn e2e_sp1_hosted_api_rejects_unverified_prove_requests() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "sp1.mode=prove requires sp1.verify=true on the hosted API"
@@ -1812,7 +1963,9 @@ async fn e2e_sp1_hosted_api_rejects_network_verify_when_pair_not_enabled() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "sp1 network verification is not enabled for network pair taiko_dev/ethereum"
@@ -1855,7 +2008,7 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["proof_type"], "sp1");
     assert_eq!(res["data"]["status"], "registered");
-    assert!(res["data"]["task_id"].as_str().is_some());
+    assert!(res["data"].get("task_id").is_none(), "{res}");
 }
 
 #[tokio::test]
@@ -1885,7 +2038,9 @@ async fn e2e_sp1_network_settings_require_network_prover() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(
         res["message"],
         "sp1 network-only settings require sp1.prover=network"
@@ -1916,10 +2071,9 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     let (status, res) = post_json(&app, &format!("/v3/tasks/{id}/cancel"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
@@ -1946,16 +2100,16 @@ async fn e2e_duplicate_batch_request_reuses_existing_root_task() {
 
     let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
     assert_eq!(status, StatusCode::OK);
-    let first_id = first["data"]["task_id"]
-        .as_str()
-        .expect("first response task_id")
-        .to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
+    let first_id = single_report_task_id(&app).await;
 
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["status"], "ok");
     assert_eq!(second["data"]["status"], "registered");
-    assert_eq!(second["data"]["task_id"], first_id);
+    assert!(second["data"].get("task_id").is_none(), "{second}");
+    assert_eq!(single_report_task_id(&app).await, first_id);
 }
 
 #[tokio::test]
@@ -1982,10 +2136,9 @@ async fn e2e_task_status_turns_proving_after_preflight_progress() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     let ran = engine.run_one("e2e-worker").await.expect("run one task");
     assert!(ran, "expected preflight task to run");
@@ -2030,14 +2183,14 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         stage: ProposalStage::Prove,
     });
     let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
-    let mut metadata = HoodiTaskMetadata {
+    let mut metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Native,
         execution_mode: None,
         aggregate_requested: false,
-        proposals: vec![HoodiProposalTask {
+        proposals: vec![ProposalTask {
             proposal_id: 3,
             checkpoint: None,
             l1_inclusion_block_number: 1,
@@ -2058,7 +2211,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         }],
         aggregate_task_id: None,
         aggregate_request: None,
-        runtime: HoodiRuntimeMetadata {
+        runtime: RuntimeMetadata {
             active_stage: Some("prove".to_string()),
             last_event: Some("submission_registered".to_string()),
             ..Default::default()
@@ -2073,6 +2226,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         &BoundlessSubmissionProgress {
             provider_request_id: "0x1234".to_string(),
             remote_tx_hash: Some("0xabcd".to_string()),
+            expires_at: 123_456,
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),
             offchain: false,
@@ -2137,6 +2291,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     );
     assert_eq!(res["data"]["proposals"][0]["runtime"]["deployment"], "base");
     assert_eq!(res["data"]["proposals"][0]["runtime"]["offchain"], false);
+    assert_eq!(res["data"]["proposals"][0]["runtime"]["expires_at"], 123456);
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["quoted_mcycles_count"],
         6000
@@ -2188,14 +2343,14 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         stage: ProposalStage::Prove,
     });
     let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
-    let metadata = HoodiTaskMetadata {
+    let metadata = TaskMetadata {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Native,
         execution_mode: None,
         aggregate_requested: false,
-        proposals: vec![HoodiProposalTask {
+        proposals: vec![ProposalTask {
             proposal_id: 3,
             checkpoint: None,
             l1_inclusion_block_number: 1,
@@ -2206,7 +2361,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         }],
         aggregate_task_id: None,
         aggregate_request: None,
-        runtime: HoodiRuntimeMetadata {
+        runtime: RuntimeMetadata {
             last_event: Some("completed".to_string()),
             ..Default::default()
         },
@@ -2305,10 +2460,9 @@ async fn e2e_risc0_mock_failure_propagates_guest_error_to_status_and_runtime() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let id = res["data"]["task_id"]
-        .as_str()
-        .expect("response task_id")
-        .to_string();
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
 
     drive_engine_to_idle(&engine).await;
 

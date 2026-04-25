@@ -7,6 +7,9 @@ Confirm all of these before reporting success:
 - Kubernetes context matches `tolba-prod`
 - current deployment revision and image were captured before rollout
 - config/key identity check passed before build
+- redacted server config snapshot was captured before rollout
+- queue config schema migration was checked when relevant: no `[queue.retry]` / `queue.retry`
+  remains, and `queue.task_timeout_secs` is intentional
 - dirty worktree state was shown
 - pushed image digest was captured
 - `register-image` dry-run was executed after `release-image`
@@ -15,6 +18,9 @@ Confirm all of these before reporting success:
 - at least one new pod is `Ready`
 - pod `imageID` matches the pushed digest
 - config/key identity check passed after rollout
+- redacted server config snapshot was captured after rollout
+- server config diff was checked and matched the intended change set, or had no unexpected diff for
+  image-only rollout
 - `/ready` returned `200`
 - `/metrics` endpoint was reachable
 
@@ -28,6 +34,7 @@ New revision/image: <new-revision> <new-digest>
 Tag: <tag>
 Register: checked only | applied
 Config/key check: ok
+Server config diff: none | expected changes only
 Ready: ok
 Metrics: reachable
 Worktree: clean | dirty
@@ -147,4 +154,28 @@ Boundless signer source: <source>
 Expected signer source: <source>
 Network key source: <source-or-unavailable>
 Next step required: fix the config secret or signer source before rollout
+```
+
+## Unexpected Server Config Diff
+
+If a rollout is intended to be image-only but the redacted server config diff shows changed runtime
+configuration, stop before continuing unless the user explicitly confirms the diff.
+
+The report must include:
+
+- snapshot paths used for the comparison
+- the redacted diff summary, without raw secret values
+- whether the diff came from deployment env, resources, replicas, or `config.toml`
+- the next required action
+
+Use this report shape:
+
+```text
+Rollout blocked by unexpected server config diff.
+
+Failure point: server config diff gate
+Before snapshot: <path>
+After snapshot: <path>
+Primary signal: <short summary>
+Next step required: confirm the config diff is intended or restore the live config before rollout
 ```

@@ -26,6 +26,7 @@ pub enum L2ProviderKind {
     #[default]
     Reth,
     Geth,
+    GethLocalWitness,
 }
 
 impl fmt::Display for L2ProviderKind {
@@ -33,6 +34,7 @@ impl fmt::Display for L2ProviderKind {
         match self {
             Self::Reth => f.write_str("reth"),
             Self::Geth => f.write_str("geth"),
+            Self::GethLocalWitness => f.write_str("geth_local_witness"),
         }
     }
 }
@@ -90,6 +92,11 @@ pub(crate) struct GethL2Provider {
     rpc: RpcL2Provider,
 }
 
+#[derive(Clone)]
+pub(crate) struct GethLocalWitnessL2Provider {
+    rpc: RpcL2Provider,
+}
+
 impl RethL2Provider {
     const fn new(rpc: RpcL2Provider) -> Self {
         Self { rpc }
@@ -97,6 +104,12 @@ impl RethL2Provider {
 }
 
 impl GethL2Provider {
+    const fn new(rpc: RpcL2Provider) -> Self {
+        Self { rpc }
+    }
+}
+
+impl GethLocalWitnessL2Provider {
     const fn new(rpc: RpcL2Provider) -> Self {
         Self { rpc }
     }
@@ -123,6 +136,25 @@ impl L2Provider for RethL2Provider {
 
 #[async_trait::async_trait]
 impl L2Provider for GethL2Provider {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+        self.rpc.fetch_blocks(block_numbers).await
+    }
+
+    async fn batch_accounts(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+        self.rpc.fetch_accounts(block_numbers, addresses).await
+    }
+
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses(block_numbers).await
+    }
+}
+
+#[async_trait::async_trait]
+impl L2Provider for GethLocalWitnessL2Provider {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
         self.rpc.fetch_blocks(block_numbers).await
     }
@@ -237,6 +269,7 @@ impl NetworkProvider {
         let l2_provider: Arc<dyn L2Provider> = match l2_provider_kind {
             L2ProviderKind::Reth => Arc::new(RethL2Provider::new(l2_rpc)),
             L2ProviderKind::Geth => Arc::new(GethL2Provider::new(l2_rpc)),
+            L2ProviderKind::GethLocalWitness => Arc::new(GethLocalWitnessL2Provider::new(l2_rpc)),
         };
         let mut http_client_builder = reqwest::Client::builder();
         if config.timeout_ms > 0 {

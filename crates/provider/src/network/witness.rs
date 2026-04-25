@@ -17,9 +17,9 @@ use tracing::info;
 
 use crate::on_the_spot_witness::execution_witness;
 
-use super::{GethL2Provider, RethL2Provider, RpcL2Provider};
+use super::{GethL2Provider, GethLocalWitnessL2Provider, RethL2Provider, RpcL2Provider};
 
-const DEFAULT_WITNESS_BATCH_SIZE: usize = 5;
+const DEFAULT_WITNESS_BATCH_SIZE: usize = 2;
 const DEFAULT_SYSTEM_PROOF_BATCH_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Default)]
@@ -653,6 +653,36 @@ impl GethL2Provider {
             block_count = block_numbers.len(),
             elapsed_ms = started_at.elapsed().as_millis(),
             "fetched witnesses via geth debug_executionWitness"
+        );
+        Ok(witnesses)
+    }
+}
+
+impl GethLocalWitnessL2Provider {
+    pub(super) async fn fetch_witnesses(
+        &self,
+        block_numbers: &[u64],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let started_at = Instant::now();
+        let chain_id = self
+            .rpc
+            .witness_provider
+            .get_chain_id()
+            .await
+            .map_err(|e| {
+                RaikoError::RPC(format!(
+                    "eth_chainId failed while building geth local witnesses: {e}"
+                ))
+            })?;
+        let witnesses = self
+            .rpc
+            .fetch_on_the_spot_taiko_witnesses(chain_id, block_numbers)
+            .await?;
+        info!(
+            chain_id,
+            block_count = block_numbers.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched witnesses via geth local on-the-spot provider"
         );
         Ok(witnesses)
     }

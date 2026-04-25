@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::server::state::{EngineHandle, PipelineFactory};
-use crate::server::task_metadata::HoodiTaskMetadata;
+use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
@@ -118,7 +118,7 @@ pub(crate) async fn cancel_registered_tasks(
     engine: &Arc<dyn EngineHandle>,
     public_task_id: &str,
     pipeline_key: PipelineKey,
-    metadata: &HoodiTaskMetadata,
+    metadata: &TaskMetadata,
 ) -> Result<()> {
     let mut errors = Vec::new();
 
@@ -225,7 +225,7 @@ pub(crate) async fn has_other_live_task_reference(
 pub(crate) async fn remove_task_children(
     engine: &Arc<dyn EngineHandle>,
     pipeline_key: PipelineKey,
-    metadata: &HoodiTaskMetadata,
+    metadata: &TaskMetadata,
     removed_engine_task_ids: &mut HashSet<String>,
 ) -> Result<()> {
     for proposal in &metadata.proposals {
@@ -262,7 +262,7 @@ pub(crate) async fn remove_task_children_if_unreferenced(
     engine: &Arc<dyn EngineHandle>,
     public_task_id: &str,
     pipeline_key: PipelineKey,
-    metadata: &HoodiTaskMetadata,
+    metadata: &TaskMetadata,
 ) -> Result<ChildCleanupOutcome> {
     let mut outcome = ChildCleanupOutcome::default();
 
@@ -307,7 +307,7 @@ pub(crate) async fn remove_task_children_if_unreferenced(
 }
 
 fn record_matches_network_pair(record: &RuntimeTaskRecord, network_pair: &str) -> Result<bool> {
-    let metadata: HoodiTaskMetadata = serde_json::from_value(record.metadata.clone())
+    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
         .context("failed to parse referenced task metadata")?;
     Ok(metadata.network_pair == network_pair)
 }
@@ -356,7 +356,7 @@ async fn cleanup_expired_root_task(
     pipelines: &dyn PipelineFactory,
     record: &RuntimeTaskRecord,
 ) -> Result<ChildCleanupOutcome> {
-    let metadata: HoodiTaskMetadata =
+    let metadata: TaskMetadata =
         serde_json::from_value(record.metadata.clone()).context("failed to parse task metadata")?;
     let engine = pipelines
         .get(&metadata.network_pair, record.pipeline_key)
@@ -407,9 +407,7 @@ mod tests {
         proposal_task_chain_ids, run_runtime_cleanup_pass,
     };
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
-    use crate::server::task_metadata::{
-        HoodiProposalTask, HoodiRuntimeMetadata, HoodiTaskMetadata,
-    };
+    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
     use anyhow::{Context, Result};
     use raiko2_engine::{
         AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest,
@@ -792,14 +790,11 @@ mod tests {
         Ok(())
     }
 
-    fn metadata_for_task(proposal_task_id: &str) -> HoodiTaskMetadata {
+    fn metadata_for_task(proposal_task_id: &str) -> TaskMetadata {
         metadata_for_task_with_pair(proposal_task_id, "taiko_dev/ethereum")
     }
 
-    fn metadata_for_task_with_pair(
-        proposal_task_id: &str,
-        network_pair: &str,
-    ) -> HoodiTaskMetadata {
+    fn metadata_for_task_with_pair(proposal_task_id: &str, network_pair: &str) -> TaskMetadata {
         let request = match decode_task_id::<EngineTaskKey>(proposal_task_id)
             .expect("decode proposal task id")
             .0
@@ -810,14 +805,14 @@ mod tests {
         let (network, l1_network) = network_pair
             .split_once('/')
             .unwrap_or((network_pair, "ethereum"));
-        HoodiTaskMetadata {
+        TaskMetadata {
             network_pair: network_pair.to_string(),
             network: network.to_string(),
             l1_network: l1_network.to_string(),
             proof_type: ProofType::Risc0,
             execution_mode: None,
             aggregate_requested: false,
-            proposals: vec![HoodiProposalTask {
+            proposals: vec![ProposalTask {
                 proposal_id: 1,
                 checkpoint: None,
                 l1_inclusion_block_number: 0,
@@ -828,7 +823,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
-            runtime: HoodiRuntimeMetadata::default(),
+            runtime: RuntimeMetadata::default(),
         }
     }
 

@@ -9,35 +9,10 @@ pub struct TaskExecutionPolicy {
     pub retry: RetryPolicy,
 }
 
-impl TaskExecutionPolicy {
-    #[must_use]
-    pub const fn with_retry_limit(&self, max_attempts: u32) -> Self {
-        let retry = match &self.retry {
-            RetryPolicy::None => RetryPolicy::None,
-            RetryPolicy::Fixed { delay, .. } => RetryPolicy::Fixed {
-                max_attempts,
-                delay: *delay,
-            },
-            RetryPolicy::Exponential {
-                base_delay,
-                max_delay,
-                ..
-            } => RetryPolicy::Exponential {
-                max_attempts,
-                base_delay: *base_delay,
-                max_delay: *max_delay,
-            },
-        };
-        Self {
-            lease_duration: self.lease_duration,
-            retry,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub lease_duration: Duration,
+    pub task_timeout: Duration,
     pub retry: RetryPolicy,
 }
 
@@ -55,6 +30,7 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             lease_duration: Duration::from_secs(60),
+            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::None,
         }
     }

@@ -1,5 +1,5 @@
 use raiko2_primitives::{Proof, ShastaCheckpoint};
-use raiko2_prover::sp1::{ExecutionMode as Sp1ExecutionMode, Sp1ConfigOverrides};
+use raiko2_prover::sp1::Sp1ConfigOverrides;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +13,8 @@ pub(super) enum HoodiProofType {
     Sp1,
     Risc0,
     Sgx,
+    #[serde(rename = "sgxgeth", alias = "SGXGETH")]
+    SgxGeth,
     ZkAny,
 }
 
@@ -23,6 +25,7 @@ impl HoodiProofType {
             Self::Sp1 => "sp1",
             Self::Risc0 => "risc0",
             Self::Sgx => "sgx",
+            Self::SgxGeth => "sgxgeth",
             Self::ZkAny => "zk_any",
         }
     }
@@ -86,13 +89,18 @@ pub(super) struct ShastaProposal {
 pub(super) struct PublicProverArgs {
     pub(super) native: Option<Value>,
     pub(super) sgx: Option<Value>,
+    pub(super) sgxgeth: Option<Value>,
     pub(super) sp1: Option<Sp1ConfigOverrides>,
     pub(super) risc0: Option<Value>,
 }
 
 impl PublicProverArgs {
     pub(super) const fn is_empty(&self) -> bool {
-        self.native.is_none() && self.sgx.is_none() && self.sp1.is_none() && self.risc0.is_none()
+        self.native.is_none()
+            && self.sgx.is_none()
+            && self.sgxgeth.is_none()
+            && self.sp1.is_none()
+            && self.risc0.is_none()
     }
 }
 
@@ -104,41 +112,36 @@ pub(crate) struct HoodiSuccess<T> {
 }
 
 #[derive(Serialize)]
-pub(crate) struct RegistrationData {
-    pub(crate) status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) task_id: Option<String>,
-}
-
-#[derive(Serialize)]
 pub(crate) struct LegacyProofEnvelope {
     pub(crate) status: &'static str,
     pub(crate) proof_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_id: Option<u64>,
     pub(crate) data: LegacyProofData,
 }
 
 #[derive(Serialize)]
-pub(crate) struct LegacyProofData {
-    pub(crate) status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) task_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) proof: Option<LegacyProofMaterial>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct LegacyProofMaterial {
-    pub(crate) proof: String,
-    pub(crate) kzg_proof: String,
-    pub(crate) quote: String,
+#[serde(untagged)]
+pub(crate) enum LegacyProofData {
+    Status { status: LegacyTaskStatus },
+    Proof { proof: Proof },
 }
 
 #[derive(Serialize)]
 pub(crate) struct LegacyProofError {
     pub(crate) status: &'static str,
-    pub(crate) proof_type: String,
     pub(crate) error: &'static str,
     pub(crate) message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LegacyTaskStatus {
+    Registered,
+    WorkInProgress,
+    Cancelled,
+    AnyhowError(String),
+    ZkAnyNotDrawn,
 }
 
 #[derive(Serialize)]
@@ -222,6 +225,8 @@ pub(crate) struct HoodiTaskRuntimeView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) offchain: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
@@ -258,13 +263,4 @@ pub(super) struct RootTaskState {
     pub(super) proof: Option<String>,
     pub(super) error: Option<String>,
     pub(super) current_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TaskMetadataParams<'a> {
-    pub(super) network: &'a str,
-    pub(super) l1_network: &'a str,
-    pub(super) proof_type: raiko2_primitives::ProofType,
-    pub(super) execution_mode: Option<Sp1ExecutionMode>,
-    pub(super) aggregate_requested: bool,
 }

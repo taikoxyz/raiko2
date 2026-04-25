@@ -14,6 +14,7 @@ pub struct TaskLease<P, Id> {
     pub attempt: u32,
     pub worker: String,
     pub execution_policy: TaskExecutionPolicy,
+    pub deadline_at_ms: u64,
 }
 
 #[derive(Clone)]

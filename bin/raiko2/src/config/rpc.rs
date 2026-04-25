@@ -3,7 +3,7 @@ use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
-    L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
+    DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use std::str::FromStr;
 use url::Url;
 
 const fn default_rpc_timeout_ms() -> u64 {
-    60_000
+    DEFAULT_RPC_TIMEOUT_MS
 }
 
 const fn default_rpc_concurrency_limit() -> usize {
@@ -353,4 +353,20 @@ fn resolve_pair(
         l1_spec,
         l2_spec,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_config_default_timeout_matches_provider_default() {
+        let config = RpcConfig::default();
+
+        assert_eq!(config.client.timeout_ms, DEFAULT_RPC_TIMEOUT_MS);
+        assert_eq!(
+            config.provider_client_config().timeout_ms,
+            DEFAULT_RPC_TIMEOUT_MS
+        );
+    }
 }

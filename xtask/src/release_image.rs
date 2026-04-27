@@ -32,6 +32,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
+    ensure_clean_source_tree(root)?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
     let buildx_cache_root = util::target_root(root).join("buildx-cache").join("raiko2");
@@ -51,11 +52,13 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     } else {
         build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
+    ensure_clean_source_tree(root)?;
 
     println!(
         "[INFO] Building runtime image `{image_ref}` with buildx local cache at {:?}...",
         buildx_cache_current
     );
+    let source_revision = source_revision(root)?;
     let mut build_cmd = Command::new("docker");
     build_cmd
         .arg("buildx")
@@ -74,6 +77,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
+        .args(build_metadata_flags(&source_revision))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
@@ -110,9 +114,53 @@ fn release_summary_lines(digest_ref: &str) -> Vec<String> {
     vec![format!("[INFO] Image pushed: {digest_ref}")]
 }
 
+fn build_metadata_flags(source_revision: &str) -> Vec<String> {
+    vec!["--build-arg".to_string(), format!("VCS_REF={source_revision}")]
+}
+
 fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
     for line in release_summary_lines(digest_ref) {
         writeln!(writer, "{line}")?;
+    }
+    Ok(())
+}
+
+fn source_revision(root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .with_context(|| format!("failed to read git revision at {root:?}"))?;
+    if !output.status.success() {
+        bail!("git rev-parse HEAD failed at {root:?}");
+    }
+
+    let revision = String::from_utf8(output.stdout)
+        .with_context(|| format!("git rev-parse HEAD produced non-utf8 output at {root:?}"))?;
+    let revision = revision.trim().to_string();
+    ensure_non_empty("source revision", &revision)?;
+    Ok(revision)
+}
+
+fn ensure_clean_source_tree(root: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("status")
+        .arg("--short")
+        .arg("--untracked-files=all")
+        .output()
+        .with_context(|| format!("failed to inspect git worktree at {root:?}"))?;
+    if !output.status.success() {
+        bail!("git status failed at {root:?}");
+    }
+
+    let status = String::from_utf8(output.stdout)
+        .with_context(|| format!("git status produced non-utf8 output at {root:?}"))?;
+    if !status.trim().is_empty() {
+        bail!("raiko2 worktree must be clean before release-image");
     }
     Ok(())
 }
@@ -168,7 +216,12 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{release_summary_lines, write_release_summary};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{build_metadata_flags, release_summary_lines, write_release_summary};
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
@@ -185,5 +238,51 @@ mod tests {
         assert!(!output.contains("kubectl"));
         assert!(!output.contains("rollout"));
         assert!(!output.contains("deployment/"));
+    }
+
+    #[test]
+    fn build_metadata_flags_include_revision_label() {
+        let flags = build_metadata_flags("26eff23");
+
+        assert_eq!(
+            flags,
+            vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
+        );
+    }
+
+    #[test]
+    fn clean_source_tree_rejects_dirty_worktree() {
+        let repo_root = temp_git_repo("dirty");
+        fs::write(repo_root.join("dirty.txt"), "dirty").expect("should write dirty marker");
+
+        let err = super::ensure_clean_source_tree(&repo_root)
+            .expect_err("dirty repo should be rejected");
+        assert!(err.to_string().contains("worktree must be clean"));
+    }
+
+    #[test]
+    fn clean_source_tree_accepts_clean_worktree() {
+        let repo_root = temp_git_repo("clean");
+        super::ensure_clean_source_tree(&repo_root).expect("clean repo should be accepted");
+    }
+
+    fn temp_git_repo(suffix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!(
+            "raiko2-release-image-test-{suffix}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&repo_root).expect("should create temp repo");
+
+        let status = Command::new("git")
+            .arg("init")
+            .arg(&repo_root)
+            .status()
+            .expect("git init should run");
+        assert!(status.success(), "git init should succeed");
+        repo_root
     }
 }

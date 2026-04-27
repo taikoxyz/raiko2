@@ -10,20 +10,16 @@ workspace = true
 
 [dependencies]
 raiko2-protocol.workspace = true
+taiko-client-protocol.workspace = true
 
 # Alloy types
+alethia-reth-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
-alloy-rlp.workspace = true
 alloy-eips.workspace = true
-alloy-consensus.workspace = true
-alloy-provider = { workspace = true, optional = true }
-reth-ethereum-primitives.workspace = true
-k256 = { workspace = true, optional = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
-flate2.workspace = true
 thiserror.workspace = true
 
 # Logging
@@ -31,7 +27,7 @@ tracing.workspace = true
 
 [features]
 default = []
-net = ["dep:alloy-provider", "dep:k256"]
+net = ["taiko-client-protocol/net"]
 
 [dev-dependencies]
 alloy-rpc-types-engine.workspace = true

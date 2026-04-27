@@ -1,18 +1,19 @@
 //! Shared Shasta derivation helpers aligned with taiko-mono-rs.
 
-use super::{BlobCoder, DerivationSource, manifest::DerivationSourceManifest};
+use super::{
+    BlobCoder, DerivationSource,
+    constants::{
+        BLOCK_GAS_LIMIT_MAX_CHANGE, GAS_LIMIT_DENOMINATOR, MAX_BLOCK_GAS_LIMIT,
+        MIN_BLOCK_GAS_LIMIT, max_anchor_offset_for_chain, timestamp_max_offset_for_chain,
+    },
+    manifest::DerivationSourceManifest,
+};
+use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use alloy_eips::eip4844::{BYTES_PER_BLOB, Blob};
 use alloy_primitives::Address;
 use raiko2_protocol::InputDataSource;
 use thiserror::Error;
 
-const ANCHOR_GAS_LIMIT: u64 = 1_000_000;
-const MAX_ANCHOR_OFFSET: u64 = 128;
-const TIMESTAMP_MAX_OFFSET: u64 = 12 * 128;
-const MIN_BLOCK_GAS_LIMIT: u64 = 10_000_000;
-const MAX_BLOCK_GAS_LIMIT: u64 = 45_000_000;
-const BLOCK_GAS_LIMIT_MAX_CHANGE: u64 = 200;
-const GAS_LIMIT_DENOMINATOR: u64 = 1_000_000;
 const MAX_MANIFEST_OFFSET: usize = BYTES_PER_BLOB - 64;
 
 /// Metadata shared across all derivation sources in a proposal.
@@ -24,6 +25,8 @@ pub struct ProposalMetadata {
     pub origin_block_number: u64,
     /// Proposer address that becomes the inherited coinbase.
     pub proposer: Address,
+    /// L2 chain ID used for chain-aware protocol bounds.
+    pub chain_id: u64,
 }
 
 /// Parent block data required to validate and inherit source metadata.
@@ -58,6 +61,8 @@ pub struct ValidationContext {
     pub is_forced_inclusion: bool,
     /// Activation timestamp of the Shasta fork.
     pub fork_timestamp: u64,
+    /// L2 chain ID used for chain-aware validation bounds.
+    pub chain_id: u64,
 }
 
 /// Parameters required to populate inherited metadata for forced/default manifests.
@@ -77,6 +82,8 @@ pub struct InheritedMetadataInput {
     pub parent_block_number: u64,
     /// Gas limit of the parent L2 block, including anchor gas.
     pub parent_gas_limit: u64,
+    /// L2 chain ID used for chain-aware inherited timestamp bounds.
+    pub chain_id: u64,
 }
 
 /// Errors that can occur during manifest validation.
@@ -131,11 +138,13 @@ pub fn validate_source_manifest(
         ctx.parent_timestamp,
         ctx.proposal_timestamp,
         ctx.fork_timestamp,
+        ctx.chain_id,
     ) || !validate_anchor_numbers(
         manifest,
         ctx.origin_block_number,
         ctx.parent_anchor_block_number,
         ctx.is_forced_inclusion,
+        ctx.chain_id,
     ) || !validate_gas_limit(manifest, ctx.parent_block_number, ctx.parent_gas_limit)
     {
         return Err(ValidationError::DefaultManifest);
@@ -173,6 +182,7 @@ pub fn apply_inherited_metadata(
             parent_ts,
             input.proposal_timestamp,
             input.fork_timestamp,
+            input.chain_id,
         );
         block.timestamp = lower_bound;
         block.coinbase = input.proposer;
@@ -182,7 +192,7 @@ pub fn apply_inherited_metadata(
     }
 }
 
-/// Decode and sanitize a source manifest using the same fallback rules as taiko-mono-rs.
+/// Decode and sanitize a source manifest using the same default-manifest rules as taiko-mono-rs.
 ///
 /// # Errors
 ///
@@ -221,6 +231,7 @@ pub fn prepare_source_manifest(
                 anchor_block_number: parent.anchor_block_number,
                 parent_block_number: parent.block_number,
                 parent_gas_limit: parent.gas_limit,
+                chain_id: meta.chain_id,
             },
         );
     }
@@ -234,6 +245,7 @@ pub fn prepare_source_manifest(
         origin_block_number: meta.origin_block_number,
         is_forced_inclusion: source.isForcedInclusion,
         fork_timestamp,
+        chain_id: meta.chain_id,
     };
 
     match validate_source_manifest(&manifest, &validation_ctx) {
@@ -250,6 +262,7 @@ pub fn prepare_source_manifest(
                     anchor_block_number: parent.anchor_block_number,
                     parent_block_number: parent.block_number,
                     parent_gas_limit: parent.gas_limit,
+                    chain_id: meta.chain_id,
                 },
             );
             Ok(default_manifest)
@@ -331,12 +344,13 @@ fn validate_timestamps(
     parent_timestamp: u64,
     proposal_timestamp: u64,
     fork_timestamp: u64,
+    chain_id: u64,
 ) -> bool {
     let mut parent_ts = parent_timestamp;
 
     for block in &manifest.blocks {
         let lower_bound =
-            compute_timestamp_lower_bound(parent_ts, proposal_timestamp, fork_timestamp);
+            compute_timestamp_lower_bound(parent_ts, proposal_timestamp, fork_timestamp, chain_id);
         if lower_bound > proposal_timestamp {
             return false;
         }
@@ -355,10 +369,12 @@ fn compute_timestamp_lower_bound(
     parent_timestamp: u64,
     proposal_timestamp: u64,
     fork_timestamp: u64,
+    chain_id: u64,
 ) -> u64 {
+    let timestamp_max_offset = timestamp_max_offset_for_chain(chain_id);
     let lower_bound = parent_timestamp.saturating_add(1);
-    let lower_bound = if proposal_timestamp > TIMESTAMP_MAX_OFFSET {
-        lower_bound.max(proposal_timestamp - TIMESTAMP_MAX_OFFSET)
+    let lower_bound = if proposal_timestamp > timestamp_max_offset {
+        lower_bound.max(proposal_timestamp - timestamp_max_offset)
     } else {
         lower_bound
     };
@@ -370,9 +386,11 @@ fn validate_anchor_numbers(
     origin_block_number: u64,
     parent_anchor_block_number: u64,
     is_forced_inclusion: bool,
+    chain_id: u64,
 ) -> bool {
     let mut parent_anchor = parent_anchor_block_number;
     let mut highest_anchor = parent_anchor_block_number;
+    let max_anchor_offset = max_anchor_offset_for_chain(chain_id);
 
     for block in &manifest.blocks {
         let anchor = block.anchor_block_number;
@@ -381,8 +399,8 @@ fn validate_anchor_numbers(
             return false;
         }
 
-        if origin_block_number > MAX_ANCHOR_OFFSET
-            && anchor < origin_block_number - MAX_ANCHOR_OFFSET
+        if origin_block_number > max_anchor_offset
+            && anchor < origin_block_number - max_anchor_offset
         {
             return false;
         }
@@ -439,7 +457,7 @@ const fn effective_parent_gas_limit(parent_block_number: u64, parent_gas_limit: 
     if parent_block_number == 0 {
         parent_gas_limit
     } else {
-        parent_gas_limit.saturating_sub(ANCHOR_GAS_LIMIT)
+        parent_gas_limit.saturating_sub(ANCHOR_V3_V4_GAS_LIMIT)
     }
 }
 
@@ -447,9 +465,6 @@ const fn effective_parent_gas_limit(parent_block_number: u64, parent_gas_limit: 
 mod tests {
     use super::*;
     use crate::shasta::manifest::BlockManifest;
-    use alloy_consensus::{TxEip1559, transaction::SignableTransaction};
-    use alloy_eips::eip4844::builder::SidecarBuilder;
-    use alloy_primitives::{Signature, TxKind, U256};
 
     fn block_manifest(anchor_block_number: u64) -> BlockManifest {
         BlockManifest {
@@ -457,21 +472,7 @@ mod tests {
             coinbase: Address::repeat_byte(0x11),
             anchor_block_number,
             gas_limit: 29_000_000,
-            transactions: vec![
-                TxEip1559 {
-                    chain_id: 167_000,
-                    nonce: 1,
-                    gas_limit: 21_000,
-                    max_fee_per_gas: 2,
-                    max_priority_fee_per_gas: 1,
-                    to: TxKind::Call(Address::repeat_byte(0x44)),
-                    value: U256::ZERO,
-                    access_list: Default::default(),
-                    input: Default::default(),
-                }
-                .into_signed(Signature::test_signature())
-                .into(),
-            ],
+            transactions: Vec::new(),
         }
     }
 
@@ -480,6 +481,7 @@ mod tests {
             proposal_timestamp: 1_100,
             origin_block_number: 1_000,
             proposer: Address::repeat_byte(0x22),
+            chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
         }
     }
 
@@ -503,6 +505,7 @@ mod tests {
             origin_block_number: 1_000,
             is_forced_inclusion: false,
             fork_timestamp: 0,
+            chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
         };
 
         let manifest = DerivationSourceManifest { blocks: Vec::new() };
@@ -541,6 +544,7 @@ mod tests {
                 anchor_block_number: 900,
                 parent_block_number: 10,
                 parent_gas_limit: 30_000_000,
+                chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
             },
         );
 
@@ -571,43 +575,37 @@ mod tests {
         )
         .expect("prepared manifest");
 
-        assert_eq!(prepared.blocks[0].transactions.len(), 1);
+        assert!(prepared.blocks[0].transactions.is_empty());
         assert_eq!(prepared.blocks[0].anchor_block_number, 901);
     }
 
     #[test]
-    fn prepare_source_manifest_decodes_blob_backed_payloads() {
+    fn prepare_source_manifest_rejects_malformed_blob_backed_payloads() {
         let mut source = DerivationSource::default();
         source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
-        let manifest = DerivationSourceManifest {
-            blocks: vec![block_manifest(901)],
-        };
-        let blobs = SidecarBuilder::<BlobCoder>::from_slice(
-            &manifest.encode_and_compress().expect("payload"),
-        )
-        .take();
         let data_source = InputDataSource {
-            tx_data_from_blob: blobs.into_iter().map(|blob| blob.to_vec()).collect(),
+            tx_data_from_blob: vec![vec![0xAB; BYTES_PER_BLOB]],
             ..Default::default()
         };
 
-        let prepared = prepare_source_manifest(
+        let err = prepare_source_manifest(
             &source,
             Some(&data_source),
             parent_context(),
             proposal_metadata(),
             0,
         )
-        .expect("prepared manifest");
+        .expect_err("malformed blob payload should be rejected");
 
-        assert_eq!(prepared.blocks[0].transactions.len(), 1);
-        assert_eq!(prepared.blocks[0].anchor_block_number, 901);
+        assert_eq!(err, SourceDerivationError::InvalidBlobEncoding);
     }
 
     #[test]
     fn prepare_source_manifest_defaults_invalid_forced_inclusion_segments() {
-        let mut source = DerivationSource::default();
-        source.isForcedInclusion = true;
+        let source = DerivationSource {
+            isForcedInclusion: true,
+            ..Default::default()
+        };
         let manifest = DerivationSourceManifest {
             blocks: vec![block_manifest(901), block_manifest(902)],
         };

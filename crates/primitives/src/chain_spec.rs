@@ -1,6 +1,6 @@
 use crate::proof_type::ProofType;
 pub use alethia_reth_chainspec::spec::TaikoChainSpec;
-use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET};
+use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET, TAIKO_MASAYA};
 use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
 use reth_revm::primitives::hardfork::SpecId;
@@ -559,6 +559,7 @@ impl ChainSpec {
     ///
     /// - `167000` (Taiko Mainnet)
     /// - `167001` (Taiko Devnet)
+    /// - `167011` (Taiko Masaya)
     /// - `167013` (Taiko Hoodi)
     ///
     /// Returns an error for non-Taiko chains or unknown Taiko chain IDs.
@@ -577,6 +578,7 @@ impl ChainSpec {
         match self.chain_id {
             167_000 => Ok(TAIKO_MAINNET.clone()),
             167_001 => Ok(TAIKO_DEVNET.clone()),
+            167_011 => Ok(TAIKO_MASAYA.clone()),
             167_013 => Ok(TAIKO_HOODI.clone()),
             other => bail!(
                 "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
@@ -595,6 +597,7 @@ mod tests {
     use super::*;
     use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
+        TAIKO_MASAYA_GENESIS_HASH,
     };
     use alloy_primitives::address;
 
@@ -698,6 +701,46 @@ mod tests {
         let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
+        Ok(())
+    }
+
+    #[test]
+    fn converts_taiko_masaya_to_alethia_taiko_chain_spec() -> Result<()> {
+        let spec = ChainSpec::new_single(
+            "taiko_masaya".to_string(),
+            167_011,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        let taiko = spec.to_taiko_chain_spec()?;
+
+        assert_eq!(taiko.inner.genesis_hash(), TAIKO_MASAYA_GENESIS_HASH);
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_masaya_default_spec_uses_verified_shasta_inbox() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_masaya")
+            .ok_or_else(|| anyhow!("missing taiko_masaya spec"))?;
+
+        assert_eq!(spec.chain_id, 167_011);
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(0, 0)?,
+            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9")
+        );
+        assert_eq!(
+            spec.l2_contract,
+            Some(address!("1670110000000000000000000000000000010001"))
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, 0, ProofType::Sgx)?,
+            address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
+        );
         Ok(())
     }
 

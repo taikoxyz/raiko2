@@ -7,7 +7,9 @@ use alloy_primitives::{Signature, TxKind, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
 use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs};
-use raiko2_primitives_shasta::{build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput};
+use raiko2_primitives_shasta::{
+    build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
+};
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol_shasta::libhash::hash_proposal;
 use raiko2_protocol_shasta::shasta::{
@@ -306,8 +308,9 @@ fn rejects_proof_carry_data_proposal_id_mismatch() {
 #[test]
 fn rejects_taiko_proposal_id_mismatch_with_event_proposal_id() {
     let mut guest_input = guest_input_with_single_block();
-    guest_input.taiko.proposal_event.proposal.id =
-        (guest_input.taiko.proposal_id + 1).try_into().expect("fits in uint48");
+    guest_input.taiko.proposal_event.proposal.id = (guest_input.taiko.proposal_id + 1)
+        .try_into()
+        .expect("fits in uint48");
     guest_input.proof_carry_data.transition_input.proposal_hash =
         hash_proposal(&guest_input.taiko.proposal_event.proposal);
 

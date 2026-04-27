@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import sys
@@ -20,6 +21,7 @@ from stress_shasta_proposal import (
     DEFAULT_SHASTA_IINBOX_ABI,
     ProposalGroup,
     build_discovered_proposal_record,
+    parse_proposal_ids,
     resolve_monitor_config,
     write_discovered_proposals,
 )
@@ -30,8 +32,11 @@ class _FakeProposedEvent:
         self._logs = logs
         self.calls = []
 
-    def get_logs(self, *, from_block, to_block):
-        self.calls.append((from_block, to_block))
+    def get_logs(self, *, from_block, to_block, argument_filters=None):
+        if argument_filters is None:
+            self.calls.append((from_block, to_block))
+        else:
+            self.calls.append((from_block, to_block, argument_filters))
         return list(self._logs)
 
 
@@ -93,6 +98,73 @@ class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(results[17341], 34819)
         self.assertEqual(results[17342], 34820)
+
+    async def test_find_l1_inclusion_block_by_indexed_proposal_id_uses_id_filter(self):
+        log = SimpleNamespace(blockNumber=2701561)
+        monitor = self.make_monitor(logs=[log], latest_l1=2701561)
+
+        l1_block = monitor.find_l1_inclusion_block_by_indexed_proposal_id(22758)
+
+        self.assertEqual(l1_block, 2701561)
+        self.assertEqual(
+            monitor.evt_contract.events.Proposed.calls,
+            [(0, "latest", {"id": 22758})],
+        )
+        self.assertEqual(monitor.proposal_block_cache[22758], 2701561)
+
+
+class TestStressProposalIdParsing(unittest.TestCase):
+    def test_parse_proposal_ids_accepts_comma_separated_values(self):
+        self.assertEqual(parse_proposal_ids("22733, 22734"), [22733, 22734])
+
+    def test_parse_proposal_ids_rejects_empty_values(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            parse_proposal_ids(",")
+
+
+class TestBatchMonitorInitialization(unittest.TestCase):
+    def test_log_file_none_keeps_file_logging_disabled(self):
+        original_init_contract_event = BatchMonitor._BatchMonitor__init_contract_event
+        BatchMonitor._BatchMonitor__init_contract_event = lambda self, *_args: None
+        try:
+            monitor = BatchMonitor(
+                l1_rpc="http://l1.invalid",
+                l2_rpc="http://l2.invalid",
+                abi_file=str(DEFAULT_SHASTA_IINBOX_ABI),
+                evt_address="0x0000000000000000000000000000000000000000",
+                raiko_rpc="http://raiko.invalid",
+                log_file=None,
+            )
+            monitor.append_log("no-op")
+        finally:
+            BatchMonitor._BatchMonitor__init_contract_event = original_init_contract_event
+
+        self.assertIsNone(monitor.log_file)
+
+
+class TestBatchMonitorProposalIdSearch(unittest.IsolatedAsyncioTestCase):
+    async def test_find_l2_block_for_proposal_id_skips_pre_shasta_blocks(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.logger = logging.getLogger("test_stress_shasta_proposal")
+        monitor.get_latest_l2_block_number = lambda: 8
+        proposal_ids_by_block = {
+            0: None,
+            1: None,
+            2: None,
+            3: 5,
+            4: 5,
+            5: 6,
+            6: 6,
+            7: 7,
+            8: 7,
+        }
+
+        async def get_l2_block_proposal_id(block_number):
+            return proposal_ids_by_block[block_number]
+
+        monitor.get_l2_block_proposal_id = get_l2_block_proposal_id
+
+        self.assertEqual(await monitor.find_l2_block_for_proposal_id(6), 5)
 
 
 class TestStressChainSpecResolution(unittest.TestCase):

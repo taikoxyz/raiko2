@@ -5,16 +5,11 @@
 #[cfg(feature = "net")]
 pub mod anchor;
 pub mod blob_coder;
-#[cfg(feature = "net")]
 pub mod constants;
 pub mod derivation;
-#[cfg(feature = "net")]
 pub mod error;
 pub mod manifest;
-#[cfg(feature = "net")]
 pub mod payload_helpers;
-#[cfg(feature = "net")]
-mod signer;
 
 #[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
@@ -24,9 +19,7 @@ pub use derivation::{
     ValidationError, apply_inherited_metadata, manifest_is_default, prepare_source_manifest,
     validate_source_manifest,
 };
-#[cfg(feature = "net")]
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
-#[cfg(feature = "net")]
 pub use payload_helpers::{
     PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data, encode_transactions,
     encode_tx_list, payload_id_to_bytes,

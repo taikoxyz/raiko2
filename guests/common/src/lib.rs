@@ -10,8 +10,8 @@ use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
     BlockHeader as _, Header,
 };
-use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use alloy_sol_types::{sol, SolCall, SolValue};
+use alloy_primitives::{Address, B256};
+use alloy_sol_types::{sol, SolCall};
 use anyhow::{ensure, Context, Result};
 use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs, WitnessHeader};
 use raiko2_primitives_shasta::{
@@ -19,12 +19,14 @@ use raiko2_primitives_shasta::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
-    roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
-    verify_proposal_mode_blob_usage, GuestInput, ShastaZkAggregationGuestInput,
+    roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
+    validate_anchor_progression, verify_proposal_mode_blob_usage, GuestInput,
+    ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
-    manifest::BlockManifest, prepare_source_manifest, ParentBlockContext, ProposalMetadata,
+    calculate_shasta_difficulty, encode_extra_data, manifest::BlockManifest,
+    prepare_source_manifest, ParentBlockContext, ProposalMetadata,
 };
 use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
 use std::sync::Arc;
@@ -38,11 +40,6 @@ sol! {
     }
 
     function anchorV4(AnchorV4Checkpoint _checkpoint) external;
-
-    struct ShastaDifficultyInput {
-        bytes32 parentDifficulty;
-        uint256 blockNumber;
-    }
 }
 
 pub struct TaikoRuntime {
@@ -165,17 +162,28 @@ fn validate_l1_anchor_linkage(
         .iter()
         .map(|checkpoint| checkpoint.block_number)
         .collect::<Vec<_>>();
-    validate_anchor_progression(
-        &anchor_block_numbers,
-        guest_input
-            .taiko
-            .prover_data
-            .last_anchor_block_number
-            .unwrap_or_default(),
-        origin_block_number,
-        guest_input.taiko.chain_spec.chain_id,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let last_anchor_block_number = guest_input
+        .taiko
+        .prover_data
+        .last_anchor_block_number
+        .unwrap_or_default();
+    let bypass_stalled_anchor_linkage = guest_input.taiko.l1_ancestor_headers.is_empty()
+        && should_bypass_stalled_anchor_linkage(
+            &anchor_block_numbers,
+            last_anchor_block_number,
+            origin_block_number,
+            guest_input.taiko.chain_spec.chain_id,
+        );
+
+    if !bypass_stalled_anchor_linkage {
+        validate_anchor_progression(
+            &anchor_block_numbers,
+            last_anchor_block_number,
+            origin_block_number,
+            guest_input.taiko.chain_spec.chain_id,
+        )
+        .map_err(anyhow::Error::msg)?;
+    }
 
     ensure!(
         guest_input.taiko.l1_header.number == origin_block_number,
@@ -187,10 +195,13 @@ fn validate_l1_anchor_linkage(
         guest_input.taiko.l1_header.hash_slow() == origin_block_hash,
         "taiko.l1_header hash mismatch"
     );
-    ensure!(
-        !guest_input.taiko.l1_ancestor_headers.is_empty(),
-        "taiko.l1_ancestor_headers must not be empty"
-    );
+    if guest_input.taiko.l1_ancestor_headers.is_empty() {
+        ensure!(
+            bypass_stalled_anchor_linkage,
+            "taiko.l1_ancestor_headers must not be empty unless anchor linkage is stalled"
+        );
+        return Ok(());
+    }
 
     let mut checkpoint_index = 0usize;
     let mut previous_header_number = None;
@@ -260,22 +271,6 @@ fn validate_l1_anchor_linkage(
     Ok(())
 }
 
-fn encode_shasta_extra_data(basefee_sharing_pctg: u8, proposal_id: u64) -> Bytes {
-    let mut data = [0u8; 7];
-    data[0] = basefee_sharing_pctg;
-    let proposal_bytes = proposal_id.to_be_bytes();
-    data[1..7].copy_from_slice(&proposal_bytes[2..8]);
-    Bytes::from(data.to_vec())
-}
-
-fn calculate_shasta_difficulty(parent_difficulty: B256, block_number: u64) -> B256 {
-    let params = ShastaDifficultyInput {
-        parentDifficulty: parent_difficulty,
-        blockNumber: U256::from(block_number),
-    };
-    B256::from(keccak256(params.abi_encode()))
-}
-
 fn initial_proposal_ancestor_headers(guest_input: &GuestInput) -> Result<Vec<WitnessHeader>> {
     let headers = guest_input.initial_proposal_ancestor_headers();
     ensure!(!headers.is_empty(), "missing proposal ancestor headers");
@@ -341,6 +336,7 @@ fn derive_expected_shasta_blocks(
         proposal_timestamp: proposal.timestamp.to::<u64>(),
         origin_block_number: proposal.originBlockNumber.to::<u64>(),
         proposer: proposal.proposer,
+        chain_id: guest_input.taiko.chain_spec.chain_id,
     };
 
     let mut blocks = Vec::new();
@@ -451,7 +447,7 @@ fn validate_shasta_manifest_block_metadata(
     parent_header: &Header,
 ) -> Result<()> {
     let block = &stateless_input.block;
-    let expected_extra_data = encode_shasta_extra_data(
+    let expected_extra_data = encode_extra_data(
         guest_input.taiko.proposal_event.proposal.basefeeSharingPctg,
         guest_input.taiko.proposal_id,
     );
@@ -560,6 +556,19 @@ fn validate_generated_block_matches_canonical(
     }
 
     Ok(())
+}
+
+fn manifest_transactions_for_reconstruction(
+    expected_block: &BlockManifest,
+) -> Result<Vec<reth_ethereum_primitives::TransactionSigned>> {
+    expected_block
+        .transactions
+        .iter()
+        .map(|transaction| {
+            alloy_rlp::decode_exact(&alloy_rlp::encode(transaction))
+                .context("failed to decode Shasta manifest transaction")
+        })
+        .collect()
 }
 
 fn shasta_block_env_attributes(
@@ -848,12 +857,7 @@ pub fn prove_shasta_proposal_for_proof_type(
                 .map_err(|_| anyhow::anyhow!("failed to recover canonical anchor transaction"))?;
             let outcome = reconstruct_block_from_transactions_with_witness_resources(
                 anchor_tx,
-                expected_block
-                    .transactions
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect(),
+                manifest_transactions_for_reconstruction(expected_block)?,
                 shasta_block_env_attributes(stateless_input)?,
                 &stateless_input.witness,
                 ancestor_headers,
@@ -1208,9 +1212,57 @@ mod tests {
     }
 
     #[test]
-    fn rejects_anchor_sequences_that_do_not_grow_past_last_anchor() {
+    fn accepts_anchor_sequences_that_do_not_grow_past_last_anchor_with_l1_headers() {
         let mut guest_input = guest_input_with_single_block();
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+
+        let subproof_input_hash = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect("repeated last anchor should validate with headers");
+
+        assert_eq!(
+            subproof_input_hash,
+            hash_shasta_subproof_input(&guest_input.proof_carry_data)
+        );
+    }
+
+    #[test]
+    fn bypasses_stalled_anchor_linkage_with_empty_l1_ancestor_headers() {
+        let mut guest_input = guest_input_with_single_block();
+        let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+
+        let subproof_input_hash = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect("stalled anchor should bypass linkage");
+
+        assert_eq!(
+            subproof_input_hash,
+            hash_shasta_subproof_input(&guest_input.proof_carry_data)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_l1_ancestor_headers_without_stalled_anchor() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.l1_ancestor_headers.clear();
 
         let err = prove_shasta_proposal_with_validator(
             &guest_input,
@@ -1218,9 +1270,12 @@ mod tests {
                 Ok(stateless_input.block.header.hash_slow())
             },
         )
-        .expect_err("stalled anchor should fail");
+        .expect_err("empty headers without stalled anchor should fail");
 
-        assert!(error_chain_contains(&err, "did not grow"));
+        assert!(error_chain_contains(
+            &err,
+            "unless anchor linkage is stalled"
+        ));
     }
 
     #[test]

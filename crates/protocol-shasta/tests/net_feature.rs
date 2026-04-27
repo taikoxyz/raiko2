@@ -3,7 +3,6 @@
 #![cfg(feature = "net")]
 #![allow(missing_docs)]
 
-use alloy_eips::eip4844::builder::{SidecarBuilder, SidecarCoder};
 use alloy_primitives::{Bytes, U256, b256};
 use alloy_rpc_types_engine::PayloadId;
 use raiko2_protocol_shasta::shasta::constants::{
@@ -12,8 +11,10 @@ use raiko2_protocol_shasta::shasta::constants::{
     shasta_fork_timestamp_for_chain, timestamp_max_offset_for_chain,
 };
 use raiko2_protocol_shasta::shasta::{
-    AnchorV4Input, BlobCoder, PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty,
-    encode_extra_data, encode_tx_list, payload_id_to_bytes,
+    AnchorV4Input, PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data,
+    encode_tx_list,
+    manifest::{BlockManifest, DerivationSourceManifest},
+    payload_id_to_bytes,
 };
 
 #[test]
@@ -38,21 +39,19 @@ fn shasta_difficulty_is_stable() {
 }
 
 #[test]
-fn blob_coder_round_trips_single_and_multi_blob_payloads() {
-    let single_payload = (0..256u16)
-        .flat_map(|value| value.to_be_bytes())
-        .collect::<Vec<u8>>();
-    let single_blobs = SidecarBuilder::<BlobCoder>::from_slice(&single_payload).take();
-    let mut coder = BlobCoder;
-    let single_decoded = coder.decode_all(&single_blobs).expect("single decode");
-    assert_eq!(single_decoded.concat(), single_payload);
+fn manifest_codec_uses_taiko_client_default_manifest() {
+    let manifest = DerivationSourceManifest {
+        blocks: vec![BlockManifest::default()],
+    };
+    let payload = manifest.encode_and_compress().expect("encode manifest");
+    let decoded =
+        DerivationSourceManifest::decompress_and_decode(&payload, 0).expect("decode manifest");
+    assert_eq!(decoded.blocks.len(), 1);
 
-    let multi_payload = vec![0xAB; 131_000];
-    let multi_blobs = SidecarBuilder::<BlobCoder>::from_slice(&multi_payload).take();
-    assert!(multi_blobs.len() > 1, "payload should span multiple blobs");
-    let mut coder = BlobCoder;
-    let multi_decoded = coder.decode_all(&multi_blobs).expect("multi decode");
-    assert_eq!(multi_decoded.concat(), multi_payload);
+    let decoded = DerivationSourceManifest::decompress_and_decode(&[0u8; 64], 0)
+        .expect("invalid payload returns default manifest");
+    assert_eq!(decoded.blocks.len(), 1);
+    assert!(decoded.blocks[0].transactions.is_empty());
 }
 
 #[test]
@@ -75,7 +74,10 @@ fn shasta_chain_constants_are_chain_aware() {
         shasta_fork_timestamp_for_chain(TAIKO_HOODI_CHAIN_ID).expect("hoodi timestamp"),
         1_770_296_400
     );
-    assert!(shasta_fork_timestamp_for_chain(TAIKO_MAINNET_CHAIN_ID).is_err());
+    assert_eq!(
+        shasta_fork_timestamp_for_chain(TAIKO_MAINNET_CHAIN_ID).expect("mainnet timestamp"),
+        1_775_135_700
+    );
     assert!(shasta_fork_timestamp_for_chain(1).is_err());
     assert!(shasta_fork_condition_for_chain(1).is_none());
 }

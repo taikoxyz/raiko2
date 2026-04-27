@@ -109,7 +109,7 @@ mod test {
                         "0189ea2792db70c7d2165c397be7bc37b7d45b1ed082bec866e9cb62e90cb4a0"
                     )],
                     offset: Uint::from(0u32),
-                    timestamp: Uint::from(1758948572u64),
+                    timestamp: Uint::from(1_758_948_572_u64),
                 },
             }],
         };
@@ -126,7 +126,7 @@ mod test {
     fn test_hash_public_input() {
         let aggregated_proving_hash =
             b256!("b836ee1f972e8bcd4766bede4a9fa5267d8b6ec7cd6088562aca0b07b15f57bc");
-        let chain_id = 167001u64;
+        let chain_id = 167_001_u64;
         let verifier_address = address!("00f9f60C79e38c08b785eE4F1a849900693C6630");
         let public_input_hash = hash_public_input(
             aggregated_proving_hash,

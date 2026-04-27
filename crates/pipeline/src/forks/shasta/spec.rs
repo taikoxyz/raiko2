@@ -13,9 +13,12 @@ use raiko2_primitives::{
     SupportedChainSpecs,
 };
 use raiko2_primitives_shasta::{
-    GuestInput, roll_proposal_ancestor_headers_in_place, validate_anchor_progression,
+    GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
+    validate_anchor_progression,
 };
-use raiko2_protocol_shasta::shasta::{ShastaEventData, decode_proposal_id_from_extra_data};
+use raiko2_protocol_shasta::shasta::{
+    ShastaEventData, constants::DERIVATION_SOURCE_MAX_BLOCKS, decode_proposal_id_from_extra_data,
+};
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
@@ -502,6 +505,39 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         .prover_data
         .last_anchor_block_number
         .unwrap_or_default();
+    if should_bypass_stalled_anchor_linkage(
+        &anchor_block_numbers,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_id,
+    ) {
+        let l1_headers =
+            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
+                provider.batch_l1_headers(&[origin_block_number]).await
+            })
+            .await?;
+        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
+            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
+        })?;
+        if origin_header.number != origin_block_number {
+            return Err(RaikoError::Preflight(format!(
+                "proposal origin block number mismatch: expected {origin_block_number}, got {}",
+                origin_header.number
+            )));
+        }
+        if origin_header.hash_slow() != proposal.originBlockHash {
+            return Err(RaikoError::Preflight(format!(
+                "proposal origin block hash mismatch: expected {:?}, got {:?}",
+                proposal.originBlockHash,
+                origin_header.hash_slow()
+            )));
+        }
+
+        manifest.l1_header = origin_header;
+        manifest.l1_ancestor_headers.clear();
+        return Ok(());
+    }
+
     validate_anchor_progression(
         &anchor_block_numbers,
         last_anchor_block_number,
@@ -626,6 +662,22 @@ fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
             return Err(RaikoError::InvalidRequestConfig(
                 "request l2_block_range.start must be <= end".into(),
             ));
+        }
+        let block_count = range
+            .end
+            .checked_sub(range.start)
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "request l2_block_range contains too many blocks".into(),
+                )
+            })?;
+        let max_blocks = u64::try_from(DERIVATION_SOURCE_MAX_BLOCKS)
+            .expect("derivation source max blocks fits u64");
+        if block_count > max_blocks {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "request l2_block_range contains {block_count} blocks, max {max_blocks}"
+            )));
         }
         return Ok(((range.start..=range.end).collect(), ctx.request.proposal_id));
     }
@@ -1092,6 +1144,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extract_block_range_accepts_protocol_max_blocks() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
+        });
+
+        let (blocks, proposal_id) = super::extract_block_range(&ctx).expect("valid range");
+
+        assert_eq!(proposal_id, 42);
+        assert_eq!(blocks.len(), super::DERIVATION_SOURCE_MAX_BLOCKS);
+    }
+
+    #[test]
+    fn extract_block_range_rejects_more_than_protocol_max_blocks() {
+        let mut ctx = sample_context(42, 11, 9);
+        let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: max_blocks + 1,
+        });
+
+        let err = super::extract_block_range(&ctx).expect_err("oversized range");
+
+        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    }
+
     #[tokio::test]
     async fn preflight_rejects_kzg_versioned_hash_hint_for_sp1() {
         let provider = sample_provider();
@@ -1113,7 +1193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_rejects_stalled_anchor_sequences() {
+    async fn preflight_accepts_repeated_last_anchor_with_l1_headers() {
         let provider = sample_provider();
         let ctx = sample_context(42, 11, 10);
         let spec = ShastaSpec::new(
@@ -1123,8 +1203,33 @@ mod tests {
             provider.clone(),
         );
 
-        let err = spec.preflight(&ctx, &provider).await.expect_err("reject");
-        assert!(err.to_string().contains("did not grow"));
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.taiko.l1_ancestor_headers.len(), 1);
+        assert_eq!(input.taiko.l1_header.number, 10);
+    }
+
+    #[tokio::test]
+    async fn preflight_bypasses_stalled_anchor_linkage() {
+        let mut provider = sample_provider();
+        let origin_header = sample_l1_header(200, B256::from([0x77; 32]));
+        provider.block = sample_block(42, 10, B256::from([0x88; 32]), B256::from([0x99; 32]));
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        provider.l1_headers = vec![origin_header.clone()];
+        let ctx = sample_context(42, 201, 10);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert!(input.taiko.l1_ancestor_headers.is_empty());
+        assert_eq!(input.taiko.l1_header.number, origin_header.number);
     }
 
     #[tokio::test]

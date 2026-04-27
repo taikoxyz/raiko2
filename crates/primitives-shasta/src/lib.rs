@@ -11,7 +11,9 @@ mod input;
 pub mod instance;
 mod proof;
 
-pub use anchor::{anchor_max_offset_for_chain, validate_anchor_progression};
+pub use anchor::{
+    anchor_max_offset_for_chain, should_bypass_stalled_anchor_linkage, validate_anchor_progression,
+};
 pub use blob::verify_proposal_mode_blob_usage;
 pub use fixture::{
     DEFAULT_GUEST_INPUT_ROOT, guest_input_proposal_path, guest_input_proposals_dir,

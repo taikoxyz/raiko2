@@ -166,11 +166,12 @@ mod tests {
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
-        let output = release_summary_lines(
-            "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .join("\n");
+        let digest_ref =
+            "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let lines = release_summary_lines(digest_ref);
+        let output = lines.join("\n");
 
+        assert_eq!(lines, vec![format!("[INFO] Image pushed: {digest_ref}")]);
         assert!(output.contains("Image pushed:"));
         assert!(!output.contains("kubectl"));
         assert!(!output.contains("rollout"));

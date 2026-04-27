@@ -51,7 +51,24 @@ jobs:
               - 'justfile'
               - '.github/workflows/ci.yml'
 
-  rust:
+  rust-fmt:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+          components: rustfmt
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+  rust-clippy:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -65,7 +82,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
-          components: rustfmt, clippy
+          components: clippy
 
       - uses: rui314/setup-mold@v1
 
@@ -73,18 +90,53 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
-
-      - uses: taiki-e/install-action@nextest
-
-      - name: fmt
-        run: cargo fmt --all -- --check
+          shared-key: ci-rust
 
       - name: clippy
         run: cargo clippy --workspace -- -D warnings
 
+  rust-nextest:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+
+      - uses: taiki-e/install-action@nextest
+
       - name: nextest
         run: cargo nextest run --workspace
+
+  rust:
+    needs:
+      - changes
+      - rust-fmt
+      - rust-clippy
+      - rust-nextest
+    if: always() && (needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify rust lanes
+        run: |
+          test "${{ needs.rust-fmt.result }}" = "success"
+          test "${{ needs.rust-clippy.result }}" = "success"
+          test "${{ needs.rust-nextest.result }}" = "success"
 
   # Guest backend versions are pinned by repo-owned toolchain definitions:
   # - RISC0: docker/risc0-toolchain/Dockerfile

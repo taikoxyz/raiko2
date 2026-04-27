@@ -160,7 +160,10 @@ fn ensure_clean_source_tree(root: &Path) -> Result<()> {
     let status = String::from_utf8(output.stdout)
         .with_context(|| format!("git status produced non-utf8 output at {root:?}"))?;
     if !status.trim().is_empty() {
-        bail!("raiko2 worktree must be clean before release-image");
+        bail!(
+            "raiko2 worktree at {root:?} must be clean before release-image:\n{}",
+            status.trim_end()
+        );
     }
     Ok(())
 }

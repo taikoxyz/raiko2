@@ -19,7 +19,7 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [precompile-status.md](precompile-status.md) when you need the current Shasta precompile
   activation and guest hook coverage.
 - Read [development.md](development.md) for local workflows, fixture testing, guest builds, and benchmarking.
-- Read [operations.md](operations.md) for runtime configuration, Docker, image publishing, and Boundless operation.
+- Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
 
 ## Historical Notes
 

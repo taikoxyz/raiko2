@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::process::Command;
 
@@ -85,9 +86,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::run(push_cmd)?;
 
     let digest_ref = resolve_repo_digest(&image_ref, &args.repository)?;
-    for line in release_summary_lines(&digest_ref) {
-        println!("{line}");
-    }
+    write_release_summary(io::stdout(), &digest_ref)?;
 
     Ok(())
 }
@@ -109,6 +108,13 @@ fn ensure_non_empty(name: &str, value: &str) -> Result<()> {
 
 fn release_summary_lines(digest_ref: &str) -> Vec<String> {
     vec![format!("[INFO] Image pushed: {digest_ref}")]
+}
+
+fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
+    for line in release_summary_lines(digest_ref) {
+        writeln!(writer, "{line}")?;
+    }
+    Ok(())
 }
 
 fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
@@ -162,17 +168,20 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::release_summary_lines;
+    use super::{release_summary_lines, write_release_summary};
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
         let digest_ref =
             "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let lines = release_summary_lines(digest_ref);
-        let output = lines.join("\n");
+        let mut output = Vec::new();
+
+        write_release_summary(&mut output, digest_ref).expect("summary output should render");
+        let output = String::from_utf8(output).expect("summary output should be valid utf-8");
 
         assert_eq!(lines, vec![format!("[INFO] Image pushed: {digest_ref}")]);
-        assert!(output.contains("Image pushed:"));
+        assert_eq!(output, format!("[INFO] Image pushed: {digest_ref}\n"));
         assert!(!output.contains("kubectl"));
         assert!(!output.contains("rollout"));
         assert!(!output.contains("deployment/"));

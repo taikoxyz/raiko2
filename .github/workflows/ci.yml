@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      zk: ${{ steps.filter.outputs.zk }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -32,9 +33,20 @@ jobs:
               - 'rust-toolchain.toml'
               - 'crates/**'
               - 'bin/**'
+              - 'guests/**'
               - 'xtask/**'
               - 'config/**'
               - 'test.json'
+              - 'justfile'
+              - '.github/workflows/ci.yml'
+            zk:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'crates/**'
+              - 'guests/**'
+              - 'xtask/**'
+              - 'docker/**'
               - 'justfile'
               - '.github/workflows/ci.yml'
 
@@ -73,3 +85,60 @@ jobs:
       - name: nextest
         run: cargo nextest run --workspace
 
+  # Guest backend versions are pinned by repo-owned toolchain definitions:
+  # - RISC0: docker/risc0-toolchain/Dockerfile
+  # - SP1: guests/sp1/Cargo.lock + docker/sp1-toolchain/Dockerfile
+  build-guest-risc0:
+    needs: changes
+    if: needs.changes.outputs.zk == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-zk-build
+
+      - uses: taiki-e/install-action@just
+
+      - name: build guest risc0
+        run: just build-guest risc0
+
+      - name: verify guest elf outputs are up to date
+        run: git diff --exit-code -- crates/guests/elf
+
+  build-guest-sp1:
+    needs: changes
+    if: needs.changes.outputs.zk == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-zk-build
+
+      - uses: taiki-e/install-action@just
+
+      - name: build guest sp1
+        run: just build-guest sp1
+
+      - name: verify guest elf outputs are up to date
+        run: git diff --exit-code -- crates/guests/elf
+
+  # TODO: add a native smoke lane here once the repo has a deterministic CI-safe
+  # fixture/regression entrypoint for native proving.

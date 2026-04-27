@@ -21,6 +21,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       zk: ${{ steps.filter.outputs.zk }}
+      workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -39,7 +40,6 @@ jobs:
               - 'config/**'
               - 'test.json'
               - 'justfile'
-              - '.github/workflows/ci.yml'
             zk:
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -49,7 +49,21 @@ jobs:
               - 'xtask/**'
               - 'docker/**'
               - 'justfile'
+            workflow:
               - '.github/workflows/ci.yml'
+
+  workflow:
+    needs: changes
+    if: needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: note workflow-only validation path
+        run: |
+          echo "ci.yml changed."
+          echo "Heavy Rust and zk lanes are gated by source changes."
+          echo "Use workflow_dispatch when you want to exercise the full workflow after CI-only edits."
 
   rust-fmt:
     needs: changes

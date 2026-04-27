@@ -8,9 +8,6 @@ use clap::Args;
 use crate::{Backend, build_guest, util};
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
-const DEFAULT_NAMESPACE: &str = "tolba-raiko2-host";
-const DEFAULT_DEPLOYMENT: &str = "raiko2";
-const DEFAULT_CONTAINER: &str = "raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 
 #[derive(Args, Debug)]
@@ -24,15 +21,6 @@ pub(crate) struct ReleaseImageArgs {
     #[arg(long, default_value = DEFAULT_IMAGE_REPOSITORY)]
     pub(crate) repository: String,
 
-    #[arg(long, default_value = DEFAULT_NAMESPACE)]
-    pub(crate) namespace: String,
-
-    #[arg(long, default_value = DEFAULT_DEPLOYMENT)]
-    pub(crate) deployment: String,
-
-    #[arg(long, default_value = DEFAULT_CONTAINER)]
-    pub(crate) container: String,
-
     #[arg(long, default_value_t = false)]
     pub(crate) force_rebuild_guests: bool,
 }
@@ -43,9 +31,6 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
-    ensure_non_empty("namespace", &args.namespace)?;
-    ensure_non_empty("deployment", &args.deployment)?;
-    ensure_non_empty("container", &args.container)?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
     let buildx_cache_root = util::target_root(root).join("buildx-cache").join("raiko2");
@@ -100,16 +85,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::run(push_cmd)?;
 
     let digest_ref = resolve_repo_digest(&image_ref, &args.repository)?;
-    println!("[INFO] Image pushed: {digest_ref}");
-    println!("[INFO] Rollout commands:");
-    println!(
-        "kubectl set image deployment/{} -n {} {}={}",
-        args.deployment, args.namespace, args.container, digest_ref
-    );
-    println!(
-        "kubectl rollout status deployment/{} -n {}",
-        args.deployment, args.namespace
-    );
+    for line in release_summary_lines(&digest_ref) {
+        println!("{line}");
+    }
 
     Ok(())
 }
@@ -127,6 +105,10 @@ fn ensure_non_empty(name: &str, value: &str) -> Result<()> {
         bail!("{name} must not be empty");
     }
     Ok(())
+}
+
+fn release_summary_lines(digest_ref: &str) -> Vec<String> {
+    vec![format!("[INFO] Image pushed: {digest_ref}")]
 }
 
 fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
@@ -176,4 +158,22 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
         fs::remove_dir_all(&backup).with_context(|| format!("failed to remove {backup:?}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_summary_lines;
+
+    #[test]
+    fn release_summary_lines_do_not_reference_rollout() {
+        let output = release_summary_lines(
+            "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .join("\n");
+
+        assert!(output.contains("Image pushed:"));
+        assert!(!output.contains("kubectl"));
+        assert!(!output.contains("rollout"));
+        assert!(!output.contains("deployment/"));
+    }
 }

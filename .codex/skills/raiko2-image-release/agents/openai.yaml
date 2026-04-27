@@ -1,0 +1,4 @@
+interface:
+  display_name: "Raiko2 Image Release"
+  short_description: "Build and publish images only"
+  default_prompt: "Use $raiko2-image-release to publish a raiko2 runtime image from this repo."

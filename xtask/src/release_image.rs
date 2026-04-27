@@ -32,7 +32,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
-    ensure_clean_source_tree(root)?;
+    ensure_clean_source_tree(root, "before release-image starts")?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
     let buildx_cache_root = util::target_root(root).join("buildx-cache").join("raiko2");
@@ -52,7 +52,10 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     } else {
         build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
-    ensure_clean_source_tree(root)?;
+    ensure_clean_source_tree(
+        root,
+        "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
+    )?;
 
     println!(
         "[INFO] Building runtime image `{image_ref}` with buildx local cache at {:?}...",
@@ -149,7 +152,7 @@ fn source_revision(root: &Path) -> Result<String> {
     Ok(revision)
 }
 
-fn ensure_clean_source_tree(root: &Path) -> Result<()> {
+fn ensure_clean_source_tree(root: &Path, requirement: &str) -> Result<()> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -166,8 +169,8 @@ fn ensure_clean_source_tree(root: &Path) -> Result<()> {
         .with_context(|| format!("git status produced non-utf8 output at {root:?}"))?;
     if !status.trim().is_empty() {
         bail!(
-            "raiko2 worktree at {root:?} must be clean before release-image:\n{}",
-            status.trim_end()
+            "raiko2 worktree at {root:?} must be clean {requirement}:\n{}",
+            status.trim_end(),
         );
     }
     Ok(())
@@ -263,15 +266,31 @@ mod tests {
         let repo_root = temp_git_repo("dirty");
         fs::write(repo_root.join("dirty.txt"), "dirty").expect("should write dirty marker");
 
-        let err = super::ensure_clean_source_tree(&repo_root)
+        let err = super::ensure_clean_source_tree(&repo_root, "before release-image starts")
             .expect_err("dirty repo should be rejected");
-        assert!(err.to_string().contains("worktree must be clean"));
+        assert!(err.to_string().contains("before release-image starts"));
     }
 
     #[test]
     fn clean_source_tree_accepts_clean_worktree() {
         let repo_root = temp_git_repo("clean");
-        super::ensure_clean_source_tree(&repo_root).expect("clean repo should be accepted");
+        super::ensure_clean_source_tree(&repo_root, "before release-image starts")
+            .expect("clean repo should be accepted");
+    }
+
+    #[test]
+    fn clean_source_tree_reports_guest_refresh_hint() {
+        let repo_root = temp_git_repo("guest-refresh-dirty");
+        fs::write(repo_root.join("dirty.txt"), "dirty").expect("should write dirty marker");
+
+        let err = super::ensure_clean_source_tree(
+            &repo_root,
+            "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
+        )
+        .expect_err("dirty repo should be rejected");
+        assert!(err
+            .to_string()
+            .contains("review and commit updated release artifacts before retrying"));
     }
 
     fn temp_git_repo(suffix: &str) -> PathBuf {

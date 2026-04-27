@@ -11,6 +11,7 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Use `README.md` for project layout, build/run examples, guest build details, and prover workflow.
 - Use `docs/API.md` for request/response contracts, config keys, and environment variables.
 - Use `config.example.toml` as the canonical config shape.
+- Use `.codex/skills/raiko2-image-release/SKILL.md` for image build-and-publish sequencing.
 - Do not copy long command walkthroughs into this file. Add only agent-critical rules and stable entrypoints.
 
 ## Repository Layout
@@ -50,7 +51,18 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
   - `just build-guest sp1`
   - `just build-guest all`
 - Direct xtask fallback: `cargo run -r -p xtask -- build-guest <backend>`
+- Image release:
+  - `just release-image <backend> <tag>`
+  - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
+
+## Project Skill Rule
+
+For image release or image publication tasks, read `.codex/skills/raiko2-image-release/SKILL.md`
+before acting.
+
+Do not use this repository to perform Tolba or GKE rollout. Keep `release-image` scoped to guest
+ELF refresh, image build/push, digest capture, and optional `register-image` checks only.
 
 ## Verification Policy
 

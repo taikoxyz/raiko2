@@ -85,8 +85,8 @@ Operational notes:
 
 ## Release Images
 
-Use the `xtask` release entrypoint for runtime images. It rebuilds guest ELFs, builds the runtime
-image, and pushes it.
+Use the `xtask` release entrypoint for runtime images. It ensures the checked-in guest ELFs are
+current, then builds and pushes the runtime image.
 
 ```bash
 just release-image risc0 tolba-20260310-1013
@@ -102,6 +102,10 @@ cargo run -r -p xtask -- release-image risc0 \
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts and does not rebuild guest sources by itself.
+
+If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
+before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
+release command so the image provenance still matches committed repo state.
 
 ## Register Guest Digests
 

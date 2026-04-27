@@ -86,7 +86,7 @@ Operational notes:
 ## Release Images
 
 Use the `xtask` release entrypoint for runtime images. It rebuilds guest ELFs, builds the runtime
-image, pushes it, and prints the rollout command.
+image, and pushes it.
 
 ```bash
 just release-image risc0 tolba-20260310-1013
@@ -97,10 +97,7 @@ Direct `xtask` entrypoint:
 ```bash
 cargo run -r -p xtask -- release-image risc0 \
   --tag tolba-20260310-1013 \
-  --repository us-docker.pkg.dev/evmchain/images/raiko2 \
-  --namespace tolba-raiko2-host \
-  --deployment raiko2 \
-  --container raiko2
+  --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing

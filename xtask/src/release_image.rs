@@ -134,7 +134,12 @@ fn source_revision(root: &Path) -> Result<String> {
         .output()
         .with_context(|| format!("failed to read git revision at {root:?}"))?;
     if !output.status.success() {
-        bail!("git rev-parse HEAD failed at {root:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            bail!("git rev-parse HEAD failed at {root:?}");
+        }
+        bail!("git rev-parse HEAD failed at {root:?}: {stderr}");
     }
 
     let revision = String::from_utf8(output.stdout)

@@ -52,22 +52,9 @@ jobs:
             workflow:
               - '.github/workflows/ci.yml'
 
-  workflow:
-    needs: changes
-    if: needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: note workflow-only validation path
-        run: |
-          echo "ci.yml changed."
-          echo "Heavy Rust and zk lanes are gated by source changes."
-          echo "Use workflow_dispatch when you want to exercise the full workflow after CI-only edits."
-
   rust-fmt:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -84,7 +71,7 @@ jobs:
 
   rust-clippy:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -143,14 +130,18 @@ jobs:
       - rust-fmt
       - rust-clippy
       - rust-nextest
-    if: always() && (needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch')
+    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - name: verify rust lanes
         run: |
           test "${{ needs.rust-fmt.result }}" = "success"
           test "${{ needs.rust-clippy.result }}" = "success"
-          test "${{ needs.rust-nextest.result }}" = "success"
+          if [ "${{ needs.changes.outputs.rust }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            test "${{ needs.rust-nextest.result }}" = "success"
+          else
+            test "${{ needs.rust-nextest.result }}" = "skipped"
+          fi
 
   # Guest backend versions are pinned by repo-owned toolchain definitions:
   # - RISC0: docker/risc0-toolchain/Dockerfile

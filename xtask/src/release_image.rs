@@ -5,8 +5,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use xtask_build_guest::Backend;
 
-use crate::{Backend, build_guest, util};
+use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
@@ -48,9 +49,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     );
     if args.force_rebuild_guests {
         println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
-        build_guest::build(root, args.backend, false, None)?;
+        xtask_build_guest::build(root, args.backend, false, None)?;
     } else {
-        build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
+        xtask_build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
     ensure_clean_source_tree(
         root,

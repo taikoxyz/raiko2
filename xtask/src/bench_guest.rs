@@ -7,9 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use serde::{Deserialize, Serialize};
+use xtask_build_guest::Backend;
 
-use crate::Backend;
-use crate::build_guest;
 use crate::util;
 
 #[derive(Args)]
@@ -166,7 +165,8 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
 
     let input_path = prepare_input(root, &args)?;
 
-    let sp1_docker_tag = build_guest::resolve_sp1_docker_tag(root, args.sp1_docker_tag.as_deref());
+    let sp1_docker_tag =
+        xtask_build_guest::resolve_sp1_docker_tag(root, args.sp1_docker_tag.as_deref());
     let built_guest = !args.skip_build_guest;
 
     if args.skip_build_guest {
@@ -176,7 +176,7 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
             "missing SP1 guest ELF; re-run without `--skip-build-guest` or run `cargo run -r -p xtask -- build-guest sp1 --bench` first"
         );
     } else {
-        build_guest::build(root, args.backend, true, Some(sp1_docker_tag.as_str()))?;
+        xtask_build_guest::build(root, args.backend, true, Some(sp1_docker_tag.as_str()))?;
     }
 
     let launcher_path = build_guest_launcher(root)?;

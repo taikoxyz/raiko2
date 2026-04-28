@@ -4,14 +4,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::Backend;
-use crate::util;
+mod util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
 const DEFAULT_SP1_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend=\"custom\"";
@@ -21,22 +20,37 @@ const DEFAULT_RISC0_CC: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unk
 const DEFAULT_RISC0_CXX: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-g++";
 const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-ar";
 
-#[derive(Args)]
-pub(crate) struct BuildGuestArgs {
-    #[arg(value_enum)]
-    pub(crate) backend: Backend,
-    /// Include benchmark binaries (requires bins in Cargo.toml).
-    #[arg(long)]
-    pub(crate) bench: bool,
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Risc0,
+    Sp1,
+    All,
 }
 
-pub(crate) fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
+#[derive(Args)]
+pub struct BuildGuestArgs {
+    #[arg(value_enum)]
+    pub backend: Backend,
+    /// Include benchmark binaries (requires bins in Cargo.toml).
+    #[arg(long)]
+    pub bench: bool,
+}
+
+pub fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("xtask-build-guest lives under xtask/")
+        .to_path_buf()
+}
+
+pub fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
     build(root, args.backend, args.bench, None)?;
     println!("[INFO] Build complete!");
     Ok(())
 }
 
-pub(crate) fn build(
+pub fn build(
     root: &Path,
     backend: Backend,
     bench: bool,
@@ -57,7 +71,7 @@ pub(crate) fn build(
     Ok(())
 }
 
-pub(crate) fn resolve_sp1_docker_tag(root: &Path, override_tag: Option<&str>) -> String {
+pub fn resolve_sp1_docker_tag(root: &Path, override_tag: Option<&str>) -> String {
     let override_tag = override_tag.and_then(non_empty_str);
     let env_tag = env::var("SP1_DOCKER_TAG").ok().and_then(non_empty);
     let lock_tag = default_sp1_docker_tag(root);
@@ -103,7 +117,7 @@ struct GuestBuildFingerprint {
     fingerprint: String,
 }
 
-pub(crate) fn ensure_release_guest_elves(
+pub fn ensure_release_guest_elves(
     root: &Path,
     backend: Backend,
     bench: bool,
@@ -312,9 +326,10 @@ fn compute_backend_fingerprint(
 
     let mut paths = vec![
         root.join("rust-toolchain.toml"),
-        root.join("xtask/Cargo.toml"),
-        root.join("xtask/src/build_guest.rs"),
-        root.join("xtask/src/util.rs"),
+        root.join("xtask/build-guest/Cargo.toml"),
+        root.join("xtask/build-guest/src/lib.rs"),
+        root.join("xtask/build-guest/src/main.rs"),
+        root.join("xtask/build-guest/src/util.rs"),
         root.join("guests/common/Cargo.toml"),
         root.join("guests/common/Cargo.lock"),
         root.join(format!("guests/{backend_key}/Cargo.toml")),
@@ -914,8 +929,6 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
             "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
         ));
 
-    // Ensure crates with C/C++ sources (e.g. `c-kzg`, `blst`) cross-compile for the guest target.
-    // Prefer the RISC-V bare-metal GCC toolchain: it provides a proper sysroot with standard headers.
     cmd.arg("-e")
         .arg("CC_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
     cmd.arg("-e")
@@ -1045,7 +1058,7 @@ mod tests {
 
     #[test]
     fn sp1_guest_fingerprint_changes_with_docker_tag() {
-        let root = util::repo_root();
+        let root = repo_root();
         let v1 =
             compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4"), false).unwrap();
         let v2 =
@@ -1094,7 +1107,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = env::temp_dir().join(format!("raiko2-xtask-test-{unique}"));
+        let path = env::temp_dir().join(format!("raiko2-xtask-build-guest-test-{unique}"));
         fs::create_dir_all(&path).unwrap();
         path
     }

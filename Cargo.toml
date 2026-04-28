@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "xtask",
+    "xtask/build-guest",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",

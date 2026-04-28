@@ -5,8 +5,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use xtask_build_guest::Backend;
 
-use crate::{Backend, build_guest, util};
+use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
@@ -48,9 +49,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     );
     if args.force_rebuild_guests {
         println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
-        build_guest::build(root, args.backend, false, None)?;
+        xtask_build_guest::build(root, args.backend, false, None)?;
     } else {
-        build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
+        xtask_build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
     ensure_clean_source_tree(
         root,
@@ -118,7 +119,10 @@ fn release_summary_lines(digest_ref: &str) -> Vec<String> {
 }
 
 fn build_metadata_flags(source_revision: &str) -> Vec<String> {
-    vec!["--build-arg".to_string(), format!("VCS_REF={source_revision}")]
+    vec![
+        "--build-arg".to_string(),
+        format!("VCS_REF={source_revision}"),
+    ]
 }
 
 fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
@@ -236,8 +240,7 @@ mod tests {
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
-        let digest_ref =
-            "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let digest_ref = "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let lines = release_summary_lines(digest_ref);
         let mut output = Vec::new();
 
@@ -288,9 +291,10 @@ mod tests {
             "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
         )
         .expect_err("dirty repo should be rejected");
-        assert!(err
-            .to_string()
-            .contains("review and commit updated release artifacts before retrying"));
+        assert!(
+            err.to_string()
+                .contains("review and commit updated release artifacts before retrying")
+        );
     }
 
     fn temp_git_repo(suffix: &str) -> PathBuf {

@@ -1,5 +1,4 @@
 mod bench_guest;
-mod build_guest;
 mod latest_proposal_request;
 mod register_image;
 mod release_image;
@@ -7,7 +6,8 @@ mod replay_guest_input;
 mod util;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use xtask_build_guest::BuildGuestArgs;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -19,7 +19,7 @@ struct Args {
 #[derive(Subcommand)]
 enum Cmd {
     /// Build guest ELF binaries using official docker tooling.
-    BuildGuest(build_guest::BuildGuestArgs),
+    BuildGuest(BuildGuestArgs),
 
     /// Run guest benchmarks following the PR #9 workflow.
     BenchGuest(Box<bench_guest::BenchGuestArgs>),
@@ -37,20 +37,13 @@ enum Cmd {
     ReplayGuestInput(replay_guest_input::ReplayGuestInputArgs),
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum Backend {
-    Risc0,
-    Sp1,
-    All,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let root = util::repo_root();
 
     match args.cmd {
-        Cmd::BuildGuest(args) => build_guest::run(&root, args),
+        Cmd::BuildGuest(args) => xtask_build_guest::run(&root, args),
         Cmd::BenchGuest(args) => bench_guest::run(&root, *args),
         Cmd::LatestProposalRequest(args) => latest_proposal_request::run(&root, args).await,
         Cmd::ReleaseImage(args) => release_image::run(&root, args),

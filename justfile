@@ -2,7 +2,7 @@ default:
     @just --list
 
 build-guest backend="all" *args:
-    cargo run -r -p xtask -- build-guest {{backend}} {{args}}
+    cargo run -r -p xtask-build-guest -- {{backend}} {{args}}
 
 build-guest-risc0:
     just build-guest risc0

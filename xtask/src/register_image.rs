@@ -23,8 +23,8 @@ use raiko2_guests::{
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
 use sp1_sdk::{HashableKey, Prover as _, ProverClient};
+use xtask_build_guest::Backend;
 
-use crate::Backend;
 use crate::util;
 
 const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "http://34.46.244.179:8545";
@@ -702,9 +702,9 @@ mod tests {
         backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
         materialize_checked_plan, resolve_profile,
     };
-    use crate::Backend;
     use alloy::primitives::{Address, B256, address};
     use std::collections::BTreeSet;
+    use xtask_build_guest::Backend;
 
     #[test]
     fn backend_names_match_cli_values() {

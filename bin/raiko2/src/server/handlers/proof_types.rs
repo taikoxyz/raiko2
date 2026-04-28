@@ -161,6 +161,10 @@ pub(crate) struct TaskData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }
 
@@ -178,6 +182,10 @@ pub(crate) struct ProposalStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) runtime: Option<TaskRuntime>,
@@ -191,6 +199,10 @@ pub(crate) struct AggregateStatus {
     pub(crate) status: ProofStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

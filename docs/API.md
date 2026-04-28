@@ -147,11 +147,11 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sgx -> unsupported legacy error response`
   - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
-- `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the server first
-  checks for existing proposal proof artifacts; if every proposal has an artifact for one concrete
-  proof type, aggregation reuses that proof type without drawing again. Mixed or incomplete cached
-  artifacts are treated as a cache miss, and the same draw is reused for both proposal proving and
-  aggregation.
+- `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
+  proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the
+  canonical route, task key, and proof artifact key.
+- `aggregate=true` requires a concrete `proof_type` such as `sp1` or `risc0`. Aggregate requests
+  may reuse existing proposal proof artifacts for that concrete proof type.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
@@ -374,17 +374,17 @@ Returns the root-task view derived from the original batch request.
     "task_id": "task_...",
     "route": "risc0/boundless",
     "execution_mode": "prove",
-    "status": "proving",
+    "status": "completed",
     "network": "taiko_hoodi",
     "l1_network": "hoodi",
     "runtime": {
-      "runner_status": "allocated",
-      "active_stage": "prove",
-      "last_event": "submission_registered",
+      "runner_status": "completed",
+      "active_stage": "aggregate",
+      "last_event": "completed",
       "updated_at": 1742836800,
       "engine_state_present": true
     },
-    "current_index": 1,
+    "current_index": null,
     "proposals": [
       {
         "index": 0,
@@ -395,13 +395,21 @@ Returns the root-task view derived from the original batch request.
         "l1_inclusion_block_number": 100,
         "l2_block_numbers": [42, 43, 44],
         "last_anchor_block_number": 41,
-        "proof": "0x..."
+        "proof": "0x...",
+        "proof_ref": "proposal:...",
+        "proof_path": "cache/proofs/taiko_hoodi_hoodi/proposal_....json"
       }
     ],
     "aggregate": {
       "task_id": "...",
-      "status": "pending"
-    }
+      "status": "completed",
+      "proof": "0x...",
+      "proof_ref": "aggregate:...",
+      "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
+    },
+    "proof": "0x...",
+    "proof_ref": "aggregate:...",
+    "proof_path": "cache/proofs/taiko_hoodi_hoodi/aggregate_....json"
   }
 }
 ```
@@ -415,6 +423,9 @@ Returns the root-task view derived from the original batch request.
   `allocated`, `running`, `completed`, `failed`, or `cancelled`.
 - `data.status` is the proof-oriented root status shown to API clients:
   `pending`, `proving`, `completed`, `failed`, or `cancelled`.
+- `proof_ref` and `proof_path`, when present, point at the persisted proof artifact for the
+  resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
+  artifact key, never `zk_any`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
   exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and

@@ -22,7 +22,7 @@ use raiko2_runtime::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::super::errors::ApiError;
 use super::proof_route::{
@@ -106,6 +106,12 @@ struct TaskLookup {
     engine: Arc<dyn EngineHandle>,
 }
 
+#[derive(Clone)]
+struct ProofLocation {
+    proof_ref: Option<String>,
+    proof_path: Option<String>,
+}
+
 pub async fn request_batch_shasta_proof(
     state: State<AppState>,
     req: Result<Json<BatchShastaRequest>, JsonRejection>,
@@ -131,7 +137,7 @@ async fn request_batch_shasta_proof_inner(
         .map(|proposal| proposal.proposal_id)
         .collect::<Vec<_>>();
     let not_drawn_batch_id = req.proposals.first().map(|proposal| proposal.proposal_id);
-    let Some(submission) = build_canonical_batch_submission(&state, req).await? else {
+    let Some(submission) = build_canonical_batch_submission(&state, req)? else {
         info!(
             proof_type = requested_proof_type.as_str(),
             aggregate = requested_aggregate,
@@ -309,7 +315,7 @@ pub async fn prune_proofs(State(state): State<AppState>) -> Result<Json<PruneSta
     Ok(Json(PruneStatus { status: "ok" }))
 }
 
-async fn build_canonical_batch_submission(
+fn build_canonical_batch_submission(
     state: &AppState,
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
@@ -324,15 +330,7 @@ async fn build_canonical_batch_submission(
         .iter()
         .map(canonicalize_proposal)
         .collect::<Result<Vec<_>, _>>()?;
-    let selected_proof_type = match decide_batch_proof_type_with_cached_aggregate(
-        state,
-        &pair,
-        &proposals,
-        &req,
-        &requested_prover_config,
-    )
-    .await?
-    {
+    let selected_proof_type = match decide_batch_proof_type(state, &req)? {
         BatchProofDecision::Selected(proof_type) => proof_type,
         BatchProofDecision::NotDrawn => return Ok(None),
     };
@@ -364,93 +362,14 @@ async fn build_canonical_batch_submission(
     }))
 }
 
-async fn decide_batch_proof_type_with_cached_aggregate(
-    state: &AppState,
-    pair: &ResolvedNetworkPair,
-    proposals: &[CanonicalProposal],
-    req: &BatchShastaRequest,
-    prover_config: &ProverTaskConfig,
-) -> Result<BatchProofDecision, ApiError> {
-    if matches!(req.proof_type, BatchProofType::ZkAny)
-        && req.aggregate
-        && let Some(proof_type) =
-            cached_aggregate_proof_type(state, pair, proposals, req, prover_config).await?
-    {
-        info!(
-            proof_type = proof_type.as_str(),
-            pair = pair.key.as_str(),
-            proposal_count = proposals.len(),
-            "zk_any aggregate request reused cached proposal proof type"
-        );
-        return Ok(BatchProofDecision::Selected(proof_type));
-    }
-
-    decide_batch_proof_type(state, req)
-}
-
-async fn cached_aggregate_proof_type(
-    state: &AppState,
-    pair: &ResolvedNetworkPair,
-    proposals: &[CanonicalProposal],
-    req: &BatchShastaRequest,
-    prover_config: &ProverTaskConfig,
-) -> Result<Option<BatchProofType>, ApiError> {
-    let mut cached_matches = Vec::new();
-    for proof_type in [BatchProofType::Sp1, BatchProofType::Risc0] {
-        let route = route_for_proof_type(state, proof_type)?;
-        let mut matched_count = 0usize;
-        for proposal in proposals {
-            let request = proposal_task_request(
-                proposal,
-                req.blob_proof_type.clone(),
-                req.prover.clone(),
-                req.graffiti.clone(),
-                prover_config.clone(),
-            );
-            let proof_ref = proposal_task_ref(route.pipeline_key(), &request);
-            if cached_proposal_artifact_record_matches_route(
-                state.runtime.as_ref(),
-                &pair.key,
-                route,
-                &proof_ref,
-            )
-            .await?
-            {
-                matched_count += 1;
-            }
-        }
-
-        if matched_count == 0 {
-            continue;
-        }
-        info!(
-            proof_type = proof_type.as_str(),
-            pair = pair.key.as_str(),
-            cached_proposals = matched_count,
-            proposal_count = proposals.len(),
-            "zk_any aggregate found cached proposal proofs"
-        );
-        cached_matches.push((proof_type, matched_count));
-    }
-
-    match cached_matches.as_slice() {
-        [(proof_type, matched_count)] if *matched_count == proposals.len() => Ok(Some(*proof_type)),
-        [] => Ok(None),
-        matches => {
-            debug!(
-                pair = pair.key.as_str(),
-                proposal_count = proposals.len(),
-                cached_matches = ?matches,
-                "zk_any aggregate cache is mixed or incomplete; falling back to sampling"
-            );
-            Ok(None)
-        }
-    }
-}
-
 fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
+    }
+    if req.aggregate && matches!(req.proof_type, BatchProofType::ZkAny) {
+        return Err(ApiError::bad_request(
+            "proof_type=zk_any is not supported for aggregate requests",
+        ));
     }
     Ok(())
 }
@@ -1297,6 +1216,7 @@ async fn load_task_data_from_lookup(
         lookup.metadata.has_runtime_progress(),
         lookup.record.error.as_deref(),
     );
+    let root_proof_location = root_proof_location(&lookup.record, &proposals, aggregate.as_ref());
     let root_proof = root_state.proof;
     let root_proof = if root_proof.is_none() && matches!(root_state.status, ProofStatus::Completed)
     {
@@ -1317,6 +1237,10 @@ async fn load_task_data_from_lookup(
         proposals,
         aggregate,
         proof: root_proof,
+        proof_ref: root_proof_location
+            .as_ref()
+            .and_then(|location| location.proof_ref.clone()),
+        proof_path: root_proof_location.and_then(|location| location.proof_path),
         error: root_state.error,
     })
 }
@@ -1341,36 +1265,6 @@ async fn load_cached_proposal_artifact(
         proof_ref,
     )
     .await
-}
-
-async fn cached_proposal_artifact_record_matches_route(
-    runtime: &RuntimeManager,
-    network_pair: &str,
-    route: CanonicalProofRoute,
-    proof_ref: &str,
-) -> Result<bool, ApiError> {
-    let Some(record) = runtime
-        .get_proof_artifact(network_pair, proof_ref)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
-    else {
-        return Ok(false);
-    };
-
-    if record.pipeline_key != route.pipeline_key() || record.route != route.route {
-        warn!(
-            network_pair = record.network_pair,
-            proof_ref = record.proof_ref,
-            artifact_pipeline = record.pipeline_key.as_str(),
-            artifact_route = %record.route,
-            request_pipeline = route.pipeline_key().as_str(),
-            request_route = %route.route,
-            "proof artifact route does not match request; treating it as a cache miss"
-        );
-        return Ok(false);
-    }
-
-    Ok(true)
 }
 
 async fn load_cached_proposal_artifact_for_route(
@@ -1427,6 +1321,59 @@ async fn load_persisted_root_proof_material(
     let proof: Proof = serde_json::from_slice(&bytes)
         .map_err(|err| ApiError::internal(format!("failed to parse proof file {path}: {err}")))?;
     Ok(Some(proof))
+}
+
+fn artifact_proof_location(record: &raiko2_runtime::ProofArtifactRecord) -> ProofLocation {
+    ProofLocation {
+        proof_ref: Some(record.proof_ref.clone()),
+        proof_path: Some(record.proof_path.clone()),
+    }
+}
+
+fn status_proof_location(
+    proof_ref: Option<&String>,
+    proof_path: Option<&String>,
+) -> Option<ProofLocation> {
+    if proof_ref.is_none() && proof_path.is_none() {
+        return None;
+    }
+
+    Some(ProofLocation {
+        proof_ref: proof_ref.cloned(),
+        proof_path: proof_path.cloned(),
+    })
+}
+
+fn root_proof_location(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    proposals: &[ProposalStatus],
+    aggregate: Option<&AggregateStatus>,
+) -> Option<ProofLocation> {
+    let record_location = || {
+        record.proof_path.as_ref().map(|proof_path| ProofLocation {
+            proof_ref: None,
+            proof_path: Some(proof_path.clone()),
+        })
+    };
+
+    if let Some(aggregate) = aggregate
+        && let Some(location) =
+            status_proof_location(aggregate.proof_ref.as_ref(), aggregate.proof_path.as_ref())
+    {
+        return Some(location);
+    }
+    if aggregate.is_some() {
+        return record_location();
+    }
+
+    if let [proposal] = proposals
+        && let Some(location) =
+            status_proof_location(proposal.proof_ref.as_ref(), proposal.proof_path.as_ref())
+    {
+        return Some(location);
+    }
+
+    record_location()
 }
 
 async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError> {
@@ -1488,12 +1435,14 @@ async fn load_proposal_statuses(
             runtime.is_some() || metadata.has_runtime_progress(),
             record.error.as_deref(),
         );
+        let mut proof_location = None;
         let status = if let Some(material) =
             load_proof_artifact_material(runtime_manager, &metadata.network_pair, &proposal.task_id)
                 .await
                 .map_err(|err| {
                     ApiError::internal(format!("failed to load proof artifact: {err}"))
                 })? {
+            proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
             EngineStatusView {
                 status: ProofStatus::Completed,
@@ -1514,6 +1463,10 @@ async fn load_proposal_statuses(
             l2_block_numbers: proposal.l2_block_numbers.clone(),
             last_anchor_block_number: proposal.last_anchor_block_number,
             proof: status.proof,
+            proof_ref: proof_location
+                .as_ref()
+                .and_then(|location| location.proof_ref.clone()),
+            proof_path: proof_location.and_then(|location| location.proof_path),
             error: status.error,
             runtime: task_runtime_view(runtime, engine_state_present, record.updated_at),
             extra_data: status.extra_data,
@@ -1552,6 +1505,7 @@ async fn load_aggregate_status(
         metadata.aggregate_runtime().is_some() || metadata.has_runtime_progress(),
         record.error.as_deref(),
     );
+    let mut proof_location = None;
     let status = if let Some(task_id) = metadata.aggregate_task_id.as_deref() {
         if let Some(material) =
             load_proof_artifact_material(runtime_manager, &metadata.network_pair, task_id)
@@ -1560,6 +1514,7 @@ async fn load_aggregate_status(
                     ApiError::internal(format!("failed to load proof artifact: {err}"))
                 })?
         {
+            proof_location = Some(artifact_proof_location(&material.record));
             let proof = material.proof;
             EngineStatusView {
                 status: ProofStatus::Completed,
@@ -1579,6 +1534,10 @@ async fn load_aggregate_status(
             task_id: metadata.aggregate_task_id.clone().expect("checked"),
             status: status.status.clone(),
             proof: status.proof,
+            proof_ref: proof_location
+                .as_ref()
+                .and_then(|location| location.proof_ref.clone()),
+            proof_path: proof_location.and_then(|location| location.proof_path),
             error: status.error,
             runtime: task_runtime_view(
                 metadata.aggregate_runtime(),
@@ -2772,6 +2731,8 @@ mod tests {
             l2_block_numbers: vec![42],
             last_anchor_block_number: 41,
             proof: proof.map(str::to_string),
+            proof_ref: None,
+            proof_path: None,
             error: None,
             runtime: None,
             extra_data: None,
@@ -2783,6 +2744,8 @@ mod tests {
             task_id: "aggregate-task".to_string(),
             status,
             proof: proof.map(str::to_string),
+            proof_ref: None,
+            proof_path: None,
             error: None,
             runtime: None,
             extra_data: None,

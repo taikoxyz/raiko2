@@ -468,6 +468,7 @@ fn retry_schedule(deadline_at_ms: u64, delay: Duration) -> Option<RetrySchedule>
 mod tests {
     use super::*;
     use crate::MemoryStore;
+    use crate::Priority;
     use crate::StoreResult;
     use crate::TaskStoreError;
     use std::collections::{HashMap, HashSet};
@@ -479,6 +480,15 @@ mod tests {
 
     fn test_id(value: u64) -> TestTaskId {
         TaskId::new(value)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct EqualSortId(u64);
+
+    impl crate::ReadyQueueSort for EqualSortId {
+        fn ready_queue_sort_prefix(&self) -> [u8; 16] {
+            [0u8; 16]
+        }
     }
 
     fn duration_millis_saturating(duration: Duration) -> u64 {
@@ -900,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn next_ready_picks_high_before_low() -> StoreResult<()> {
+    async fn next_ready_orders_by_priority_before_sort_prefix() -> StoreResult<()> {
         let sched: Scheduler<&'static str, (), TestId> = Scheduler::new(MemoryStore::new());
 
         let a = sched
@@ -916,6 +926,44 @@ mod tests {
         let b = sched
             .submit(
                 test_id(2),
+                NewTask {
+                    priority: Priority::High,
+                    payload: "b",
+                },
+                vec![],
+            )
+            .await?;
+
+        let first = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready task"))?;
+        assert_eq!(first.id, b);
+        let second = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready task"))?;
+        assert_eq!(second.id, a);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn next_ready_uses_priority_when_memory_sort_prefix_matches() -> StoreResult<()> {
+        let sched: Scheduler<&'static str, (), EqualSortId> = Scheduler::new(MemoryStore::new());
+
+        let a = sched
+            .submit(
+                TaskId::new(EqualSortId(1)),
+                NewTask {
+                    priority: Priority::Low,
+                    payload: "a",
+                },
+                vec![],
+            )
+            .await?;
+        let b = sched
+            .submit(
+                TaskId::new(EqualSortId(2)),
                 NewTask {
                     priority: Priority::High,
                     payload: "b",
@@ -1357,7 +1405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_ready_then_resubmit_same_high_id_keeps_fifo() -> StoreResult<()> {
+    async fn cancel_ready_then_resubmit_same_high_id_removes_stale_entry() -> StoreResult<()> {
         let sched: Scheduler<&'static str, &'static str, TestId> =
             Scheduler::new(MemoryStore::new());
 
@@ -1399,15 +1447,15 @@ mod tests {
             .next_ready("w")
             .await?
             .ok_or_else(|| TaskStoreError::corrupt_msg("expected first high task"))?;
-        assert_eq!(first.id, b);
-        assert_eq!(first.payload, "b");
+        assert_eq!(first.id, a);
+        assert_eq!(first.payload, "a2");
 
         let second = sched
             .next_ready("w")
             .await?
             .ok_or_else(|| TaskStoreError::corrupt_msg("expected resubmitted high task"))?;
-        assert_eq!(second.id, a);
-        assert_eq!(second.payload, "a2");
+        assert_eq!(second.id, b);
+        assert_eq!(second.payload, "b");
         assert!(sched.next_ready("w").await?.is_none());
         Ok(())
     }

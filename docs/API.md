@@ -29,8 +29,8 @@ The public API surface is:
 
 The optional admin surface is disabled unless `server.admin_api_key` is configured:
 
-- `GET /admin/get_ballot`
-- `POST /admin/set_ballot`
+- `GET /admin/ballot`
+- `POST /admin/ballot`
 
 `/v1/...` routes are removed.
 
@@ -72,8 +72,8 @@ Terminal counters and duration histograms also include `status`.
 ## Admin Ballot
 
 ```http
-GET /admin/get_ballot
-POST /admin/set_ballot
+GET /admin/ballot
+POST /admin/ballot
 x-api-key: <server.admin_api_key>
 ```
 
@@ -148,9 +148,10 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the server first
-  checks for existing proposal proof artifacts; if they exist for one concrete proof type, aggregation
-  reuses that proof type without drawing again. Otherwise the same draw is reused for both proposal
-  proving and aggregation.
+  checks for existing proposal proof artifacts; if every proposal has an artifact for one concrete
+  proof type, aggregation reuses that proof type without drawing again. Mixed or incomplete cached
+  artifacts are treated as a cache miss, and the same draw is reused for both proposal proving and
+  aggregation.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:

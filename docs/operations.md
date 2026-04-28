@@ -176,19 +176,19 @@ per_day = 8
 When a client submits `proof_type = "zk_any"` to `/v3/proof/batch/shasta`, the server draws once
 at admission time and either routes the request to `sp1` / `risc0` or returns
 `data.status = "zk_any_not_drawn"` without registering a task.
-If the same request also sets `aggregate = true`, existing proposal proof artifacts take precedence:
-when all cached artifacts resolve to one concrete proof type, aggregation reuses that proof type
-without sampling. If no cached proposal proof exists, the draw still happens exactly once and the
+If the same request also sets `aggregate = true`, existing proposal proof artifacts take precedence
+only when every proposal has a cached artifact for one concrete proof type. Mixed or incomplete
+cached artifacts are treated as a cache miss, so the draw still happens exactly once and the
 resulting backend is reused for both proposal proving and aggregation.
 
 Operators can adjust the in-memory `zk_any` ballot without restarting the server when
 `server.admin_api_key` is configured:
 
 ```bash
-curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/get_ballot
+curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/ballot
 curl -X POST -H "x-api-key: $RAIKO2_ADMIN_API_KEY" -H "content-type: application/json" \
   --data '{"Risc0":[0.1,10],"Sp1":[0.0,0]}' \
-  http://localhost:8080/admin/set_ballot
+  http://localhost:8080/admin/ballot
 ```
 
 Only `Risc0` and `Sp1` are accepted. The second tuple value is the per-day frequency gate; `0`

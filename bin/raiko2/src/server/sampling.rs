@@ -2,7 +2,7 @@ use alloy_primitives::B256;
 use raiko2_primitives::ProofType;
 use std::collections::{BTreeMap, HashMap, VecDeque, hash_map::Entry};
 use std::time::{Duration, SystemTime};
-use tracing::info;
+use tracing::debug;
 
 use crate::config::{ZkAnyConfig, ZkAnyTargetConfig};
 
@@ -65,8 +65,8 @@ impl ZkAnySampler {
     #[must_use]
     fn draw_with_time(&mut self, seed: B256, now: SystemTime) -> Option<ProofType> {
         if let Some(result) = self.cached_results.get(&seed).copied() {
-            info!(
-                seed = %format!("{seed:#x}"),
+            debug!(
+                seed = ?seed,
                 selected = result.map(|proof_type| proof_type.to_string()).as_deref().unwrap_or("none"),
                 "zk_any sampling cache hit"
             );
@@ -76,24 +76,24 @@ impl ZkAnySampler {
         let candidate = self.draw_candidate(seed);
         let draw_result = match candidate {
             Some(proof_type) if self.check_frequency(proof_type, now) => {
-                info!(
-                    seed = %format!("{seed:#x}"),
+                debug!(
+                    seed = ?seed,
                     selected = %proof_type,
                     "zk_any sampling selected"
                 );
                 Some(proof_type)
             }
             Some(proof_type) => {
-                info!(
-                    seed = %format!("{seed:#x}"),
+                debug!(
+                    seed = ?seed,
                     candidate = %proof_type,
                     "zk_any sampling frequency blocked"
                 );
                 None
             }
             None => {
-                info!(
-                    seed = %format!("{seed:#x}"),
+                debug!(
+                    seed = ?seed,
                     "zk_any sampling not drawn"
                 );
                 None
@@ -144,7 +144,7 @@ impl ZkAnySampler {
         if should_draw {
             target.last_draw_at = Some(now);
         } else {
-            info!(
+            debug!(
                 proof_type = %proof_type,
                 per_day = target.per_day,
                 min_interval_secs = min_interval.as_secs(),

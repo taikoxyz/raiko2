@@ -8,7 +8,7 @@ use crate::server::state::ProofStatus;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum HoodiProofType {
+pub(super) enum BatchProofType {
     Native,
     Sp1,
     Risc0,
@@ -18,7 +18,7 @@ pub(super) enum HoodiProofType {
     ZkAny,
 }
 
-impl HoodiProofType {
+impl BatchProofType {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -37,7 +37,7 @@ pub(crate) struct BatchShastaRequest {
     pub(super) proposals: Vec<ShastaProposal>,
     #[serde(default)]
     pub(super) aggregate: bool,
-    pub(super) proof_type: HoodiProofType,
+    pub(super) proof_type: BatchProofType,
     #[serde(default)]
     pub(super) network: Option<String>,
     #[serde(default)]
@@ -58,7 +58,7 @@ pub(crate) struct AggregateProofRequest {
     #[serde(default)]
     pub(super) aggregation_ids: Vec<u64>,
     pub(super) proofs: Vec<Proof>,
-    pub(super) proof_type: HoodiProofType,
+    pub(super) proof_type: BatchProofType,
     #[serde(default)]
     pub(super) network: Option<String>,
     #[serde(default)]

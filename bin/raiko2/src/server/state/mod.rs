@@ -564,12 +564,20 @@ async fn build_boundless_engine(
 mod tests {
     use super::*;
     use crate::server::task_metadata::{ProposalTask, RuntimeMetadata};
-    use raiko2_engine::{
-        EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
-    };
+    use raiko2_engine::{ProposalStage, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-    use raiko2_queue::encode_task_id;
+    use raiko2_queue::{TaskId, encode_task_id};
     use raiko2_runtime::RuntimeTaskRecord;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    enum LegacyEngineTaskKey {
+        Proposal {
+            pipeline: PipelineKey,
+            request: ProposalTaskRequest,
+            stage: ProposalStage,
+        },
+    }
 
     #[tokio::test]
     async fn restore_proof_artifacts_registers_canonical_and_legacy_proposal_refs() -> Result<()> {
@@ -587,7 +595,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let legacy_ref = encode_task_id(&EngineTaskId::new(EngineTaskKey::Proposal {
+        let legacy_ref = encode_task_id(&TaskId::new(LegacyEngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: request.clone(),
             stage: ProposalStage::Prove,

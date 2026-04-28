@@ -260,7 +260,6 @@ impl ProposalTask {
                 EngineTaskId::new(EngineTaskKey::Proposal {
                     pipeline: pipeline_key,
                     request,
-                    stage: ProposalStage::Prove,
                 })
             })
             .or_else(|| decode_legacy_proposal_task_id(&self.task_id))
@@ -283,28 +282,58 @@ pub(crate) fn aggregate_task_ref(
 
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
     match &task_id.0 {
-        EngineTaskKey::Proposal {
-            pipeline,
-            request,
-            stage,
-        } => stable_stage_ref(*pipeline, request, *stage),
+        EngineTaskKey::Proposal { pipeline, request } => {
+            stable_stage_ref(*pipeline, request, ProposalStage::Prove)
+        }
+        EngineTaskKey::Aggregate { pipeline, request } => aggregate_task_ref(*pipeline, request),
+    }
+}
+
+pub(crate) fn stage_task_ref_for_stage(task_id: &EngineTaskId, stage: ProposalStage) -> String {
+    match &task_id.0 {
+        EngineTaskKey::Proposal { pipeline, request } => {
+            stable_stage_ref(*pipeline, request, stage)
+        }
         EngineTaskKey::Aggregate { pipeline, request } => aggregate_task_ref(*pipeline, request),
     }
 }
 
 fn decode_legacy_proposal_task_id(raw: &str) -> Option<EngineTaskId> {
-    match decode_task_id::<EngineTaskKey>(raw).ok()?.0 {
-        EngineTaskKey::Proposal {
-            pipeline,
-            request,
-            stage: _,
+    if let Ok(task_id) = decode_task_id::<EngineTaskKey>(raw) {
+        return match task_id.0 {
+            EngineTaskKey::Proposal { pipeline, request } => {
+                Some(EngineTaskId::new(EngineTaskKey::Proposal {
+                    pipeline,
+                    request,
+                }))
+            }
+            EngineTaskKey::Aggregate { .. } => None,
+        };
+    }
+
+    match decode_task_id::<LegacyEngineTaskKey>(raw).ok()?.0 {
+        LegacyEngineTaskKey::Proposal {
+            pipeline, request, ..
         } => Some(EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request,
-            stage: ProposalStage::Prove,
         })),
-        EngineTaskKey::Aggregate { .. } => None,
+        LegacyEngineTaskKey::Aggregate { .. } => None,
     }
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+enum LegacyEngineTaskKey {
+    Proposal {
+        pipeline: PipelineKey,
+        request: ProposalTaskRequest,
+        stage: ProposalStage,
+    },
+    Aggregate {
+        pipeline: PipelineKey,
+        request: AggregationTaskRequest,
+    },
 }
 
 fn decode_legacy_aggregate_task_id(raw: &str) -> Option<EngineTaskId> {

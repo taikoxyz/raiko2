@@ -7,7 +7,7 @@ use axum::{
 };
 use raiko2_engine::{
     AggregationInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProofArtifactRef,
-    ProposalStage, ProposalTaskRequest, ProverTaskConfig,
+    ProposalTaskRequest, ProverTaskConfig,
 };
 use raiko2_pipeline::PipelineKey;
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
@@ -22,7 +22,7 @@ use raiko2_runtime::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::super::errors::ApiError;
 use super::proof_route::{
@@ -30,8 +30,8 @@ use super::proof_route::{
     route_for_proof_type,
 };
 use super::proof_types::{
-    AggregateProofRequest, BatchShastaRequest, CanonicalProposal, HoodiAggregateStatus,
-    HoodiProofType, HoodiProposalStatus, HoodiRootRuntimeView, HoodiSuccess, HoodiTaskData,
+    AggregateProofRequest, BatchProofType, BatchShastaRequest, CanonicalProposal,
+    HoodiAggregateStatus, HoodiProposalStatus, HoodiRootRuntimeView, HoodiSuccess, HoodiTaskData,
     HoodiTaskRuntimeView, LegacyProofData, LegacyProofEnvelope, LegacyProofError, LegacyTaskStatus,
     PruneStatus, PublicProverArgs, RootTaskState, ShastaProposal,
 };
@@ -39,7 +39,7 @@ use crate::config::ResolvedNetworkPair;
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
 use crate::server::state::{AppState, EngineHandle, EngineStatusView, ProofStatus};
 use crate::server::task_cleanup::{
-    cancel_registered_tasks, proposal_stage_task_id, proposal_task_chain_ids, remove_task_children,
+    cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
 };
 use crate::server::task_metadata::{
     BuildTaskMetadataParams, ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
@@ -121,34 +121,41 @@ async fn request_batch_shasta_proof_inner(
     req: Result<Json<BatchShastaRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
+    let requested_proof_type = req.proof_type;
+    let requested_aggregate = req.aggregate;
+    let requested_network = req.network.clone();
+    let requested_l1_network = req.l1_network.clone();
     let proposal_ids = req
         .proposals
         .iter()
         .map(|proposal| proposal.proposal_id)
         .collect::<Vec<_>>();
-    info!(
-        proof_type = req.proof_type.as_str(),
-        aggregate = req.aggregate,
-        network = req.network.as_deref().unwrap_or("default"),
-        l1_network = req.l1_network.as_deref().unwrap_or("default"),
-        proposal_count = proposal_ids.len(),
-        proposal_ids = ?proposal_ids,
-        "received hoodi shasta batch request"
-    );
     let not_drawn_batch_id = req.proposals.first().map(|proposal| proposal.proposal_id);
     let Some(submission) = build_canonical_batch_submission(&state, req).await? else {
+        info!(
+            proof_type = requested_proof_type.as_str(),
+            aggregate = requested_aggregate,
+            network = requested_network.as_deref().unwrap_or("default"),
+            l1_network = requested_l1_network.as_deref().unwrap_or("default"),
+            proposal_count = proposal_ids.len(),
+            proposal_ids = ?proposal_ids,
+            "received hoodi shasta batch request not drawn"
+        );
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
     let request_fingerprint = batch_request_fingerprint(&submission)?;
     let plan = build_submission_plan(state.runtime.as_ref(), &submission).await?;
 
     info!(
-        "Received hoodi shasta batch request: task_id={}, proposals={}, aggregate={}, route={}, pair={}",
-        submission.public_task_id,
-        submission.proposals.len(),
-        submission.aggregate_requested,
-        submission.route.route,
-        submission.pair.key
+        task_id = submission.public_task_id.as_str(),
+        proof_type = requested_proof_type.as_str(),
+        selected_proof_type = %submission.route.proof_type(),
+        aggregate = submission.aggregate_requested,
+        pair = submission.pair.key.as_str(),
+        route = %submission.route.route,
+        proposal_count = proposal_ids.len(),
+        proposal_ids = ?proposal_ids,
+        "received hoodi shasta batch request"
     );
 
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
@@ -176,14 +183,9 @@ async fn request_aggregation_proof_inner(
     req: Result<Json<AggregateProofRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    info!(
-        proof_type = req.proof_type.as_str(),
-        network = req.network.as_deref().unwrap_or("default"),
-        l1_network = req.l1_network.as_deref().unwrap_or("default"),
-        proofs = req.proofs.len(),
-        aggregation_ids = ?req.aggregation_ids,
-        "received hoodi aggregate request"
-    );
+    let requested_proof_type = req.proof_type;
+    let proof_count = req.proofs.len();
+    let aggregation_ids = req.aggregation_ids.clone();
     let submission = build_external_aggregate_submission(&state, req)?;
     let engine = resolve_engine(
         &state,
@@ -193,12 +195,14 @@ async fn request_aggregation_proof_inner(
     let aggregate = planned_external_aggregate_task(&submission);
 
     info!(
-        "Received hoodi aggregate request: task_id={}, proofs={}, aggregate_ids={}, route={}, pair={}",
-        submission.public_task_id,
-        submission.proofs.len(),
-        submission.request.proposal_ids.len(),
-        submission.route.route,
-        submission.pair.key
+        task_id = submission.public_task_id.as_str(),
+        proof_type = requested_proof_type.as_str(),
+        selected_proof_type = %submission.route.proof_type(),
+        pair = submission.pair.key.as_str(),
+        route = %submission.route.route,
+        proofs = proof_count,
+        aggregation_ids = ?aggregation_ids,
+        "received hoodi aggregate request"
     );
 
     match register_external_aggregate_task(&state, &submission, &aggregate).await? {
@@ -371,7 +375,7 @@ async fn decide_batch_proof_type_with_cached_aggregate(
     req: &BatchShastaRequest,
     prover_config: &ProverTaskConfig,
 ) -> Result<BatchProofDecision, ApiError> {
-    if matches!(req.proof_type, HoodiProofType::ZkAny)
+    if matches!(req.proof_type, BatchProofType::ZkAny)
         && req.aggregate
         && let Some(proof_type) =
             cached_aggregate_proof_type(state, pair, proposals, req, prover_config).await?
@@ -394,9 +398,9 @@ async fn cached_aggregate_proof_type(
     proposals: &[CanonicalProposal],
     req: &BatchShastaRequest,
     prover_config: &ProverTaskConfig,
-) -> Result<Option<HoodiProofType>, ApiError> {
-    let mut matched: Option<HoodiProofType> = None;
-    for proof_type in [HoodiProofType::Sp1, HoodiProofType::Risc0] {
+) -> Result<Option<BatchProofType>, ApiError> {
+    let mut cached_matches = Vec::new();
+    for proof_type in [BatchProofType::Sp1, BatchProofType::Risc0] {
         let route = route_for_proof_type(state, proof_type)?;
         let mut matched_count = 0usize;
         for proposal in proposals {
@@ -408,14 +412,13 @@ async fn cached_aggregate_proof_type(
                 prover_config.clone(),
             );
             let proof_ref = proposal_task_ref(route.pipeline_key(), &request);
-            if load_cached_proposal_artifact_for_route(
+            if cached_proposal_artifact_record_matches_route(
                 state.runtime.as_ref(),
                 &pair.key,
                 route,
                 &proof_ref,
             )
             .await?
-            .is_some()
             {
                 matched_count += 1;
             }
@@ -424,13 +427,6 @@ async fn cached_aggregate_proof_type(
         if matched_count == 0 {
             continue;
         }
-        if let Some(previous) = matched {
-            return Err(ApiError::bad_request(format!(
-                "zk_any aggregate found cached proposal proofs for both {} and {}",
-                previous.as_str(),
-                proof_type.as_str()
-            )));
-        }
         info!(
             proof_type = proof_type.as_str(),
             pair = pair.key.as_str(),
@@ -438,9 +434,22 @@ async fn cached_aggregate_proof_type(
             proposal_count = proposals.len(),
             "zk_any aggregate found cached proposal proofs"
         );
-        matched = Some(proof_type);
+        cached_matches.push((proof_type, matched_count));
     }
-    Ok(matched)
+
+    match cached_matches.as_slice() {
+        [(proof_type, matched_count)] if *matched_count == proposals.len() => Ok(Some(*proof_type)),
+        [] => Ok(None),
+        matches => {
+            debug!(
+                pair = pair.key.as_str(),
+                proposal_count = proposals.len(),
+                cached_matches = ?matches,
+                "zk_any aggregate cache is mixed or incomplete; falling back to sampling"
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
@@ -451,10 +460,10 @@ fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
 }
 
 fn validate_public_prover_args(
-    proof_type: HoodiProofType,
+    proof_type: BatchProofType,
     args: &PublicProverArgs,
 ) -> Result<ProverTaskConfig, ApiError> {
-    if matches!(proof_type, HoodiProofType::ZkAny) && !args.is_empty() {
+    if matches!(proof_type, BatchProofType::ZkAny) && !args.is_empty() {
         return Err(ApiError::bad_request(
             "proof_type=zk_any does not support prover args",
         ));
@@ -479,7 +488,7 @@ fn validate_public_prover_args(
             "sgxgeth prover args are not supported in this API",
         ));
     }
-    if args.sp1.is_some() && !matches!(proof_type, HoodiProofType::Sp1 | HoodiProofType::ZkAny) {
+    if args.sp1.is_some() && !matches!(proof_type, BatchProofType::Sp1 | BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "sp1 prover args require proof_type=sp1",
         ));
@@ -610,7 +619,7 @@ fn canonicalize_proposal(proposal: &ShastaProposal) -> Result<CanonicalProposal,
 }
 
 fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), ApiError> {
-    if matches!(req.proof_type, HoodiProofType::ZkAny) {
+    if matches!(req.proof_type, BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "proof_type=zk_any is not supported for aggregate requests",
         ));
@@ -725,11 +734,7 @@ async fn build_submission_plan(
                 submission.graffiti.clone(),
                 submission.prover_config.clone(),
             );
-            let task_id = proposal_stage_task_id(
-                submission.route.pipeline_key(),
-                request.clone(),
-                ProposalStage::Prove,
-            );
+            let task_id = proposal_task_id(submission.route.pipeline_key(), request.clone());
             Ok(PlannedProposalTask {
                 task_ref: proposal_task_ref(submission.route.pipeline_key(), &request),
                 request,
@@ -1240,7 +1245,7 @@ async fn handle_created_external_aggregate_task(
     );
 
     Ok(registered_response(
-        HoodiProofType::from_canonical(submission.route.proof_type()),
+        BatchProofType::from_canonical(submission.route.proof_type()),
         submission.public_task_id.clone(),
     )
     .into_response())
@@ -1340,6 +1345,36 @@ async fn load_cached_proposal_artifact(
         proof_ref,
     )
     .await
+}
+
+async fn cached_proposal_artifact_record_matches_route(
+    runtime: &RuntimeManager,
+    network_pair: &str,
+    route: CanonicalProofRoute,
+    proof_ref: &str,
+) -> Result<bool, ApiError> {
+    let Some(record) = runtime
+        .get_proof_artifact(network_pair, proof_ref)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+    else {
+        return Ok(false);
+    };
+
+    if record.pipeline_key != route.pipeline_key() || record.route != route.route {
+        warn!(
+            network_pair = record.network_pair,
+            proof_ref = record.proof_ref,
+            artifact_pipeline = record.pipeline_key.as_str(),
+            artifact_route = %record.route,
+            request_pipeline = route.pipeline_key().as_str(),
+            request_route = %route.route,
+            "proof artifact route does not match request; treating it as a cache miss"
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 async fn load_cached_proposal_artifact_for_route(
@@ -1886,12 +1921,12 @@ fn resolve_engine(
         })
 }
 
-const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> HoodiProofType {
+const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> BatchProofType {
     match submission.route.proof_type() {
-        ProofType::Native => HoodiProofType::Native,
-        ProofType::Sp1 => HoodiProofType::Sp1,
-        ProofType::Sgx => HoodiProofType::Sgx,
-        ProofType::Risc0 => HoodiProofType::Risc0,
+        ProofType::Native => BatchProofType::Native,
+        ProofType::Sp1 => BatchProofType::Sp1,
+        ProofType::Sgx => BatchProofType::Sgx,
+        ProofType::Risc0 => BatchProofType::Risc0,
     }
 }
 
@@ -1909,13 +1944,13 @@ fn registration_response(
     .into_response()
 }
 
-fn registered_response(proof_type: HoodiProofType, _public_task_id: String) -> Response {
+fn registered_response(proof_type: BatchProofType, _public_task_id: String) -> Response {
     registration_response(proof_type.as_str(), LegacyTaskStatus::Registered, None)
 }
 
 fn zk_any_not_drawn_response(batch_id: Option<u64>) -> Response {
     registration_response(
-        HoodiProofType::Native.as_str(),
+        BatchProofType::Native.as_str(),
         LegacyTaskStatus::ZkAnyNotDrawn,
         batch_id,
     )
@@ -2036,7 +2071,7 @@ async fn compatibility_response_for_task(
     task_id: &str,
 ) -> Result<Response, ApiError> {
     let lookup = load_task_lookup(state, task_id).await?;
-    let proof_type = HoodiProofType::from_canonical(lookup.metadata.proof_type);
+    let proof_type = BatchProofType::from_canonical(lookup.metadata.proof_type);
     let task = load_task_data_from_lookup(state, task_id, &lookup).await?;
 
     Ok(match task.status {
@@ -2073,7 +2108,7 @@ async fn legacy_root_proof_material(
     })
 }
 
-fn legacy_status_response(proof_type: HoodiProofType, status: LegacyTaskStatus) -> Response {
+fn legacy_status_response(proof_type: BatchProofType, status: LegacyTaskStatus) -> Response {
     Json(LegacyProofEnvelope {
         status: "ok",
         proof_type: proof_type.as_str().to_string(),
@@ -2083,7 +2118,7 @@ fn legacy_status_response(proof_type: HoodiProofType, status: LegacyTaskStatus) 
     .into_response()
 }
 
-fn legacy_proof_response(proof_type: HoodiProofType, proof: Proof) -> Response {
+fn legacy_proof_response(proof_type: BatchProofType, proof: Proof) -> Response {
     Json(LegacyProofEnvelope {
         status: "ok",
         proof_type: proof_type.as_str().to_string(),
@@ -2206,11 +2241,7 @@ mod tests {
                     .lock()
                     .expect("proposal submissions mutex")
                     .push((request.clone(), dependencies));
-                Ok(proposal_stage_task_id(
-                    self.pipeline_key,
-                    request,
-                    ProposalStage::Prove,
-                ))
+                Ok(proposal_task_id(self.pipeline_key, request))
             })
         }
 

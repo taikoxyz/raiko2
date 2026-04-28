@@ -36,6 +36,9 @@ use raiko2_queue::{
 
 use crate::tasks::{EngineOutput, EngineTask};
 
+const PROPOSAL_TASK_PRIORITY: Priority = Priority::Medium;
+const AGGREGATION_TASK_PRIORITY: Priority = Priority::High;
+
 pub struct Engine<S>
 where
     S: PipelineSpec,
@@ -101,6 +104,39 @@ pub trait EngineObserver: Send + Sync {
         _task: &EngineTask,
     ) -> Option<BoundlessSubmissionResume> {
         None
+    }
+}
+
+async fn notify_stage_started(
+    observer: Option<&Arc<dyn EngineObserver>>,
+    id: &EngineTaskId,
+    task: &EngineTask,
+    worker: &str,
+) {
+    if let Some(observer) = observer {
+        observer.on_task_started(id, task, worker).await;
+    }
+}
+
+async fn notify_stage_succeeded(
+    observer: Option<&Arc<dyn EngineObserver>>,
+    id: &EngineTaskId,
+    task: &EngineTask,
+    success: &EngineTaskSuccess,
+) {
+    if let Some(observer) = observer {
+        observer.on_task_succeeded(id, task, success).await;
+    }
+}
+
+async fn notify_stage_failed(
+    observer: Option<&Arc<dyn EngineObserver>>,
+    id: &EngineTaskId,
+    task: &EngineTask,
+    error: &str,
+) {
+    if let Some(observer) = observer {
+        observer.on_task_failed(id, task, error).await;
     }
 }
 
@@ -265,11 +301,10 @@ where
         }
     }
 
-    fn proposal_task_id(&self, request: ProposalTaskRequest, stage: ProposalStage) -> EngineTaskId {
+    fn proposal_task_id(&self, request: ProposalTaskRequest) -> EngineTaskId {
         EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: self.inner.spec.pipeline_key(),
             request,
-            stage,
         })
     }
 
@@ -278,13 +313,6 @@ where
             pipeline: self.inner.spec.pipeline_key(),
             request,
         })
-    }
-
-    fn stage_execution_policy(&self) -> TaskExecutionPolicy {
-        TaskExecutionPolicy {
-            lease_duration: self.inner.scheduler.config().lease_duration,
-            retry: RetryPolicy::None,
-        }
     }
 
     fn externally_stateful_stage_execution_policy(&self) -> TaskExecutionPolicy {
@@ -314,72 +342,16 @@ where
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
     ) -> Result<EngineTaskId, TaskStoreError> {
-        let preflight_id = self.proposal_task_id(request.clone(), ProposalStage::Preflight);
-        let preflight_task = self
-            .inner
-            .scheduler
-            .submit_with_execution_policy(
-                preflight_id,
-                NewTask {
-                    priority: Priority::Low,
-                    payload: EngineTask::Preflight {
-                        request: request.clone(),
-                    },
-                },
-                dependencies,
-                self.stage_execution_policy(),
-            )
-            .await?;
-
-        let validation_id = self.proposal_task_id(request.clone(), ProposalStage::Validation);
-        let validation_task = self
-            .inner
-            .scheduler
-            .submit_with_execution_policy(
-                validation_id,
-                NewTask {
-                    priority: Priority::Low,
-                    payload: EngineTask::Validate {
-                        request: request.clone(),
-                        preflight_task: preflight_task.clone(),
-                    },
-                },
-                vec![preflight_task],
-                self.stage_execution_policy(),
-            )
-            .await?;
-
-        let encode_id = self.proposal_task_id(request.clone(), ProposalStage::Encode);
-        let encode_task = self
-            .inner
-            .scheduler
-            .submit_with_execution_policy(
-                encode_id,
-                NewTask {
-                    priority: Priority::Low,
-                    payload: EngineTask::Encode {
-                        request: request.clone(),
-                        input_task: validation_task.clone(),
-                    },
-                },
-                vec![validation_task],
-                self.stage_execution_policy(),
-            )
-            .await?;
-
-        let prove_id = self.proposal_task_id(request.clone(), ProposalStage::Prove);
+        let proposal_id = self.proposal_task_id(request.clone());
         self.inner
             .scheduler
             .submit_with_execution_policy(
-                prove_id,
+                proposal_id,
                 NewTask {
-                    priority: Priority::Medium,
-                    payload: EngineTask::ProveProposal {
-                        request,
-                        input_task: encode_task.clone(),
-                    },
+                    priority: PROPOSAL_TASK_PRIORITY,
+                    payload: EngineTask::Proposal { request },
                 },
-                vec![encode_task],
+                dependencies,
                 self.externally_stateful_stage_execution_policy(),
             )
             .await
@@ -402,17 +374,15 @@ where
         let mut proposal_ids = Vec::with_capacity(proof_tasks.len());
         for proof_task in &proof_tasks {
             match &proof_task.0 {
-                EngineTaskKey::Proposal {
-                    pipeline,
-                    request,
-                    stage: ProposalStage::Prove,
-                } if *pipeline == self.inner.spec.pipeline_key() => {
+                EngineTaskKey::Proposal { pipeline, request }
+                    if *pipeline == self.inner.spec.pipeline_key() =>
+                {
                     proposal_ids.push(request.proposal_id);
                 }
-                EngineTaskKey::Proposal { stage, .. } => {
-                    return Err(TaskStoreError::corrupt_msg(format!(
-                        "aggregation input must reference proposal prove tasks, got {stage:?}"
-                    )));
+                EngineTaskKey::Proposal { .. } => {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "aggregation input must reference proposal tasks in this pipeline",
+                    ));
                 }
                 EngineTaskKey::Aggregate { .. } => {
                     return Err(TaskStoreError::corrupt_msg(
@@ -452,15 +422,12 @@ where
 
         for proof_task in &proof_tasks {
             match &proof_task.0 {
-                EngineTaskKey::Proposal {
-                    pipeline,
-                    stage: ProposalStage::Prove,
-                    ..
-                } if *pipeline == self.inner.spec.pipeline_key() => {}
-                EngineTaskKey::Proposal { stage, .. } => {
-                    return Err(TaskStoreError::corrupt_msg(format!(
-                        "aggregation input must reference proposal prove tasks, got {stage:?}"
-                    )));
+                EngineTaskKey::Proposal { pipeline, .. }
+                    if *pipeline == self.inner.spec.pipeline_key() => {}
+                EngineTaskKey::Proposal { .. } => {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "aggregation input must reference proposal tasks in this pipeline",
+                    ));
                 }
                 EngineTaskKey::Aggregate { .. } => {
                     return Err(TaskStoreError::corrupt_msg(
@@ -476,7 +443,7 @@ where
             .submit_with_execution_policy(
                 aggregate_id,
                 NewTask {
-                    priority: Priority::High,
+                    priority: AGGREGATION_TASK_PRIORITY,
                     payload: EngineTask::Aggregate {
                         request,
                         source: AggregationSource::ProofTasks(proof_tasks.clone()),
@@ -509,17 +476,15 @@ where
                 continue;
             };
             match &proof_task.0 {
-                EngineTaskKey::Proposal {
-                    pipeline,
-                    stage: ProposalStage::Prove,
-                    ..
-                } if *pipeline == self.inner.spec.pipeline_key() => {
+                EngineTaskKey::Proposal { pipeline, .. }
+                    if *pipeline == self.inner.spec.pipeline_key() =>
+                {
                     proof_tasks.push((**proof_task).clone());
                 }
-                EngineTaskKey::Proposal { stage, .. } => {
-                    return Err(TaskStoreError::corrupt_msg(format!(
-                        "aggregation input must reference proposal prove tasks, got {stage:?}"
-                    )));
+                EngineTaskKey::Proposal { .. } => {
+                    return Err(TaskStoreError::corrupt_msg(
+                        "aggregation input must reference proposal tasks in this pipeline",
+                    ));
                 }
                 EngineTaskKey::Aggregate { .. } => {
                     return Err(TaskStoreError::corrupt_msg(
@@ -535,7 +500,7 @@ where
             .submit_with_execution_policy(
                 aggregate_id,
                 NewTask {
-                    priority: Priority::High,
+                    priority: AGGREGATION_TASK_PRIORITY,
                     payload: EngineTask::Aggregate {
                         request,
                         source: AggregationSource::Inputs(inputs),
@@ -568,7 +533,7 @@ where
             .submit_with_execution_policy(
                 aggregate_id,
                 NewTask {
-                    priority: Priority::High,
+                    priority: AGGREGATION_TASK_PRIORITY,
                     payload: EngineTask::Aggregate {
                         request,
                         source: AggregationSource::Proofs(proofs),
@@ -647,7 +612,9 @@ where
             }
         });
 
-        if let Some(observer) = &self.inner.observer {
+        if let Some(observer) = &self.inner.observer
+            && !matches!(payload, EngineTask::Proposal { .. })
+        {
             observer.on_task_started(&lease.id, &payload, worker).await;
         }
 
@@ -664,9 +631,16 @@ where
         }
         let success = result.as_ref().ok().map(task_success_from_output);
         let error = result.as_ref().err().cloned();
+        let should_notify_queue_task = !matches!(payload, EngineTask::Proposal { .. })
+            || error.as_deref() == Some(task_cancelled_error().as_str())
+            || error.as_deref() == Some(task_lease_lost_error().as_str())
+            || error.as_deref() == Some(task_timeout_error(task_timeout).as_str());
         let completed_id = lease.id.clone();
         let completed = self.inner.scheduler.complete(lease, result).await?;
-        if completed && let Some(observer) = &self.inner.observer {
+        if completed
+            && should_notify_queue_task
+            && let Some(observer) = &self.inner.observer
+        {
             if let Some(success) = success.as_ref() {
                 observer
                     .on_task_succeeded(&completed_id, &payload, success)
@@ -755,7 +729,7 @@ where
         payload: EngineTask,
         remaining_timeout: Duration,
     ) -> Result<EngineOutput<S::GuestInput>, String> {
-        let execute = self.execute(task_id, payload);
+        let execute = self.execute(task_id, payload, &lease.worker);
         let interrupted = self.wait_lease_interruption(&lease.id, &lease.worker, lease.attempt);
         tokio::pin!(execute);
         tokio::pin!(interrupted);
@@ -903,6 +877,112 @@ where
         }
     }
 
+    async fn execute_proposal_stage<T>(
+        &self,
+        task_id: &EngineTaskId,
+        task: &EngineTask,
+        worker: &str,
+        stage: PipelineStage,
+        execute: impl std::future::Future<Output = Result<PipelineStageResult<T>, String>>,
+    ) -> Result<PipelineStageResult<T>, String> {
+        notify_stage_started(self.inner.observer.as_ref(), task_id, task, worker).await;
+        match execute.await {
+            Ok(output) => {
+                let success = match stage {
+                    PipelineStage::Encode => EngineTaskSuccess::EncodedInput { stage },
+                    PipelineStage::Prove | PipelineStage::Aggregate => {
+                        return Err("proof stages require proof output".to_string());
+                    }
+                    PipelineStage::Preflight | PipelineStage::Validation => {
+                        EngineTaskSuccess::GuestInput { stage }
+                    }
+                };
+                notify_stage_succeeded(self.inner.observer.as_ref(), task_id, task, &success).await;
+                Ok(output)
+            }
+            Err(error) => {
+                notify_stage_failed(self.inner.observer.as_ref(), task_id, task, &error).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn execute_proposal(
+        &self,
+        task_id: &EngineTaskId,
+        request: ProposalTaskRequest,
+        worker: &str,
+    ) -> Result<EngineOutput<S::GuestInput>, String> {
+        let ctx = self.context_for_proposal(&request);
+        let pipeline = Pipeline::new(&self.inner.spec);
+
+        let preflight_task = EngineTask::Preflight {
+            request: request.clone(),
+        };
+        let preflight = self
+            .execute_proposal_stage(
+                task_id,
+                &preflight_task,
+                worker,
+                PipelineStage::Preflight,
+                async { pipeline.preflight(&ctx).await.map_err(|e| e.to_string()) },
+            )
+            .await?;
+
+        let validation_task = EngineTask::Validate {
+            request: request.clone(),
+            preflight_task: task_id.clone(),
+        };
+        let validated = self
+            .execute_proposal_stage(
+                task_id,
+                &validation_task,
+                worker,
+                PipelineStage::Validation,
+                async {
+                    pipeline
+                        .validate(&ctx, preflight.output)
+                        .map_err(|e| e.to_string())
+                },
+            )
+            .await?;
+
+        let encode_task = EngineTask::Encode {
+            request: request.clone(),
+            input_task: task_id.clone(),
+        };
+        notify_stage_started(self.inner.observer.as_ref(), task_id, &encode_task, worker).await;
+        let encoded = match self
+            .inner
+            .spec
+            .prover()
+            .encode(&validated.output, &ctx.config)
+            .map(|output| PipelineStageResult::new(PipelineStage::Encode, output))
+            .map_err(|e| e.to_string())
+        {
+            Ok(encoded) => {
+                notify_stage_succeeded(
+                    self.inner.observer.as_ref(),
+                    task_id,
+                    &encode_task,
+                    &EngineTaskSuccess::EncodedInput {
+                        stage: PipelineStage::Encode,
+                    },
+                )
+                .await;
+                encoded
+            }
+            Err(error) => {
+                notify_stage_failed(self.inner.observer.as_ref(), task_id, &encode_task, &error)
+                    .await;
+                return Err(error);
+            }
+        };
+
+        self.prove_proposal_encoded(task_id, request, task_id.clone(), encoded.output, worker)
+            .await
+    }
+
     async fn prove_proposal(
         &self,
         task_id: &EngineTaskId,
@@ -941,12 +1021,83 @@ where
         ))))
     }
 
+    async fn prove_proposal_encoded(
+        &self,
+        task_id: &EngineTaskId,
+        request: ProposalTaskRequest,
+        input_task: EngineTaskId,
+        encoded: EncodedGuestInput,
+        worker: &str,
+    ) -> Result<EngineOutput<S::GuestInput>, String> {
+        let progress_task = EngineTask::ProveProposal {
+            request: request.clone(),
+            input_task,
+        };
+        notify_stage_started(
+            self.inner.observer.as_ref(),
+            task_id,
+            &progress_task,
+            worker,
+        )
+        .await;
+        let ctx = self.context_for_proposal(&request);
+        let proof = match self
+            .inner
+            .spec
+            .prover()
+            .prove_encoded_with_observer(
+                encoded,
+                &ctx.config,
+                self.inner.spec.backend(),
+                self.inner.observer.as_ref().map(|observer| {
+                    Arc::new(EngineProgressObserver {
+                        observer: Arc::clone(observer),
+                        task_id: task_id.clone(),
+                        task: progress_task.clone(),
+                    }) as Arc<dyn ProverProgressObserver>
+                }),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        {
+            Ok(proof) => proof,
+            Err(error) => {
+                notify_stage_failed(
+                    self.inner.observer.as_ref(),
+                    task_id,
+                    &progress_task,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        notify_stage_succeeded(
+            self.inner.observer.as_ref(),
+            task_id,
+            &progress_task,
+            &EngineTaskSuccess::Proof {
+                stage: PipelineStage::Prove,
+                proof: proof.clone(),
+            },
+        )
+        .await;
+        Ok(EngineOutput::Proof(Box::new(PipelineStageResult::new(
+            PipelineStage::Prove,
+            proof,
+        ))))
+    }
+
     async fn execute(
         &self,
         task_id: &EngineTaskId,
         task: EngineTask,
+        worker: &str,
     ) -> Result<EngineOutput<S::GuestInput>, String> {
         match task {
+            EngineTask::Proposal { request } => {
+                self.execute_proposal(task_id, request, worker).await
+            }
             EngineTask::Preflight { request } => {
                 let ctx = self.context_for_proposal(&request);
                 let pipeline = Pipeline::new(&self.inner.spec);
@@ -1124,7 +1275,7 @@ mod tests {
     use crate::tasks::{
         AggregationTaskRequest, EngineOutput, ProposalTaskRequest, ProverTaskConfig,
     };
-    use crate::{Engine, EngineTaskId, EngineTaskKey, ProposalStage};
+    use crate::{Engine, EngineTaskId, EngineTaskKey, PROPOSAL_TASK_PRIORITY};
 
     struct MockProver;
 
@@ -1413,6 +1564,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proposal_is_enqueued_as_one_task() -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+        let request = proposal_request(1);
+
+        engine.submit_proposal_proof(request.clone()).await?;
+
+        let task_id = engine.proposal_task_id(request);
+        let view = engine
+            .get(task_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected proposal task view"))?;
+        assert_eq!(view.priority, PROPOSAL_TASK_PRIORITY);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn submit_proposal_proof_runs_dependency_pipeline()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
@@ -1424,9 +1597,6 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
         assert!(engine.run_one("w1").await?);
         assert!(!engine.run_one("w1").await?);
 
@@ -1459,8 +1629,8 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
-        let first = engine.proposal_task_id(proposal_request(1), ProposalStage::Prove);
-        let second = engine.proposal_task_id(proposal_request(2), ProposalStage::Prove);
+        let first = engine.proposal_task_id(proposal_request(1));
+        let second = engine.proposal_task_id(proposal_request(2));
         let aggregate_id = engine
             .submit_aggregation_proof(vec![first.clone(), second.clone()])
             .await?;
@@ -1485,7 +1655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_accepts_single_prove_task()
+    async fn submit_aggregation_proof_accepts_single_proposal_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -1494,7 +1664,7 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
-        let proof_task = engine.proposal_task_id(proposal_request(1), ProposalStage::Prove);
+        let proof_task = engine.proposal_task_id(proposal_request(1));
         let aggregate_id = engine
             .submit_aggregation_proof(vec![proof_task.clone()])
             .await?;
@@ -1540,7 +1710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_aggregation_proof_rejects_non_prove_task()
+    async fn submit_aggregation_proof_rejects_wrong_pipeline_proposal_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -1549,27 +1719,20 @@ mod tests {
             Engine::<TestSpec<MockProver>>::default_scheduler_config(),
         );
 
+        let other_pipeline_task = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: raiko2_pipeline::PipelineKey::ShastaSp1,
+            request: proposal_request(1),
+        });
         let err = engine
-            .submit_aggregation_proof(vec![
-                engine.proposal_task_id(proposal_request(1), ProposalStage::Validation),
-            ])
+            .submit_aggregation_proof(vec![other_pipeline_task])
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("proposal prove tasks"));
-
-        let err = engine
-            .submit_aggregation_proof(vec![
-                engine.proposal_task_id(proposal_request(1), ProposalStage::Validation),
-                engine.proposal_task_id(proposal_request(2), ProposalStage::Prove),
-            ])
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("proposal prove tasks"));
+        assert!(err.to_string().contains("proposal tasks in this pipeline"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn submit_proposal_proof_with_dependencies_delays_next_preflight()
+    async fn submit_proposal_proof_with_dependencies_delays_next_proposal()
     -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -1580,8 +1743,7 @@ mod tests {
 
         let first_prove = engine.submit_proposal_proof(proposal_request(1)).await?;
         let second_request = proposal_request(2);
-        let second_preflight =
-            engine.proposal_task_id(second_request.clone(), ProposalStage::Preflight);
+        let second_proposal = engine.proposal_task_id(second_request.clone());
         engine
             .submit_proposal_proof_with_dependencies(second_request, vec![first_prove])
             .await?;
@@ -1592,13 +1754,10 @@ mod tests {
             .next_ready("w1")
             .await?
             .ok_or_else(|| std::io::Error::other("expected ready task"))?;
-        assert_eq!(
-            ready.id,
-            engine.proposal_task_id(proposal_request(1), ProposalStage::Preflight)
-        );
+        assert_eq!(ready.id, engine.proposal_task_id(proposal_request(1)));
 
         let second_view = engine
-            .get(second_preflight)
+            .get(second_proposal)
             .await?
             .ok_or_else(|| std::io::Error::other("expected second task view"))?;
         assert!(matches!(second_view.state, TaskState::Pending { .. }));
@@ -1622,9 +1781,6 @@ mod tests {
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
         assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
 
         let view = engine
             .get(job_id)
@@ -1636,7 +1792,8 @@ mod tests {
 
     #[cfg(feature = "boundless")]
     #[tokio::test]
-    async fn submitted_stage_tasks_disable_queue_retry() -> Result<(), Box<dyn std::error::Error>> {
+    async fn submitted_proposal_and_aggregate_tasks_disable_queue_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(45),
             task_timeout: Duration::from_secs(300),
@@ -1646,79 +1803,21 @@ mod tests {
             },
         };
         let engine = boundless_test_engine(scheduler_config.clone());
-        let local_stage_policy = raiko2_queue::TaskExecutionPolicy {
-            lease_duration: scheduler_config.lease_duration,
-            retry: RetryPolicy::None,
-        };
-        let remote_stage_policy = raiko2_queue::TaskExecutionPolicy {
+        let task_policy = raiko2_queue::TaskExecutionPolicy {
             lease_duration: scheduler_config.lease_duration,
             retry: RetryPolicy::None,
         };
         let request = proposal_request(9);
-        let prove_id = engine.submit_proposal_proof(request.clone()).await?;
+        let proposal_id = engine.submit_proposal_proof(request.clone()).await?;
 
-        let preflight = engine
+        let proposal = engine
             .inner
             .scheduler
             .next_ready("w1")
             .await?
-            .ok_or_else(|| std::io::Error::other("expected preflight lease"))?;
-        assert_eq!(preflight.execution_policy, local_stage_policy);
-        engine
-            .inner
-            .scheduler
-            .complete(
-                preflight,
-                Ok(EngineOutput::GuestInput(Box::new(
-                    PipelineStageResult::new(PipelineStage::Preflight, GuestInput::default()),
-                ))),
-            )
-            .await?;
-
-        let validation = engine
-            .inner
-            .scheduler
-            .next_ready("w1")
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected validation lease"))?;
-        assert_eq!(validation.execution_policy, local_stage_policy);
-        engine
-            .inner
-            .scheduler
-            .complete(
-                validation,
-                Ok(EngineOutput::GuestInput(Box::new(
-                    PipelineStageResult::new(PipelineStage::Validation, GuestInput::default()),
-                ))),
-            )
-            .await?;
-
-        let encode = engine
-            .inner
-            .scheduler
-            .next_ready("w1")
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected encode lease"))?;
-        assert_eq!(encode.execution_policy, local_stage_policy);
-        engine
-            .inner
-            .scheduler
-            .complete(
-                encode,
-                Ok(EngineOutput::EncodedInput(Box::new(
-                    PipelineStageResult::new(PipelineStage::Encode, Bytes::from_static(&[1])),
-                ))),
-            )
-            .await?;
-
-        let prove = engine
-            .inner
-            .scheduler
-            .next_ready("w1")
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected prove lease"))?;
-        assert_eq!(prove.id, prove_id);
-        assert_eq!(prove.execution_policy, remote_stage_policy);
+            .ok_or_else(|| std::io::Error::other("expected proposal lease"))?;
+        assert_eq!(proposal.id, proposal_id);
+        assert_eq!(proposal.execution_policy, task_policy);
 
         let aggregate_id = engine
             .submit_aggregation_proof_from_proofs(
@@ -1733,7 +1832,7 @@ mod tests {
             .await?
             .ok_or_else(|| std::io::Error::other("expected aggregate lease"))?;
         assert_eq!(aggregate.id, aggregate_id);
-        assert_eq!(aggregate.execution_policy, remote_stage_policy);
+        assert_eq!(aggregate.execution_policy, task_policy);
         Ok(())
     }
 
@@ -1757,9 +1856,6 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
         assert!(engine.run_one("w1").await?);
         assert!(!engine.run_one("w1").await?);
 
@@ -1786,9 +1882,6 @@ mod tests {
         );
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
         assert!(engine.run_one("w1").await?);
 
         let view = engine
@@ -1823,10 +1916,6 @@ mod tests {
         );
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-        assert!(engine.run_one("w1").await?);
-
         let worker_engine = engine.clone();
         let handle = tokio::spawn(async move { worker_engine.run_one("w1").await });
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1847,9 +1936,9 @@ mod tests {
 
     #[tokio::test]
     async fn validate_requires_preflight_output_stage() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey};
         use raiko2_pipeline::{PipelineStage, PipelineStageResult};
-        use raiko2_queue::{NewTask, Priority};
+        use raiko2_queue::NewTask;
 
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -1863,7 +1952,6 @@ mod tests {
         let preflight_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
             request: request.clone(),
-            stage: ProposalStage::Preflight,
         });
 
         // Manually submit and complete a preflight task with WRONG stage output (e.g., Validation)
@@ -1873,7 +1961,7 @@ mod tests {
             .submit(
                 preflight_id.clone(),
                 NewTask {
-                    priority: Priority::Low,
+                    priority: PROPOSAL_TASK_PRIORITY,
                     payload: EngineTask::Preflight {
                         request: request.clone(),
                     },
@@ -1907,12 +1995,12 @@ mod tests {
                 &EngineTaskId::new(EngineTaskKey::Proposal {
                     pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
                     request: request.clone(),
-                    stage: ProposalStage::Validation,
                 }),
                 EngineTask::Validate {
                     request,
                     preflight_task: preflight_id,
                 },
+                "w1",
             )
             .await;
 
@@ -1926,9 +2014,9 @@ mod tests {
 
     #[tokio::test]
     async fn encode_requires_validated_guest_input() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey, ProposalStage};
+        use crate::tasks::{EngineTask, EngineTaskId, EngineTaskKey};
         use raiko2_pipeline::{PipelineStage, PipelineStageResult};
-        use raiko2_queue::{NewTask, Priority};
+        use raiko2_queue::NewTask;
 
         let engine = Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver),
@@ -1942,7 +2030,6 @@ mod tests {
         let validation_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
             request: request.clone(),
-            stage: ProposalStage::Validation,
         });
 
         // Manually submit and complete a validation task with WRONG stage output (e.g., Preflight)
@@ -1952,13 +2039,12 @@ mod tests {
             .submit(
                 validation_id.clone(),
                 NewTask {
-                    priority: Priority::Low,
+                    priority: PROPOSAL_TASK_PRIORITY,
                     payload: EngineTask::Validate {
                         request: request.clone(),
                         preflight_task: EngineTaskId::new(EngineTaskKey::Proposal {
                             pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
                             request: request.clone(),
-                            stage: ProposalStage::Preflight,
                         }),
                     },
                 },
@@ -1991,12 +2077,12 @@ mod tests {
                 &EngineTaskId::new(EngineTaskKey::Proposal {
                     pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
                     request: request.clone(),
-                    stage: ProposalStage::Encode,
                 }),
                 EngineTask::Encode {
                     request,
                     input_task: validation_id,
                 },
+                "w1",
             )
             .await;
 

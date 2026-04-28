@@ -197,6 +197,8 @@ struct TaskRecord<P, O, Id> {
     execution_policy: TaskExecutionPolicy,
 }
 
+type TakenReadyTask<P> = (P, Priority, u32, TaskExecutionPolicy, u64);
+
 enum DependencyInsertState<Id> {
     Pending {
         remaining: usize,
@@ -297,10 +299,65 @@ where
     Id: ReadyQueueSort,
 {
     match priority {
-        Priority::High => inner.ready_high.push_back(id),
+        Priority::High => insert_ready_sorted(&mut inner.ready_high, id),
         Priority::Medium => insert_ready_sorted(&mut inner.ready_med, id),
         Priority::Low => insert_ready_sorted(&mut inner.ready_low, id),
     }
+}
+
+fn take_ready_locked<P, O, Id>(
+    inner: &mut Inner<P, O, Id>,
+    lease: Duration,
+    id: &TaskId<Id>,
+    worker: &str,
+    task_timeout: Duration,
+) -> StoreResult<Option<TakenReadyTask<P>>>
+where
+    P: Clone,
+    Id: Clone + Eq + Hash,
+{
+    let (payload, deadline_at_ms, now_ms) = {
+        let Some(record) = inner.tasks.get_mut(id) else {
+            return Ok(None);
+        };
+        if !matches!(record.state, TaskState::Ready) {
+            return Ok(None);
+        }
+        let Some(payload) = record.payload.as_ref() else {
+            return Ok(None);
+        };
+        let payload = payload.clone();
+        let now_ms = now_millis();
+        let task_timeout_ms = duration_millis_saturating(task_timeout);
+        let deadline_at_ms = *record
+            .deadline_at_ms
+            .get_or_insert_with(|| now_ms.saturating_add(task_timeout_ms));
+        (payload, deadline_at_ms, now_ms)
+    };
+
+    let lease_sequence = next_sequence(inner);
+    let record = inner
+        .tasks
+        .get_mut(id)
+        .ok_or_else(|| TaskStoreError::corrupt_msg("ready task disappeared"))?;
+    record.attempt = record.attempt.saturating_add(1);
+    let attempt = record.attempt;
+    record.state = TaskState::Running {
+        worker: worker.to_string(),
+        attempt,
+    };
+    record.lease_sequence = lease_sequence;
+    let lease_duration = record.execution_policy.lease_duration.max(lease);
+    let lease_ms =
+        u64::try_from(lease_duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
+    record.lease_until_ms = Some(now_ms.saturating_add(lease_ms));
+    Ok(Some((
+        payload,
+        record.priority,
+        attempt,
+        record.execution_policy.clone(),
+        deadline_at_ms,
+    )))
 }
 
 fn remove_dependent_edges<Id>(
@@ -607,48 +664,7 @@ where
         task_timeout: Duration,
     ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>> {
         let mut g = self.inner.lock().await;
-        let (payload, deadline_at_ms, now_ms) = {
-            let Some(record) = g.tasks.get_mut(id) else {
-                return Ok(None);
-            };
-            if !matches!(record.state, TaskState::Ready) {
-                return Ok(None);
-            }
-            let Some(payload) = record.payload.as_ref() else {
-                return Ok(None);
-            };
-            let payload = payload.clone();
-            let now_ms = now_millis();
-            let task_timeout_ms = duration_millis_saturating(task_timeout);
-            let deadline_at_ms = *record
-                .deadline_at_ms
-                .get_or_insert_with(|| now_ms.saturating_add(task_timeout_ms));
-            (payload, deadline_at_ms, now_ms)
-        };
-
-        let lease_sequence = next_sequence(&mut g);
-        let record = g
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| TaskStoreError::corrupt_msg("ready task disappeared"))?;
-        record.attempt = record.attempt.saturating_add(1);
-        let attempt = record.attempt;
-        record.state = TaskState::Running {
-            worker: worker.to_string(),
-            attempt,
-        };
-        record.lease_sequence = lease_sequence;
-        let lease_duration = record.execution_policy.lease_duration.max(self.lease);
-        let lease_ms =
-            u64::try_from(lease_duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX);
-        record.lease_until_ms = Some(now_ms.saturating_add(lease_ms));
-        Ok(Some((
-            payload,
-            record.priority,
-            attempt,
-            record.execution_policy.clone(),
-            deadline_at_ms,
-        )))
+        take_ready_locked(&mut g, self.lease, id, worker, task_timeout)
     }
 
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {

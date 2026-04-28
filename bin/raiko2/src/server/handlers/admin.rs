@@ -74,8 +74,37 @@ fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError
     else {
         return Err(ApiError::unauthorized("missing admin API key"));
     };
-    if actual_key != expected_key {
+    if !constant_time_eq(actual_key, expected_key) {
         return Err(ApiError::unauthorized("invalid admin API key"));
     }
     Ok(())
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut diff = left.len() ^ right.len();
+
+    for idx in 0..left.len().max(right.len()) {
+        let left_byte = left.get(idx).copied().unwrap_or_default();
+        let right_byte = right.get(idx).copied().unwrap_or_default();
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+
+    diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_matches_string_equality() {
+        assert!(constant_time_eq("secret-admin-key", "secret-admin-key"));
+        assert!(!constant_time_eq("secret-admin-key", "secret-admin-kex"));
+        assert!(!constant_time_eq(
+            "secret-admin-key",
+            "secret-admin-key-extra"
+        ));
+    }
 }

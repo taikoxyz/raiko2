@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::server::state::{EngineHandle, PipelineFactory};
 use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
-use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
+use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
 use raiko2_pipeline::PipelineKey;
 use raiko2_queue::{TaskStoreError, encode_task_id};
 use raiko2_runtime::{ExpiredTaskCursor, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
@@ -313,24 +313,11 @@ fn record_matches_network_pair(record: &RuntimeTaskRecord, network_pair: &str) -
 }
 
 pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskId> {
-    let EngineTaskKey::Proposal {
-        pipeline,
-        request,
-        stage: _,
-    } = &task_id.0
-    else {
+    if !matches!(task_id.0, EngineTaskKey::Proposal { .. }) {
         return Vec::new();
-    };
+    }
 
-    [
-        ProposalStage::Preflight,
-        ProposalStage::Validation,
-        ProposalStage::Encode,
-        ProposalStage::Prove,
-    ]
-    .into_iter()
-    .map(|stage| proposal_stage_task_id(*pipeline, request.clone(), stage))
-    .collect()
+    vec![task_id.clone()]
 }
 
 fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
@@ -376,15 +363,13 @@ async fn cleanup_expired_root_task(
     Ok(outcome)
 }
 
-pub(crate) const fn proposal_stage_task_id(
+pub(crate) const fn proposal_task_id(
     pipeline_key: raiko2_pipeline::PipelineKey,
     request: ProposalTaskRequest,
-    stage: ProposalStage,
 ) -> EngineTaskId {
     EngineTaskId::new(EngineTaskKey::Proposal {
         pipeline: pipeline_key,
         request,
-        stage,
     })
 }
 
@@ -403,15 +388,15 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_stage_task_id,
-        proposal_task_chain_ids, run_runtime_cleanup_pass,
+        ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_task_chain_ids,
+        proposal_task_id, run_runtime_cleanup_pass,
     };
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
     use anyhow::{Context, Result};
     use raiko2_engine::{
-        AggregationInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalStage,
-        ProposalTaskRequest, ProverTaskConfig,
+        AggregationInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalTaskRequest,
+        ProverTaskConfig,
     };
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::{Proof, ProofType};
@@ -542,7 +527,7 @@ mod tests {
                 scanned: 1,
                 expired: 1,
                 removed_roots: 1,
-                skipped_shared_children: 4,
+                skipped_shared_children: 1,
                 retained_failures: 0,
             }
         );
@@ -839,8 +824,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let task_id =
-            proposal_stage_task_id(PipelineKey::ShastaRisc0, request, ProposalStage::Prove);
+        let task_id = proposal_task_id(PipelineKey::ShastaRisc0, request);
         encode_task_id(&task_id).context("encode proposal task id")
     }
 

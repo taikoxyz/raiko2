@@ -27,8 +27,16 @@ pub(crate) struct TaskMetadata {
     pub(crate) aggregate_task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) aggregate_request: Option<AggregationTaskRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) aggregate_input_artifacts: Vec<AggregateInputProofArtifact>,
     #[serde(default)]
     pub(crate) runtime: RuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AggregateInputProofArtifact {
+    pub(crate) proof_ref: String,
+    pub(crate) proof_path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -266,6 +274,17 @@ impl ProposalTask {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProofArtifactKind {
+    Proposal,
+    Aggregate,
+}
+
+pub(crate) struct ProofArtifactRefs {
+    pub(crate) refs: Vec<String>,
+    pub(crate) kind: ProofArtifactKind,
+}
+
 pub(crate) fn proposal_task_ref(
     pipeline_key: PipelineKey,
     request: &ProposalTaskRequest,
@@ -278,6 +297,61 @@ pub(crate) fn aggregate_task_ref(
     request: &AggregationTaskRequest,
 ) -> String {
     stable_task_ref("aggregate", pipeline_key, request)
+}
+
+pub(crate) fn aggregate_input_proof_ref(request_fingerprint: &str, index: usize) -> String {
+    let payload = serde_json::json!({
+        "kind": "aggregate_input",
+        "request_fingerprint": request_fingerprint,
+        "index": index,
+    });
+    stable_ref("proof", &payload)
+}
+
+pub(crate) fn proposal_proof_artifact_refs(
+    pipeline_key: PipelineKey,
+    proposal: &ProposalTask,
+) -> Vec<String> {
+    let mut refs = proposal
+        .request
+        .as_ref()
+        .map(|request| vec![proposal_task_ref(pipeline_key, request)])
+        .unwrap_or_default();
+    if !refs.contains(&proposal.task_id) {
+        refs.push(proposal.task_id.clone());
+    }
+    refs
+}
+
+pub(crate) fn root_proof_artifact_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Option<ProofArtifactRefs> {
+    if let Some(request) = metadata.aggregate_request.as_ref() {
+        let mut refs = vec![aggregate_task_ref(pipeline_key, request)];
+        if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref()
+            && !refs.contains(legacy_ref)
+        {
+            refs.push(legacy_ref.clone());
+        }
+        return Some(ProofArtifactRefs {
+            refs,
+            kind: ProofArtifactKind::Aggregate,
+        });
+    }
+    if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref() {
+        return Some(ProofArtifactRefs {
+            refs: vec![legacy_ref.clone()],
+            kind: ProofArtifactKind::Aggregate,
+        });
+    }
+    match metadata.proposals.as_slice() {
+        [proposal] => Some(ProofArtifactRefs {
+            refs: proposal_proof_artifact_refs(pipeline_key, proposal),
+            kind: ProofArtifactKind::Proposal,
+        }),
+        _ => None,
+    }
 }
 
 pub(crate) fn stage_task_ref(task_id: &EngineTaskId) -> String {
@@ -465,6 +539,7 @@ mod tests {
             proposals: Vec::new(),
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         let json = serde_json::to_value(&metadata).expect("serialize metadata");
@@ -485,6 +560,7 @@ mod tests {
             proposals: Vec::new(),
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
 

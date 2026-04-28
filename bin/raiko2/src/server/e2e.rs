@@ -28,11 +28,12 @@ use tower::ServiceExt;
 
 use super::app;
 #[cfg(feature = "boundless")]
-use super::fixture::risc0_boundless_fixture_engine;
+use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_native_fixture_engine, app_with_observed_native_fixture_engine,
-    base_config, native_fixture_engine, risc0_fixture_engine, sp1_fixture_engine,
-    spawn_chain_id_rpc, unique_runtime_root,
+    app_with_observed_sp1_fixture_engine, base_config, native_fixture_engine, risc0_fixture_engine,
+    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine,
+    unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
@@ -232,14 +233,7 @@ fn sp1_fixture_app() -> (
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
-    let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaSp1,
-        engine.clone(),
-    );
-    (app::build_router(state), engine)
+    app_with_observed_sp1_fixture_engine(config)
 }
 
 #[cfg(feature = "boundless")]
@@ -251,14 +245,7 @@ fn risc0_boundless_fixture_app() -> (
     config.prover.guest_system = GuestSystem::Risc0;
     config.prover.runner = RunnerKind::Boundless;
 
-    let engine = risc0_boundless_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaRisc0Boundless,
-        engine.clone(),
-    );
-    (app::build_router(state), engine)
+    app_with_observed_risc0_boundless_fixture_engine(config)
 }
 
 fn sp1_external_proof(proof_hex: String) -> Value {
@@ -631,8 +618,7 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
 #[tokio::test]
 async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_native_fixture_engine(config);
 
     let (status, res) = post_json(
         &app,
@@ -854,8 +840,7 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_native_fixture_engine(config);
     let payload = json!({
         "proposals": [{
             "proposal_id": 3,
@@ -941,6 +926,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         }],
         aggregate_task_id: None,
         aggregate_request: None,
+        aggregate_input_artifacts: Vec::new(),
         runtime: RuntimeMetadata::default(),
     };
     let canonical_proposals = vec![json!({
@@ -1298,13 +1284,7 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
         probability: 1.0,
         per_day: 0,
     });
-    let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaSp1,
-        engine.clone(),
-    );
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
     let app = app::build_router(state);
 
     let (status, res) = post_json(
@@ -1417,13 +1397,7 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
 async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let mut config = base_config();
     config.server.admin_api_key = Some("secret-admin-key".to_string());
-    let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaSp1,
-        engine.clone(),
-    );
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
     let app = app::build_router(state);
 
     let (status, res) = get_json(&app, "/admin/ballot").await;
@@ -1506,13 +1480,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
-    let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaSp1,
-        engine.clone(),
-    );
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
     let app = app::build_router(state);
 
     let (status, res) = post_json(
@@ -1651,7 +1619,7 @@ async fn e2e_batch_single_proof_aggregate_sp1_completes_from_fixture() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["status"], "completed");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
-    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation", "{res}");
 }
 
 #[tokio::test]
@@ -1661,13 +1629,7 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
 
-    let engine = sp1_fixture_engine(json!({}));
-    let state = app_with_engine(
-        config,
-        "taiko_dev/ethereum",
-        PipelineKey::ShastaSp1,
-        engine.clone(),
-    );
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
     let proposal_request = ProposalTaskRequest {
         proposal_id: 3,
         l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 3, end: 3 }),
@@ -1729,8 +1691,14 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
     assert_eq!(res["data"]["proposals"][0]["proof_ref"], proof_ref);
     assert_eq!(res["data"]["proposals"][0]["proof_path"], proof_path);
-    assert!(res["data"]["proof_ref"].is_null(), "{res}");
-    assert!(res["data"]["proof_path"].is_null(), "{res}");
+    assert_eq!(
+        res["data"]["proof_ref"],
+        res["data"]["aggregate"]["proof_ref"]
+    );
+    assert_eq!(
+        res["data"]["proof_path"],
+        res["data"]["aggregate"]["proof_path"]
+    );
 }
 
 #[tokio::test]
@@ -2160,8 +2128,7 @@ async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
 #[tokio::test]
 async fn e2e_report_and_list_expose_root_tasks_only() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_native_fixture_engine(config);
 
     let payload = |proposal_id| {
         json!({
@@ -2602,6 +2569,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         }],
         aggregate_task_id: None,
         aggregate_request: None,
+        aggregate_input_artifacts: Vec::new(),
         runtime: RuntimeMetadata {
             active_stage: Some("prove".to_string()),
             last_event: Some("submission_registered".to_string()),
@@ -2751,6 +2719,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         }],
         aggregate_task_id: None,
         aggregate_request: None,
+        aggregate_input_artifacts: Vec::new(),
         runtime: RuntimeMetadata {
             last_event: Some("completed".to_string()),
             ..Default::default()

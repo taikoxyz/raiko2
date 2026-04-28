@@ -49,7 +49,7 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::{TaskMetadata, aggregate_task_ref, proposal_task_ref};
+use super::task_metadata::{ProofArtifactKind, TaskMetadata, root_proof_artifact_refs};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -180,7 +180,7 @@ async fn restore_proof_artifacts_from_runtime_task(
     };
     let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
         .context("failed to parse runtime task metadata for proof artifact restore")?;
-    let Some(restored_refs) = persisted_root_proof_refs(&metadata, record.pipeline_key) else {
+    let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
         return Ok(());
     };
     let proof_bytes = fs::read(proof_path)
@@ -189,7 +189,7 @@ async fn restore_proof_artifacts_from_runtime_task(
     let proof: Proof = serde_json::from_slice(&proof_bytes)
         .with_context(|| format!("failed to parse proof file {proof_path}"))?;
 
-    if restored_refs.kind == RestoredProofKind::Proposal
+    if restored_refs.kind == ProofArtifactKind::Proposal
         && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
     {
         warn!(
@@ -217,58 +217,6 @@ async fn restore_proof_artifacts_from_runtime_task(
             .await?;
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestoredProofKind {
-    Proposal,
-    Aggregate,
-}
-
-struct RestoredProofRefs {
-    refs: Vec<String>,
-    kind: RestoredProofKind,
-}
-
-fn persisted_root_proof_refs(
-    metadata: &TaskMetadata,
-    pipeline_key: PipelineKey,
-) -> Option<RestoredProofRefs> {
-    if let Some(request) = metadata.aggregate_request.as_ref() {
-        let mut refs = vec![aggregate_task_ref(pipeline_key, request)];
-        if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref()
-            && !refs.contains(legacy_ref)
-        {
-            refs.push(legacy_ref.clone());
-        }
-        return Some(RestoredProofRefs {
-            refs,
-            kind: RestoredProofKind::Aggregate,
-        });
-    }
-    if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref() {
-        return Some(RestoredProofRefs {
-            refs: vec![legacy_ref.clone()],
-            kind: RestoredProofKind::Aggregate,
-        });
-    }
-    match metadata.proposals.as_slice() {
-        [proposal] => {
-            let mut refs = proposal
-                .request
-                .as_ref()
-                .map(|request| vec![proposal_task_ref(pipeline_key, request)])
-                .unwrap_or_default();
-            if !refs.contains(&proposal.task_id) {
-                refs.push(proposal.task_id.clone());
-            }
-            Some(RestoredProofRefs {
-                refs,
-                kind: RestoredProofKind::Proposal,
-            })
-        }
-        _ => None,
-    }
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
@@ -563,7 +511,7 @@ async fn build_boundless_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata};
+    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, proposal_task_ref};
     use raiko2_engine::{ProposalStage, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
     use raiko2_queue::{TaskId, encode_task_id};
@@ -633,6 +581,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         runtime

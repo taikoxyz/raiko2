@@ -45,15 +45,16 @@ pub struct AggregationTaskRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationSource {
-    ProofTasks(Vec<EngineTaskId>),
-    Proofs(Vec<Proof>),
-    Inputs(Vec<AggregationInput>),
+    Inputs(Vec<AggregateProofInput>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AggregationInput {
-    ProofTask(Box<EngineTaskId>),
+pub enum AggregateProofInput {
     ProofArtifact(ProofArtifactRef),
+    PendingProofArtifact {
+        artifact: ProofArtifactRef,
+        dependency: Box<EngineTaskId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +176,14 @@ mod tests {
             prover: None,
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
+        }
+    }
+
+    fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
+        ProofArtifactRef {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: proof_ref.to_string(),
+            proof_path: format!("/tmp/{proof_ref}.json"),
         }
     }
 
@@ -325,7 +334,16 @@ mod tests {
                             proposal_ids: vec![1, 2],
                             prover_config: ProverTaskConfig::default(),
                         },
-                        source: AggregationSource::ProofTasks(vec![a1.clone(), a2.clone()]),
+                        source: AggregationSource::Inputs(vec![
+                            AggregateProofInput::PendingProofArtifact {
+                                artifact: proof_artifact("a1"),
+                                dependency: Box::new(a1.clone()),
+                            },
+                            AggregateProofInput::PendingProofArtifact {
+                                artifact: proof_artifact("a2"),
+                                dependency: Box::new(a2.clone()),
+                            },
+                        ]),
                     },
                 },
                 vec![a1, a2],
@@ -393,7 +411,9 @@ mod tests {
                             proposal_ids: vec![2],
                             prover_config: ProverTaskConfig::default(),
                         },
-                        source: AggregationSource::Proofs(vec![Proof::default()]),
+                        source: AggregationSource::Inputs(vec![
+                            AggregateProofInput::ProofArtifact(proof_artifact("agg-2-input")),
+                        ]),
                     },
                 },
                 vec![],

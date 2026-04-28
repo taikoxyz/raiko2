@@ -395,11 +395,11 @@ mod tests {
     use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
     use anyhow::{Context, Result};
     use raiko2_engine::{
-        AggregationInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProposalTaskRequest,
-        ProverTaskConfig,
+        AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
+        ProposalTaskRequest, ProverTaskConfig,
     };
     use raiko2_pipeline::PipelineKey;
-    use raiko2_primitives::{Proof, ProofType};
+    use raiko2_primitives::ProofType;
     use raiko2_queue::{TaskStoreError, decode_task_id, encode_task_id};
     use raiko2_runtime::{RunnerStatus, RuntimeManager, TaskRegistration};
     use std::collections::HashSet;
@@ -444,18 +444,10 @@ mod tests {
             Box::pin(async { panic!("unexpected proposal submission") })
         }
 
-        fn submit_aggregation_proof_from_proofs(
-            &self,
-            _request: AggregationTaskRequest,
-            _proofs: Vec<Proof>,
-        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-            Box::pin(async { panic!("unexpected aggregation submission from proofs") })
-        }
-
         fn submit_aggregation_proof_from_inputs(
             &self,
             _request: AggregationTaskRequest,
-            _inputs: Vec<AggregationInput>,
+            _inputs: Vec<AggregateProofInput>,
         ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
             Box::pin(async { panic!("unexpected aggregation submission from inputs") })
         }
@@ -808,6 +800,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         }
     }

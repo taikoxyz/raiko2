@@ -16,8 +16,9 @@ pub mod tasks;
 pub mod worker;
 
 pub use tasks::{
-    AggregationInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput, EngineTaskId,
-    EngineTaskKey, ProofArtifactRef, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
+    AggregateProofInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput,
+    EngineTaskId, EngineTaskKey, ProofArtifactRef, ProposalStage, ProposalTaskRequest,
+    ProverTaskConfig,
 };
 
 use std::sync::Arc;
@@ -360,109 +361,11 @@ where
     /// # Errors
     ///
     /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
-    /// task id does not point to a proposal prove stage in this pipeline.
-    pub async fn submit_aggregation_proof(
-        &self,
-        proof_tasks: Vec<EngineTaskId>,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        if proof_tasks.is_empty() {
-            return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 1 proof task",
-            ));
-        }
-
-        let mut proposal_ids = Vec::with_capacity(proof_tasks.len());
-        for proof_task in &proof_tasks {
-            match &proof_task.0 {
-                EngineTaskKey::Proposal { pipeline, request }
-                    if *pipeline == self.inner.spec.pipeline_key() =>
-                {
-                    proposal_ids.push(request.proposal_id);
-                }
-                EngineTaskKey::Proposal { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input must reference proposal tasks in this pipeline",
-                    ));
-                }
-                EngineTaskKey::Aggregate { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input cannot reference an aggregate task",
-                    ));
-                }
-            }
-        }
-
-        let request = AggregationTaskRequest {
-            request_id: proposal_ids
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join("-"),
-            proposal_ids,
-            prover_config: ProverTaskConfig::default(),
-        };
-        self.submit_aggregation_proof_from_tasks(request, proof_tasks)
-            .await
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
-    /// task id does not point to a proposal prove stage in this pipeline.
-    pub async fn submit_aggregation_proof_from_tasks(
-        &self,
-        request: AggregationTaskRequest,
-        proof_tasks: Vec<EngineTaskId>,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        if proof_tasks.is_empty() {
-            return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 1 proof task",
-            ));
-        }
-
-        for proof_task in &proof_tasks {
-            match &proof_task.0 {
-                EngineTaskKey::Proposal { pipeline, .. }
-                    if *pipeline == self.inner.spec.pipeline_key() => {}
-                EngineTaskKey::Proposal { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input must reference proposal tasks in this pipeline",
-                    ));
-                }
-                EngineTaskKey::Aggregate { .. } => {
-                    return Err(TaskStoreError::corrupt_msg(
-                        "aggregation input cannot reference an aggregate task",
-                    ));
-                }
-            }
-        }
-
-        let aggregate_id = self.aggregate_task_id(request.clone());
-        self.inner
-            .scheduler
-            .submit_with_execution_policy(
-                aggregate_id,
-                NewTask {
-                    priority: AGGREGATION_TASK_PRIORITY,
-                    payload: EngineTask::Aggregate {
-                        request,
-                        source: AggregationSource::ProofTasks(proof_tasks.clone()),
-                    },
-                },
-                proof_tasks,
-                self.externally_stateful_stage_execution_policy(),
-            )
-            .await
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot enqueue the aggregation task or if any proof
     /// task input does not point to a proposal prove stage in this pipeline.
     pub async fn submit_aggregation_proof_from_inputs(
         &self,
         request: AggregationTaskRequest,
-        inputs: Vec<AggregationInput>,
+        inputs: Vec<AggregateProofInput>,
     ) -> Result<EngineTaskId, TaskStoreError> {
         if inputs.is_empty() {
             return Err(TaskStoreError::corrupt_msg(
@@ -472,8 +375,12 @@ where
 
         let mut proof_tasks = Vec::new();
         for input in &inputs {
-            let AggregationInput::ProofTask(proof_task) = input else {
-                continue;
+            let proof_task = match input {
+                AggregateProofInput::PendingProofArtifact {
+                    dependency: proof_task,
+                    ..
+                } => proof_task,
+                AggregateProofInput::ProofArtifact(_) => continue,
             };
             match &proof_task.0 {
                 EngineTaskKey::Proposal { pipeline, .. }
@@ -507,39 +414,6 @@ where
                     },
                 },
                 proof_tasks,
-                self.externally_stateful_stage_execution_policy(),
-            )
-            .await
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the task store cannot enqueue the aggregation task or if the proof set
-    /// is invalid.
-    pub async fn submit_aggregation_proof_from_proofs(
-        &self,
-        request: AggregationTaskRequest,
-        proofs: Vec<Proof>,
-    ) -> Result<EngineTaskId, TaskStoreError> {
-        if proofs.is_empty() {
-            return Err(TaskStoreError::corrupt_msg(
-                "aggregation requires at least 1 proof",
-            ));
-        }
-
-        let aggregate_id = self.aggregate_task_id(request.clone());
-        self.inner
-            .scheduler
-            .submit_with_execution_policy(
-                aggregate_id,
-                NewTask {
-                    priority: AGGREGATION_TASK_PRIORITY,
-                    payload: EngineTask::Aggregate {
-                        request,
-                        source: AggregationSource::Proofs(proofs),
-                    },
-                },
-                Vec::new(),
                 self.externally_stateful_stage_execution_policy(),
             )
             .await
@@ -809,26 +683,6 @@ where
         }
     }
 
-    async fn get_proof(&self, id: EngineTaskId) -> Result<raiko2_primitives::Proof, String> {
-        let view = self
-            .get_view_or_err(id, || "missing dependency proof task".to_string())
-            .await?;
-
-        match view.state {
-            TaskState::Succeeded {
-                output: EngineOutput::Proof(proof),
-            } => {
-                if proof.stage == PipelineStage::Prove {
-                    Ok(proof.output)
-                } else {
-                    Err("dependency task did not produce proposal proof".to_string())
-                }
-            }
-            TaskState::Succeeded { .. } => Err("dependency task did not produce Proof".to_string()),
-            _ => Err("dependency task not completed".to_string()),
-        }
-    }
-
     async fn get_proof_artifact(
         &self,
         artifact: ProofArtifactRef,
@@ -852,23 +706,13 @@ where
         source: AggregationSource,
     ) -> Result<Vec<raiko2_primitives::Proof>, String> {
         match source {
-            AggregationSource::ProofTasks(proof_tasks) => {
-                let mut proofs = Vec::with_capacity(proof_tasks.len());
-                for proof_task in proof_tasks {
-                    proofs.push(self.get_proof(proof_task).await?);
-                }
-                Ok(proofs)
-            }
-            AggregationSource::Proofs(proofs) => Ok(proofs),
             AggregationSource::Inputs(inputs) => {
                 let mut proofs = Vec::with_capacity(inputs.len());
                 for input in inputs {
                     match input {
-                        AggregationInput::ProofArtifact(artifact) => {
+                        AggregateProofInput::ProofArtifact(artifact)
+                        | AggregateProofInput::PendingProofArtifact { artifact, .. } => {
                             proofs.push(self.get_proof_artifact(artifact).await?);
-                        }
-                        AggregationInput::ProofTask(proof_task) => {
-                            proofs.push(self.get_proof(*proof_task).await?);
                         }
                     }
                 }
@@ -1273,7 +1117,8 @@ mod tests {
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
     use crate::tasks::{
-        AggregationTaskRequest, EngineOutput, ProposalTaskRequest, ProverTaskConfig,
+        AggregateProofInput, AggregationTaskRequest, EngineOutput, ProofArtifactRef,
+        ProposalTaskRequest, ProverTaskConfig,
     };
     use crate::{Engine, EngineTaskId, EngineTaskKey, PROPOSAL_TASK_PRIORITY};
 
@@ -1544,12 +1389,26 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "boundless")]
     fn aggregation_request(request_id: &str) -> AggregationTaskRequest {
         AggregationTaskRequest {
             request_id: request_id.to_string(),
             proposal_ids: vec![1, 2],
             prover_config: ProverTaskConfig::default(),
+        }
+    }
+
+    fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
+        ProofArtifactRef {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: proof_ref.to_string(),
+            proof_path: format!("/tmp/{proof_ref}.json"),
+        }
+    }
+
+    fn pending_proof_input(proof_ref: &str, dependency: EngineTaskId) -> AggregateProofInput {
+        AggregateProofInput::PendingProofArtifact {
+            artifact: proof_artifact(proof_ref),
+            dependency: Box::new(dependency),
         }
     }
 
@@ -1631,8 +1490,15 @@ mod tests {
 
         let first = engine.proposal_task_id(proposal_request(1));
         let second = engine.proposal_task_id(proposal_request(2));
+        let request = aggregation_request("agg-1");
         let aggregate_id = engine
-            .submit_aggregation_proof(vec![first.clone(), second.clone()])
+            .submit_aggregation_proof_from_inputs(
+                request.clone(),
+                vec![
+                    pending_proof_input("proposal-1", first.clone()),
+                    pending_proof_input("proposal-2", second.clone()),
+                ],
+            )
             .await?;
 
         let view = engine
@@ -1644,11 +1510,7 @@ mod tests {
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
                 pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
-                request: AggregationTaskRequest {
-                    request_id: "1-2".to_string(),
-                    proposal_ids: vec![1, 2],
-                    prover_config: ProverTaskConfig::default(),
-                },
+                request,
             })
         );
         Ok(())
@@ -1665,8 +1527,16 @@ mod tests {
         );
 
         let proof_task = engine.proposal_task_id(proposal_request(1));
+        let request = AggregationTaskRequest {
+            request_id: "agg-single".to_string(),
+            proposal_ids: vec![1],
+            prover_config: ProverTaskConfig::default(),
+        };
         let aggregate_id = engine
-            .submit_aggregation_proof(vec![proof_task.clone()])
+            .submit_aggregation_proof_from_inputs(
+                request.clone(),
+                vec![pending_proof_input("proposal-1", proof_task.clone())],
+            )
             .await?;
 
         let view = engine
@@ -1678,11 +1548,7 @@ mod tests {
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
                 pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
-                request: AggregationTaskRequest {
-                    request_id: "1".to_string(),
-                    proposal_ids: vec![1],
-                    prover_config: ProverTaskConfig::default(),
-                },
+                request,
             })
         );
         Ok(())
@@ -1699,12 +1565,12 @@ mod tests {
         );
 
         let err = engine
-            .submit_aggregation_proof(Vec::new())
+            .submit_aggregation_proof_from_inputs(aggregation_request("agg-empty"), Vec::new())
             .await
             .unwrap_err();
         assert!(
             err.to_string()
-                .contains("aggregation requires at least 1 proof task")
+                .contains("aggregation requires at least 1 proof input")
         );
         Ok(())
     }
@@ -1724,7 +1590,10 @@ mod tests {
             request: proposal_request(1),
         });
         let err = engine
-            .submit_aggregation_proof(vec![other_pipeline_task])
+            .submit_aggregation_proof_from_inputs(
+                aggregation_request("agg-wrong-pipeline"),
+                vec![pending_proof_input("proposal-1", other_pipeline_task)],
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("proposal tasks in this pipeline"));
@@ -1820,9 +1689,11 @@ mod tests {
         assert_eq!(proposal.execution_policy, task_policy);
 
         let aggregate_id = engine
-            .submit_aggregation_proof_from_proofs(
+            .submit_aggregation_proof_from_inputs(
                 aggregation_request("agg"),
-                vec![Proof::default()],
+                vec![AggregateProofInput::ProofArtifact(proof_artifact(
+                    "aggregate-input",
+                ))],
             )
             .await?;
         let aggregate = engine

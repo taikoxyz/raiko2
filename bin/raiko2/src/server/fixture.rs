@@ -735,6 +735,74 @@ pub(crate) fn app_with_observed_native_fixture_engine(
     (app::build_router(state), engine)
 }
 
+#[cfg(test)]
+pub(crate) fn state_with_observed_sp1_fixture_engine(
+    config: Config,
+) -> (AppState, Sp1FixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-sp1-runtime"))
+            .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = sp1_fixture_engine_with_observer(json!({}), Some(observer));
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaSp1,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
+    (state, engine)
+}
+
+#[cfg(test)]
+pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, Sp1FixtureEngine) {
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
+    (app::build_router(state), engine)
+}
+
+#[cfg(all(test, feature = "boundless"))]
+pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
+    config: Config,
+) -> (Router, Risc0FixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root(
+            "raiko2-e2e-observed-risc0-boundless-runtime",
+        ))
+        .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = risc0_fixture_engine_for_pipeline(
+        json!({}),
+        PipelineKey::ShastaRisc0Boundless,
+        Some(observer),
+    );
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaRisc0Boundless,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
+    (app::build_router(state), engine)
+}
+
 pub(crate) async fn spawn_chain_id_rpc(
     chain_id: u64,
 ) -> Result<(String, tokio::task::JoinHandle<()>), std::io::Error> {

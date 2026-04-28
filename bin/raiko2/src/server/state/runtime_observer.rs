@@ -968,6 +968,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, request)],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1016,6 +1017,7 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1145,6 +1147,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, &request)],
                     aggregate_task_id: Some(aggregate_ref),
                     aggregate_request: Some(aggregate_request),
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1394,6 +1397,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1495,6 +1499,7 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1617,6 +1622,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1703,6 +1709,7 @@ mod tests {
                     proposals: vec![],
                     aggregate_task_id: Some(task_ref),
                     aggregate_request: Some(aggregate_request.clone()),
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1723,7 +1730,7 @@ mod tests {
                     &aggregate_task_id,
                     &EngineTask::Aggregate {
                         request: aggregate_request.clone(),
-                        source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                        source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
                 .await,
@@ -1735,7 +1742,7 @@ mod tests {
                 &aggregate_task_id,
                 &EngineTask::Aggregate {
                     request: aggregate_request.clone(),
-                    source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                    source: raiko2_engine::AggregationSource::Inputs(vec![]),
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                     provider_request_id: "0xsp1-aggregate".to_string(),
@@ -1754,7 +1761,7 @@ mod tests {
                     &aggregate_task_id,
                     &EngineTask::Aggregate {
                         request: aggregate_request,
-                        source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                        source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
                 .await
@@ -1793,6 +1800,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         metadata.mark_stage_started(&preflight_ref, "preflight", now_ms() - 1_000);

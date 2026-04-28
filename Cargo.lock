@@ -3439,7 +3439,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=0130a6eeae45e4f9ef5b76f9f04363abc858e2f2#0130a6eeae45e4f9ef5b76f9f04363abc858e2f2"
+source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#82720700fdb0e37dad6f21aaa6e9af8ccba7b94b"
 dependencies = [
  "alloy 1.8.3",
  "serde",
@@ -5727,7 +5727,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7092,7 +7092,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -8836,7 +8836,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9020,7 +9020,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10303,7 +10303,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=0130a6eeae45e4f9ef5b76f9f04363abc858e2f2#0130a6eeae45e4f9ef5b76f9f04363abc858e2f2"
+source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#82720700fdb0e37dad6f21aaa6e9af8ccba7b94b"
 dependencies = [
  "alethia-reth-consensus 0.7.1 (git+https://github.com/taikoxyz/alethia-reth?rev=d1e831837fddfe6dbf8f7e43a77488316f1458bc)",
  "alethia-reth-primitives 0.7.1 (git+https://github.com/taikoxyz/alethia-reth?rev=d1e831837fddfe6dbf8f7e43a77488316f1458bc)",
@@ -14702,7 +14702,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -14816,7 +14816,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.7",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -15613,7 +15613,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

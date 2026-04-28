@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=0130a6eeae45e4f9ef5b76f9f04363abc858e2f2#0130a6eeae45e4f9ef5b76f9f04363abc858e2f2"
+source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#82720700fdb0e37dad6f21aaa6e9af8ccba7b94b"
 dependencies = [
  "alethia-reth-consensus 0.7.1 (git+https://github.com/taikoxyz/alethia-reth?rev=d1e831837fddfe6dbf8f7e43a77488316f1458bc)",
  "alethia-reth-primitives 0.7.1 (git+https://github.com/taikoxyz/alethia-reth?rev=d1e831837fddfe6dbf8f7e43a77488316f1458bc)",

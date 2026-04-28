@@ -65,7 +65,7 @@ raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "0130a6eeae45e4f9ef5b76f9f04363abc858e2f2", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", branch = "main", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }

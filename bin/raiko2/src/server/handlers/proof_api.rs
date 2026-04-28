@@ -30,10 +30,10 @@ use super::proof_route::{
     route_for_proof_type,
 };
 use super::proof_types::{
-    AggregateProofRequest, BatchProofType, BatchShastaRequest, CanonicalProposal,
-    HoodiAggregateStatus, HoodiProposalStatus, HoodiRootRuntimeView, HoodiSuccess, HoodiTaskData,
-    HoodiTaskRuntimeView, LegacyProofData, LegacyProofEnvelope, LegacyProofError, LegacyTaskStatus,
-    PruneStatus, PublicProverArgs, RootTaskState, ShastaProposal,
+    AggregateProofRequest, AggregateStatus, ApiOk, BatchProofType, BatchShastaRequest,
+    CanonicalProposal, LegacyProofData, LegacyProofEnvelope, LegacyProofError, LegacyTaskStatus,
+    ProposalStatus, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState, ShastaProposal,
+    TaskData, TaskRuntime,
 };
 use crate::config::ResolvedNetworkPair;
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
@@ -218,11 +218,11 @@ async fn request_aggregation_proof_inner(
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<HoodiSuccess<HoodiTaskData>>, ApiError> {
+) -> Result<Json<ApiOk<TaskData>>, ApiError> {
     let data = load_task_data(&state, &id).await?;
     let lookup = load_task_lookup(&state, &id).await?;
 
-    Ok(Json(HoodiSuccess {
+    Ok(Json(ApiOk {
         status: "ok",
         proof_type: lookup.metadata.proof_type.to_string(),
         data,
@@ -232,7 +232,7 @@ pub async fn get_task(
 pub async fn cancel_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<HoodiSuccess<HoodiTaskData>>, ApiError> {
+) -> Result<Json<ApiOk<TaskData>>, ApiError> {
     let TaskLookup {
         record,
         metadata,
@@ -261,16 +261,12 @@ pub async fn cancel_task(
     get_task(State(state), Path(id)).await
 }
 
-pub async fn report_proofs(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<HoodiTaskData>>, ApiError> {
+pub async fn report_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
     let tasks = load_all_task_data(&state).await?;
     Ok(Json(tasks))
 }
 
-pub async fn list_proofs(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<HoodiTaskData>>, ApiError> {
+pub async fn list_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
     let tasks = load_all_task_data(&state)
         .await?
         .into_iter()
@@ -1267,7 +1263,7 @@ async fn cleanup_external_aggregate_submission(
     .await;
 }
 
-async fn load_task_data(state: &AppState, id: &str) -> Result<HoodiTaskData, ApiError> {
+async fn load_task_data(state: &AppState, id: &str) -> Result<TaskData, ApiError> {
     let lookup = load_task_lookup(state, id).await?;
     load_task_data_from_lookup(state, id, &lookup).await
 }
@@ -1276,8 +1272,8 @@ async fn load_task_data_from_lookup(
     state: &AppState,
     id: &str,
     lookup: &TaskLookup,
-) -> Result<HoodiTaskData, ApiError> {
-    let (proposals, proposal_engine_state_present): (Vec<HoodiProposalStatus>, bool) =
+) -> Result<TaskData, ApiError> {
+    let (proposals, proposal_engine_state_present): (Vec<ProposalStatus>, bool) =
         load_proposal_statuses(
             state.runtime.as_ref(),
             &lookup.engine,
@@ -1285,7 +1281,7 @@ async fn load_task_data_from_lookup(
             &lookup.record,
         )
         .await?;
-    let (aggregate, aggregate_engine_state_present): (Option<HoodiAggregateStatus>, bool) =
+    let (aggregate, aggregate_engine_state_present): (Option<AggregateStatus>, bool) =
         load_aggregate_status(
             state.runtime.as_ref(),
             &lookup.engine,
@@ -1309,7 +1305,7 @@ async fn load_task_data_from_lookup(
         root_proof
     };
 
-    Ok(HoodiTaskData {
+    Ok(TaskData {
         task_id: id.to_string(),
         route: lookup.record.route.to_string(),
         execution_mode: lookup.metadata.execution_mode_str(),
@@ -1433,7 +1429,7 @@ async fn load_persisted_root_proof_material(
     Ok(Some(proof))
 }
 
-async fn load_all_task_data(state: &AppState) -> Result<Vec<HoodiTaskData>, ApiError> {
+async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError> {
     let records = state
         .runtime
         .list_tasks()
@@ -1469,7 +1465,7 @@ async fn load_proposal_statuses(
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
-) -> Result<(Vec<HoodiProposalStatus>, bool), ApiError> {
+) -> Result<(Vec<ProposalStatus>, bool), ApiError> {
     let mut proposals = Vec::with_capacity(metadata.proposals.len());
     let mut any_engine_state_present = false;
 
@@ -1508,7 +1504,7 @@ async fn load_proposal_statuses(
         } else {
             status
         };
-        proposals.push(HoodiProposalStatus {
+        proposals.push(ProposalStatus {
             index,
             proposal_id: proposal.proposal_id,
             checkpoint: proposal.checkpoint,
@@ -1532,7 +1528,7 @@ async fn load_aggregate_status(
     engine: &Arc<dyn EngineHandle>,
     metadata: &TaskMetadata,
     record: &raiko2_runtime::RuntimeTaskRecord,
-) -> Result<(Option<HoodiAggregateStatus>, bool), ApiError> {
+) -> Result<(Option<AggregateStatus>, bool), ApiError> {
     let Some(_task_id) = metadata.aggregate_task_id.as_ref() else {
         return Ok((None, false));
     };
@@ -1579,7 +1575,7 @@ async fn load_aggregate_status(
     };
 
     Ok((
-        Some(HoodiAggregateStatus {
+        Some(AggregateStatus {
             task_id: metadata.aggregate_task_id.clone().expect("checked"),
             status: status.status.clone(),
             proof: status.proof,
@@ -1675,8 +1671,8 @@ fn fallback_status_without_engine(
 
 fn resolve_root_task_state(
     runner_status: RuntimeRunnerStatus,
-    proposals: &[HoodiProposalStatus],
-    aggregate: Option<&HoodiAggregateStatus>,
+    proposals: &[ProposalStatus],
+    aggregate: Option<&AggregateStatus>,
     runtime_has_progress: bool,
     runtime_error: Option<&str>,
 ) -> RootTaskState {
@@ -1725,8 +1721,8 @@ fn resolve_root_task_state(
 }
 
 fn summarize_root_status(
-    proposals: &[HoodiProposalStatus],
-    aggregate: Option<&HoodiAggregateStatus>,
+    proposals: &[ProposalStatus],
+    aggregate: Option<&AggregateStatus>,
 ) -> ProofStatus {
     if proposals.is_empty() {
         return aggregate.map_or(ProofStatus::Pending, |aggregate| aggregate.status.clone());
@@ -1785,8 +1781,8 @@ fn root_runtime_view(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
     engine_state_present: bool,
-) -> HoodiRootRuntimeView {
-    HoodiRootRuntimeView {
+) -> RootRuntime {
+    RootRuntime {
         runner_status: record.runner_status,
         active_stage: metadata.runtime.active_stage.clone(),
         last_event: metadata.runtime.last_event.clone(),
@@ -1799,12 +1795,12 @@ fn task_runtime_view(
     runtime: Option<&TaskRuntimeMetadata>,
     engine_state_present: bool,
     fallback_updated_at: i64,
-) -> Option<HoodiTaskRuntimeView> {
+) -> Option<TaskRuntime> {
     if engine_state_present && runtime.is_none() {
         return None;
     }
     let runtime = runtime.cloned().unwrap_or_default();
-    Some(HoodiTaskRuntimeView {
+    Some(TaskRuntime {
         updated_at: if runtime.updated_at == 0 {
             fallback_updated_at
         } else {
@@ -2765,8 +2761,8 @@ mod tests {
         std::env::temp_dir().join(format!("raiko2-{prefix}-{unique}"))
     }
 
-    fn proposal_status(status: ProofStatus, proof: Option<&str>) -> HoodiProposalStatus {
-        HoodiProposalStatus {
+    fn proposal_status(status: ProofStatus, proof: Option<&str>) -> ProposalStatus {
+        ProposalStatus {
             index: 0,
             proposal_id: 42,
             checkpoint: None,
@@ -2782,8 +2778,8 @@ mod tests {
         }
     }
 
-    fn aggregate_status(status: ProofStatus, proof: Option<&str>) -> HoodiAggregateStatus {
-        HoodiAggregateStatus {
+    fn aggregate_status(status: ProofStatus, proof: Option<&str>) -> AggregateStatus {
+        AggregateStatus {
             task_id: "aggregate-task".to_string(),
             status,
             proof: proof.map(str::to_string),

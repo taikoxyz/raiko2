@@ -105,7 +105,7 @@ impl PublicProverArgs {
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiSuccess<T> {
+pub(crate) struct ApiOk<T> {
     pub(crate) status: &'static str,
     pub(crate) proof_type: String,
     pub(crate) data: T,
@@ -145,7 +145,7 @@ pub(crate) enum LegacyTaskStatus {
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiTaskData {
+pub(crate) struct TaskData {
     pub(crate) task_id: String,
     pub(crate) route: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,11 +153,11 @@ pub(crate) struct HoodiTaskData {
     pub(crate) status: ProofStatus,
     pub(crate) network: String,
     pub(crate) l1_network: String,
-    pub(crate) runtime: HoodiRootRuntimeView,
+    pub(crate) runtime: RootRuntime,
     pub(crate) current_index: Option<usize>,
-    pub(crate) proposals: Vec<HoodiProposalStatus>,
+    pub(crate) proposals: Vec<ProposalStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) aggregate: Option<HoodiAggregateStatus>,
+    pub(crate) aggregate: Option<AggregateStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) proof: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,7 +165,7 @@ pub(crate) struct HoodiTaskData {
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiProposalStatus {
+pub(crate) struct ProposalStatus {
     pub(crate) index: usize,
     pub(crate) proposal_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,13 +180,13 @@ pub(crate) struct HoodiProposalStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) runtime: Option<HoodiTaskRuntimeView>,
+    pub(crate) runtime: Option<TaskRuntime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extra_data: Option<Value>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiAggregateStatus {
+pub(crate) struct AggregateStatus {
     pub(crate) task_id: String,
     pub(crate) status: ProofStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,13 +194,13 @@ pub(crate) struct HoodiAggregateStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) runtime: Option<HoodiTaskRuntimeView>,
+    pub(crate) runtime: Option<TaskRuntime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) extra_data: Option<Value>,
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiRootRuntimeView {
+pub(crate) struct RootRuntime {
     pub(crate) runner_status: RuntimeRunnerStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) active_stage: Option<String>,
@@ -211,7 +211,7 @@ pub(crate) struct HoodiRootRuntimeView {
 }
 
 #[derive(Serialize)]
-pub(crate) struct HoodiTaskRuntimeView {
+pub(crate) struct TaskRuntime {
     pub(crate) updated_at: i64,
     pub(crate) engine_state_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

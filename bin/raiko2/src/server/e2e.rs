@@ -78,6 +78,17 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
     read_json(res).await
 }
 
+async fn get_json_with_admin_key(app: &Router, uri: &str, key: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("x-api-key", key)
+        .body(Body::empty())
+        .expect("build authenticated GET request");
+    let res = app.clone().oneshot(req).await.expect("dispatch request");
+    read_json(res).await
+}
+
 async fn get_text(app: &Router, uri: &str) -> (StatusCode, String) {
     let req = Request::builder()
         .method("GET")
@@ -97,6 +108,43 @@ async fn post_json(app: &Router, uri: &str, payload: Value) -> (StatusCode, Valu
         .expect("build POST request");
     let res = app.clone().oneshot(req).await.expect("dispatch request");
     read_json(res).await
+}
+
+async fn post_json_with_admin_key(
+    app: &Router,
+    uri: &str,
+    key: &str,
+    payload: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-api-key", key)
+        .body(Body::from(payload.to_string()))
+        .expect("build authenticated POST request");
+    let res = app.clone().oneshot(req).await.expect("dispatch request");
+    read_json(res).await
+}
+
+async fn post_raw_json_text_with_optional_admin_key(
+    app: &Router,
+    uri: &str,
+    key: Option<&str>,
+    body: &str,
+) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(key) = key {
+        builder = builder.header("x-api-key", key);
+    }
+    let req = builder
+        .body(Body::from(body.to_string()))
+        .expect("build raw POST request");
+    let res = app.clone().oneshot(req).await.expect("dispatch request");
+    read_text(res).await
 }
 
 async fn report_task_ids(app: &Router) -> Vec<String> {
@@ -1298,6 +1346,133 @@ async fn e2e_zk_any_rejects_prover_args() {
 }
 
 #[tokio::test]
+async fn e2e_admin_ballot_authenticates_before_body_parse() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, body) =
+        post_raw_json_text_with_optional_admin_key(&app, "/admin/set_ballot", None, "{not-json")
+            .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let mut config = base_config();
+    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, body) =
+        post_raw_json_text_with_optional_admin_key(&app, "/admin/set_ballot", None, "{not-json")
+            .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, body) = post_raw_json_text_with_optional_admin_key(
+        &app,
+        "/admin/set_ballot",
+        Some("wrong"),
+        "{not-json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, body) = post_raw_json_text_with_optional_admin_key(
+        &app,
+        "/admin/set_ballot",
+        Some("secret-admin-key"),
+        "{not-json",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
+    let mut config = base_config();
+    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    let app = app::build_router(state);
+
+    let (status, res) = get_json(&app, "/admin/get_ballot").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) = post_json_with_admin_key(
+        &app,
+        "/admin/set_ballot",
+        "secret-admin-key",
+        json!({
+            "Sp1": [1.0, 0],
+            "Risc0": [0.0, 0]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "ok");
+
+    let (status, res) =
+        get_json_with_admin_key(&app, "/admin/get_ballot", "secret-admin-key").await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["Sp1"][0], 1.0);
+    assert_eq!(res["Sp1"][1], 0);
+    assert_eq!(res["Risc0"][0], 0.0);
+    assert_eq!(res["Risc0"][1], 0);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["proof_type"], "sp1");
+    assert_eq!(res["data"]["status"], "registered");
+    drive_engine_to_idle(&engine).await;
+}
+
+#[tokio::test]
+async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
+    let mut config = base_config();
+    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    let engine = native_fixture_engine();
+    let app = app_with_native_fixture_engine(config, engine);
+
+    let (status, res) = post_json_with_admin_key(
+        &app,
+        "/admin/set_ballot",
+        "secret-admin-key",
+        json!({
+            "Native": [1.0, 0]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert!(
+        res["message"]
+            .as_str()
+            .expect("message")
+            .contains("not supported for zk_any")
+    );
+}
+
+#[tokio::test]
 async fn e2e_sp1_execute_returns_execution_metadata() {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Sp1;
@@ -1531,6 +1706,97 @@ async fn e2e_batch_aggregate_sp1_reuses_cached_proposal_proof() {
     assert!(
         !engine.run_one("e2e").await.expect("queue drained"),
         "cached proposal proof should avoid preflight/proposal tasks"
+    );
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["status"], "completed", "{res}");
+    assert_eq!(res["data"]["proposals"][0]["status"], "completed");
+    assert_eq!(res["data"]["aggregate"]["status"], "completed");
+    assert_eq!(res["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_zk_any_aggregate_reuses_cached_proposal_proof_without_sampling() {
+    let mut config = base_config();
+    config.prover.zk_any = Default::default();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+
+    let engine = sp1_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaSp1,
+        engine.clone(),
+    );
+    let proposal_request = ProposalTaskRequest {
+        proposal_id: 3,
+        l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 3, end: 3 }),
+        l1_inclusion_block_number: 1,
+        last_anchor_block_number: 0,
+        checkpoint: None,
+        blob_proof_type: None,
+        prover: None,
+        graffiti: None,
+        prover_config: ProverTaskConfig::default(),
+    };
+    let proof_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request);
+    let proof: Proof = serde_json::from_value(sp1_external_proof("0xcached-sp1-proof".to_string()))
+        .expect("cached proof");
+    let proof_path = state
+        .runtime
+        .proof_artifact_path("taiko_dev/ethereum", &proof_ref);
+    tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+        .await
+        .expect("create proof dir");
+    tokio::fs::write(
+        &proof_path,
+        serde_json::to_vec_pretty(&proof).expect("serialize proof"),
+    )
+    .await
+    .expect("write proof artifact");
+    state
+        .runtime
+        .upsert_proof_artifact(ProofArtifactRegistration {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref,
+            pipeline_key: PipelineKey::ShastaSp1,
+            route: "sp1/local".parse().expect("route"),
+            proof_path: proof_path.display().to_string(),
+        })
+        .await
+        .expect("register proof artifact");
+
+    let app = app::build_router(state);
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [
+                {
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                }
+            ],
+            "aggregate": true,
+            "proof_type": "zk_any",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["proof_type"], "sp1");
+    let id = single_report_task_id(&app).await;
+
+    assert!(engine.run_one("e2e").await.expect("run aggregate"));
+    assert!(
+        !engine.run_one("e2e").await.expect("queue drained"),
+        "cached proposal proof should bypass sampling and avoid proposal tasks"
     );
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;

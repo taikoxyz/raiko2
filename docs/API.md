@@ -27,6 +27,11 @@ The public API surface is:
 - `GET /metrics`
 - `GET /ready`
 
+The optional admin surface is disabled unless `server.admin_api_key` is configured:
+
+- `GET /admin/get_ballot`
+- `POST /admin/set_ballot`
+
 `/v1/...` routes are removed.
 
 ## Health
@@ -63,6 +68,18 @@ The canonical minimal metric families are:
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
+
+## Admin Ballot
+
+```http
+GET /admin/get_ballot
+POST /admin/set_ballot
+x-api-key: <server.admin_api_key>
+```
+
+These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any`. The payload is a
+JSON object whose keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples.
+Only those two proof types are accepted.
 
 ## Submit Shasta Batch Proof
 
@@ -130,8 +147,10 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sgx -> unsupported legacy error response`
   - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
-- `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the same draw is
-  reused for both proposal proving and aggregation.
+- `proof_type=zk_any` draws once per Shasta batch request. When `aggregate=true`, the server first
+  checks for existing proposal proof artifacts; if they exist for one concrete proof type, aggregation
+  reuses that proof type without drawing again. Otherwise the same draw is reused for both proposal
+  proving and aggregation.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
@@ -269,7 +288,8 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
-- `proof_type=zk_any` is not supported for aggregate requests.
+- `proof_type=zk_any` is not supported on `POST /v3/proof/aggregate`; use concrete proposal
+  proofs there.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.

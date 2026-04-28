@@ -1,11 +1,13 @@
 //! HTTP request handlers.
 
+mod admin;
 mod errors;
 mod health;
 mod metrics;
 mod proof;
 mod ready;
 
+pub(crate) use admin::{get_ballot, set_ballot};
 pub use health::health;
 pub use metrics::metrics;
 pub use proof::{

@@ -11,14 +11,8 @@ use alloy::sol;
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use raiko2_guests::{
-    risc0::shasta::{
-        AGGREGATION_ELF as RISC0_SHASTA_AGGREGATION_ELF,
-        BOUNDLESS_AGGREGATION_ELF as RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF,
-        PROPOSAL_ELF as RISC0_SHASTA_PROPOSAL_ELF,
-    },
-    sp1::shasta::{
-        AGGREGATION_ELF as SP1_SHASTA_AGGREGATION_ELF, PROPOSAL_ELF as SP1_SHASTA_PROPOSAL_ELF,
-    },
+    DEFAULT_GUEST_ELF_DIR, Risc0ShastaGuestElves, Sp1ShastaGuestElves,
+    load_risc0_shasta_guest_elves_from_dir, load_sp1_shasta_guest_elves_from_dir,
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
@@ -197,7 +191,7 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let plan = build_plan(args.backend, &config)?;
+    let plan = build_plan(args.backend, &config, root)?;
     let summary_path = output_dir.join("summary.json");
     let read_provider = ProviderBuilder::new().connect_http(
         config
@@ -348,19 +342,37 @@ fn resolve_output_dir(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
         .join(format!("run-{run_id}")))
 }
 
-fn build_plan(backend: Backend, config: &ResolvedProfile) -> Result<Vec<RegistrationCall>> {
+fn build_plan(
+    backend: Backend,
+    config: &ResolvedProfile,
+    root: &Path,
+) -> Result<Vec<RegistrationCall>> {
     let mut plan = Vec::new();
+    let elf_dir = root.join(DEFAULT_GUEST_ELF_DIR);
 
     match backend {
         Backend::Risc0 => {
-            plan.extend(build_risc0_calls(config)?);
+            let elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+                format!("failed to load RISC0 guest ELFs from {}", elf_dir.display())
+            })?;
+            plan.extend(build_risc0_calls(config, &elves)?);
         }
         Backend::Sp1 => {
-            plan.extend(build_sp1_calls(config)?);
+            let elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+                format!("failed to load SP1 guest ELFs from {}", elf_dir.display())
+            })?;
+            plan.extend(build_sp1_calls(config, &elves)?);
         }
         Backend::All => {
-            plan.extend(build_risc0_calls(config)?);
-            plan.extend(build_sp1_calls(config)?);
+            let risc0_elves =
+                load_risc0_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+                    format!("failed to load RISC0 guest ELFs from {}", elf_dir.display())
+                })?;
+            let sp1_elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir).with_context(|| {
+                format!("failed to load SP1 guest ELFs from {}", elf_dir.display())
+            })?;
+            plan.extend(build_risc0_calls(config, &risc0_elves)?);
+            plan.extend(build_sp1_calls(config, &sp1_elves)?);
         }
     }
 
@@ -371,33 +383,39 @@ fn build_plan(backend: Backend, config: &ResolvedProfile) -> Result<Vec<Registra
     Ok(plan)
 }
 
-fn build_risc0_calls(config: &ResolvedProfile) -> Result<Vec<RegistrationCall>> {
+fn build_risc0_calls(
+    config: &ResolvedProfile,
+    elves: &Risc0ShastaGuestElves,
+) -> Result<Vec<RegistrationCall>> {
     Ok(vec![
         risc0_call(
             "risc0_shasta_proposal",
             Stage::Proposal,
-            RISC0_SHASTA_PROPOSAL_ELF,
+            elves.proposal.as_ref(),
             config.risc0_verifier,
         )?,
         risc0_call(
             "risc0_shasta_aggregation",
             Stage::Aggregation,
-            RISC0_SHASTA_AGGREGATION_ELF,
+            elves.aggregation.as_ref(),
             config.risc0_verifier,
         )?,
         risc0_call(
             "risc0_shasta_boundless_aggregation",
             Stage::Aggregation,
-            RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF,
+            elves.boundless_aggregation.as_ref(),
             config.risc0_verifier,
         )?,
     ])
 }
 
-fn build_sp1_calls(config: &ResolvedProfile) -> Result<Vec<RegistrationCall>> {
+fn build_sp1_calls(
+    config: &ResolvedProfile,
+    elves: &Sp1ShastaGuestElves,
+) -> Result<Vec<RegistrationCall>> {
     let client = ProverClient::builder().cpu().build();
-    let proposal_vk = client.setup(SP1_SHASTA_PROPOSAL_ELF).1;
-    let aggregation_vk = client.setup(SP1_SHASTA_AGGREGATION_ELF).1;
+    let proposal_vk = client.setup(elves.proposal.as_ref()).1;
+    let aggregation_vk = client.setup(elves.aggregation.as_ref()).1;
 
     Ok(vec![
         sp1_call(
@@ -703,6 +721,7 @@ mod tests {
         materialize_checked_plan, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
+    use raiko2_guests::load_risc0_shasta_guest_elves;
     use std::collections::BTreeSet;
     use xtask_build_guest::Backend;
 
@@ -764,7 +783,8 @@ mod tests {
         };
 
         let resolved = resolve_profile(&args);
-        let calls = build_risc0_calls(&resolved).expect("build risc0 calls");
+        let elves = load_risc0_shasta_guest_elves().expect("load RISC0 Shasta guest ELFs");
+        let calls = build_risc0_calls(&resolved, &elves).expect("build risc0 calls");
         let keys = calls
             .iter()
             .map(|call| call.registration_key.as_str())

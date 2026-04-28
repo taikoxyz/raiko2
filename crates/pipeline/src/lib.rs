@@ -9,8 +9,7 @@ use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr, sync::Arc};
 
 pub mod forks;
 mod pipeline;
@@ -364,7 +363,7 @@ pub trait ProverBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the backend cannot provide an ELF for the requested stage.
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]>;
 }
 
 /// Native backend placeholder (no ELF).
@@ -372,7 +371,7 @@ pub trait ProverBackend: Send + Sync {
 pub struct NativeBackend;
 
 impl ProverBackend for NativeBackend {
-    fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, _stage: ProofStage) -> RaikoResult<&[u8]> {
         Err(RaikoError::InvalidRequestConfig(
             "native backend does not provide ELF".to_string(),
         ))
@@ -380,15 +379,15 @@ impl ProverBackend for NativeBackend {
 }
 
 /// Shared ELF selector for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ShastaElfBackend {
-    proposal_elf: &'static [u8],
-    aggregation_elf: &'static [u8],
+    proposal_elf: Arc<[u8]>,
+    aggregation_elf: Arc<[u8]>,
 }
 
 impl ShastaElfBackend {
     #[must_use]
-    pub(crate) const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub(crate) const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             proposal_elf,
             aggregation_elf,
@@ -397,23 +396,23 @@ impl ShastaElfBackend {
 }
 
 impl ProverBackend for ShastaElfBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         Ok(match stage {
-            ProofStage::Proposal => self.proposal_elf,
-            ProofStage::Aggregation => self.aggregation_elf,
+            ProofStage::Proposal => self.proposal_elf.as_ref(),
+            ProofStage::Aggregation => self.aggregation_elf.as_ref(),
         })
     }
 }
 
 /// RISC0 backend for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Risc0ShastaBackend {
     elf_backend: ShastaElfBackend,
 }
 
 impl Risc0ShastaBackend {
     #[must_use]
-    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
         }
@@ -425,20 +424,20 @@ impl Risc0ShastaBackend {
 }
 
 impl ProverBackend for Risc0ShastaBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }
 }
 
 /// SP1 backend for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Sp1ShastaBackend {
     elf_backend: ShastaElfBackend,
 }
 
 impl Sp1ShastaBackend {
     #[must_use]
-    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
         }
@@ -450,7 +449,7 @@ impl Sp1ShastaBackend {
 }
 
 impl ProverBackend for Sp1ShastaBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }
 }

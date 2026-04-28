@@ -1017,16 +1017,21 @@ mod tests {
         remote_verifier_program_vkey, remote_verifier_proof_bytes,
     };
     use alloy_primitives::B256;
-    use raiko2_guests::sp1::shasta::{AGGREGATION_ELF, PROPOSAL_ELF};
+    use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::words_to_bytes_le;
     use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
     use std::str::FromStr;
 
+    fn sp1_test_elves() -> Sp1ShastaGuestElves {
+        load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    }
+
     #[test]
     fn remote_verifier_program_vkey_matches_contract_bytes32_encoding() {
         let client = ProverClient::builder().mock().build();
-        let (_, vk) = client.setup(PROPOSAL_ELF);
+        let elves = sp1_test_elves();
+        let (_, vk) = client.setup(elves.proposal.as_ref());
 
         let expected = B256::from_str(&vk.bytes32()).expect("valid bytes32 encoding");
         let old_buggy = B256::from_slice(&vk.hash_bytes());
@@ -1046,7 +1051,8 @@ mod tests {
     #[test]
     fn remote_verifier_proof_bytes_matches_legacy_raiko_semantics() {
         let client = ProverClient::builder().mock().build();
-        let (pk, _) = client.setup(PROPOSAL_ELF);
+        let elves = sp1_test_elves();
+        let (pk, _) = client.setup(elves.proposal.as_ref());
 
         let core = SP1ProofWithPublicValues::create_mock_proof(
             &pk,
@@ -1075,8 +1081,9 @@ mod tests {
     #[test]
     fn sp1_aggregation_payload_layout_matches_legacy_raiko() {
         let client = ProverClient::builder().mock().build();
-        let (_, block_vk) = client.setup(PROPOSAL_ELF);
-        let (_, aggregation_vk) = client.setup(AGGREGATION_ELF);
+        let elves = sp1_test_elves();
+        let (_, block_vk) = client.setup(elves.proposal.as_ref());
+        let (_, aggregation_vk) = client.setup(elves.aggregation.as_ref());
         let proof_bytes = [0xaa, 0xbb, 0xcc];
 
         let payload = encode_sp1_onchain_payload(
@@ -1101,7 +1108,8 @@ mod tests {
     #[test]
     fn load_sp1_subproof_for_aggregation_prefers_quote() {
         let client = ProverClient::builder().mock().build();
-        let (pk, _) = client.setup(PROPOSAL_ELF);
+        let elves = sp1_test_elves();
+        let (pk, _) = client.setup(elves.proposal.as_ref());
         let compressed = SP1ProofWithPublicValues::create_mock_proof(
             &pk,
             sp1_sdk::SP1PublicValues::new(),
@@ -1121,7 +1129,8 @@ mod tests {
     #[test]
     fn load_sp1_subproof_for_aggregation_accepts_legacy_bincode_payload() {
         let client = ProverClient::builder().mock().build();
-        let (pk, _) = client.setup(PROPOSAL_ELF);
+        let elves = sp1_test_elves();
+        let (pk, _) = client.setup(elves.proposal.as_ref());
         let compressed = SP1ProofWithPublicValues::create_mock_proof(
             &pk,
             sp1_sdk::SP1PublicValues::new(),

@@ -14,11 +14,9 @@ pub use types::{EngineStatusView, ProofStatus};
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
-#[cfg(feature = "boundless")]
-use raiko2_pipeline::forks::shasta::RISC0_BOUNDLESS_SHASTA_BACKEND;
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+    forks::shasta::{ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
 #[cfg(feature = "boundless")]
@@ -69,6 +67,7 @@ impl AppState {
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
 
         let mut factory = StaticPipelineFactory::default();
 
@@ -78,6 +77,7 @@ impl AppState {
             let risc0_engine = build_risc0_engine(
                 &config,
                 pair,
+                shasta_backends.risc0.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
             )
@@ -95,6 +95,7 @@ impl AppState {
                 let boundless_engine = build_boundless_engine(
                     &config,
                     pair,
+                    shasta_backends.risc0_boundless.clone(),
                     boundless_scheduler_config,
                     Arc::clone(&runtime_observer),
                 )
@@ -111,6 +112,7 @@ impl AppState {
             let sp1_engine = build_sp1_engine(
                 &config,
                 pair,
+                shasta_backends.sp1.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
             )
@@ -223,6 +225,7 @@ async fn restore_proof_artifacts_from_runtime_task(
 async fn build_risc0_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Risc0Spec>> {
@@ -235,7 +238,7 @@ async fn build_risc0_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0,
                 Risc0Prover::new(risc0_config),
-                RISC0_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -266,7 +269,7 @@ async fn build_risc0_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0,
                     Risc0Prover::new(risc0_config),
-                    RISC0_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -294,6 +297,7 @@ async fn build_risc0_engine(
 async fn build_sp1_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Sp1Spec>> {
@@ -306,7 +310,7 @@ async fn build_sp1_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaSp1,
                 Sp1Prover::new(sp1_config),
-                SP1_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -337,7 +341,7 @@ async fn build_sp1_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaSp1,
                     Sp1Prover::new(sp1_config),
-                    SP1_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -438,6 +442,7 @@ async fn build_native_engine(
 async fn build_boundless_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<BoundlessSpec>> {
@@ -450,7 +455,7 @@ async fn build_boundless_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Boundless,
                 BoundlessProver::new(agent_config),
-                RISC0_BOUNDLESS_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -484,7 +489,7 @@ async fn build_boundless_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0Boundless,
                     BoundlessProver::new(agent_config),
-                    RISC0_BOUNDLESS_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(

@@ -63,15 +63,19 @@ RUN apt-get update && \
     curl && \
     rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
 RUN mkdir -p /etc/raiko2
 
 COPY --from=builder /app/target/release/raiko2 /usr/local/bin/raiko2
+COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
 COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json
 COPY --from=builder /app/config.example.toml /etc/raiko2/config.example.toml
 
 ENV RAIKO2_HOST=0.0.0.0
 ENV RAIKO2_PORT=8080
 ENV RAIKO2_CONFIG=/etc/raiko2/config.toml
+ENV RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf
 ENV RUST_LOG=info
 
 EXPOSE 8080

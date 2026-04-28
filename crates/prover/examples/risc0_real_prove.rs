@@ -2,7 +2,9 @@
 
 use std::{env, fs, time::Instant};
 
-use raiko2_pipeline::{ProofStage, ProverBackend, forks::shasta::RISC0_SHASTA_BACKEND};
+use raiko2_pipeline::{
+    ProofStage, ProverBackend, Risc0ShastaBackend, forks::shasta::load_risc0_shasta_backend,
+};
 use raiko2_primitives::ProverConfig;
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::{
@@ -14,8 +16,11 @@ use risc0_zkvm::{ExecutorEnv, local_executor};
 const MILLION_CYCLES: u64 = 1_000_000;
 const QUOTED_MCYCLES_LIMIT: u32 = 6_000;
 
-fn evaluated_mcycles(input: &GuestInput) -> Result<u32, Box<dyn std::error::Error>> {
-    let elf = RISC0_SHASTA_BACKEND
+fn evaluated_mcycles(
+    input: &GuestInput,
+    backend: &Risc0ShastaBackend,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    let elf = backend
         .elf(ProofStage::Proposal)
         .map_err(|err| format!("load risc0 proposal elf: {err}"))?
         .to_vec();
@@ -47,9 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| format!("read guest input from {input_path}: {err}"))?;
     let guest_input: GuestInput = serde_json::from_str(&input_bytes)
         .map_err(|err| format!("parse guest input json: {err}"))?;
+    let backend = load_risc0_shasta_backend()
+        .map_err(|err| format!("load RISC0 Shasta guest ELFs: {err}"))?;
 
     let evaluated_start = Instant::now();
-    let evaluated_mcycles = evaluated_mcycles(&guest_input)?;
+    let evaluated_mcycles = evaluated_mcycles(&guest_input, &backend)?;
     let evaluated_elapsed = evaluated_start.elapsed();
 
     let prover = Risc0Prover::new(Risc0Config {
@@ -62,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let prove_start = Instant::now();
     let proof = prover
-        .prove(guest_input, &ProverConfig::default(), &RISC0_SHASTA_BACKEND)
+        .prove(guest_input, &ProverConfig::default(), &backend)
         .await
         .map_err(|err| format!("generate real risc0 proof: {err}"))?;
     let prove_elapsed = prove_start.elapsed();

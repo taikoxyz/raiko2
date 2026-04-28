@@ -101,7 +101,10 @@ cargo run -r -p xtask -- release-image risc0 \
 ```
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
-`crates/guests/elf` artifacts and does not rebuild guest sources by itself.
+`crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
+process starts and does not rebuild guest sources by itself. The image sets
+`RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf` so ELF lookup does not depend on the container
+working directory.
 
 If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
 before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the

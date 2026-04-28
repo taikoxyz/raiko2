@@ -1247,7 +1247,7 @@ mod tests {
     struct TestBackend;
 
     impl ProverBackend for TestBackend {
-        fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+        fn elf(&self, _stage: ProofStage) -> RaikoResult<&[u8]> {
             Ok(&[])
         }
     }

@@ -89,7 +89,7 @@ jobs:
           set -eu
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/guests/elf
+          git add -A -- crates/guests/elf
           git commit -m "chore: sync guest elf outputs"
 
       - name: push synced guest elfs

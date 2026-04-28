@@ -116,7 +116,7 @@ jobs:
 
   rust-nextest:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -155,7 +155,7 @@ jobs:
         run: |
           test "${{ needs.rust-fmt.result }}" = "success"
           test "${{ needs.rust-clippy.result }}" = "success"
-          if [ "${{ needs.changes.outputs.rust }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ needs.changes.outputs.rust }}" = "true" ] || [ "${{ needs.changes.outputs.workflow }}" = "true" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             test "${{ needs.rust-nextest.result }}" = "success"
           else
             test "${{ needs.rust-nextest.result }}" = "skipped"

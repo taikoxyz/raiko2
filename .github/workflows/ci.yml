@@ -276,6 +276,7 @@ jobs:
         with:
           name: guest-elf-risc0
           path: crates/guests/elf/risc0_*.elf
+          retention-days: 7
 
   build-guest-sp1:
     needs: changes
@@ -305,6 +306,7 @@ jobs:
         with:
           name: guest-elf-sp1
           path: crates/guests/elf/sp1_*.elf
+          retention-days: 7
 
   # TODO: add a native smoke lane here once the repo has a deterministic CI-safe
   # fixture/regression entrypoint for native proving.

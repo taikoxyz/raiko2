@@ -1,0 +1,140 @@
+name: rust-heavy
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Heavy Rust lane to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - prover
+          - engine
+          - server
+          - all
+      ref:
+        description: Branch to test; defaults to the branch this workflow was dispatched from
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-heavy-${{ github.event.inputs.ref || github.ref }}-${{ github.event.inputs.lane || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.target.outputs.ref }}
+    env:
+      TARGET_REF_INPUT: ${{ inputs.ref }}
+      DISPATCH_REF: ${{ github.ref_name }}
+    steps:
+      - name: resolve target ref
+        id: target
+        shell: bash
+        run: |
+          set -eu
+          target_ref="$(printf '%s' "${TARGET_REF_INPUT}" | xargs)"
+          if [ -z "${target_ref}" ]; then
+            target_ref="${DISPATCH_REF}"
+          fi
+          echo "ref=${target_ref}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved target ref: ${target_ref}"
+
+  test-prover:
+    needs: resolve-ref
+    if: inputs.lane == 'prover' || inputs.lane == 'all'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
+      RUSTFLAGS: -Cdebuginfo=0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-heavy
+
+      - name: test prover
+        run: cargo test -p raiko2-prover -p guest-launcher
+
+  test-engine:
+    needs: resolve-ref
+    if: inputs.lane == 'engine' || inputs.lane == 'all'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
+      RUSTFLAGS: -Cdebuginfo=0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-heavy
+
+      - name: test engine
+        run: cargo test -p raiko2-engine
+
+  test-server:
+    needs: resolve-ref
+    if: inputs.lane == 'server' || inputs.lane == 'all'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
+      RUSTFLAGS: -Cdebuginfo=0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-heavy
+
+      - name: test server
+        run: cargo test -p raiko2

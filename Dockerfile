@@ -54,6 +54,9 @@ RUN cargo +1.93.0 build --release -p raiko2 ${BIN_FEATURES}
 
 FROM debian:bookworm-slim AS runtime
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \

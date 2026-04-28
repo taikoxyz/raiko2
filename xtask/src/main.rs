@@ -27,7 +27,7 @@ enum Cmd {
     /// Build a `/v3/proof/batch/shasta` request for the latest onchain proposal.
     LatestProposalRequest(latest_proposal_request::LatestProposalRequestArgs),
 
-    /// Build guest ELFs, build/push the runtime image, and print the rollout command.
+    /// Build guest ELFs, build and push the runtime image.
     ReleaseImage(release_image::ReleaseImageArgs),
 
     /// Register the current Shasta guest image ids on verifier contracts.

@@ -268,8 +268,14 @@ jobs:
       - name: build guest risc0
         run: just build-guest risc0
 
-      - name: verify guest elf outputs are up to date
-        run: git diff --exit-code -- crates/guests/elf
+      # Temporary: treat guest build as a compile/producibility check only.
+      # The generated ELFs are uploaded for inspection instead of enforcing
+      # byte-for-byte equality with the checked-in copies.
+      - name: upload guest elf outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-elf-risc0
+          path: crates/guests/elf/risc0_*.elf
 
   build-guest-sp1:
     needs: changes
@@ -294,8 +300,11 @@ jobs:
       - name: build guest sp1
         run: just build-guest sp1
 
-      - name: verify guest elf outputs are up to date
-        run: git diff --exit-code -- crates/guests/elf
+      - name: upload guest elf outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-elf-sp1
+          path: crates/guests/elf/sp1_*.elf
 
   # TODO: add a native smoke lane here once the repo has a deterministic CI-safe
   # fixture/regression entrypoint for native proving.

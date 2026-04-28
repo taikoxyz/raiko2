@@ -1597,8 +1597,8 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(!engine.run_one("w1").await?);
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        assert!(!Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
@@ -1780,7 +1780,7 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
+        assert!(Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
@@ -1856,8 +1856,8 @@ mod tests {
 
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
-        assert!(!engine.run_one("w1").await?);
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        assert!(!Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
@@ -1882,7 +1882,7 @@ mod tests {
         );
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
-        assert!(engine.run_one("w1").await?);
+        assert!(Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
@@ -1917,7 +1917,7 @@ mod tests {
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
         let worker_engine = engine.clone();
-        let handle = tokio::spawn(async move { worker_engine.run_one("w1").await });
+        let handle = tokio::spawn(async move { Box::pin(worker_engine.run_one("w1")).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         engine.cancel(job_id.clone()).await?;
 

@@ -85,38 +85,27 @@ impl EngineTaskKey {
     }
 }
 
-const fn pipeline_rank(pipeline: PipelineKey) -> u8 {
-    match pipeline {
-        PipelineKey::ShastaNative => 0,
-        PipelineKey::ShastaRisc0 => 1,
-        PipelineKey::ShastaSp1 => 2,
-        PipelineKey::ShastaRisc0Boundless => 3,
-    }
-}
-
-fn proposal_ready_sort_prefix(proposal_id: u64, pipeline: PipelineKey) -> [u8; 16] {
+fn proposal_ready_sort_prefix(proposal_id: u64) -> [u8; 16] {
     let mut b = [0u8; 16];
     b[0..8].copy_from_slice(&proposal_id.to_be_bytes());
-    b[8] = pipeline_rank(pipeline);
     b
 }
 
-fn aggregate_ready_sort_prefix(proposal_ids: &[u64], pipeline: PipelineKey) -> [u8; 16] {
+fn aggregate_ready_sort_prefix(proposal_ids: &[u64]) -> [u8; 16] {
     let proposal_id = proposal_ids.iter().copied().min().unwrap_or(u64::MAX);
     let mut b = [0u8; 16];
     b[0..8].copy_from_slice(&proposal_id.to_be_bytes());
-    b[8] = pipeline_rank(pipeline);
     b
 }
 
 impl ReadyQueueSort for EngineTaskKey {
     fn ready_queue_sort_prefix(&self) -> [u8; 16] {
         match self {
-            EngineTaskKey::Proposal { request, pipeline } => {
-                proposal_ready_sort_prefix(request.proposal_id, *pipeline)
+            EngineTaskKey::Proposal { request, .. } => {
+                proposal_ready_sort_prefix(request.proposal_id)
             }
-            EngineTaskKey::Aggregate { request, pipeline } => {
-                aggregate_ready_sort_prefix(&request.proposal_ids, *pipeline)
+            EngineTaskKey::Aggregate { request, .. } => {
+                aggregate_ready_sort_prefix(&request.proposal_ids)
             }
         }
     }
@@ -190,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn proposal_ready_sort_orders_by_proposal_id_then_pipeline() {
+    fn proposal_ready_sort_orders_by_proposal_id_only() {
         let p2 = EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: proposal_request(2),
@@ -208,6 +197,15 @@ mod tests {
             request: proposal_request(1),
         };
 
+        assert_eq!(
+            p1_native.ready_queue_sort_prefix(),
+            p1_sp1.ready_queue_sort_prefix()
+        );
+        assert_eq!(
+            p1_native.ready_queue_sort_prefix(),
+            p1_risc0.ready_queue_sort_prefix()
+        );
+
         let mut keys = [p2, p1_native, p1_sp1, p1_risc0];
         keys.sort_by(raiko2_queue::ReadyQueueSort::cmp_for_ready_queue);
 
@@ -222,14 +220,14 @@ mod tests {
             keys[1],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                pipeline: PipelineKey::ShastaRisc0
+                ..
             }
         ));
         assert!(matches!(
             keys[2],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                pipeline: PipelineKey::ShastaSp1
+                ..
             }
         ));
         assert!(matches!(
@@ -357,6 +355,61 @@ mod tests {
             .await?
             .ok_or_else(|| TaskStoreError::corrupt_msg("expected aggregate task to be ready"))?;
         assert_eq!(next.id, b);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_priority_wins_before_proposal_id_sort() -> StoreResult<()> {
+        let sched: Scheduler<EngineTask, EngineOutput<GuestInput>, EngineTaskKey> =
+            Scheduler::new(MemoryStore::new());
+
+        let proposal = sched
+            .submit(
+                proposal_task_id(PipelineKey::ShastaNative, proposal_request(1)),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: EngineTask::Proposal {
+                        request: proposal_request(1),
+                    },
+                },
+                vec![],
+            )
+            .await?;
+        let aggregate = sched
+            .submit(
+                TaskId::new(EngineTaskKey::Aggregate {
+                    pipeline: PipelineKey::ShastaNative,
+                    request: AggregationTaskRequest {
+                        request_id: "agg-2".to_string(),
+                        proposal_ids: vec![2],
+                        prover_config: ProverTaskConfig::default(),
+                    },
+                }),
+                NewTask {
+                    priority: Priority::High,
+                    payload: EngineTask::Aggregate {
+                        request: AggregationTaskRequest {
+                            request_id: "agg-2".to_string(),
+                            proposal_ids: vec![2],
+                            prover_config: ProverTaskConfig::default(),
+                        },
+                        source: AggregationSource::Proofs(vec![Proof::default()]),
+                    },
+                },
+                vec![],
+            )
+            .await?;
+
+        let first = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready task"))?;
+        assert_eq!(first.id, aggregate);
+        let second = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready task"))?;
+        assert_eq!(second.id, proposal);
         Ok(())
     }
 }

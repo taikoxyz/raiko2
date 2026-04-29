@@ -207,6 +207,3 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "std",
 ] }
 kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "cd9c40b38b82558baa92e4cc4da6e6e007d9d704", default-features = false }
-
-[patch.crates-io]
-boundless-market = { path = "vendor/boundless-market" }

@@ -22,7 +22,7 @@ use raiko2_runtime::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::super::errors::ApiError;
 use super::proof_route::{
@@ -146,8 +146,11 @@ async fn request_batch_shasta_proof_inner(
             network = requested_network.as_deref().unwrap_or("default"),
             l1_network = requested_l1_network.as_deref().unwrap_or("default"),
             proposal_count = proposal_ids.len(),
-            proposal_ids = ?proposal_ids,
             "received hoodi shasta batch request not drawn"
+        );
+        debug!(
+            proposal_ids = ?proposal_ids,
+            "received hoodi shasta batch request not drawn proposal ids"
         );
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
@@ -162,8 +165,12 @@ async fn request_batch_shasta_proof_inner(
         pair = submission.pair.key.as_str(),
         route = %submission.route.route,
         proposal_count = proposal_ids.len(),
-        proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request"
+    );
+    debug!(
+        task_id = submission.public_task_id.as_str(),
+        proposal_ids = ?proposal_ids,
+        "received hoodi shasta batch request proposal ids"
     );
 
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {

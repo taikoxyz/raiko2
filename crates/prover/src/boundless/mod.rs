@@ -11,29 +11,31 @@ pub use config::{
 #[cfg(feature = "boundless")]
 use std::collections::HashMap;
 #[cfg(feature = "boundless")]
+use std::env;
+#[cfg(feature = "boundless")]
 use std::future::Future;
+#[cfg(feature = "boundless")]
+use std::path::PathBuf;
+#[cfg(feature = "boundless")]
+use std::str::FromStr;
 #[cfg(feature = "boundless")]
 use std::sync::Arc;
 #[cfg(feature = "boundless")]
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(feature = "boundless")]
-use alloy_primitives::B256;
-#[cfg(feature = "boundless")]
-use alloy_primitives::Bytes;
-#[cfg(feature = "boundless")]
-use alloy_primitives::U256;
-#[cfg(feature = "boundless")]
-use alloy_primitives::utils::parse_ether;
+use alloy_primitives::{B256, Bytes, U256};
 #[cfg(feature = "boundless")]
 use alloy_signer_local::PrivateKeySigner;
 #[cfg(feature = "boundless")]
 use boundless_market::{
-    Client, ProofRequest,
+    Client, ProofRequest, StorageUploaderConfig,
     contracts::RequestStatus,
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
+    price_oracle::{Amount, Asset},
     request_builder::OfferParams,
+    storage::StorageUploaderType,
 };
 #[cfg(feature = "boundless")]
 use raiko2_pipeline::{ProofStage, ProverBackend};
@@ -65,9 +67,6 @@ use crate::{
     encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
     parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
-
-#[cfg(feature = "boundless")]
-use self::config::parse_staking_token;
 
 #[cfg(feature = "boundless")]
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -284,13 +283,70 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
 #[cfg(feature = "boundless")]
 #[derive(Debug)]
 struct ValidatedOfferParams {
-    max_price: U256,
-    min_price: U256,
-    lock_collateral: U256,
+    max_price: Amount,
+    min_price: Amount,
+    lock_collateral: Amount,
     lock_timeout: u32,
     timeout: u32,
     ramp_up_period: u32,
     bidding_start: u64,
+}
+
+#[cfg(feature = "boundless")]
+fn env_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(feature = "boundless")]
+fn env_bool(name: &str) -> Option<bool> {
+    env_var(name).and_then(|value| value.parse::<bool>().ok())
+}
+
+#[cfg(feature = "boundless")]
+fn env_url(name: &str) -> RaikoResult<Option<Url>> {
+    env_var(name)
+        .map(|value| {
+            Url::parse(&value).map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Invalid {name} URL {value}: {e}"))
+            })
+        })
+        .transpose()
+}
+
+#[cfg(feature = "boundless")]
+fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
+    let mut config = StorageUploaderConfig::default();
+    let selected = env_var("STORAGE_UPLOADER").map(|value| value.to_ascii_lowercase());
+    config.storage_uploader = match selected.as_deref() {
+        Some("s3") => StorageUploaderType::S3,
+        Some("pinata") => StorageUploaderType::Pinata,
+        Some("file") => StorageUploaderType::File,
+        Some("none" | "") => StorageUploaderType::None,
+        Some(other) => {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "Invalid STORAGE_UPLOADER value {other}"
+            )));
+        }
+        None if env_var("S3_BUCKET").is_some() => StorageUploaderType::S3,
+        None if env_var("PINATA_JWT").is_some() => StorageUploaderType::Pinata,
+        None if env_var("FILE_PATH").is_some() => StorageUploaderType::File,
+        None => StorageUploaderType::None,
+    };
+    config.s3_bucket = env_var("S3_BUCKET");
+    config.s3_url = env_var("S3_URL");
+    config.aws_access_key_id = env_var("AWS_ACCESS_KEY_ID");
+    config.aws_secret_access_key = env_var("AWS_SECRET_ACCESS_KEY");
+    config.aws_region = env_var("AWS_REGION");
+    config.s3_presigned = env_bool("S3_PRESIGNED");
+    config.s3_public_url = env_bool("S3_PUBLIC_URL");
+    config.pinata_jwt = env_var("PINATA_JWT");
+    config.pinata_api_url = env_url("PINATA_API_URL")?;
+    config.ipfs_gateway_url = env_url("IPFS_GATEWAY_URL")?;
+    config.file_path = env_var("FILE_PATH").map(PathBuf::from);
+    Ok(config)
 }
 
 #[cfg(feature = "boundless")]
@@ -318,10 +374,17 @@ impl BoundlessProver {
         let signer: PrivateKeySigner = self.config.signer_key.parse().map_err(|e| {
             RaikoError::InvalidRequestConfig(format!("Invalid boundless signer_key: {e}"))
         })?;
+        let storage_config = storage_uploader_config_from_env()?;
         Client::builder()
             .with_rpc_url(rpc_url)
             .with_deployment(Some(self.deployment.clone()))
-            .with_storage_provider(boundless_market::storage::storage_provider_from_env().ok())
+            .with_uploader_config(&storage_config)
+            .await
+            .map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Failed to configure boundless storage uploader: {e}"
+                ))
+            })?
             .with_private_key(signer)
             .build()
             .await
@@ -448,11 +511,13 @@ impl BoundlessProver {
         retry_external("build boundless request", || {
             let request_params = request_params.clone();
             async move {
-                client.build_request(request_params).await.map_err(|e| {
-                    RaikoError::InvalidRequestConfig(format!(
-                        "Failed to build boundless request: {e:?}"
-                    ))
-                })
+                Box::pin(client.build_request(request_params))
+                    .await
+                    .map_err(|e| {
+                        RaikoError::InvalidRequestConfig(format!(
+                            "Failed to build boundless request: {e:?}"
+                        ))
+                    })
             }
         })
         .await
@@ -568,18 +633,17 @@ impl BoundlessProver {
         context: FreshSubmissionContext<'_>,
     ) -> RaikoResult<Submission> {
         let (guest_env, guest_env_bytes) = Self::process_input(context.input.as_ref())?;
-        let request = self
-            .build_request(
-                context.client,
-                guest_env,
-                &guest_env_bytes,
-                context.elf,
-                context.program,
-                context.offer_spec,
-                context.quoted_mcycles_count,
-                context.journal.to_vec(),
-            )
-            .await?;
+        let request = Box::pin(self.build_request(
+            context.client,
+            guest_env,
+            &guest_env_bytes,
+            context.elf,
+            context.program,
+            context.offer_spec,
+            context.quoted_mcycles_count,
+            context.journal.to_vec(),
+        ))
+        .await?;
 
         if self.config.offchain {
             let submission = self
@@ -676,7 +740,7 @@ impl BoundlessProver {
                 RequestStatus::Fulfilled => {
                     let fulfillment = match client
                         .boundless_market
-                        .get_request_fulfillment(submission.market_request_id)
+                        .get_request_fulfillment(submission.market_request_id, None, None)
                         .await
                     {
                         Ok(fulfillment) => fulfillment,
@@ -840,7 +904,7 @@ impl BoundlessProver {
                 .await;
                 submission
             } else {
-                self.submit_fresh_request(FreshSubmissionContext {
+                Box::pin(self.submit_fresh_request(FreshSubmissionContext {
                     client: &client,
                     input: &input,
                     elf,
@@ -852,7 +916,7 @@ impl BoundlessProver {
                     observer: observer.as_ref(),
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                })
+                }))
                 .await?
             };
 
@@ -1047,24 +1111,50 @@ impl BoundlessProver {
 }
 
 #[cfg(feature = "boundless")]
+fn parse_amount(value: &str, field: &str, asset: Asset) -> Result<Amount, String> {
+    Amount::parse_with_allowed(value, &[asset], Some(asset))
+        .map_err(|e| format!("Failed to parse {field} {value}: {e}"))
+}
+
+#[cfg(feature = "boundless")]
+fn parse_request_amount(
+    value: &str,
+    field: &str,
+    asset: Asset,
+    multiplier: u32,
+) -> RaikoResult<Amount> {
+    let mut amount = parse_amount(value, field, asset).map_err(RaikoError::InvalidRequestConfig)?;
+    amount.value = amount
+        .value
+        .checked_mul(U256::from(multiplier))
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "{field} overflows when multiplied by {multiplier} mcycles"
+            ))
+        })?;
+    Ok(amount)
+}
+
+#[cfg(feature = "boundless")]
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
     block_time_sec: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
-    let max_price = parse_ether(&offer_spec.max_price_per_mcycle).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!(
-            "Failed to parse max_price_per_mcycle {}: {e}",
-            offer_spec.max_price_per_mcycle
-        ))
-    })? * U256::from(mcycles_count);
+    let max_price = parse_request_amount(
+        &offer_spec.max_price_per_mcycle,
+        "max_price_per_mcycle",
+        Asset::ETH,
+        mcycles_count,
+    )?;
     let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_ether(min_price_value).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!(
-            "Failed to parse min_price_per_mcycle {min_price_value}: {e}"
-        ))
-    })? * U256::from(mcycles_count);
+    let min_price = parse_request_amount(
+        min_price_value,
+        "min_price_per_mcycle",
+        Asset::ETH,
+        mcycles_count,
+    )?;
     let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
     let ramp_up_seconds = offer_spec
@@ -1080,7 +1170,8 @@ fn validate_offer_params(
     Ok(ValidatedOfferParams {
         max_price,
         min_price,
-        lock_collateral: parse_staking_token(&offer_spec.lock_collateral)?,
+        lock_collateral: parse_amount(&offer_spec.lock_collateral, "lock_collateral", Asset::ZKC)
+            .map_err(RaikoError::InvalidRequestConfig)?,
         lock_timeout,
         timeout,
         ramp_up_period: offer_spec.ramp_up_period_blocks,
@@ -1130,6 +1221,7 @@ mod tests {
         BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, proof_to_envelope,
         quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
+    use boundless_market::price_oracle::Asset;
     use raiko2_primitives::Proof;
 
     fn sample_offer() -> super::BoundlessOfferParams {
@@ -1214,7 +1306,9 @@ mod tests {
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
         let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
-        assert!(validated.max_price > validated.min_price);
+        assert_eq!(validated.max_price.asset, Asset::ETH);
+        assert_eq!(validated.min_price.asset, Asset::ETH);
+        assert!(validated.max_price.value > validated.min_price.value);
         assert!(validated.timeout > validated.lock_timeout);
     }
 

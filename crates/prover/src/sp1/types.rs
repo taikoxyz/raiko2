@@ -21,6 +21,8 @@ pub enum Sp1ConfigError {
     BatchExecuteAggregationNotSupported,
     AggregationExecuteNotSupported,
     CycleLimitMustBePositive,
+    ProposalCycleLimitMustBePositive,
+    AggregationCycleLimitMustBePositive,
     TimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
     RemoteVerifyRpcUrlMustNotBeEmpty,
@@ -45,6 +47,12 @@ impl std::fmt::Display for Sp1ConfigError {
                 f.write_str("sp1.mode=execute is not supported for aggregation")
             }
             Self::CycleLimitMustBePositive => f.write_str("sp1.cycle_limit must be greater than 0"),
+            Self::ProposalCycleLimitMustBePositive => {
+                f.write_str("sp1.proposal_cycle_limit must be greater than 0")
+            }
+            Self::AggregationCycleLimitMustBePositive => {
+                f.write_str("sp1.aggregation_cycle_limit must be greater than 0")
+            }
             Self::TimeoutSecsMustBePositive => {
                 f.write_str("sp1.timeout_secs must be greater than 0")
             }
@@ -109,6 +117,12 @@ pub struct Sp1Config {
     /// Cycle limit to attach to network prove requests.
     #[serde(default = "default_cycle_limit")]
     pub cycle_limit: u64,
+    /// Optional proposal-stage cycle limit. Falls back to `cycle_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_cycle_limit: Option<u64>,
+    /// Optional aggregation-stage cycle limit. Falls back to `cycle_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregation_cycle_limit: Option<u64>,
     /// Timeout to use when waiting for network proofs.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -147,6 +161,8 @@ impl Default for Sp1Config {
             fulfillment_strategy: Sp1FulfillmentStrategy::Reserved,
             skip_simulation: true,
             cycle_limit: default_cycle_limit(),
+            proposal_cycle_limit: None,
+            aggregation_cycle_limit: None,
             timeout_secs: default_timeout_secs(),
             rpc_url: None,
             remote_verify: None,
@@ -206,6 +222,8 @@ impl Sp1Config {
                 .unwrap_or(self.fulfillment_strategy),
             skip_simulation: overrides.skip_simulation.unwrap_or(self.skip_simulation),
             cycle_limit: overrides.cycle_limit.unwrap_or(self.cycle_limit),
+            proposal_cycle_limit: self.proposal_cycle_limit,
+            aggregation_cycle_limit: self.aggregation_cycle_limit,
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
@@ -223,6 +241,9 @@ impl Sp1Config {
         let empty_overrides = Sp1ConfigOverrides::default();
         let overrides = overrides.unwrap_or(&empty_overrides);
         let mut effective_config = self.merged_with(overrides);
+        if overrides.cycle_limit.is_none() {
+            effective_config.cycle_limit = effective_config.cycle_limit_for_context(context);
+        }
         match context {
             Sp1RequestContext::ProposalBatch { .. }
                 if effective_config.mode == ExecutionMode::Prove =>
@@ -258,6 +279,12 @@ impl Sp1Config {
     pub fn validate(&self) -> Result<(), Sp1ConfigError> {
         if self.cycle_limit == 0 {
             return Err(Sp1ConfigError::CycleLimitMustBePositive);
+        }
+        if self.proposal_cycle_limit == Some(0) {
+            return Err(Sp1ConfigError::ProposalCycleLimitMustBePositive);
+        }
+        if self.aggregation_cycle_limit == Some(0) {
+            return Err(Sp1ConfigError::AggregationCycleLimitMustBePositive);
         }
         if self.timeout_secs == 0 {
             return Err(Sp1ConfigError::TimeoutSecsMustBePositive);
@@ -303,6 +330,19 @@ impl Sp1Config {
         }
 
         Ok(())
+    }
+
+    const fn cycle_limit_for_context(&self, context: Sp1RequestContext) -> u64 {
+        match context {
+            Sp1RequestContext::ProposalBatch { .. } => match self.proposal_cycle_limit {
+                Some(cycle_limit) => cycle_limit,
+                None => self.cycle_limit,
+            },
+            Sp1RequestContext::Aggregation => match self.aggregation_cycle_limit {
+                Some(cycle_limit) => cycle_limit,
+                None => self.cycle_limit,
+            },
+        }
     }
 }
 
@@ -725,6 +765,7 @@ mod tests {
         let config = Sp1Config {
             prover: ProverMode::Local,
             cycle_limit: 1_000_000_000_000,
+            proposal_cycle_limit: Some(300_000_000_000),
             ..Sp1Config::default()
         };
         let overrides = Sp1ConfigOverrides {
@@ -740,6 +781,59 @@ mod tests {
             .expect("local cycle_limit override should be accepted");
         assert_eq!(resolved.prover, ProverMode::Local);
         assert_eq!(resolved.cycle_limit, 251_290_908);
+    }
+
+    #[test]
+    fn resolve_request_config_uses_proposal_cycle_limit_for_proposals() {
+        let config = Sp1Config {
+            cycle_limit: 1_000_000_000_000,
+            proposal_cycle_limit: Some(300_000_000_000),
+            aggregation_cycle_limit: Some(500_000_000_000),
+            ..Sp1Config::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(None, Sp1RequestContext::ProposalBatch { aggregate: false })
+            .expect("proposal config should resolve");
+
+        assert_eq!(resolved.cycle_limit, 300_000_000_000);
+    }
+
+    #[test]
+    fn resolve_request_config_uses_aggregation_cycle_limit_for_aggregation() {
+        let config = Sp1Config {
+            cycle_limit: 1_000_000_000_000,
+            proposal_cycle_limit: Some(300_000_000_000),
+            aggregation_cycle_limit: Some(500_000_000_000),
+            ..Sp1Config::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(None, Sp1RequestContext::Aggregation)
+            .expect("aggregation config should resolve");
+
+        assert_eq!(resolved.cycle_limit, 500_000_000_000);
+    }
+
+    #[test]
+    fn sp1_config_rejects_zero_stage_cycle_limits() {
+        let proposal = Sp1Config {
+            proposal_cycle_limit: Some(0),
+            ..Sp1Config::default()
+        };
+        let aggregation = Sp1Config {
+            aggregation_cycle_limit: Some(0),
+            ..Sp1Config::default()
+        };
+
+        assert_eq!(
+            proposal.validate().expect_err("zero proposal limit"),
+            Sp1ConfigError::ProposalCycleLimitMustBePositive
+        );
+        assert_eq!(
+            aggregation.validate().expect_err("zero aggregation limit"),
+            Sp1ConfigError::AggregationCycleLimitMustBePositive
+        );
     }
 
     #[test]

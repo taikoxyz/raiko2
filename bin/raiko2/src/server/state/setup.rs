@@ -67,6 +67,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
+#[cfg(any(feature = "boundless", test))]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -110,6 +111,7 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     config.prover.sp1.clone()
 }
 
+#[cfg(any(feature = "boundless", test))]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -127,6 +129,7 @@ pub(crate) fn boundless_prover_config(
         deployment: boundless.deployment,
         batch_quoted_mcycles: boundless.batch_quoted_mcycles,
         batch_quote_strategy: boundless.batch_quote_strategy,
+        aggregation_quoted_mcycles: boundless.aggregation_quoted_mcycles,
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
@@ -222,6 +225,7 @@ mod tests {
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
+        config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
                 timeout_ms_per_mcycle: 500,
@@ -242,6 +246,7 @@ mod tests {
         let boundless = boundless_prover_config(&config, &pair);
 
         assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
+        assert_eq!(boundless.aggregation_quoted_mcycles, 320);
         assert_eq!(boundless.offer_params.batch.timeout_ms_per_mcycle, 500);
         assert_eq!(
             boundless.offer_params.aggregation.timeout_ms_per_mcycle,

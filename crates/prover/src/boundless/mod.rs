@@ -76,8 +76,6 @@ const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
 #[cfg(feature = "boundless")]
 const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 #[cfg(feature = "boundless")]
-const AGGREGATION_QUOTED_MCYCLES: u32 = 200;
-#[cfg(feature = "boundless")]
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 #[cfg(feature = "boundless")]
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -1043,7 +1041,7 @@ impl BoundlessProver {
                     }
                 }
             }
-            ElfType::Aggregation => AGGREGATION_QUOTED_MCYCLES,
+            ElfType::Aggregation => self.config.aggregation_quoted_mcycles,
         }
     }
 }
@@ -1129,8 +1127,8 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
-        AGGREGATION_QUOTED_MCYCLES, BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType,
-        proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, proof_to_envelope,
+        quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
     use raiko2_primitives::Proof;
 
@@ -1144,7 +1142,7 @@ mod tests {
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
         assert_eq!(
             prover.quoted_mcycles_count(ElfType::Aggregation, 123),
-            AGGREGATION_QUOTED_MCYCLES
+            BoundlessConfig::default().aggregation_quoted_mcycles
         );
     }
 
@@ -1167,6 +1165,19 @@ mod tests {
         };
         let prover = BoundlessProver::new(config);
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_500);
+    }
+
+    #[test]
+    fn aggregation_quoted_mcycles_can_use_fixed_override() {
+        let config = BoundlessConfig {
+            aggregation_quoted_mcycles: 320,
+            ..Default::default()
+        };
+        let prover = BoundlessProver::new(config);
+        assert_eq!(
+            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            320
+        );
     }
 
     #[test]

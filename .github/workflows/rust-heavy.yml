@@ -71,8 +71,12 @@ jobs:
           git rev-parse HEAD
           git branch --show-current
 
-      - name: print boundless dependency path
-        run: cargo tree -i boundless-market -p raiko2-prover
+      - name: print boundless dependency path when present
+        shell: bash
+        run: |
+          set -eu
+          cargo tree -i boundless-market -p raiko2-prover || \
+            echo "boundless-market is not in the default feature graph"
 
       - name: test prover
         run: cargo test -p raiko2-prover -p guest-launcher
@@ -82,8 +86,12 @@ jobs:
         shell: bash
         run: |
           set -eu
-          find target/debug/build -path '*boundless_market_generated.rs' -print
-          for f in $(find target/debug/build -path '*boundless_market_generated.rs'); do
+          if [ ! -d target/debug/build ]; then
+            echo "target/debug/build missing; no boundless generated source to dump"
+            exit 0
+          fi
+          find target/debug/build -path '*boundless_market_generated.rs' -print || true
+          for f in $(find target/debug/build -path '*boundless_market_generated.rs' 2>/dev/null); do
             echo "FILE:${f}"
             sha256sum "${f}"
             sed -n '1,40p' "${f}"
@@ -116,8 +124,12 @@ jobs:
           git rev-parse HEAD
           git branch --show-current
 
-      - name: print boundless dependency path
-        run: cargo tree -i boundless-market -p raiko2-engine
+      - name: print boundless dependency path when present
+        shell: bash
+        run: |
+          set -eu
+          cargo tree -i boundless-market -p raiko2-engine || \
+            echo "boundless-market is not in the default feature graph"
 
       - name: test engine
         run: cargo test -p raiko2-engine
@@ -127,8 +139,12 @@ jobs:
         shell: bash
         run: |
           set -eu
-          find target/debug/build -path '*boundless_market_generated.rs' -print
-          for f in $(find target/debug/build -path '*boundless_market_generated.rs'); do
+          if [ ! -d target/debug/build ]; then
+            echo "target/debug/build missing; no boundless generated source to dump"
+            exit 0
+          fi
+          find target/debug/build -path '*boundless_market_generated.rs' -print || true
+          for f in $(find target/debug/build -path '*boundless_market_generated.rs' 2>/dev/null); do
             echo "FILE:${f}"
             sha256sum "${f}"
             sed -n '1,40p' "${f}"
@@ -161,8 +177,12 @@ jobs:
           git rev-parse HEAD
           git branch --show-current
 
-      - name: print boundless dependency path
-        run: cargo tree -i boundless-market -p raiko2
+      - name: print boundless dependency path when present
+        shell: bash
+        run: |
+          set -eu
+          cargo tree -i boundless-market -p raiko2 || \
+            echo "boundless-market is not in the default feature graph"
 
       - name: test server
         run: cargo test -p raiko2
@@ -172,8 +192,12 @@ jobs:
         shell: bash
         run: |
           set -eu
-          find target/debug/build -path '*boundless_market_generated.rs' -print
-          for f in $(find target/debug/build -path '*boundless_market_generated.rs'); do
+          if [ ! -d target/debug/build ]; then
+            echo "target/debug/build missing; no boundless generated source to dump"
+            exit 0
+          fi
+          find target/debug/build -path '*boundless_market_generated.rs' -print || true
+          for f in $(find target/debug/build -path '*boundless_market_generated.rs' 2>/dev/null); do
             echo "FILE:${f}"
             sha256sum "${f}"
             sed -n '1,40p' "${f}"

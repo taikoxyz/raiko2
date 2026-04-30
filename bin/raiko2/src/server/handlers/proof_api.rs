@@ -1980,15 +1980,17 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::BoundlessPairConfig;
-    use crate::server::state::EngineHandle;
+    use crate::config::{BoundlessPairConfig, Config};
+    use crate::server::sampling::ZkAnySampler;
+    use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::Result;
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
     use raiko2_primitives::SupportedChainSpecs;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
-        ProofArtifactRegistration, RunnerStatus as RuntimeRunnerStatus, RuntimeTaskRecord,
+        ProofArtifactRegistration, RunnerStatus as RuntimeRunnerStatus, RuntimeManager,
+        RuntimeTaskRecord,
     };
     use std::future::Future;
     use std::pin::Pin;
@@ -2620,6 +2622,39 @@ mod tests {
             runtime: None,
             extra_data: None,
         }
+    }
+
+    #[test]
+    fn resolve_engine_reports_boundless_pipeline_as_unavailable_when_not_registered() {
+        let pair = resolved_pair();
+        let mut factory = StaticPipelineFactory::default();
+        let risc0_engine: Arc<dyn EngineHandle> = Arc::new(NoopEngine);
+        factory.insert(pair.key.clone(), PipelineKey::ShastaRisc0, risc0_engine);
+
+        let mut config = Config::default();
+        config.runtime.root = unique_test_runtime_root("resolve-engine-boundless-config");
+        let zk_any_sampler = ZkAnySampler::from_config(&config.prover.zk_any);
+        let state = AppState {
+            config: Arc::new(config),
+            pipelines: Arc::new(factory),
+            runtime: Arc::new(
+                RuntimeManager::new(unique_test_runtime_root("resolve-engine-boundless-runtime"))
+                    .expect("runtime manager"),
+            ),
+            zk_any_sampler: Arc::new(Mutex::new(zk_any_sampler)),
+        };
+
+        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Boundless) else {
+            panic!("boundless pipeline should be unavailable");
+        };
+
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(
+            err.message
+                .contains("pipeline not available: shasta-risc0-boundless"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]

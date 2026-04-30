@@ -32,13 +32,14 @@ alloy-signer-local.workspace = true
 # RISC0 dependencies (optional)
 risc0-zkvm.workspace = true
 risc0-ethereum-contracts-boundless.workspace = true
-boundless-market.workspace = true
+boundless-market = { workspace = true, optional = true }
 
 # SP1 dependencies (optional)
 sp1-sdk.workspace = true
 
 [features]
 default = []
+boundless = ["dep:boundless-market"]
 
 [dev-dependencies]
 httpmock = "0.7"

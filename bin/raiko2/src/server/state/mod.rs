@@ -14,17 +14,17 @@ pub use types::{EngineStatusView, ProofStatus};
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
+#[cfg(feature = "boundless")]
+use raiko2_pipeline::forks::shasta::RISC0_BOUNDLESS_SHASTA_BACKEND;
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{
-        RISC0_BOUNDLESS_SHASTA_BACKEND, RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec,
-    },
+    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
 };
 use raiko2_primitives::{Proof, ProofType};
+#[cfg(feature = "boundless")]
+use raiko2_prover::boundless::BoundlessProver;
 use raiko2_prover::validate_external_aggregate_proofs;
-use raiko2_prover::{
-    boundless::BoundlessProver, native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover,
-};
+use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -44,6 +44,7 @@ type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
+#[cfg(feature = "boundless")]
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
@@ -65,7 +66,6 @@ impl AppState {
         let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
-        let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
@@ -89,19 +89,24 @@ impl AppState {
                 Arc::new(risc0_engine),
             );
 
-            let boundless_engine = build_boundless_engine(
-                &config,
-                pair,
-                boundless_scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            boundless_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaRisc0Boundless,
-                Arc::new(boundless_engine),
-            );
+            #[cfg(feature = "boundless")]
+            {
+                let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
+                let boundless_engine = build_boundless_engine(
+                    &config,
+                    pair,
+                    boundless_scheduler_config,
+                    Arc::clone(&runtime_observer),
+                )
+                .await?;
+                boundless_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(
+                    pair.key.clone(),
+                    PipelineKey::ShastaRisc0Boundless,
+                    Arc::new(boundless_engine),
+                );
+            }
 
             let sp1_engine = build_sp1_engine(
                 &config,
@@ -480,6 +485,7 @@ async fn build_native_engine(
     Ok(engine)
 }
 
+#[cfg(feature = "boundless")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_boundless_engine(
     config: &Config,

@@ -2,56 +2,56 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a manual GitHub Actions workflow that runs the heavy prover, engine, and server Rust
-test lanes on a selected branch without reintroducing them into the required PR gate.
+**Goal:** Convert the manual GitHub Actions heavy workflow into compile-only smoke checks for the
+prover, engine, and server stacks on a selected branch without reintroducing them into the required
+PR gate.
 
-**Architecture:** Create a separate `workflow_dispatch` workflow that mirrors the current Rust CI
-setup and exposes one input-controlled job per heavy lane. Keep the implementation isolated from the
-default `ci.yml` so PR-required checks do not change.
+**Architecture:** Keep the separate `workflow_dispatch` workflow and its input-controlled jobs, but
+switch each lane from full `cargo test` to `cargo check --tests`. This preserves bin/test graph
+coverage while aligning the workflow with its intended role as a lightweight smoke path outside the
+default PR gate.
 
-**Tech Stack:** GitHub Actions, Cargo, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`,
-`mozilla-actions/sccache-action`, `rui314/setup-mold`
+**Tech Stack:** GitHub Actions, Cargo, `dtolnay/rust-toolchain`, `rui314/setup-mold`
 
 ---
 
-### Task 1: Add the design and workflow files
+### Task 1: Update the workflow design and command scope
 
 **Files:**
-- Modify: `.github/workflows/`
-- Create: `docs/plans/2026-04-28-rust-heavy-workflow-design.md`
-- Create: `docs/plans/2026-04-28-rust-heavy-workflow-implementation-plan.md`
-- Create: `.github/workflows/rust-heavy.yml`
+- Modify: `docs/plans/2026-04-28-rust-heavy-workflow-design.md`
+- Modify: `docs/plans/2026-04-28-rust-heavy-workflow-implementation-plan.md`
+- Modify: `.github/workflows/rust-heavy.yml`
 
-**Step 1: Write the workflow skeleton**
+**Step 1: Update the design docs**
 
-Create a `workflow_dispatch` workflow with `lane` and `ref` inputs plus read-only repository
-permissions.
+Revise the existing design and implementation-plan docs to state that `rust-heavy` is now a
+compile-only smoke workflow for heavy bin stacks.
 
-**Step 2: Add target-ref resolution**
+**Step 2: Keep the workflow skeleton and inputs**
 
-Resolve `inputs.ref` and fall back to `github.ref_name` so dispatching from a branch can target that
-branch without requiring a second edit.
+Retain the existing `workflow_dispatch` interface with `lane` and `ref`, along with the
+`resolve-ref` job that defaults `ref` to the dispatching branch.
 
-**Step 3: Add one job per heavy lane**
+**Step 3: Keep one job per smoke lane**
 
-Implement `test-prover`, `test-engine`, and `test-server` jobs, each guarded by the selected `lane`
-value and using the same Rust CI tuning already established in `ci.yml`.
+Retain the `prover`, `engine`, and `server` lanes, each guarded by the selected `lane` value and
+using the same low-optimization compile settings already established in `ci.yml`.
 
-**Step 4: Run the exact heavy test commands**
+**Step 4: Replace full tests with compile smoke**
 
-Use full `cargo test` commands:
+Use `cargo check --tests` so the workflow still covers dev-dependencies and test code:
 
 ```bash
-cargo test -p raiko2-prover -p guest-launcher
-cargo test -p raiko2-engine
-cargo test -p raiko2
+cargo check -p raiko2-prover -p guest-launcher --tests
+cargo check -p raiko2-engine --tests
+cargo check -p raiko2 --tests
 ```
 
 **Step 5: Commit**
 
 ```bash
 git add .github/workflows/rust-heavy.yml docs/plans/2026-04-28-rust-heavy-workflow-design.md docs/plans/2026-04-28-rust-heavy-workflow-implementation-plan.md
-git commit -m "ci: add manual rust-heavy workflow"
+git commit -m "ci: reduce rust-heavy workflow to smoke checks"
 ```
 
 ### Task 2: Verify workflow integrity

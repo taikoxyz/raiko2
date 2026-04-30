@@ -71,8 +71,9 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
 
 /// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
 ///
-/// Raw 32-byte image ids are encoded into little-endian `u32` words because the Shasta
-/// aggregation guest ABI reconstructs them with `words_to_bytes_le`.
+/// SP1 verifying key JSON is kept in SP1's native `hash_u32` word form. Raw 32-byte
+/// image ids are encoded into little-endian `u32` words so RISC0/Boundless aggregation
+/// paths can round-trip them back to their original bytes.
 ///
 /// # Errors
 ///
@@ -1014,12 +1015,12 @@ fn insert_sp1_metadata(
 mod tests {
     use super::{
         encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
-        remote_verifier_program_vkey, remote_verifier_proof_bytes,
+        remote_verifier_program_vkey, remote_verifier_proof_bytes, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
     use raiko2_primitives::Proof;
-    use raiko2_primitives_shasta::instance::words_to_bytes_le;
+    use raiko2_primitives_shasta::instance::{words_to_bytes_be, words_to_bytes_le};
     use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
     use std::str::FromStr;
 
@@ -1046,6 +1047,24 @@ mod tests {
         let words = super::sp1_image_id_words_from_uuid(&expected.to_string()).expect("image id");
 
         assert_eq!(B256::from(words_to_bytes_le(&words)), expected);
+    }
+
+    #[test]
+    fn sp1_vkey_words_match_contract_block_program_encoding() {
+        let client = ProverClient::builder().mock().build();
+        let elves = sp1_test_elves();
+        let (_, vk) = client.setup(elves.proposal.as_ref());
+        let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&vk)).expect("image id");
+
+        assert_eq!(words, vk.hash_u32());
+        assert_eq!(
+            B256::from(words_to_bytes_be(&words)),
+            B256::from_slice(&vk.hash_bytes())
+        );
+        assert_ne!(
+            B256::from(words_to_bytes_le(&words)),
+            B256::from_slice(&vk.hash_bytes())
+        );
     }
 
     #[test]

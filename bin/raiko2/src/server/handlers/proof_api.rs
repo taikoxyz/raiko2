@@ -155,7 +155,8 @@ async fn request_batch_shasta_proof_inner(
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
     let request_fingerprint = batch_request_fingerprint(&submission)?;
-    let plan = build_submission_plan(state.runtime.as_ref(), &submission).await?;
+    let plan =
+        build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
 
     info!(
         task_id = submission.public_task_id.as_str(),
@@ -581,8 +582,10 @@ async fn build_external_aggregate_submission(
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     let public_task_id = generate_public_task_id();
+    let request_fingerprint =
+        external_aggregate_request_fingerprint(&pair, route, &req, &prover_config)?;
     let request = AggregationTaskRequest {
-        request_id: public_task_id.clone(),
+        request_id: aggregate_request_id(&request_fingerprint),
         proposal_ids: req.aggregation_ids.clone(),
         prover_config,
     };
@@ -590,7 +593,6 @@ async fn build_external_aggregate_submission(
         pipeline: route.pipeline_key(),
         request: request.clone(),
     });
-    let request_fingerprint = external_aggregate_request_fingerprint(&pair, route, &req, &request)?;
     let (inputs, input_artifacts) = persist_external_aggregate_input_artifacts(
         state.runtime.as_ref(),
         &pair.key,
@@ -703,6 +705,7 @@ fn validate_l2_block_numbers(numbers: &[u64]) -> Result<L2BlockRange, ApiError> 
 async fn build_submission_plan(
     runtime: &RuntimeManager,
     submission: &CanonicalBatchSubmission,
+    request_fingerprint: &str,
 ) -> Result<SubmissionPlan, ApiError> {
     let proposals = submission
         .proposals
@@ -754,7 +757,7 @@ async fn build_submission_plan(
 
     let aggregate = if submission.aggregate_requested {
         let request = AggregationTaskRequest {
-            request_id: submission.public_task_id.clone(),
+            request_id: aggregate_request_id(request_fingerprint),
             proposal_ids: submission
                 .proposals
                 .iter()
@@ -1078,14 +1081,21 @@ async fn reenqueue_existing_batch_task(
         .await;
     }
 
+    let request_fingerprint = match existing.request_fingerprint.as_deref() {
+        Some(value) => value.to_string(),
+        None => batch_request_fingerprint(submission)?,
+    };
     let recovery_plan = build_submission_plan(
         state.runtime.as_ref(),
         &CanonicalBatchSubmission {
             public_task_id: existing.task_id.clone(),
             ..submission.clone()
         },
+        &request_fingerprint,
     )
     .await?;
+    let recovery_plan =
+        with_existing_aggregate_request(recovery_plan, existing.pipeline_key, existing_metadata);
     enqueue_submission_plan(&engine, &recovery_plan)
         .await
         .map_err(|err| {
@@ -2046,14 +2056,14 @@ fn external_aggregate_request_fingerprint(
     pair: &ResolvedNetworkPair,
     route: CanonicalProofRoute,
     req: &AggregateProofRequest,
-    request: &AggregationTaskRequest,
+    prover_config: &ProverTaskConfig,
 ) -> Result<String, ApiError> {
     let payload = serde_json::json!({
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
         "proof_type": req.proof_type.as_str(),
         "aggregation_ids": &req.aggregation_ids,
-        "prover_config": &request.prover_config,
+        "prover_config": prover_config,
         "proofs": &req.proofs,
         "graffiti": req.graffiti.as_deref(),
         "prover": req.prover.as_deref(),
@@ -2065,6 +2075,28 @@ fn external_aggregate_request_fingerprint(
         ))
     })?;
     Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+}
+
+fn aggregate_request_id(request_fingerprint: &str) -> String {
+    format!("request:{request_fingerprint}")
+}
+
+fn with_existing_aggregate_request(
+    mut plan: SubmissionPlan,
+    pipeline_key: PipelineKey,
+    metadata: &TaskMetadata,
+) -> SubmissionPlan {
+    if let (Some(aggregate), Some(request)) =
+        (plan.aggregate.as_mut(), metadata.aggregate_request.clone())
+    {
+        aggregate.task_ref = aggregate_task_ref(pipeline_key, &request);
+        aggregate.task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline: pipeline_key,
+            request: request.clone(),
+        });
+        aggregate.request = request;
+    }
+    plan
 }
 
 fn resolve_engine(
@@ -2772,16 +2804,62 @@ mod tests {
         };
         let runtime =
             RuntimeManager::new(unique_test_runtime_root("plan-task-id")).expect("runtime manager");
-        let single = build_submission_plan(&runtime, &canonical_submission(route, false))
+        let single_submission = canonical_submission(route, false);
+        let single_fingerprint =
+            batch_request_fingerprint(&single_submission).expect("single fingerprint");
+        let single = build_submission_plan(&runtime, &single_submission, &single_fingerprint)
             .await
             .expect("single submission plan");
-        let aggregate = build_submission_plan(&runtime, &canonical_submission(route, true))
-            .await
-            .expect("aggregate submission plan");
+        let aggregate_submission = canonical_submission(route, true);
+        let aggregate_fingerprint =
+            batch_request_fingerprint(&aggregate_submission).expect("aggregate fingerprint");
+        let aggregate =
+            build_submission_plan(&runtime, &aggregate_submission, &aggregate_fingerprint)
+                .await
+                .expect("aggregate submission plan");
 
         assert_eq!(single.proposals.len(), 1);
         assert_eq!(aggregate.proposals.len(), 1);
         assert_eq!(single.proposals[0].task_id, aggregate.proposals[0].task_id);
+    }
+
+    #[tokio::test]
+    async fn aggregate_plan_uses_request_fingerprint_as_idempotent_key() {
+        let route = CanonicalProofRoute {
+            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
+        };
+        let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-idempotent-key"))
+            .expect("runtime manager");
+        let mut first_submission = canonical_submission(route, true);
+        first_submission.public_task_id = "task-public-a".to_string();
+        let mut second_submission = first_submission.clone();
+        second_submission.public_task_id = "task-public-b".to_string();
+
+        let first_fingerprint =
+            batch_request_fingerprint(&first_submission).expect("first fingerprint");
+        let second_fingerprint =
+            batch_request_fingerprint(&second_submission).expect("second fingerprint");
+        assert_eq!(first_fingerprint, second_fingerprint);
+
+        let first = build_submission_plan(&runtime, &first_submission, &first_fingerprint)
+            .await
+            .expect("first submission plan");
+        let second = build_submission_plan(&runtime, &second_submission, &second_fingerprint)
+            .await
+            .expect("second submission plan");
+
+        let first_aggregate = first.aggregate.expect("first aggregate");
+        let second_aggregate = second.aggregate.expect("second aggregate");
+        assert_eq!(first_aggregate.task_ref, second_aggregate.task_ref);
+        assert_eq!(first_aggregate.task_id, second_aggregate.task_id);
+        assert_eq!(
+            first_aggregate.request.request_id,
+            aggregate_request_id(&first_fingerprint)
+        );
+        assert_ne!(
+            first_aggregate.request.request_id,
+            first_submission.public_task_id
+        );
     }
 
     #[tokio::test]
@@ -2813,7 +2891,9 @@ mod tests {
         .await
         .expect("write cached proof");
 
-        let plan = build_submission_plan(&runtime, &submission)
+        let request_fingerprint =
+            batch_request_fingerprint(&submission).expect("request fingerprint");
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
         assert!(matches!(
@@ -3003,7 +3083,9 @@ mod tests {
             .await
             .expect("register corrupt artifact");
 
-        let plan = build_submission_plan(&runtime, &submission)
+        let request_fingerprint =
+            batch_request_fingerprint(&submission).expect("request fingerprint");
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
         assert!(matches!(

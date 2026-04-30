@@ -26,6 +26,7 @@ use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs;
@@ -47,7 +48,10 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::{ProofArtifactKind, TaskMetadata, root_proof_artifact_refs};
+use super::task_metadata::{
+    ProofArtifactKind, TaskMetadata, aggregate_task_ref, proposal_task_ref,
+    root_proof_artifact_refs,
+};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -174,14 +178,16 @@ async fn restore_proof_artifacts_from_runtime_task(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<()> {
+    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+        .context("failed to parse runtime task metadata for proof artifact restore")?;
+    restore_cached_proof_artifacts_from_metadata(runtime, record, &metadata).await;
+
     if record.runner_status != RunnerStatus::Completed {
         return Ok(());
     }
     let Some(proof_path) = record.proof_path.as_deref() else {
         return Ok(());
     };
-    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-        .context("failed to parse runtime task metadata for proof artifact restore")?;
     let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
         return Ok(());
     };
@@ -219,6 +225,125 @@ async fn restore_proof_artifacts_from_runtime_task(
             .await?;
     }
     Ok(())
+}
+
+async fn restore_cached_proof_artifacts_from_metadata(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) {
+    for (proof_ref, kind) in persisted_child_proof_refs(metadata, record.pipeline_key) {
+        if let Err(err) =
+            restore_cached_proof_artifact(runtime, record, metadata, &proof_ref, kind).await
+        {
+            warn!(
+                task_id = record.task_id,
+                proof_ref,
+                error = %err,
+                "failed to restore cached proof artifact; skipping"
+            );
+        }
+    }
+}
+
+async fn restore_cached_proof_artifact(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    proof_ref: &str,
+    kind: ProofArtifactKind,
+) -> Result<()> {
+    let proof_path = runtime.proof_artifact_path(&metadata.network_pair, proof_ref);
+    if !fs::try_exists(&proof_path)
+        .await
+        .with_context(|| format!("failed to inspect proof artifact for {proof_ref}"))?
+    {
+        return Ok(());
+    }
+
+    let proof_bytes = fs::read(&proof_path)
+        .await
+        .with_context(|| format!("failed to read proof artifact for {proof_ref}"))?;
+    let proof: Proof = serde_json::from_slice(&proof_bytes)
+        .with_context(|| format!("failed to parse proof artifact for {proof_ref}"))?;
+    if kind == ProofArtifactKind::Proposal
+        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
+    {
+        warn!(
+            task_id = record.task_id,
+            proof_ref,
+            error = %err,
+            "cached proposal proof is not aggregatable; skipping artifact restore"
+        );
+        return Ok(());
+    }
+
+    runtime
+        .upsert_proof_artifact(ProofArtifactRegistration {
+            network_pair: metadata.network_pair.clone(),
+            proof_ref: proof_ref.to_string(),
+            pipeline_key: record.pipeline_key,
+            route: record.route,
+            proof_path: proof_path.display().to_string(),
+        })
+        .await?;
+    Ok(())
+}
+
+fn persisted_child_proof_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Vec<(String, ProofArtifactKind)> {
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+
+    for proposal in &metadata.proposals {
+        if let Some(request) = proposal.request.as_ref() {
+            push_restored_ref(
+                &mut refs,
+                &mut seen,
+                proposal_task_ref(pipeline_key, request),
+                ProofArtifactKind::Proposal,
+            );
+        }
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            proposal.task_id.clone(),
+            ProofArtifactKind::Proposal,
+        );
+    }
+
+    if let Some(request) = metadata.aggregate_request.as_ref() {
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            aggregate_task_ref(pipeline_key, request),
+            ProofArtifactKind::Aggregate,
+        );
+    }
+    if let Some(task_id) = metadata.aggregate_task_id.as_ref() {
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            task_id.clone(),
+            ProofArtifactKind::Aggregate,
+        );
+    }
+
+    refs
+}
+
+fn push_restored_ref(
+    refs: &mut Vec<(String, ProofArtifactKind)>,
+    seen: &mut BTreeSet<String>,
+    proof_ref: String,
+    kind: ProofArtifactKind,
+) {
+    if proof_ref.is_empty() || !seen.insert(proof_ref.clone()) {
+        return;
+    }
+    refs.push((proof_ref, kind));
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
@@ -614,6 +739,72 @@ mod tests {
                 .await?
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "restore-child-proposal",
+        ))?);
+        let request = ProposalTaskRequest {
+            proposal_id: 9,
+            l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 9, end: 9 }),
+            l1_inclusion_block_number: 20,
+            last_anchor_block_number: 8,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        runtime
+            .write_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                &proposal_ref,
+                &serde_json::to_vec_pretty(&valid_native_proof())?,
+            )
+            .await?;
+
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: vec![ProposalTask {
+                proposal_id: 9,
+                checkpoint: None,
+                l1_inclusion_block_number: 20,
+                l2_block_numbers: vec![9],
+                last_anchor_block_number: 8,
+                task_id: proposal_ref.clone(),
+                request: Some(request),
+            }],
+            aggregate_task_id: None,
+            aggregate_request: None,
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .upsert_task(&runtime_record(
+                "aggregate-root",
+                PipelineKey::ShastaNative,
+                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                RunnerStatus::Allocated,
+                None,
+                serde_json::to_value(metadata)?,
+            ))
+            .await?;
+
+        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+            .await?
+            .expect("proposal proof artifact");
+        assert!(tokio::fs::try_exists(artifact.proof_path).await?);
         Ok(())
     }
 

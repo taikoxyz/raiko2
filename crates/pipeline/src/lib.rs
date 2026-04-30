@@ -194,11 +194,10 @@ impl PipelineRoute {
         match (self.guest_system, self.runner) {
             (GuestSystem::Risc0, RunnerKind::Local) => Ok(PipelineKey::ShastaRisc0),
             (GuestSystem::Risc0, RunnerKind::Network) => Ok(PipelineKey::ShastaRisc0Network),
-            (GuestSystem::Sp1, RunnerKind::Local) => Ok(PipelineKey::ShastaSp1),
-            (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
-            (GuestSystem::Sp1, RunnerKind::Network) => {
-                Err("Unsupported proving route: sp1/network".to_string())
+            (GuestSystem::Sp1, RunnerKind::Local | RunnerKind::Network) => {
+                Ok(PipelineKey::ShastaSp1)
             }
+            (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
             (GuestSystem::Native, RunnerKind::Network) => {
                 Err("Unsupported proving route: native/network".to_string())
             }
@@ -249,10 +248,19 @@ mod route_tests {
 
     #[test]
     fn pipeline_route_rejects_unsupported_combo() {
-        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
+        let route = PipelineRoute::new(GuestSystem::Native, RunnerKind::Network);
         assert_eq!(
             route.pipeline_key().expect_err("unsupported route"),
-            "Unsupported proving route: sp1/network"
+            "Unsupported proving route: native/network"
+        );
+    }
+
+    #[test]
+    fn sp1_network_route_uses_sp1_pipeline() {
+        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
+        assert_eq!(
+            route.pipeline_key().expect("supported route"),
+            PipelineKey::ShastaSp1
         );
     }
 }

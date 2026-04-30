@@ -582,13 +582,6 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
     risc0_fixture_engine_with_observer(context_config, None)
 }
 
-#[cfg(all(test, feature = "boundless"))]
-pub(crate) fn risc0_boundless_fixture_engine(
-    context_config: serde_json::Value,
-) -> Risc0FixtureEngine {
-    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Network, None)
-}
-
 #[cfg(test)]
 fn risc0_fixture_engine_with_observer(
     context_config: serde_json::Value,
@@ -790,7 +783,7 @@ pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, S
     (app::build_router(state), engine)
 }
 
-#[cfg(all(test, feature = "boundless"))]
+#[cfg(test)]
 pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     config: Config,
 ) -> (Router, Risc0FixtureEngine) {

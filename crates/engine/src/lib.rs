@@ -1105,8 +1105,6 @@ mod tests {
         NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight, ProofStage,
         ProverBackend,
     };
-    #[cfg(feature = "boundless")]
-    use raiko2_pipeline::{PipelineStage, PipelineStageResult};
     use raiko2_primitives::{
         AggregationGuestInput, Proof, ProofContext, ProofRequest, ProverConfig, RaikoError,
         RaikoResult,
@@ -1269,7 +1267,6 @@ mod tests {
             }
         }
 
-        #[cfg(feature = "boundless")]
         const fn with_pipeline_key(mut self, pipeline_key: PipelineKey) -> Self {
             self.pipeline_key = pipeline_key;
             self
@@ -1412,7 +1409,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "boundless")]
     fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
@@ -1659,7 +1655,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "boundless")]
     #[tokio::test]
     async fn submitted_proposal_and_aggregate_tasks_disable_queue_retry()
     -> Result<(), Box<dyn std::error::Error>> {

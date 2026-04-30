@@ -140,7 +140,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
-  - `sp1 -> sp1/local` with `prover_type = mock | local | network`
+  - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `boundless -> unsupported legacy error response`
@@ -421,7 +421,7 @@ Returns the root-task view derived from the original batch request.
 ### Runtime Semantics
 
 - `data.route` is the canonical resolved route that accepted the request, such as
-  `native/local`, `sp1/local`, `risc0/local`, or `risc0/network`.
+  `native/local`, `sp1/local`, `sp1/network`, `risc0/local`, or `risc0/network`.
 - `data.prover_type` is present for zkVM proof types and reports the effective prover mode:
   `mock`, `local`, or `network`. For RISC0, the network mode is currently backed by Boundless.
 - `data.execution_mode` is present for SP1 tasks and distinguishes `prove` from `execute`.

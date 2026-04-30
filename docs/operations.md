@@ -51,7 +51,7 @@ docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 The default compose stack runs a single `raiko2` container on port `8080` with the in-process
-memory queue.
+memory queue. Default binaries include RISC Zero local/network proving and SP1 proving.
 
 To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 
@@ -59,8 +59,10 @@ To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 - `risc0/local`
 - `risc0/network`
 - `sp1/local`
+- `sp1/network`
 
-Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`.
+Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`; Boundless
+does not need an extra feature flag in default builds.
 
 ## Hosted Aggregate Route
 

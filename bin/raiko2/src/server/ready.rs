@@ -1,6 +1,4 @@
-use crate::config::{Config, QueueBackend, QueueConfig};
-#[cfg(feature = "boundless")]
-use crate::config::{GuestSystem, PipelineRoute, RunnerKind};
+use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfig, RunnerKind};
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
@@ -186,7 +184,6 @@ fn check_prover(config: &Config) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "boundless")]
 fn check_risc0_capability(config: &Config) -> Result<()> {
     match config.prover.route() {
         PipelineRoute {
@@ -197,16 +194,10 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
     }
 }
 
-#[cfg(not(feature = "boundless"))]
-const fn check_risc0_capability(_config: &Config) -> Result<()> {
-    Ok(())
-}
-
 fn check_sp1_capability(config: &Config) -> Result<()> {
     check_sp1_prover(config)
 }
 
-#[cfg(feature = "boundless")]
 fn check_boundless_prover(config: &Config) -> Result<()> {
     let boundless = &config.prover.boundless;
     Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;

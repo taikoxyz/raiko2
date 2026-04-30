@@ -101,6 +101,8 @@ impl Config {
             config.queue.redis_url = Some(redis_url.clone());
         }
 
+        config.normalize();
+
         // Validate configuration
         config.validate()?;
 
@@ -141,6 +143,11 @@ impl Config {
                 })?;
         }
         Ok(())
+    }
+
+    /// Applies cross-field defaults that cannot be represented by Serde defaults alone.
+    pub fn normalize(&mut self) {
+        self.prover.normalize_route();
     }
 }
 
@@ -358,6 +365,10 @@ mod tests {
             PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
         );
         assert_eq!(
+            "sp1/network".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+        );
+        assert_eq!(
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
@@ -376,7 +387,6 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    #[cfg(feature = "boundless")]
     #[test]
     fn test_boundless_route_requires_signer_key() {
         let mut config = Config::default();
@@ -388,7 +398,6 @@ mod tests {
         assert!(err.to_string().contains("signer_key"));
     }
 
-    #[cfg(feature = "boundless")]
     #[test]
     fn test_boundless_route_requires_rpc_url() {
         let mut config = Config::default();
@@ -400,18 +409,6 @@ mod tests {
 
         let err = config.prover.validate().expect_err("missing rpc url");
         assert!(err.to_string().contains("rpc_url"));
-    }
-
-    #[cfg(not(feature = "boundless"))]
-    #[test]
-    fn test_boundless_route_allows_missing_signer_and_rpc_when_feature_disabled() {
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Network;
-        config.prover.boundless.rpc_url.clear();
-        config.prover.boundless.signer_key.clear();
-
-        assert!(config.prover.validate().is_ok());
     }
 
     #[test]
@@ -499,6 +496,36 @@ maintenance_interval_ms = 200
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_cli_sp1_network_route_sets_sp1_network_prover() {
+        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/network"]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+        );
+        assert_eq!(
+            config.prover.sp1.prover,
+            raiko2_prover::sp1::ProverMode::Network
+        );
+    }
+
+    #[test]
+    fn test_cli_sp1_local_route_sets_sp1_local_prover() {
+        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/local"]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
+        );
+        assert_eq!(
+            config.prover.sp1.prover,
+            raiko2_prover::sp1::ProverMode::Local
+        );
     }
 
     #[test]

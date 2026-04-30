@@ -15,9 +15,7 @@ use http_body_util::BodyExt;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
-#[cfg(feature = "boundless")]
 use raiko2_primitives_shasta::encode_proof_carry_data;
-#[cfg(feature = "boundless")]
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
@@ -27,7 +25,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 use super::app;
-#[cfg(feature = "boundless")]
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
@@ -236,7 +233,6 @@ fn sp1_fixture_app() -> (
     app_with_observed_sp1_fixture_engine(config)
 }
 
-#[cfg(feature = "boundless")]
 fn risc0_boundless_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Risc0FixtureSpec>,
@@ -263,7 +259,6 @@ fn sp1_external_proof(proof_hex: String) -> Value {
     })
 }
 
-#[cfg(feature = "boundless")]
 fn risc0_boundless_external_proof() -> Value {
     let extra_data =
         encode_proof_carry_data(&ProofCarryData::default()).expect("encode proof carry data");
@@ -373,7 +368,6 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     l2_handle.abort();
 }
 
-#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -1002,8 +996,7 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
     let payload = json!({
         "proposals": [{
             "proposal_id": 3,
@@ -2201,7 +2194,6 @@ async fn e2e_aggregate_request_uses_default_pair_when_network_fields_are_omitted
     assert_eq!(res["data"]["l1_network"], "ethereum");
 }
 
-#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() {
     let (app, engine) = risc0_boundless_fixture_app();
@@ -2345,8 +2337,7 @@ async fn e2e_aggregate_rejects_native_public_proof_type() {
 #[tokio::test]
 async fn e2e_report_and_list_expose_root_tasks_only() {
     let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine.clone());
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let payload = |proposal_id| {
         json!({
@@ -2591,7 +2582,7 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["route"], "sp1/network");
     assert_eq!(res["data"]["prover_type"], "network");
 }
 
@@ -2731,9 +2722,9 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "risc0/local");
     assert_eq!(res["data"]["prover_type"], "local");
-    assert_eq!(res["data"]["status"], "proving");
-    assert_eq!(res["data"]["current_index"], 0);
-    assert_eq!(res["data"]["proposals"][0]["status"], "proving");
+    assert_eq!(res["data"]["status"], "completed");
+    assert!(res["data"]["current_index"].is_null());
+    assert_eq!(res["data"]["proposals"][0]["status"], "completed");
     assert!(
         res["data"]["proposals"][0].get("runtime").is_none(),
         "unexpected per-proposal runtime while engine state is present: {res}"

@@ -17,7 +17,8 @@ that skill; it does not cover deployment or rollout.
 ## At a Glance
 
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`
+- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
+- Default binaries include RISC Zero local/network proving and SP1 proving
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
@@ -41,8 +42,8 @@ cargo run -r -p raiko2 -- --config config.toml
 Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and environment variables
 override values from the file. The real server checks configured RPC endpoints and hosted prover
 capabilities before it starts, so replace example RPC endpoints and set required prover secrets
-such as `NETWORK_PRIVATE_KEY` for SP1 network proving or a Boundless signer key for
-`risc0/network`. The prover also loads guest ELF files from the fixed `crates/guests/elf`
+such as `NETWORK_PRIVATE_KEY` for SP1 network proving or a Boundless signer key when the selected
+route is `risc0/network`. The prover also loads guest ELF files from the fixed `crates/guests/elf`
 path at startup. Packaged deployments can set `RAIKO2_GUEST_ELF_DIR` to anchor that location
 independently of the process working directory.
 
@@ -86,8 +87,8 @@ flowchart LR
   instead of a zk proof.
 - `risc0/local` generates RISC Zero proofs locally.
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
-- `sp1/local` selects the SP1 pipeline. The task `prover_type` reports whether SP1 ran in
-  `mock`, `local`, or `network` mode.
+- `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
+  SP1 ran in `mock`, `local`, or `network` mode.
 
 ## Repository Map
 

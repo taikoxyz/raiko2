@@ -67,7 +67,6 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-#[cfg(any(feature = "boundless", test))]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -111,7 +110,6 @@ pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Confi
     config.prover.sp1.clone()
 }
 
-#[cfg(any(feature = "boundless", test))]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,

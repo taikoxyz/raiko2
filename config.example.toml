@@ -50,7 +50,7 @@ inactive_ttl_secs = 7200
 # Supported routes:
 # Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
 # Routes supported by server config:
-#   risc0/local | risc0/network | sp1/local | native/local
+#   risc0/local | risc0/network | sp1/local | sp1/network | native/local
 guest_system = "risc0"
 runner = "local"
 

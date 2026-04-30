@@ -351,15 +351,21 @@ fn build_canonical_batch_submission(
         BatchProofDecision::Selected(proof_type) => proof_type,
         BatchProofDecision::NotDrawn => return Ok(None),
     };
-    let route = route_for_proof_type(state, selected_proof_type)?;
+    let sp1_context = Sp1RequestContext::ProposalBatch {
+        aggregate: req.aggregate,
+    };
+    let route = route_for_proof_type(
+        state,
+        selected_proof_type,
+        &requested_prover_config,
+        sp1_context,
+    )?;
     let prover_type = prover_type_for_proof_type(
         state,
         selected_proof_type,
         route.route,
         &requested_prover_config,
-        Sp1RequestContext::ProposalBatch {
-            aggregate: req.aggregate,
-        },
+        sp1_context,
     )?;
     validate_route_specific_request(
         state,
@@ -658,13 +664,14 @@ async fn build_external_aggregate_submission(
         &pair,
         validate_public_prover_args(req.proof_type, &req.prover_args)?,
     );
-    let route = route_for_proof_type(state, req.proof_type)?;
+    let sp1_context = Sp1RequestContext::Aggregation;
+    let route = route_for_proof_type(state, req.proof_type, &prover_config, sp1_context)?;
     let prover_type = prover_type_for_proof_type(
         state,
         req.proof_type,
         route.route,
         &prover_config,
-        Sp1RequestContext::Aggregation,
+        sp1_context,
     )?;
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)

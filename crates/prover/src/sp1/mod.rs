@@ -118,6 +118,9 @@ pub fn sp1_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
 
 impl Sp1Prover {
     /// Create a new SP1 prover with the given configuration.
+    ///
+    /// Call `preload_setup` before using this prover to prove. Server code should prefer
+    /// `new_with_backend` so SP1 setup happens during startup instead of the async proving path.
     #[must_use]
     pub fn new(config: Sp1Config) -> Self {
         Self {
@@ -150,8 +153,8 @@ impl Sp1Prover {
     where
         B: ProverBackend,
     {
-        self.setup_for_stage(backend, ProofStage::Proposal)?;
-        self.setup_for_stage(backend, ProofStage::Aggregation)?;
+        self.preload_setup_for_stage(backend, ProofStage::Proposal)?;
+        self.preload_setup_for_stage(backend, ProofStage::Aggregation)?;
         Ok(())
     }
 
@@ -183,7 +186,7 @@ impl Sp1Prover {
             .map_or(effective.clone(), |system| system.applied_to(&effective)))
     }
 
-    fn setup_for_stage<B>(
+    fn preload_setup_for_stage<B>(
         &self,
         backend: &B,
         stage: ProofStage,
@@ -212,6 +215,15 @@ impl Sp1Prover {
             }
             Err(setup) => Ok(cell.get().cloned().unwrap_or(setup)),
         }
+    }
+
+    fn cached_setup_for_stage(&self, stage: ProofStage) -> RaikoResult<Arc<Sp1ProgramSetup>> {
+        self.setup_cache.cell(stage).get().cloned().ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "SP1 {} setup is not initialized; call Sp1Prover::preload_setup before proving",
+                sp1_stage_name(stage)
+            ))
+        })
     }
 }
 
@@ -332,13 +344,13 @@ where
             }
             ExecutionMode::Prove => {
                 let proof_mode: SP1ProofMode = effective_config.recursion.into();
-                let setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
+                let setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
                 match effective_config.prover {
                     ProverMode::Mock => {
                         let client = ProverClient::builder().mock().build();
                         prove_proposal_with_client(
                             &client,
-                            Arc::clone(&setup),
+                            setup.as_ref(),
                             &stdin,
                             proof_mode,
                             effective_config.verify,
@@ -349,7 +361,7 @@ where
                         let client = ProverClient::builder().cpu().build();
                         prove_proposal_with_client(
                             &client,
-                            Arc::clone(&setup),
+                            setup.as_ref(),
                             &stdin,
                             proof_mode,
                             effective_config.verify,
@@ -360,7 +372,7 @@ where
                         let client = build_network_prover(&effective_config)?;
                         prove_proposal_with_network_client(
                             &client,
-                            setup,
+                            setup.as_ref(),
                             stdin,
                             proof_mode,
                             &effective_config,
@@ -378,7 +390,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        backend: &B,
+        _backend: &B,
     ) -> RaikoResult<Proof> {
         let effective_config =
             self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
@@ -396,8 +408,8 @@ where
 
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
-        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
-        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
+        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
+        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
@@ -405,8 +417,8 @@ where
                 let client = ProverClient::builder().mock().build();
                 aggregate_with_client(
                     &client,
-                    Arc::clone(&proposal_setup),
-                    Arc::clone(&aggregation_setup),
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     proof_mode,
@@ -417,8 +429,8 @@ where
                 let client = ProverClient::builder().cpu().build();
                 aggregate_with_client(
                     &client,
-                    Arc::clone(&proposal_setup),
-                    Arc::clone(&aggregation_setup),
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     proof_mode,
@@ -429,8 +441,8 @@ where
                 let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
-                    proposal_setup,
-                    aggregation_setup,
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     &effective_config,
@@ -445,7 +457,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        backend: &B,
+        _backend: &B,
         observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let effective_config =
@@ -459,8 +471,8 @@ where
         let mut stdin = SP1Stdin::new();
         stdin.write(&aggregation_input);
 
-        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
-        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
+        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
+        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
@@ -468,8 +480,8 @@ where
                 let client = ProverClient::builder().mock().build();
                 aggregate_with_client(
                     &client,
-                    Arc::clone(&proposal_setup),
-                    Arc::clone(&aggregation_setup),
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     proof_mode,
@@ -480,8 +492,8 @@ where
                 let client = ProverClient::builder().cpu().build();
                 aggregate_with_client(
                     &client,
-                    Arc::clone(&proposal_setup),
-                    Arc::clone(&aggregation_setup),
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     proof_mode,
@@ -492,8 +504,8 @@ where
                 let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
-                    proposal_setup,
-                    aggregation_setup,
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     &effective_config,
@@ -718,7 +730,7 @@ async fn verify_sp1_remote_contract(
 
 fn prove_proposal_with_client(
     client: &CpuProver,
-    setup: Arc<Sp1ProgramSetup>,
+    setup: &Sp1ProgramSetup,
     stdin: &SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
@@ -756,7 +768,7 @@ fn prove_proposal_with_client(
 
 async fn prove_proposal_with_network_client(
     client: &NetworkProver,
-    setup: Arc<Sp1ProgramSetup>,
+    setup: &Sp1ProgramSetup,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     config: &Sp1Config,
@@ -795,8 +807,8 @@ async fn prove_proposal_with_network_client(
 
 fn aggregate_with_client(
     client: &CpuProver,
-    proposal_setup: Arc<Sp1ProgramSetup>,
-    aggregation_setup: Arc<Sp1ProgramSetup>,
+    proposal_setup: &Sp1ProgramSetup,
+    aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
@@ -851,8 +863,8 @@ fn aggregate_with_client(
 
 async fn aggregate_with_network_client(
     client: &NetworkProver,
-    proposal_setup: Arc<Sp1ProgramSetup>,
-    aggregation_setup: Arc<Sp1ProgramSetup>,
+    proposal_setup: &Sp1ProgramSetup,
+    aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     config: &Sp1Config,
@@ -1114,6 +1126,8 @@ mod tests {
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
+    use raiko2_pipeline::ProofStage;
+    use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
@@ -1121,6 +1135,32 @@ mod tests {
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    }
+
+    #[test]
+    fn sp1_setup_cache_requires_preload_before_use() {
+        let prover = super::Sp1Prover::new(super::Sp1Config::default());
+
+        let err = match prover.cached_setup_for_stage(ProofStage::Proposal) {
+            Ok(_) => panic!("setup should not be initialized"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("setup is not initialized"));
+    }
+
+    #[test]
+    fn sp1_new_with_backend_preloads_setup_cache() {
+        let backend = sp1_shasta_backend_from_elves(sp1_test_elves());
+        let prover = super::Sp1Prover::new_with_backend(super::Sp1Config::default(), &backend)
+            .expect("preload SP1 setup");
+
+        assert!(prover.cached_setup_for_stage(ProofStage::Proposal).is_ok());
+        assert!(
+            prover
+                .cached_setup_for_stage(ProofStage::Aggregation)
+                .is_ok()
+        );
     }
 
     #[test]

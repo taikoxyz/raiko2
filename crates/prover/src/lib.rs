@@ -18,8 +18,8 @@
 //! // Create RISC0 prover
 //! let risc0_prover = Risc0Prover::new(Default::default());
 //!
-//! // Create SP1 prover
-//! let sp1_prover = Sp1Prover::new(Default::default());
+//! // Create SP1 prover after loading the SP1 backend ELFs.
+//! let sp1_prover = Sp1Prover::new_with_backend(Default::default(), &sp1_backend)?;
 //! ```
 
 pub mod boundless;
@@ -93,7 +93,6 @@ pub trait ProverProgressObserver: Send + Sync {
 }
 
 const B256_BYTES: usize = 32;
-#[cfg(feature = "boundless")]
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
 pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
@@ -161,7 +160,6 @@ pub(crate) fn encode_risc0_aggregation_proof_payload(
     )
 }
 
-#[cfg(any(feature = "boundless", test))]
 pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
     value
         .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())

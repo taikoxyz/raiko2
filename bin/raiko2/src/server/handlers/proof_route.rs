@@ -1,6 +1,8 @@
 use alloy_primitives::keccak256;
+use raiko2_engine::ProverTaskConfig;
 use raiko2_pipeline::{PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
+use raiko2_prover::sp1::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
@@ -44,9 +46,14 @@ pub(super) fn public_task_id_from_fingerprint(request_fingerprint: &str) -> Stri
 pub(super) fn route_for_proof_type(
     state: &AppState,
     proof_type: BatchProofType,
+    prover_config: &ProverTaskConfig,
+    sp1_context: Sp1RequestContext,
 ) -> Result<CanonicalProofRoute, ApiError> {
     let route = match proof_type {
-        BatchProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+        BatchProofType::Sp1 => PipelineRoute::new(
+            GuestSystem::Sp1,
+            sp1_runner_for_request(state, prover_config, sp1_context)?,
+        ),
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
@@ -67,6 +74,23 @@ pub(super) fn route_for_proof_type(
     };
 
     CanonicalProofRoute::new(route)
+}
+
+fn sp1_runner_for_request(
+    state: &AppState,
+    prover_config: &ProverTaskConfig,
+    sp1_context: Sp1RequestContext,
+) -> Result<RunnerKind, ApiError> {
+    let effective_config = state
+        .config
+        .prover
+        .sp1
+        .resolve_request_config(prover_config.sp1.as_ref(), sp1_context)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    Ok(match effective_config.prover {
+        Sp1ProverMode::Network => RunnerKind::Network,
+        Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
+    })
 }
 
 pub(super) fn decide_batch_proof_type(
@@ -107,17 +131,7 @@ const fn default_risc0_runner_for_route(route: PipelineRoute) -> RunnerKind {
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
             runner: RunnerKind::Network,
-        } => {
-            #[cfg(feature = "boundless")]
-            {
-                RunnerKind::Network
-            }
-
-            #[cfg(not(feature = "boundless"))]
-            {
-                RunnerKind::Local
-            }
-        }
+        } => RunnerKind::Network,
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
             runner,
@@ -153,27 +167,14 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "boundless")]
     #[test]
-    fn default_risc0_runner_keeps_network_when_feature_enabled() {
+    fn default_risc0_runner_keeps_network_routes_network() {
         assert_eq!(
             default_risc0_runner_for_route(PipelineRoute::new(
                 GuestSystem::Risc0,
                 RunnerKind::Network,
             )),
             RunnerKind::Network
-        );
-    }
-
-    #[cfg(not(feature = "boundless"))]
-    #[test]
-    fn default_risc0_runner_falls_back_to_local_when_feature_disabled() {
-        assert_eq!(
-            default_risc0_runner_for_route(PipelineRoute::new(
-                GuestSystem::Risc0,
-                RunnerKind::Network,
-            )),
-            RunnerKind::Local
         );
     }
 }

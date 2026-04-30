@@ -77,7 +77,7 @@
     {
         "name": "taiko_mainnet",
         "chain_id": 167000,
-        "max_spec_id": "SHASTA",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
             "HEKLA": {
                 "Block": 0
@@ -91,6 +91,7 @@
     "SHASTA": {
       "Timestamp": 1775393399
     },
+    "UNZEN": "TBD",
             "CANCUN": "TBD"
         },
         "eip_1559_constants": {
@@ -127,8 +128,11 @@
     {
         "name": "taiko_dev",
         "chain_id": 167001,
-        "max_spec_id": "CANCUN",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
+            "UNZEN": {
+                "Timestamp": 0
+            },
             "CANCUN": {
                 "Timestamp": 0
             }
@@ -159,7 +163,7 @@
     {
         "name": "taiko_masaya",
         "chain_id": 167011,
-        "max_spec_id": "SHASTA",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
             "HEKLA": {
                 "Block": 0
@@ -172,6 +176,9 @@
             },
             "SHASTA": {
                 "Timestamp": 0
+            },
+            "UNZEN": {
+                "Timestamp": 1778158800
             },
             "CANCUN": "TBD"
         },
@@ -202,7 +209,7 @@
     {
         "name": "taiko_hoodi",
         "chain_id": 167013,
-        "max_spec_id": "SHASTA",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
             "HEKLA": {
                 "Block": 0
@@ -216,6 +223,7 @@
             "SHASTA": {
                 "Timestamp": 1770296400
             },
+            "UNZEN": "TBD",
             "CANCUN": "TBD"
         },
         "eip_1559_constants": {

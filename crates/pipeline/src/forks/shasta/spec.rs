@@ -11,13 +11,16 @@ use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
     ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs,
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData, constants::DERIVATION_SOURCE_MAX_BLOCKS, decode_proposal_id_from_extra_data,
+    ShastaEventData,
+    constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
+    decode_proposal_id_from_extra_data,
 };
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -102,8 +105,8 @@ where
     ) -> RaikoResult<GuestInput> {
         let preflight_started_at = Instant::now();
         let proof_type = proof_type_from_context(ctx);
-        let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
         let chain_spec = chain_spec_from_context(ctx);
+        let (block_numbers, expected_proposal_id) = extract_block_range(ctx, &chain_spec)?;
         let chunk_size = preflight_chunk_size();
         let chunk_concurrency = preflight_chunk_concurrency();
         info!(
@@ -156,6 +159,12 @@ where
 
         let proposal_event =
             resolve_shasta_proposal_event(ctx, provider, &chain_spec, &blocks).await?;
+        validate_derivation_source_block_limit(
+            block_numbers.len(),
+            block_numbers[0],
+            proposal_event.proposal.timestamp.to::<u64>(),
+            &chain_spec,
+        )?;
         let mut manifest =
             ShastaManifestBuilder::taiko_manifest_with_event(ctx, &blocks, proposal_event)?;
         hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
@@ -656,7 +665,53 @@ fn validate_l1_headers(
     Ok(())
 }
 
-fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
+fn derivation_source_max_blocks_for_chain_spec_at(
+    chain_spec: &ChainSpec,
+    block_no: u64,
+    proposal_timestamp: u64,
+) -> usize {
+    if chain_spec
+        .hard_forks
+        .get(&ForkId::Taiko(TaikoFork::Unzen))
+        .is_some_and(|fork| fork.active(block_no, proposal_timestamp))
+    {
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+    } else {
+        DERIVATION_SOURCE_MAX_BLOCKS
+    }
+}
+
+fn validate_derivation_source_block_limit(
+    block_count: usize,
+    first_block_no: u64,
+    proposal_timestamp: u64,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<()> {
+    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
+        chain_spec,
+        first_block_no,
+        proposal_timestamp,
+    );
+    if block_count > max_blocks {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "request l2_block_range contains {block_count} blocks, max {max_blocks}"
+        )));
+    }
+    Ok(())
+}
+
+fn possible_derivation_source_max_blocks_for_chain_spec(chain_spec: &ChainSpec) -> usize {
+    if matches!(
+        chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+        Some(ForkCondition::Block(_) | ForkCondition::Timestamp(_))
+    ) {
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+    } else {
+        DERIVATION_SOURCE_MAX_BLOCKS
+    }
+}
+
+fn extract_block_range(ctx: &ProofContext, chain_spec: &ChainSpec) -> RaikoResult<(Vec<u64>, u64)> {
     if let Some(range) = ctx.request.l2_block_range {
         if !range.is_valid() {
             return Err(RaikoError::InvalidRequestConfig(
@@ -672,8 +727,10 @@ fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
                     "request l2_block_range contains too many blocks".into(),
                 )
             })?;
-        let max_blocks = u64::try_from(DERIVATION_SOURCE_MAX_BLOCKS)
-            .expect("derivation source max blocks fits u64");
+        let max_blocks = u64::try_from(possible_derivation_source_max_blocks_for_chain_spec(
+            chain_spec,
+        ))
+        .expect("derivation source max blocks fits u64");
         if block_count > max_blocks {
             return Err(RaikoError::InvalidRequestConfig(format!(
                 "request l2_block_range contains {block_count} blocks, max {max_blocks}"
@@ -1136,7 +1193,8 @@ mod tests {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_block_range = None;
 
-        let err = super::extract_block_range(&ctx).expect_err("missing range");
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("missing range");
 
         assert!(
             err.to_string()
@@ -1152,22 +1210,103 @@ mod tests {
             end: u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
         });
 
-        let (blocks, proposal_id) = super::extract_block_range(&ctx).expect("valid range");
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let (blocks, proposal_id) =
+            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
 
         assert_eq!(proposal_id, 42);
         assert_eq!(blocks.len(), super::DERIVATION_SOURCE_MAX_BLOCKS);
     }
 
     #[test]
-    fn extract_block_range_rejects_more_than_protocol_max_blocks() {
+    fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
+        });
+
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let (blocks, proposal_id) =
+            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
+
+        assert_eq!(proposal_id, 42);
+        assert_eq!(blocks.len(), super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS);
+    }
+
+    #[test]
+    fn extract_block_range_rejects_unzen_range_when_environment_has_no_activation() {
         let mut ctx = sample_context(42, 11, 9);
         let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
             end: max_blocks + 1,
         });
+        let chain_spec = super::chain_spec_from_context(&ctx);
 
-        let err = super::extract_block_range(&ctx).expect_err("oversized range");
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
+
+        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    }
+
+    #[test]
+    fn extract_block_range_rejects_more_than_unzen_max_blocks() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_001;
+        let max_blocks =
+            u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: max_blocks + 1,
+        });
+        let chain_spec = super::chain_spec_from_context(&ctx);
+
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
+
+        assert!(err.to_string().contains("contains 769 blocks, max 768"));
+    }
+
+    #[test]
+    fn derivation_source_limit_uses_environment_hardfork_activation() {
+        let mut ctx = sample_context(42, 11, 9);
+        let hoodi = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&hoodi, 1, u64::MAX),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+
+        ctx.request.l2_chain_id = 167_001;
+        let devnet = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+        );
+
+        ctx.request.l2_chain_id = 167_011;
+        let masaya = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_799),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_800),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+        );
+    }
+
+    #[test]
+    fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
+        let ctx = sample_context(42, 11, 9);
+        let chain_spec = super::chain_spec_from_context(&ctx);
+
+        let err = super::validate_derivation_source_block_limit(
+            super::DERIVATION_SOURCE_MAX_BLOCKS + 1,
+            1,
+            u64::MAX,
+            &chain_spec,
+        )
+        .expect_err("inactive unzen environment should reject");
 
         assert!(err.to_string().contains("contains 193 blocks, max 192"));
     }

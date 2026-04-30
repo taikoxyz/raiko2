@@ -4,7 +4,8 @@ use super::{
     BlobCoder, DerivationSource,
     constants::{
         BLOCK_GAS_LIMIT_MAX_CHANGE, GAS_LIMIT_DENOMINATOR, MAX_BLOCK_GAS_LIMIT,
-        MIN_BLOCK_GAS_LIMIT, max_anchor_offset_for_chain, timestamp_max_offset_for_chain,
+        MIN_BLOCK_GAS_LIMIT, derivation_source_max_blocks_for_chain_timestamp,
+        max_anchor_offset_for_chain, timestamp_max_offset_for_chain,
     },
     manifest::DerivationSourceManifest,
 };
@@ -205,14 +206,45 @@ pub fn prepare_source_manifest(
     meta: ProposalMetadata,
     fork_timestamp: u64,
 ) -> Result<DerivationSourceManifest, SourceDerivationError> {
+    let max_blocks =
+        derivation_source_max_blocks_for_chain_timestamp(meta.chain_id, meta.proposal_timestamp);
+    prepare_source_manifest_with_max_blocks(
+        source,
+        data_source,
+        parent,
+        meta,
+        fork_timestamp,
+        max_blocks,
+    )
+}
+
+/// Decode and sanitize a source manifest using a caller-selected per-source block limit.
+///
+/// # Errors
+///
+/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or when
+/// the provided blob bytes cannot be decoded with the shared Shasta blob codec.
+pub fn prepare_source_manifest_with_max_blocks(
+    source: &DerivationSource,
+    data_source: Option<&InputDataSource>,
+    parent: ParentBlockContext,
+    meta: ProposalMetadata,
+    fork_timestamp: u64,
+    max_blocks: usize,
+) -> Result<DerivationSourceManifest, SourceDerivationError> {
     let mut manifest = if source.blobSlice.blobHashes.is_empty() {
-        decode_inline_manifest(data_source, source.blobSlice.offset.to::<usize>())
+        decode_inline_manifest(
+            data_source,
+            source.blobSlice.offset.to::<usize>(),
+            max_blocks,
+        )
     } else if !is_source_offset_valid(source) {
         DerivationSourceManifest::default()
     } else {
         decode_blob_backed_manifest(
             data_source.ok_or(SourceDerivationError::MissingBlobData)?,
             source.blobSlice.offset.to::<usize>(),
+            max_blocks,
         )?
     };
 
@@ -279,15 +311,17 @@ pub const fn block_count(manifest: &DerivationSourceManifest) -> usize {
 fn decode_inline_manifest(
     data_source: Option<&InputDataSource>,
     offset: usize,
+    max_blocks: usize,
 ) -> DerivationSourceManifest {
     let Some(data_source) = data_source else {
         return DerivationSourceManifest::default();
     };
 
     if !data_source.tx_data_from_calldata.is_empty() {
-        return DerivationSourceManifest::decompress_and_decode(
+        return DerivationSourceManifest::decompress_and_decode_with_max_blocks(
             &data_source.tx_data_from_calldata,
             offset,
+            max_blocks,
         )
         .unwrap_or_default();
     }
@@ -301,12 +335,18 @@ fn decode_inline_manifest(
         .iter()
         .flat_map(|chunk| chunk.iter().copied())
         .collect::<Vec<_>>();
-    DerivationSourceManifest::decompress_and_decode(&concatenated, offset).unwrap_or_default()
+    DerivationSourceManifest::decompress_and_decode_with_max_blocks(
+        &concatenated,
+        offset,
+        max_blocks,
+    )
+    .unwrap_or_default()
 }
 
 fn decode_blob_backed_manifest(
     data_source: &InputDataSource,
     offset: usize,
+    max_blocks: usize,
 ) -> Result<DerivationSourceManifest, SourceDerivationError> {
     if data_source.tx_data_from_blob.is_empty() {
         return Err(SourceDerivationError::MissingBlobData);
@@ -332,7 +372,14 @@ fn decode_blob_backed_manifest(
         concatenated.extend(chunk);
     }
 
-    Ok(DerivationSourceManifest::decompress_and_decode(&concatenated, offset).unwrap_or_default())
+    Ok(
+        DerivationSourceManifest::decompress_and_decode_with_max_blocks(
+            &concatenated,
+            offset,
+            max_blocks,
+        )
+        .unwrap_or_default(),
+    )
 }
 
 fn is_source_offset_valid(source: &DerivationSource) -> bool {
@@ -577,6 +624,39 @@ mod tests {
 
         assert!(prepared.blocks[0].transactions.is_empty());
         assert_eq!(prepared.blocks[0].anchor_block_number, 901);
+    }
+
+    #[test]
+    fn prepare_source_manifest_accepts_unzen_block_limit() {
+        let source = DerivationSource::default();
+        let manifest = DerivationSourceManifest {
+            blocks: (0..crate::shasta::constants::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS)
+                .map(|index| {
+                    let mut block = block_manifest(901);
+                    block.timestamp = 1_001 + u64::try_from(index).expect("fits u64");
+                    block
+                })
+                .collect(),
+        };
+        let data_source = InputDataSource {
+            tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
+            ..Default::default()
+        };
+        let meta = ProposalMetadata {
+            proposal_timestamp: 2_000,
+            origin_block_number: 1_000,
+            proposer: Address::repeat_byte(0x22),
+            chain_id: crate::shasta::constants::TAIKO_DEVNET_CHAIN_ID,
+        };
+
+        let prepared =
+            prepare_source_manifest(&source, Some(&data_source), parent_context(), meta, 0)
+                .expect("prepared manifest");
+
+        assert_eq!(
+            prepared.blocks.len(),
+            crate::shasta::constants::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+        );
     }
 
     #[test]

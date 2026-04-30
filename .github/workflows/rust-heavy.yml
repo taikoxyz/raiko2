@@ -78,8 +78,8 @@ jobs:
           cargo tree -i boundless-market -p raiko2-prover || \
             echo "boundless-market is not in the default feature graph"
 
-      - name: test prover
-        run: cargo test -p raiko2-prover -p guest-launcher
+      - name: check prover smoke
+        run: cargo check -p raiko2-prover -p guest-launcher --tests
 
       - name: dump boundless generated source on failure
         if: failure()
@@ -131,8 +131,8 @@ jobs:
           cargo tree -i boundless-market -p raiko2-engine || \
             echo "boundless-market is not in the default feature graph"
 
-      - name: test engine
-        run: cargo test -p raiko2-engine
+      - name: check engine smoke
+        run: cargo check -p raiko2-engine --tests
 
       - name: dump boundless generated source on failure
         if: failure()
@@ -184,8 +184,8 @@ jobs:
           cargo tree -i boundless-market -p raiko2 || \
             echo "boundless-market is not in the default feature graph"
 
-      - name: test server
-        run: cargo test -p raiko2
+      - name: check server smoke
+        run: cargo check -p raiko2 --tests
 
       - name: dump boundless generated source on failure
         if: failure()

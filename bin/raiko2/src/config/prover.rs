@@ -43,6 +43,7 @@ impl ProverConfig {
     pub fn validate(&self) -> Result<()> {
         self.route().pipeline_key().map_err(anyhow::Error::msg)?;
 
+        #[cfg(feature = "boundless")]
         if matches!(self.runner, RunnerKind::Boundless) {
             if self.boundless.rpc_url.trim().is_empty() {
                 bail!("prover.boundless.rpc_url must not be empty");

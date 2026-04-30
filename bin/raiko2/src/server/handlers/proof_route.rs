@@ -103,7 +103,25 @@ pub(super) fn decide_batch_proof_type(
 }
 
 fn default_risc0_runner(state: &AppState) -> RunnerKind {
-    match state.config.prover.route() {
+    default_risc0_runner_for_route(state.config.prover.route())
+}
+
+const fn default_risc0_runner_for_route(route: PipelineRoute) -> RunnerKind {
+    match route {
+        PipelineRoute {
+            guest_system: GuestSystem::Risc0,
+            runner: RunnerKind::Boundless,
+        } => {
+            #[cfg(feature = "boundless")]
+            {
+                RunnerKind::Boundless
+            }
+
+            #[cfg(not(feature = "boundless"))]
+            {
+                RunnerKind::Local
+            }
+        }
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
             runner,
@@ -120,5 +138,46 @@ impl HoodiProofType {
             ProofType::Sgx => Self::Sgx,
             ProofType::Risc0 => Self::Risc0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_risc0_runner_for_route;
+    use crate::config::{GuestSystem, PipelineRoute, RunnerKind};
+
+    #[test]
+    fn default_risc0_runner_keeps_local_routes_local() {
+        assert_eq!(
+            default_risc0_runner_for_route(PipelineRoute::new(
+                GuestSystem::Risc0,
+                RunnerKind::Local,
+            )),
+            RunnerKind::Local
+        );
+    }
+
+    #[cfg(feature = "boundless")]
+    #[test]
+    fn default_risc0_runner_keeps_boundless_when_feature_enabled() {
+        assert_eq!(
+            default_risc0_runner_for_route(PipelineRoute::new(
+                GuestSystem::Risc0,
+                RunnerKind::Boundless,
+            )),
+            RunnerKind::Boundless
+        );
+    }
+
+    #[cfg(not(feature = "boundless"))]
+    #[test]
+    fn default_risc0_runner_falls_back_to_local_when_feature_disabled() {
+        assert_eq!(
+            default_risc0_runner_for_route(PipelineRoute::new(
+                GuestSystem::Risc0,
+                RunnerKind::Boundless,
+            )),
+            RunnerKind::Local
+        );
     }
 }

@@ -584,7 +584,7 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
     risc0_fixture_engine_with_observer(context_config, None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "boundless"))]
 pub(crate) fn risc0_boundless_fixture_engine(
     context_config: serde_json::Value,
 ) -> Risc0FixtureEngine {

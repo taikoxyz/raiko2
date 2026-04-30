@@ -1,4 +1,6 @@
-use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfig, RunnerKind};
+use crate::config::{Config, QueueBackend, QueueConfig};
+#[cfg(feature = "boundless")]
+use crate::config::{GuestSystem, PipelineRoute, RunnerKind};
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
@@ -184,6 +186,7 @@ fn check_prover(config: &Config) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "boundless")]
 fn check_risc0_capability(config: &Config) -> Result<()> {
     match config.prover.route() {
         PipelineRoute {
@@ -194,10 +197,16 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
     }
 }
 
+#[cfg(not(feature = "boundless"))]
+const fn check_risc0_capability(_config: &Config) -> Result<()> {
+    Ok(())
+}
+
 fn check_sp1_capability(config: &Config) -> Result<()> {
     check_sp1_prover(config)
 }
 
+#[cfg(feature = "boundless")]
 fn check_boundless_prover(config: &Config) -> Result<()> {
     let boundless = &config.prover.boundless;
     Url::parse(&boundless.rpc_url).context("boundless rpc_url is not a valid URL")?;
@@ -271,6 +280,41 @@ fn sp1_effective_pair_config(
     }
 }
 
+#[cfg(feature = "redis-queue")]
+async fn check_queue(config: &Config) -> Result<()> {
+    match config.queue.backend {
+        QueueBackend::Memory => Ok(()),
+        QueueBackend::Redis => check_redis_queue(&config.queue).await,
+    }
+}
+
+#[cfg(not(feature = "redis-queue"))]
+fn check_queue(config: &Config) -> Result<()> {
+    match config.queue.backend {
+        QueueBackend::Memory => Ok(()),
+        QueueBackend::Redis => check_redis_queue(&config.queue),
+    }
+}
+
+#[cfg(feature = "redis-queue")]
+async fn check_redis_queue(config: &QueueConfig) -> Result<()> {
+    let url = config.redis_url.clone().unwrap_or_default();
+    let namespace = config.namespace.clone();
+    let _store = raiko2_queue::RedisStore::<(), (), ()>::connect(
+        &url,
+        &namespace,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .context("failed to connect to redis queue")?;
+    Ok(())
+}
+
+#[cfg(not(feature = "redis-queue"))]
+fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
+    bail!("redis queue requires building raiko2 with `--features redis-queue`");
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Sp1RemoteVerifyConfig, sp1_effective_pair_config};
@@ -325,39 +369,4 @@ mod tests {
             "https://pair-verifier.example.com"
         );
     }
-}
-
-#[cfg(feature = "redis-queue")]
-async fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue).await,
-    }
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_queue(config: &Config) -> Result<()> {
-    match config.queue.backend {
-        QueueBackend::Memory => Ok(()),
-        QueueBackend::Redis => check_redis_queue(&config.queue),
-    }
-}
-
-#[cfg(feature = "redis-queue")]
-async fn check_redis_queue(config: &QueueConfig) -> Result<()> {
-    let url = config.redis_url.clone().unwrap_or_default();
-    let namespace = config.namespace.clone();
-    let _store = raiko2_queue::RedisStore::<(), (), ()>::connect(
-        &url,
-        &namespace,
-        std::time::Duration::from_secs(60),
-    )
-    .await
-    .context("failed to connect to redis queue")?;
-    Ok(())
-}
-
-#[cfg(not(feature = "redis-queue"))]
-fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
-    bail!("redis queue requires building raiko2 with `--features redis-queue`");
 }

@@ -1,18 +1,33 @@
 #![allow(missing_docs)]
 
 pub mod aggregation;
+mod config;
 
+pub use config::{
+    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, DeploymentConfig, DeploymentType,
+    OfferParamsConfig, validate_offer_spec,
+};
+
+#[cfg(feature = "boundless")]
 use std::collections::HashMap;
+#[cfg(feature = "boundless")]
 use std::future::Future;
-use std::str::FromStr;
+#[cfg(feature = "boundless")]
 use std::sync::Arc;
+#[cfg(feature = "boundless")]
 use std::time::{Duration, Instant, SystemTime};
 
-use alloy_primitives::{
-    B256, Bytes, U256,
-    utils::{parse_ether, parse_units},
-};
+#[cfg(feature = "boundless")]
+use alloy_primitives::B256;
+#[cfg(feature = "boundless")]
+use alloy_primitives::Bytes;
+#[cfg(feature = "boundless")]
+use alloy_primitives::U256;
+#[cfg(feature = "boundless")]
+use alloy_primitives::utils::parse_ether;
+#[cfg(feature = "boundless")]
 use alloy_signer_local::PrivateKeySigner;
+#[cfg(feature = "boundless")]
 use boundless_market::{
     Client, ProofRequest,
     contracts::RequestStatus,
@@ -20,19 +35,30 @@ use boundless_market::{
     input::GuestEnv,
     request_builder::OfferParams,
 };
+#[cfg(feature = "boundless")]
 use raiko2_pipeline::{ProofStage, ProverBackend};
+#[cfg(feature = "boundless")]
 use raiko2_primitives::proof::{
     AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
 };
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+#[cfg(feature = "boundless")]
+use raiko2_primitives::{AggregationGuestInput, ProverConfig};
+#[cfg(feature = "boundless")]
+use raiko2_primitives::{Proof, RaikoError, RaikoResult};
+#[cfg(feature = "boundless")]
 use raiko2_primitives_shasta::GuestInput;
+#[cfg(feature = "boundless")]
 use raiko2_protocol_shasta::shasta::ProofCarryData;
+#[cfg(feature = "boundless")]
 use risc0_ethereum_contracts_boundless::receipt::{Receipt as ContractReceipt, decode_seal};
+#[cfg(feature = "boundless")]
 use risc0_zkvm::{Digest, Journal, compute_image_id, local_executor};
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "boundless")]
 use tokio::sync::RwLock;
+#[cfg(feature = "boundless")]
 use url::Url;
 
+#[cfg(feature = "boundless")]
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
     RISC0_SEAL_PAYLOAD_KIND, decode_hex_payload, encode_risc0_aggregation_seal_payload,
@@ -40,15 +66,25 @@ use crate::{
     parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
+#[cfg(feature = "boundless")]
+use self::config::parse_staking_token;
+
+#[cfg(feature = "boundless")]
 const MILLION_CYCLES: u64 = 1_000_000;
-const STAKE_TOKEN_DECIMALS: u8 = 18;
+#[cfg(feature = "boundless")]
 const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
+#[cfg(feature = "boundless")]
 const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
+#[cfg(feature = "boundless")]
 const AGGREGATION_QUOTED_MCYCLES: u32 = 200;
+#[cfg(feature = "boundless")]
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
+#[cfg(feature = "boundless")]
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+#[cfg(feature = "boundless")]
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
+#[cfg(feature = "boundless")]
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
 where
     F: FnMut() -> Fut,
@@ -82,6 +118,7 @@ where
     }
 }
 
+#[cfg(feature = "boundless")]
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,112 +126,13 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(feature = "boundless")]
 fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     let mcycles = user_cycles.div_ceil(MILLION_CYCLES);
     u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DeploymentType {
-    Sepolia,
-    Base,
-}
-
-impl FromStr for DeploymentType {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.to_lowercase().as_str() {
-            "sepolia" => Ok(Self::Sepolia),
-            "base" => Ok(Self::Base),
-            _ => Err(format!("Invalid boundless deployment_type: {value}")),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoundlessOfferParams {
-    pub ramp_up_start_sec: u32,
-    pub ramp_up_period_blocks: u32,
-    pub lock_timeout_ms_per_mcycle: u32,
-    pub timeout_ms_per_mcycle: u32,
-    pub max_price_per_mcycle: String,
-    #[serde(default)]
-    pub min_price_per_mcycle: Option<String>,
-    pub lock_collateral: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OfferParamsConfig {
-    pub batch: BoundlessOfferParams,
-    pub aggregation: BoundlessOfferParams,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DeploymentConfig {
-    pub deployment_type: Option<DeploymentType>,
-    pub overrides: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchQuoteStrategy {
-    #[default]
-    RaikoAgent,
-    Evaluated,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BoundlessConfig {
-    #[serde(default = "default_execution_po2")]
-    pub execution_po2: u32,
-    #[serde(default)]
-    pub offchain: bool,
-    pub rpc_url: String,
-    pub signer_key: String,
-    #[serde(default)]
-    pub deployment: Option<DeploymentConfig>,
-    #[serde(default)]
-    pub batch_quoted_mcycles: Option<u32>,
-    #[serde(default)]
-    pub batch_quote_strategy: BatchQuoteStrategy,
-    pub offer_params: OfferParamsConfig,
-    #[serde(default = "default_poll_interval_ms")]
-    pub poll_interval_ms: u64,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-impl Default for BoundlessConfig {
-    fn default() -> Self {
-        Self {
-            execution_po2: default_execution_po2(),
-            offchain: false,
-            rpc_url: "https://base-rpc.publicnode.com".to_string(),
-            signer_key: String::new(),
-            deployment: Some(DeploymentConfig {
-                deployment_type: Some(DeploymentType::Base),
-                overrides: Some(serde_json::json!({
-                    "order_stream_url": "https://base-mainnet.boundless.network"
-                })),
-            }),
-            batch_quoted_mcycles: None,
-            batch_quote_strategy: BatchQuoteStrategy::default(),
-            offer_params: OfferParamsConfig {
-                batch: default_batch_offer_params(),
-                aggregation: default_aggregation_offer_params(),
-            },
-            poll_interval_ms: default_poll_interval_ms(),
-            timeout_ms: default_timeout_ms(),
-        }
-    }
-}
-
-fn default_execution_po2() -> u32 {
-    crate::risc0::Risc0Config::default().execution_po2
-}
-
+#[cfg(feature = "boundless")]
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
     let rounded = if evaluated_mcycles == 0 {
         0
@@ -208,15 +146,8 @@ const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
     }
 }
 
+#[cfg(feature = "boundless")]
 impl BoundlessConfig {
-    #[must_use]
-    pub fn get_deployment_type(&self) -> DeploymentType {
-        self.deployment
-            .as_ref()
-            .and_then(|deployment| deployment.deployment_type.clone())
-            .unwrap_or(DeploymentType::Base)
-    }
-
     #[must_use]
     pub fn get_effective_deployment(&self) -> Deployment {
         let mut deployment = match self.get_deployment_type() {
@@ -238,22 +169,16 @@ impl BoundlessConfig {
 
         deployment
     }
-
-    #[must_use]
-    pub fn block_time_sec(&self) -> u32 {
-        match self.get_deployment_type() {
-            DeploymentType::Base => 2,
-            DeploymentType::Sepolia => 12,
-        }
-    }
 }
 
+#[cfg(feature = "boundless")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ElfType {
     Batch,
     Aggregation,
 }
 
+#[cfg(feature = "boundless")]
 #[derive(Clone, Debug)]
 struct UploadedProgram {
     image_id: Digest,
@@ -261,6 +186,7 @@ struct UploadedProgram {
     refresh_at: SystemTime,
 }
 
+#[cfg(feature = "boundless")]
 #[derive(Clone, Debug)]
 struct Submission {
     market_request_id: U256,
@@ -269,6 +195,7 @@ struct Submission {
     expires_at: u64,
 }
 
+#[cfg(feature = "boundless")]
 struct FreshSubmissionContext<'a> {
     client: &'a Client,
     input: &'a Bytes,
@@ -283,17 +210,20 @@ struct FreshSubmissionContext<'a> {
     evaluated_mcycles_count: u32,
 }
 
+#[cfg(feature = "boundless")]
 enum BoundlessAttemptError {
     Retryable(String),
     Fatal(RaikoError),
 }
 
+#[cfg(feature = "boundless")]
 impl From<RaikoError> for BoundlessAttemptError {
     fn from(value: RaikoError) -> Self {
         Self::Fatal(value)
     }
 }
 
+#[cfg(feature = "boundless")]
 #[allow(clippy::too_many_arguments)]
 async fn publish_boundless_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
@@ -322,6 +252,7 @@ async fn publish_boundless_progress(
     }
 }
 
+#[cfg(feature = "boundless")]
 impl TryFrom<BoundlessSubmissionResume> for Submission {
     type Error = RaikoError;
 
@@ -352,6 +283,7 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
     }
 }
 
+#[cfg(feature = "boundless")]
 #[derive(Debug)]
 struct ValidatedOfferParams {
     max_price: U256,
@@ -363,12 +295,14 @@ struct ValidatedOfferParams {
     bidding_start: u64,
 }
 
+#[cfg(feature = "boundless")]
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
 }
 
+#[cfg(feature = "boundless")]
 impl BoundlessProver {
     #[must_use]
     pub fn new(config: BoundlessConfig) -> Self {
@@ -962,6 +896,7 @@ impl BoundlessProver {
     }
 }
 
+#[cfg(feature = "boundless")]
 impl crate::GuestInputCodec<GuestInput> for BoundlessProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
         bincode::serialize(input)
@@ -970,6 +905,7 @@ impl crate::GuestInputCodec<GuestInput> for BoundlessProver {
     }
 }
 
+#[cfg(feature = "boundless")]
 #[async_trait::async_trait]
 impl<B> crate::Prover<B> for BoundlessProver
 where
@@ -1090,38 +1026,7 @@ where
     }
 }
 
-const fn default_poll_interval_ms() -> u64 {
-    10_000
-}
-
-const fn default_timeout_ms() -> u64 {
-    3_600_000
-}
-
-fn default_batch_offer_params() -> BoundlessOfferParams {
-    BoundlessOfferParams {
-        ramp_up_start_sec: 20,
-        ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 200,
-        timeout_ms_per_mcycle: 410,
-        max_price_per_mcycle: "0.000000085".to_string(),
-        min_price_per_mcycle: Some("0.000000010".to_string()),
-        lock_collateral: "20".to_string(),
-    }
-}
-
-fn default_aggregation_offer_params() -> BoundlessOfferParams {
-    BoundlessOfferParams {
-        ramp_up_start_sec: 20,
-        ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 3000,
-        timeout_ms_per_mcycle: 6000,
-        max_price_per_mcycle: "0.00000006".to_string(),
-        min_price_per_mcycle: Some("0.000000006".to_string()),
-        lock_collateral: "20".to_string(),
-    }
-}
-
+#[cfg(feature = "boundless")]
 impl BoundlessProver {
     // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
     const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
@@ -1143,42 +1048,7 @@ impl BoundlessProver {
     }
 }
 
-fn parse_staking_token(value: &str) -> RaikoResult<U256> {
-    parse_units(value, STAKE_TOKEN_DECIMALS)
-        .map(Into::into)
-        .map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!(
-                "Failed to parse lock_collateral {value}: {e}"
-            ))
-        })
-}
-
-/// Validate the static offer invariants that must hold for every Boundless offer config.
-///
-/// # Errors
-///
-/// Returns an error when the configured min/max price range, timeout ordering, or staking token
-/// amount is invalid.
-pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
-    let max_price = parse_ether(&offer_spec.max_price_per_mcycle).map_err(|e| {
-        format!(
-            "Failed to parse max_price_per_mcycle {}: {e}",
-            offer_spec.max_price_per_mcycle
-        )
-    })?;
-    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_ether(min_price_value)
-        .map_err(|e| format!("Failed to parse min_price_per_mcycle {min_price_value}: {e}"))?;
-    if min_price > max_price {
-        return Err("min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string());
-    }
-    if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
-        return Err("timeout must be greater than lock_timeout".to_string());
-    }
-    parse_staking_token(&offer_spec.lock_collateral).map_err(|err| err.to_string())?;
-    Ok(())
-}
-
+#[cfg(feature = "boundless")]
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
@@ -1224,6 +1094,7 @@ fn validate_offer_params(
     })
 }
 
+#[cfg(feature = "boundless")]
 fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
     let mut verifier_artifacts = Vec::new();
     if let Some(receipt) = proof.quote {
@@ -1254,51 +1125,17 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "boundless"))]
 mod tests {
+    use super::config::default_batch_offer_params;
     use super::{
-        AGGREGATION_QUOTED_MCYCLES, BatchQuoteStrategy, BoundlessConfig, BoundlessProver,
-        DeploymentType, ElfType, default_batch_offer_params, proof_to_envelope,
-        quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
+        AGGREGATION_QUOTED_MCYCLES, BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType,
+        proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
     use raiko2_primitives::Proof;
 
     fn sample_offer() -> super::BoundlessOfferParams {
         default_batch_offer_params()
-    }
-
-    #[test]
-    fn default_config_uses_base_deployment() {
-        let config = BoundlessConfig::default();
-        assert_eq!(config.get_deployment_type(), DeploymentType::Base);
-        assert!(!config.offchain);
-    }
-
-    #[test]
-    fn default_batch_offer_matches_tolba_deployment() {
-        let batch = BoundlessConfig::default().offer_params.batch;
-        assert_eq!(batch.ramp_up_start_sec, 20);
-        assert_eq!(batch.ramp_up_period_blocks, 60);
-        assert_eq!(batch.lock_timeout_ms_per_mcycle, 200);
-        assert_eq!(batch.timeout_ms_per_mcycle, 410);
-        assert_eq!(batch.max_price_per_mcycle, "0.000000085");
-        assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
-        assert_eq!(batch.lock_collateral, "20");
-    }
-
-    #[test]
-    fn default_aggregation_offer_matches_tolba_deployment() {
-        let aggregation = BoundlessConfig::default().offer_params.aggregation;
-        assert_eq!(aggregation.ramp_up_start_sec, 20);
-        assert_eq!(aggregation.ramp_up_period_blocks, 60);
-        assert_eq!(aggregation.lock_timeout_ms_per_mcycle, 3000);
-        assert_eq!(aggregation.timeout_ms_per_mcycle, 6000);
-        assert_eq!(aggregation.max_price_per_mcycle, "0.00000006");
-        assert_eq!(
-            aggregation.min_price_per_mcycle.as_deref(),
-            Some("0.000000006")
-        );
-        assert_eq!(aggregation.lock_collateral, "20");
     }
 
     #[test]

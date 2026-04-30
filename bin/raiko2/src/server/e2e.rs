@@ -17,7 +17,9 @@ use raiko2_engine::{
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
+#[cfg(feature = "boundless")]
 use raiko2_primitives_shasta::encode_proof_carry_data;
+#[cfg(feature = "boundless")]
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
@@ -27,10 +29,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 use super::app;
+#[cfg(feature = "boundless")]
+use super::fixture::risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_native_fixture_engine, app_with_observed_native_fixture_engine,
-    base_config, native_fixture_engine, risc0_boundless_fixture_engine, risc0_fixture_engine,
-    sp1_fixture_engine, spawn_chain_id_rpc, unique_runtime_root,
+    base_config, native_fixture_engine, risc0_fixture_engine, sp1_fixture_engine,
+    spawn_chain_id_rpc, unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
@@ -159,6 +163,7 @@ fn sp1_fixture_app() -> (
     (app::build_router(state), engine)
 }
 
+#[cfg(feature = "boundless")]
 fn risc0_boundless_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Risc0FixtureSpec>,
@@ -192,6 +197,7 @@ fn sp1_external_proof(proof_hex: String) -> Value {
     })
 }
 
+#[cfg(feature = "boundless")]
 fn risc0_boundless_external_proof() -> Value {
     let extra_data =
         encode_proof_carry_data(&ProofCarryData::default()).expect("encode proof carry data");
@@ -301,6 +307,7 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     l2_handle.abort();
 }
 
+#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -1769,6 +1776,7 @@ async fn e2e_aggregate_request_uses_default_pair_when_network_fields_are_omitted
     assert_eq!(res["data"]["l1_network"], "ethereum");
 }
 
+#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() {
     let (app, engine) = risc0_boundless_fixture_app();

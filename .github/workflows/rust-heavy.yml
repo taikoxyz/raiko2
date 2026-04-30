@@ -62,7 +62,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -115,7 +115,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -168,7 +168,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 

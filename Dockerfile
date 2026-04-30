@@ -1,13 +1,13 @@
 # Raiko2 runtime image for Docker and Docker Compose deployments.
 # This image intentionally excludes SGX-specific setup.
 
-FROM rust:1.93.0-bookworm AS chef
+FROM rust:1.94.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
 ARG CARGO_CHEF_VERSION=0.1.77
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -50,7 +50,7 @@ COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
 
-RUN cargo +1.93.0 build --release -p raiko2 ${BIN_FEATURES}
+RUN cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
 
 FROM debian:bookworm-slim AS runtime
 

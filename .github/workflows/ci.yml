@@ -65,7 +65,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
           components: rustfmt
 
       - name: fmt
@@ -85,7 +85,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
           components: clippy
 
       - uses: rui314/setup-mold@v1
@@ -133,7 +133,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -168,7 +168,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -204,7 +204,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -259,7 +259,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -292,7 +292,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@v2
         with:

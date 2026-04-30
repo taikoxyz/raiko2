@@ -57,7 +57,7 @@ To switch proving routes, change `RAIKO2_PROVER` in `docker/.env`:
 
 - `native/local`
 - `risc0/local`
-- `risc0/boundless`
+- `risc0/network`
 - `sp1/local`
 
 Redis-backed queueing requires rebuilding with `BIN_FEATURES=--features redis-queue`.
@@ -79,7 +79,7 @@ Operational notes:
 - `proof_type = "sp1"` requires proofs that include the SP1 aggregation metadata expected by the
   canonical aggregation path. Hosted SP1 batch proposal proving emits Compressed proofs, and the
   hosted aggregation route emits a Plonk proof.
-- `proof_type = "risc0"` uses the same hosted Boundless path as proposal proving.
+- `proof_type = "risc0"` uses the same hosted RISC0 network prover path as proposal proving.
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.
 
@@ -127,16 +127,16 @@ Current behavior:
 - `sp1` registrations derive the current proving key digests from `setup(elf)` and call
   `setProgramTrusted(bytes32,bool)`.
 - Boundless program upload is a separate runtime concern and still happens automatically when
-  `risc0/boundless` submits a request.
+  `risc0/network` submits a request.
 
-## Boundless Route
+## RISC0 Network Route
 
-To use the boundless-backed RISC0 route, configure:
+To use the network-backed RISC0 route, configure:
 
 ```toml
 [prover]
 guest_system = "risc0"
-runner = "boundless"
+runner = "network"
 
 [prover.boundless]
 offchain = false
@@ -161,7 +161,7 @@ Operator notes:
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
   `aggregation_quoted_mcycles`, and either offer param block for a specific
-  `(network, l1_network)` pair. This only affects `risc0/boundless`; SP1 ignores it.
+  `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
 Optional `zk_any` request sampling is configured at the server level:

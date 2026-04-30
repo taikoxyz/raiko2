@@ -39,7 +39,7 @@ pub enum PipelineKey {
     ShastaRisc0,
     ShastaSp1,
     ShastaNative,
-    ShastaRisc0Boundless,
+    ShastaRisc0Network,
 }
 
 impl PipelineKey {
@@ -49,7 +49,7 @@ impl PipelineKey {
             PipelineKey::ShastaRisc0 => "shasta-risc0-local",
             PipelineKey::ShastaSp1 => "shasta-sp1-local",
             PipelineKey::ShastaNative => "shasta-native-local",
-            PipelineKey::ShastaRisc0Boundless => "shasta-risc0-boundless",
+            PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
         }
     }
 
@@ -59,9 +59,7 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaRisc0Boundless => {
-                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
-            }
+            Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
 }
@@ -80,7 +78,7 @@ impl FromStr for PipelineKey {
             "shasta-risc0-local" => Ok(Self::ShastaRisc0),
             "shasta-sp1-local" => Ok(Self::ShastaSp1),
             "shasta-native-local" => Ok(Self::ShastaNative),
-            "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Boundless),
+            "shasta-risc0-network" => Ok(Self::ShastaRisc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -132,7 +130,7 @@ impl FromStr for GuestSystem {
 pub enum RunnerKind {
     #[default]
     Local,
-    Boundless,
+    Network,
 }
 
 impl RunnerKind {
@@ -140,7 +138,7 @@ impl RunnerKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
-            Self::Boundless => "boundless",
+            Self::Network => "network",
         }
     }
 }
@@ -157,7 +155,7 @@ impl FromStr for RunnerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
-            "boundless" => Ok(Self::Boundless),
+            "network" => Ok(Self::Network),
             _ => Err(format!("Unknown runner: {s}")),
         }
     }
@@ -195,14 +193,14 @@ impl PipelineRoute {
     pub fn pipeline_key(self) -> Result<PipelineKey, String> {
         match (self.guest_system, self.runner) {
             (GuestSystem::Risc0, RunnerKind::Local) => Ok(PipelineKey::ShastaRisc0),
-            (GuestSystem::Risc0, RunnerKind::Boundless) => Ok(PipelineKey::ShastaRisc0Boundless),
+            (GuestSystem::Risc0, RunnerKind::Network) => Ok(PipelineKey::ShastaRisc0Network),
             (GuestSystem::Sp1, RunnerKind::Local) => Ok(PipelineKey::ShastaSp1),
             (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
-            (GuestSystem::Sp1, RunnerKind::Boundless) => {
-                Err("Unsupported proving route: sp1/boundless".to_string())
+            (GuestSystem::Sp1, RunnerKind::Network) => {
+                Err("Unsupported proving route: sp1/network".to_string())
             }
-            (GuestSystem::Native, RunnerKind::Boundless) => {
-                Err("Unsupported proving route: native/boundless".to_string())
+            (GuestSystem::Native, RunnerKind::Network) => {
+                Err("Unsupported proving route: native/network".to_string())
             }
         }
     }
@@ -236,13 +234,13 @@ mod route_tests {
 
     #[test]
     fn pipeline_route_roundtrips_with_pipeline_key() {
-        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless);
+        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network);
         let pipeline_key = route.pipeline_key().expect("supported route");
 
-        assert_eq!(pipeline_key, PipelineKey::ShastaRisc0Boundless);
+        assert_eq!(pipeline_key, PipelineKey::ShastaRisc0Network);
         assert_eq!(PipelineRoute::from_pipeline_key(pipeline_key), route);
         assert_eq!(
-            "shasta-risc0-boundless"
+            "shasta-risc0-network"
                 .parse::<PipelineKey>()
                 .expect("parse pipeline key"),
             pipeline_key
@@ -251,10 +249,10 @@ mod route_tests {
 
     #[test]
     fn pipeline_route_rejects_unsupported_combo() {
-        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Boundless);
+        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network);
         assert_eq!(
             route.pipeline_key().expect_err("unsupported route"),
-            "Unsupported proving route: sp1/boundless"
+            "Unsupported proving route: sp1/network"
         );
     }
 }

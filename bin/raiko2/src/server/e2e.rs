@@ -209,6 +209,7 @@ fn duplicate_request_fingerprint(
     let payload = json!({
         "pair_key": pair_key,
         "route": route,
+        "prover_type": "local",
         "aggregate_requested": aggregate_requested,
         "execution_mode": Value::Null,
         "blob_proof_type": Value::Null,
@@ -242,7 +243,7 @@ fn risc0_boundless_fixture_app() -> (
 ) {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
 
     app_with_observed_risc0_boundless_fixture_engine(config)
 }
@@ -390,7 +391,7 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key = "not-a-private-key".to_string();
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
@@ -538,7 +539,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key =
         "0x45f40b61ccb3a68af7eca7d54035df42ec3786c940387d3a14dea058ac68ef3b".to_string();
@@ -612,6 +613,35 @@ async fn e2e_proposal_proof_risc0_completes_from_fixture() {
         res["data"].get("error").is_none(),
         "unexpected error: {res}"
     );
+}
+
+#[tokio::test]
+async fn e2e_shasta_rejects_boundless_public_proof_type() {
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(base_config(), engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "boundless",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=boundless is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -811,6 +841,34 @@ async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
     assert_eq!(second["data"]["status"], "registered");
     assert!(second["data"].get("task_id").is_none(), "{second}");
     assert_eq!(single_report_task_id(&app).await, first_id);
+}
+
+#[tokio::test]
+async fn e2e_batch_public_task_id_is_stable_after_runtime_loss() {
+    let payload = json!({
+        "proposals": [{
+            "proposal_id": 3,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [3],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "risc0",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let first_app = app_with_risc0_fixture_engine(base_config(), risc0_fixture_engine(json!({})));
+    let (status, first) = post_json(&first_app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = single_report_task_id(&first_app).await;
+
+    let second_app = app_with_risc0_fixture_engine(base_config(), risc0_fixture_engine(json!({})));
+    let (status, second) = post_json(&second_app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_id = single_report_task_id(&second_app).await;
+
+    assert_eq!(second_id, first_id);
 }
 
 #[tokio::test]
@@ -1018,6 +1076,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {
@@ -1419,6 +1478,7 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["status"], "completed");
 }
 
@@ -1617,6 +1677,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["execution_mode"], "execute");
     assert_eq!(res["data"]["status"], "completed");
     assert!(
@@ -2168,7 +2229,8 @@ async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() 
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "risc0/boundless");
+    assert_eq!(res["data"]["route"], "risc0/network");
+    assert_eq!(res["data"]["prover_type"], "network");
     assert_eq!(res["data"]["status"], "completed");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-risc0-aggregation");
@@ -2225,6 +2287,32 @@ async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "invalid_request_config");
     assert_eq!(res["message"], "proof_type=sgxgeth is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_aggregate_rejects_boundless_public_proof_type() {
+    let (app, _engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "boundless",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=boundless is not supported");
     assert!(report_task_ids(&app).await.is_empty());
 }
 
@@ -2499,6 +2587,12 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
     assert_eq!(res["proof_type"], "sp1");
     assert_eq!(res["data"]["status"], "registered");
     assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["prover_type"], "network");
 }
 
 #[tokio::test]
@@ -2636,6 +2730,7 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "risc0/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["current_index"], 0);
     assert_eq!(res["data"]["proposals"][0]["status"], "proving");
@@ -2677,6 +2772,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {
@@ -2835,6 +2931,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {

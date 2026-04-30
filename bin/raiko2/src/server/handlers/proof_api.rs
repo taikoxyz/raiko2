@@ -9,11 +9,12 @@ use raiko2_engine::{
     AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProofArtifactRef,
     ProposalTaskRequest, ProverTaskConfig,
 };
-use raiko2_pipeline::PipelineKey;
+use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
 use raiko2_primitives_shasta::instance::SHASTA_PROPOSAL_ID_MAX;
 use raiko2_prover::sp1::{
-    ExecutionMode as Sp1ExecutionMode, Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
+    ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1RemoteVerifyConfig,
+    Sp1RequestContext, Sp1SystemConfig,
 };
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_runtime::{
@@ -26,8 +27,8 @@ use tracing::{debug, info, warn};
 
 use super::super::errors::ApiError;
 use super::proof_route::{
-    BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type, generate_public_task_id,
-    route_for_proof_type,
+    BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
+    public_task_id_from_fingerprint, route_for_proof_type,
 };
 use super::proof_types::{
     AggregateProofRequest, AggregateStatus, ApiOk, BatchProofType, BatchShastaRequest,
@@ -42,9 +43,10 @@ use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
 };
 use crate::server::task_metadata::{
-    AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, RuntimeMetadata,
-    TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref, aggregate_task_ref,
-    proposal_proof_artifact_refs, proposal_task_ref, root_proof_artifact_refs, stage_task_ref,
+    AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
+    RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, aggregate_input_proof_ref,
+    aggregate_task_ref, proposal_proof_artifact_refs, proposal_task_ref, root_proof_artifact_refs,
+    stage_task_ref,
 };
 use crate::server::telemetry::{self, MetricContext};
 
@@ -56,6 +58,7 @@ struct CanonicalBatchSubmission {
     proposals: Vec<CanonicalProposal>,
     aggregate_requested: bool,
     prover_config: ProverTaskConfig,
+    prover_type: Option<ProverType>,
     blob_proof_type: Option<String>,
     prover: Option<String>,
     graffiti: Option<String>,
@@ -94,6 +97,7 @@ enum ProposalPlanSource {
 struct ExternalAggregateSubmission {
     pair: ResolvedNetworkPair,
     route: CanonicalProofRoute,
+    prover_type: Option<ProverType>,
     public_task_id: String,
     task_id: EngineTaskId,
     request: AggregationTaskRequest,
@@ -139,7 +143,7 @@ async fn request_batch_shasta_proof_inner(
         .map(|proposal| proposal.proposal_id)
         .collect::<Vec<_>>();
     let not_drawn_batch_id = req.proposals.first().map(|proposal| proposal.proposal_id);
-    let Some(submission) = build_canonical_batch_submission(&state, req)? else {
+    let Some(mut submission) = build_canonical_batch_submission(&state, req)? else {
         info!(
             proof_type = requested_proof_type.as_str(),
             aggregate = requested_aggregate,
@@ -155,6 +159,7 @@ async fn request_batch_shasta_proof_inner(
         return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
     };
     let request_fingerprint = batch_request_fingerprint(&submission)?;
+    submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let plan =
         build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
 
@@ -162,6 +167,7 @@ async fn request_batch_shasta_proof_inner(
         task_id = submission.public_task_id.as_str(),
         proof_type = requested_proof_type.as_str(),
         selected_proof_type = %submission.route.proof_type(),
+        prover_type = prover_type_label(submission.prover_type),
         aggregate = submission.aggregate_requested,
         pair = submission.pair.key.as_str(),
         route = %submission.route.route,
@@ -214,6 +220,7 @@ async fn request_aggregation_proof_inner(
         task_id = submission.public_task_id.as_str(),
         proof_type = requested_proof_type.as_str(),
         selected_proof_type = %submission.route.proof_type(),
+        prover_type = prover_type_label(submission.prover_type),
         pair = submission.pair.key.as_str(),
         route = %submission.route.route,
         proofs = proof_count,
@@ -345,6 +352,15 @@ fn build_canonical_batch_submission(
         BatchProofDecision::NotDrawn => return Ok(None),
     };
     let route = route_for_proof_type(state, selected_proof_type)?;
+    let prover_type = prover_type_for_proof_type(
+        state,
+        selected_proof_type,
+        route.route,
+        &requested_prover_config,
+        Sp1RequestContext::ProposalBatch {
+            aggregate: req.aggregate,
+        },
+    )?;
     validate_route_specific_request(
         state,
         &pair,
@@ -359,12 +375,13 @@ fn build_canonical_batch_submission(
         .and_then(|config| config.mode);
 
     Ok(Some(CanonicalBatchSubmission {
-        public_task_id: generate_public_task_id(),
+        public_task_id: String::new(),
         pair,
         route,
         proposals,
         aggregate_requested: req.aggregate,
         prover_config: requested_prover_config,
+        prover_type,
         blob_proof_type: req.blob_proof_type,
         prover: req.prover,
         graffiti: req.graffiti,
@@ -448,6 +465,57 @@ fn pair_sp1_system_config(pair: &ResolvedNetworkPair) -> Option<Sp1SystemConfig>
             }),
         }),
         _ => None,
+    }
+}
+
+fn prover_type_for_proof_type(
+    state: &AppState,
+    proof_type: BatchProofType,
+    route: PipelineRoute,
+    prover_config: &ProverTaskConfig,
+    sp1_context: Sp1RequestContext,
+) -> Result<Option<ProverType>, ApiError> {
+    match proof_type {
+        BatchProofType::Sp1 => {
+            let effective_config = state
+                .config
+                .prover
+                .sp1
+                .resolve_request_config(prover_config.sp1.as_ref(), sp1_context)
+                .map_err(|err| ApiError::bad_request(err.to_string()))?;
+            Ok(Some(sp1_prover_type(effective_config.prover)))
+        }
+        BatchProofType::Risc0 => Ok(Some(risc0_prover_type(state, route))),
+        BatchProofType::Boundless => Err(unsupported_proof_type(proof_type)),
+        BatchProofType::Native | BatchProofType::Sgx | BatchProofType::SgxGeth => Ok(None),
+        BatchProofType::ZkAny => Err(ApiError::bad_request(
+            "proof_type=zk_any must be resolved before prover type selection",
+        )),
+    }
+}
+
+const fn sp1_prover_type(prover: Sp1ProverMode) -> ProverType {
+    match prover {
+        Sp1ProverMode::Mock => ProverType::Mock,
+        Sp1ProverMode::Local => ProverType::Local,
+        Sp1ProverMode::Network => ProverType::Network,
+    }
+}
+
+fn risc0_prover_type(state: &AppState, route: PipelineRoute) -> ProverType {
+    if matches!(route.runner, RunnerKind::Network) {
+        ProverType::Network
+    } else if state.config.prover.risc0.mock {
+        ProverType::Mock
+    } else {
+        ProverType::Local
+    }
+}
+
+const fn prover_type_label(prover_type: Option<ProverType>) -> &'static str {
+    match prover_type {
+        Some(kind) => kind.as_str(),
+        None => "none",
     }
 }
 
@@ -591,12 +659,19 @@ async fn build_external_aggregate_submission(
         validate_public_prover_args(req.proof_type, &req.prover_args)?,
     );
     let route = route_for_proof_type(state, req.proof_type)?;
+    let prover_type = prover_type_for_proof_type(
+        state,
+        req.proof_type,
+        route.route,
+        &prover_config,
+        Sp1RequestContext::Aggregation,
+    )?;
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let public_task_id = generate_public_task_id();
     let request_fingerprint =
-        external_aggregate_request_fingerprint(&pair, route, &req, &prover_config)?;
+        external_aggregate_request_fingerprint(&pair, route, prover_type, &req, &prover_config)?;
+    let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
         proposal_ids: req.aggregation_ids.clone(),
@@ -619,6 +694,7 @@ async fn build_external_aggregate_submission(
     Ok(ExternalAggregateSubmission {
         pair,
         route,
+        prover_type,
         public_task_id,
         task_id,
         request,
@@ -831,6 +907,7 @@ async fn register_batch_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            prover_type: submission.prover_type,
             execution_mode: submission.execution_mode,
             aggregate_requested: submission.aggregate_requested,
         },
@@ -878,6 +955,7 @@ async fn register_external_aggregate_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
         },
@@ -914,6 +992,7 @@ fn build_task_metadata(
         network: params.network.to_string(),
         l1_network: params.l1_network.to_string(),
         proof_type: params.proof_type,
+        prover_type: params.prover_type,
         execution_mode: params.execution_mode,
         aggregate_requested: params.aggregate_requested,
         proposals: proposals
@@ -993,6 +1072,7 @@ async fn cleanup_submission_plan(
         network: String::new(),
         l1_network: String::new(),
         proof_type: ProofType::Native,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: plan.aggregate.is_some(),
         proposals: plan
@@ -1053,10 +1133,12 @@ async fn handle_existing_batch_task(
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
     info!(
-        "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, pair={}",
+        "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, proof_type={}, prover_type={}, pair={}",
         existing.task_id,
         submission.aggregate_requested,
         submission.route.route,
+        submission.route.proof_type(),
+        prover_type_label(submission.prover_type),
         submission.pair.key
     );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
@@ -1259,8 +1341,12 @@ async fn handle_existing_external_aggregate_task(
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
     info!(
-        "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, pair={}",
-        existing.task_id, submission.route.route, submission.pair.key
+        "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, proof_type={}, prover_type={}, pair={}",
+        existing.task_id,
+        submission.route.route,
+        submission.route.proof_type(),
+        prover_type_label(submission.prover_type),
+        submission.pair.key
     );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
         .map_err(|err| {
@@ -1402,6 +1488,7 @@ async fn handle_created_external_aggregate_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
         },
@@ -1513,6 +1600,7 @@ async fn load_task_data_from_lookup(
     Ok(TaskData {
         task_id: id.to_string(),
         route: lookup.record.route.to_string(),
+        prover_type: lookup.metadata.prover_type_str(),
         execution_mode: lookup.metadata.execution_mode_str(),
         status: root_state.status.clone(),
         network: lookup.metadata.network.clone(),
@@ -2102,6 +2190,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
     let payload = serde_json::json!({
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
+        "prover_type": submission.prover_type.map(ProverType::as_str),
         "aggregate_requested": submission.aggregate_requested,
         "execution_mode": submission
             .execution_mode
@@ -2121,13 +2210,15 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
 fn external_aggregate_request_fingerprint(
     pair: &ResolvedNetworkPair,
     route: CanonicalProofRoute,
+    prover_type: Option<ProverType>,
     req: &AggregateProofRequest,
     prover_config: &ProverTaskConfig,
 ) -> Result<String, ApiError> {
     let payload = serde_json::json!({
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
-        "proof_type": req.proof_type.as_str(),
+        "prover_type": prover_type.map(ProverType::as_str),
+        "proof_type": route.proof_type().to_string(),
         "aggregation_ids": &req.aggregation_ids,
         "prover_config": prover_config,
         "proofs": &req.proofs,
@@ -2515,7 +2606,7 @@ mod tests {
     use crate::config::{BoundlessPairConfig, Config};
     use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
     use raiko2_primitives::SupportedChainSpecs;
@@ -2529,6 +2620,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    fn batch_request_fingerprint_for_test(submission: &CanonicalBatchSubmission) -> Result<String> {
+        batch_request_fingerprint(submission).map_err(|err| anyhow!(err.message))
+    }
 
     struct NoopEngine;
 
@@ -2669,6 +2764,7 @@ mod tests {
             }],
             aggregate_requested,
             prover_config: ProverTaskConfig::default(),
+            prover_type: None,
             blob_proof_type: None,
             prover: None,
             graffiti: None,
@@ -2748,8 +2844,8 @@ mod tests {
     ) -> RuntimeTaskRecord {
         RuntimeTaskRecord {
             task_id: "task_public".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0Boundless,
-            route: "risc0/boundless".parse().expect("parse route"),
+            pipeline_key: PipelineKey::ShastaRisc0Network,
+            route: "risc0/network".parse().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(42),
             proof_ids: vec![],
@@ -2772,6 +2868,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Risc0,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: true,
             proposals: vec![ProposalTask {
@@ -2801,7 +2898,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Boundless,
+            PipelineKey::ShastaRisc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -2846,7 +2943,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Boundless,
+            PipelineKey::ShastaRisc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -2888,7 +2985,7 @@ mod tests {
             PipelineKey::ShastaNative,
             PipelineKey::ShastaRisc0,
             PipelineKey::ShastaSp1,
-            PipelineKey::ShastaRisc0Boundless,
+            PipelineKey::ShastaRisc0Network,
         ] {
             let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
             record.pipeline_key = pipeline_key;
@@ -3157,7 +3254,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals() {
+    async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals()
+    -> Result<()> {
         let route = CanonicalProofRoute {
             route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
         };
@@ -3185,8 +3283,7 @@ mod tests {
         .await
         .expect("write cached proof");
 
-        let request_fingerprint =
-            batch_request_fingerprint(&submission).expect("request fingerprint");
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
@@ -3232,6 +3329,7 @@ mod tests {
                 dependency: Box::new(plan.proposals[1].task_id.clone()),
             }
         );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3242,7 +3340,8 @@ mod tests {
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
             .expect("runtime manager");
         let submission = canonical_multi_submission(route);
-        let plan = build_submission_plan(&runtime, &submission)
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
         for proposal in &plan.proposals {
@@ -3261,6 +3360,7 @@ mod tests {
                 network: &submission.pair.network,
                 l1_network: &submission.pair.l1_network,
                 proof_type: submission.route.proof_type(),
+                prover_type: submission.prover_type,
                 execution_mode: submission.execution_mode,
                 aggregate_requested: true,
             },
@@ -3303,7 +3403,8 @@ mod tests {
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-missing"))
             .expect("runtime manager");
         let submission = canonical_multi_submission(route);
-        let plan = build_submission_plan(&runtime, &submission)
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
         let mut metadata = build_task_metadata(
@@ -3312,6 +3413,7 @@ mod tests {
                 network: &submission.pair.network,
                 l1_network: &submission.pair.l1_network,
                 proof_type: submission.route.proof_type(),
+                prover_type: submission.prover_type,
                 execution_mode: submission.execution_mode,
                 aggregate_requested: true,
             },
@@ -3343,7 +3445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_proof_artifact_is_treated_as_cache_miss() {
+    async fn corrupt_proof_artifact_is_treated_as_cache_miss() -> Result<()> {
         let route = CanonicalProofRoute {
             route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
         };
@@ -3377,8 +3479,7 @@ mod tests {
             .await
             .expect("register corrupt artifact");
 
-        let request_fingerprint =
-            batch_request_fingerprint(&submission).expect("request fingerprint");
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
         let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
             .await
             .expect("submission plan");
@@ -3397,6 +3498,7 @@ mod tests {
                 dependency: Box::new(plan.proposals[0].task_id.clone()),
             }
         );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3476,33 +3578,33 @@ mod tests {
     }
 
     #[test]
-    fn resolve_engine_reports_boundless_pipeline_as_unavailable_when_not_registered() {
+    fn resolve_engine_reports_network_pipeline_as_unavailable_when_not_registered() {
         let pair = resolved_pair();
         let mut factory = StaticPipelineFactory::default();
         let risc0_engine: Arc<dyn EngineHandle> = Arc::new(NoopEngine);
         factory.insert(pair.key.clone(), PipelineKey::ShastaRisc0, risc0_engine);
 
         let mut config = Config::default();
-        config.runtime.root = unique_test_runtime_root("resolve-engine-boundless-config");
+        config.runtime.root = unique_test_runtime_root("resolve-engine-network-config");
         let zk_any_sampler = ZkAnySampler::from_config(&config.prover.zk_any);
         let state = AppState {
             config: Arc::new(config),
             pipelines: Arc::new(factory),
             runtime: Arc::new(
-                RuntimeManager::new(unique_test_runtime_root("resolve-engine-boundless-runtime"))
+                RuntimeManager::new(unique_test_runtime_root("resolve-engine-network-runtime"))
                     .expect("runtime manager"),
             ),
             zk_any_sampler: Arc::new(Mutex::new(zk_any_sampler)),
         };
 
-        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Boundless) else {
-            panic!("boundless pipeline should be unavailable");
+        let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
+            panic!("network pipeline should be unavailable");
         };
 
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert!(
             err.message
-                .contains("pipeline not available: shasta-risc0-boundless"),
+                .contains("pipeline not available: shasta-risc0-network"),
             "unexpected error: {}",
             err.message
         );
@@ -3583,6 +3685,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Sp1,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {

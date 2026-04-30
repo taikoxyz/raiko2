@@ -143,7 +143,7 @@ boundless = ["raiko2-prover/boundless"]
 
 **Step 2: Gate Boundless-only tests**
 
-Wrap tests that instantiate `PipelineKey::ShastaRisc0Boundless` or depend on the Boundless prover
+Wrap tests that instantiate `PipelineKey::ShastaRisc0Network` or depend on the Boundless prover
 implementation in `#[cfg(feature = "boundless")]`.
 
 **Step 3: Run engine tests**
@@ -185,7 +185,7 @@ Compile Boundless engine type aliases, builders, and registration blocks only wh
 **Step 3: Implement feature-off route fallback**
 
 Adjust `default_risc0_runner` so the default RISC0 route becomes `local` when the feature is off,
-even if config says `runner = boundless`.
+even if config says `runner = network`.
 
 **Step 4: Preserve config parsing**
 
@@ -213,7 +213,7 @@ Expected: PASS and no Boundless compile failure.
 Add tests covering:
 
 - default RISC0 route uses `local` when Boundless feature is off
-- explicit `risc0/boundless` request fails through `pipeline not available`
+- explicit `risc0/network` route fails through `pipeline not available`
 - config validation does not reject Boundless fields solely because the feature is off
 
 **Step 2: Run the tests to verify failure**

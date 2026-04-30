@@ -1415,7 +1415,7 @@ mod tests {
     #[cfg(feature = "boundless")]
     fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
-            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Boundless),
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
             test_context(),
             raiko2_queue::MemoryStore::new(),
             scheduler_config,

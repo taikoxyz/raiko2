@@ -350,8 +350,8 @@ mod tests {
             PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local)
         );
         assert_eq!(
-            "RISC0/BOUNDLESS".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
+            "RISC0/NETWORK".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
         );
         assert_eq!(
             "sp1/local".parse::<PipelineRoute>().unwrap(),
@@ -360,6 +360,12 @@ mod tests {
         assert_eq!(
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+        );
+        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
+        assert!(
+            "shasta-risc0-boundless"
+                .parse::<raiko2_pipeline::PipelineKey>()
+                .is_err()
         );
         assert!("invalid".parse::<PipelineRoute>().is_err());
     }
@@ -375,7 +381,7 @@ mod tests {
     fn test_boundless_route_requires_signer_key() {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Boundless;
+        config.prover.runner = RunnerKind::Network;
         config.prover.boundless.signer_key.clear();
 
         let err = config.prover.validate().expect_err("missing signer key");
@@ -387,7 +393,7 @@ mod tests {
     fn test_boundless_route_requires_rpc_url() {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Boundless;
+        config.prover.runner = RunnerKind::Network;
         config.prover.boundless.rpc_url.clear();
         config.prover.boundless.signer_key =
             "0x0000000000000000000000000000000000000000000000000000000000000001".to_string();
@@ -401,7 +407,7 @@ mod tests {
     fn test_boundless_route_allows_missing_signer_and_rpc_when_feature_disabled() {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Boundless;
+        config.prover.runner = RunnerKind::Network;
         config.prover.boundless.rpc_url.clear();
         config.prover.boundless.signer_key.clear();
 

@@ -17,8 +17,6 @@ use std::future::Future;
 #[cfg(feature = "boundless")]
 use std::path::PathBuf;
 #[cfg(feature = "boundless")]
-use std::str::FromStr;
-#[cfg(feature = "boundless")]
 use std::sync::Arc;
 #[cfg(feature = "boundless")]
 use std::time::{Duration, Instant, SystemTime};
@@ -790,7 +788,7 @@ impl BoundlessProver {
                     }
                     let stage_metadata = serde_json::json!({
                         "zkvm": "risc0",
-                        "runner": "boundless",
+                        "runner": "network",
                         "proof_type": proof_type,
                         "mcycles_count": quoted_mcycles_count,
                         "quoted_mcycles_count": quoted_mcycles_count,

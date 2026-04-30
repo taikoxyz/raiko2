@@ -285,7 +285,7 @@ pub fn validate_external_aggregate_proofs(
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaRisc0Boundless => {
+            raiko2_pipeline::PipelineKey::ShastaRisc0Network => {
                 if proof.quote.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing Boundless aggregation metadata"
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_boundless_receipt() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let mut proof = aggregate_proof_fixture();
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let proof = Proof {
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let proof = Proof {

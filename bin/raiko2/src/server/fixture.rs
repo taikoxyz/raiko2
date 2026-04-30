@@ -586,7 +586,7 @@ pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0Fi
 pub(crate) fn risc0_boundless_fixture_engine(
     context_config: serde_json::Value,
 ) -> Risc0FixtureEngine {
-    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Boundless, None)
+    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Network, None)
 }
 
 #[cfg(test)]
@@ -683,7 +683,7 @@ fn sp1_fixture_engine_with_backend(
 
 #[cfg(test)]
 fn load_risc0_backend_for_pipeline(pipeline_key: PipelineKey) -> Risc0ShastaBackend {
-    if pipeline_key == PipelineKey::ShastaRisc0Boundless {
+    if pipeline_key == PipelineKey::ShastaRisc0Network {
         load_risc0_boundless_shasta_backend().expect("load RISC0 Boundless Shasta guest ELFs")
     } else {
         load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs")
@@ -803,14 +803,14 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     let observer = engine_observer(Arc::clone(&runtime));
     let engine = risc0_fixture_engine_for_pipeline(
         json!({}),
-        PipelineKey::ShastaRisc0Boundless,
+        PipelineKey::ShastaRisc0Network,
         Some(observer),
     );
 
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaRisc0Boundless,
+        PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));

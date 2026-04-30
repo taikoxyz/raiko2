@@ -108,7 +108,7 @@ impl AppState {
                     .start_workers_with_maintenance_interval(workers, maintenance_interval);
                 factory.insert(
                     pair.key.clone(),
-                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaRisc0Network,
                     Arc::new(boundless_engine),
                 );
             }
@@ -578,7 +578,7 @@ async fn build_boundless_engine(
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaRisc0Boundless,
+                PipelineKey::ShastaRisc0Network,
                 BoundlessProver::new(agent_config),
                 backend,
                 provider,
@@ -602,7 +602,7 @@ async fn build_boundless_engine(
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,
                     pair,
-                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaRisc0Network,
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, BoundlessOutput, EngineTaskKey>::connect(
@@ -612,7 +612,7 @@ async fn build_boundless_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaRisc0Network,
                     BoundlessProver::new(agent_config),
                     backend,
                     provider,
@@ -698,6 +698,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {
@@ -772,6 +773,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: true,
             proposals: vec![ProposalTask {
@@ -785,6 +787,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         runtime

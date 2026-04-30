@@ -191,7 +191,7 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
     match config.prover.route() {
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Boundless,
+            runner: RunnerKind::Network,
         } => check_boundless_prover(config),
         _ => Ok(()),
     }

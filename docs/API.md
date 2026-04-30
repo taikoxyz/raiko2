@@ -140,10 +140,10 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
-  - `native -> native/local`
   - `sp1 -> sp1/local`
   - `risc0 -> risc0/<server default runner>`
   - `zk_any -> admission-time draw to sp1 or risc0`
+  - `native -> unsupported legacy error response`
   - `sgx -> unsupported legacy error response`
   - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
@@ -152,10 +152,11 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   canonical route, task key, and proof artifact key.
 - `aggregate=true` requires a concrete `proof_type` such as `sp1` or `risc0`. Aggregate requests
   may reuse existing proposal proof artifacts for that concrete proof type.
+- Boundless is the network runner for `proof_type=risc0`; it is not a separate `proof_type`.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
-  - `proof_type = "native"`
+  - `proof_type = "zk_any"`
   - `batch_id = first proposal_id`
   - `data.status = "zk_any_not_drawn"`
 - Request-scoped prover overrides are strict and typed. The public API accepts flattened
@@ -242,7 +243,7 @@ Example not-drawn response:
 ```json
 {
   "status": "ok",
-  "proof_type": "native",
+  "proof_type": "zk_any",
   "batch_id": 42,
   "data": {
     "status": "zk_any_not_drawn"
@@ -289,8 +290,8 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
-- `proof_type=zk_any` is not supported on `POST /v3/proof/aggregate`; use concrete proposal
-  proofs there.
+- `proof_type` must be a concrete proof type: `risc0` or `sp1`.
+- `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.

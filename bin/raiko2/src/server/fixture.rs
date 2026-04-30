@@ -550,11 +550,6 @@ where
     )
 }
 
-#[cfg(test)]
-pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
-    native_fixture_engine_with_observer(None)
-}
-
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
@@ -723,34 +718,31 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn app_with_native_fixture_engine(
-    config: Config,
-    engine: NativeFixtureEngine,
-) -> Router {
+pub(crate) fn app_with_risc0_fixture_engine(config: Config, engine: Risc0FixtureEngine) -> Router {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     app::build_router(state)
 }
 
 #[cfg(test)]
-pub(crate) fn app_with_observed_native_fixture_engine(
+pub(crate) fn app_with_observed_risc0_fixture_engine(
     config: Config,
-) -> (Router, NativeFixtureEngine) {
+) -> (Router, Risc0FixtureEngine) {
     let runtime = Arc::new(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
             .expect("runtime manager"),
     );
     let observer = engine_observer(Arc::clone(&runtime));
-    let engine = native_fixture_engine_with_observer(Some(observer));
+    let engine = risc0_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         Arc::new(engine.clone()),
     );
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));

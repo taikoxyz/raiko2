@@ -376,6 +376,9 @@ fn validate_request_shape(req: &BatchShastaRequest) -> Result<(), ApiError> {
     if req.proposals.is_empty() {
         return Err(ApiError::bad_request("proposals must not be empty"));
     }
+    if !req.proof_type.is_public_batch_request_type() {
+        return Err(unsupported_proof_type(req.proof_type));
+    }
     if req.aggregate && matches!(req.proof_type, BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "proof_type=zk_any is not supported for aggregate requests",
@@ -549,6 +552,9 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
             "proof_type=zk_any is not supported for aggregate requests",
         ));
     }
+    if !req.proof_type.is_concrete_public_proof_type() {
+        return Err(unsupported_proof_type(req.proof_type));
+    }
     if req.proofs.is_empty() {
         return Err(ApiError::bad_request("proofs must not be empty"));
     }
@@ -556,6 +562,13 @@ fn validate_aggregate_request_shape(req: &AggregateProofRequest) -> Result<(), A
         validate_shasta_proposal_id("aggregation_ids[]", *proposal_id)?;
     }
     Ok(())
+}
+
+fn unsupported_proof_type(proof_type: BatchProofType) -> ApiError {
+    ApiError::bad_request(format!(
+        "proof_type={} is not supported",
+        proof_type.as_str()
+    ))
 }
 
 fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiError> {
@@ -2194,7 +2207,7 @@ fn registered_response(proof_type: BatchProofType, _public_task_id: String) -> R
 
 fn zk_any_not_drawn_response(batch_id: Option<u64>) -> Response {
     registration_response(
-        BatchProofType::Native.as_str(),
+        BatchProofType::ZkAny.as_str(),
         LegacyTaskStatus::ZkAnyNotDrawn,
         batch_id,
     )

@@ -52,12 +52,11 @@ pub(super) fn route_for_proof_type(
     proof_type: BatchProofType,
 ) -> Result<CanonicalProofRoute, ApiError> {
     let route = match proof_type {
-        BatchProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
         BatchProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Sgx | BatchProofType::SgxGeth => {
+        BatchProofType::Native | BatchProofType::Sgx | BatchProofType::SgxGeth => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()

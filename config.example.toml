@@ -48,6 +48,8 @@ inactive_ttl_secs = 7200
 [prover]
 # Server default route.
 # Supported routes:
+# Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
+# Routes supported by server config:
 #   risc0/local | risc0/boundless | sp1/local | native/local
 guest_system = "risc0"
 runner = "local"

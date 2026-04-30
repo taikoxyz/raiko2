@@ -72,6 +72,8 @@ impl AppState {
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
+        let sp1_prover =
+            Sp1Prover::new_with_backend(setup::sp1_prover_config(&config), &shasta_backends.sp1)?;
 
         let mut factory = StaticPipelineFactory::default();
 
@@ -116,6 +118,7 @@ impl AppState {
             let sp1_engine = build_sp1_engine(
                 &config,
                 pair,
+                sp1_prover.clone(),
                 shasta_backends.sp1.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
@@ -422,22 +425,16 @@ async fn build_risc0_engine(
 async fn build_sp1_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    prover: Sp1Prover,
     backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Sp1Spec>> {
-    let sp1_config = setup::sp1_prover_config(config);
-
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Sp1)?;
-            let spec = ShastaSpec::new(
-                PipelineKey::ShastaSp1,
-                Sp1Prover::new(sp1_config),
-                backend,
-                provider,
-            );
+            let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider);
             Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
@@ -463,12 +460,7 @@ async fn build_sp1_engine(
                         scheduler_config.lease_duration,
                     )
                     .await?;
-                let spec = ShastaSpec::new(
-                    PipelineKey::ShastaSp1,
-                    Sp1Prover::new(sp1_config),
-                    backend,
-                    provider,
-                );
+                let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider);
                 Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,

@@ -34,6 +34,12 @@ pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
     bytes
 }
 
+/// Converts SP1 `HashableKey::hash_u32()` words into the onchain block program id.
+#[must_use]
+pub fn sp1_contract_block_program_id(words: &[u32; 8]) -> B256 {
+    B256::from(words_to_bytes_be(words))
+}
+
 #[cfg(test)]
 pub(crate) fn validate_shasta_aggregate_proof_carry_data(
     aggregation_input: &ShastaRawAggregationGuestInput,

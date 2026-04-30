@@ -1020,7 +1020,7 @@ mod tests {
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
     use raiko2_primitives::Proof;
-    use raiko2_primitives_shasta::instance::{words_to_bytes_be, words_to_bytes_le};
+    use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
     use std::str::FromStr;
 
@@ -1058,12 +1058,38 @@ mod tests {
 
         assert_eq!(words, vk.hash_u32());
         assert_eq!(
-            B256::from(words_to_bytes_be(&words)),
+            sp1_contract_block_program_id(&words),
             B256::from_slice(&vk.hash_bytes())
         );
         assert_ne!(
             B256::from(words_to_bytes_le(&words)),
             B256::from_slice(&vk.hash_bytes())
+        );
+    }
+
+    #[test]
+    fn sp1_aggregation_public_input_matches_contract_payload_program_id() {
+        let client = ProverClient::builder().mock().build();
+        let elves = sp1_test_elves();
+        let (_, block_vk) = client.setup(elves.proposal.as_ref());
+        let (_, aggregation_vk) = client.setup(elves.aggregation.as_ref());
+        let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&block_vk)).expect("image id");
+        let proof_bytes = [0xaa, 0xbb, 0xcc];
+
+        let payload = encode_sp1_onchain_payload(
+            &[
+                aggregation_vk.bytes32(),
+                alloy_primitives::hex::encode_prefixed(block_vk.hash_bytes()),
+            ],
+            &proof_bytes,
+        );
+        let payload_bytes = alloy_primitives::hex::decode(payload.strip_prefix("0x").unwrap())
+            .expect("payload hex");
+        let block_program_from_contract_payload = B256::from_slice(&payload_bytes[32..64]);
+
+        assert_eq!(
+            block_program_from_contract_payload,
+            sp1_contract_block_program_id(&words)
         );
     }
 

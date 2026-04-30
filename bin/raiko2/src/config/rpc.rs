@@ -106,6 +106,7 @@ pub struct ResolvedNetworkPair {
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
+    pub aggregation_quoted_mcycles: Option<u32>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
 
@@ -114,6 +115,9 @@ impl BoundlessPairConfig {
     pub fn validate(&self, pair_key: &str) -> Result<()> {
         if matches!(self.batch_quoted_mcycles, Some(0)) {
             bail!("{pair_key}: boundless.batch_quoted_mcycles must be > 0");
+        }
+        if matches!(self.aggregation_quoted_mcycles, Some(0)) {
+            bail!("{pair_key}: boundless.aggregation_quoted_mcycles must be > 0");
         }
         if let Some(batch) = &self.offer_params.batch {
             validate_offer_spec(batch)
@@ -367,6 +371,22 @@ mod tests {
         assert_eq!(
             config.provider_client_config().timeout_ms,
             DEFAULT_RPC_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_zero_aggregation_quote() {
+        let config = BoundlessPairConfig {
+            aggregation_quoted_mcycles: Some(0),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("zero aggregation quote should fail")
+                .to_string()
+                .contains("aggregation_quoted_mcycles")
         );
     }
 }

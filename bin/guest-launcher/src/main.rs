@@ -230,6 +230,8 @@ impl Args {
             fulfillment_strategy: self.sp1_fulfillment_strategy.into(),
             skip_simulation: self.sp1_skip_simulation,
             cycle_limit: self.sp1_cycle_limit,
+            proposal_cycle_limit: None,
+            aggregation_cycle_limit: None,
             timeout_secs: self.sp1_timeout_secs,
             rpc_url: None,
             remote_verify: None,

@@ -439,6 +439,12 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
+- `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/boundless`
+  when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
+  `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
+- `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
+  `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
+  stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
 - `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
   `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
 - Shasta preflight splits proposals into chunks of `8` blocks by default and runs at most `6`

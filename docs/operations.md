@@ -155,9 +155,10 @@ Operator notes:
 - Proposal requests use `prover.boundless.batch_quoted_mcycles` when it is set. Otherwise,
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
-- `rpc.pairs[*].boundless` can override `batch_quoted_mcycles` and either offer param block for
-  a specific `(network, l1_network)` pair. This only affects `risc0/boundless`; SP1 ignores it.
-- Aggregation requests quote `200` mcycles.
+- Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
+  `aggregation_quoted_mcycles`, and either offer param block for a specific
+  `(network, l1_network)` pair. This only affects `risc0/boundless`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
 Optional `zk_any` request sampling is configured at the server level:
@@ -181,6 +182,9 @@ resulting backend is reused for both proposal proving and aggregation.
 ## SP1 Hosted Posture
 
 For hosted proof submission, `sp1.mode = "prove"` now requires `sp1.verify = true`.
+`sp1.cycle_limit` is the default Succinct network request cycle limit. Operators can set
+`sp1.proposal_cycle_limit` and `sp1.aggregation_cycle_limit` to tune proposal and aggregation
+requests independently; if either is unset, it falls back to `sp1.cycle_limit`.
 
 This is enforced in two places:
 

@@ -74,6 +74,8 @@ pub struct BoundlessConfig {
     pub batch_quoted_mcycles: Option<u32>,
     #[serde(default)]
     pub batch_quote_strategy: BatchQuoteStrategy,
+    #[serde(default = "default_aggregation_quoted_mcycles")]
+    pub aggregation_quoted_mcycles: u32,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -96,6 +98,7 @@ impl Default for BoundlessConfig {
             }),
             batch_quoted_mcycles: None,
             batch_quote_strategy: BatchQuoteStrategy::default(),
+            aggregation_quoted_mcycles: default_aggregation_quoted_mcycles(),
             offer_params: OfferParamsConfig {
                 batch: default_batch_offer_params(),
                 aggregation: default_aggregation_offer_params(),
@@ -116,6 +119,10 @@ const fn default_poll_interval_ms() -> u64 {
 
 const fn default_timeout_ms() -> u64 {
     3_600_000
+}
+
+const fn default_aggregation_quoted_mcycles() -> u32 {
+    200
 }
 
 pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {

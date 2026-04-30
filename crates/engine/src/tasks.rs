@@ -45,15 +45,16 @@ pub struct AggregationTaskRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationSource {
-    ProofTasks(Vec<EngineTaskId>),
-    Proofs(Vec<Proof>),
-    Inputs(Vec<AggregationInput>),
+    Inputs(Vec<AggregateProofInput>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AggregationInput {
-    ProofTask(Box<EngineTaskId>),
+pub enum AggregateProofInput {
     ProofArtifact(ProofArtifactRef),
+    PendingProofArtifact {
+        artifact: ProofArtifactRef,
+        dependency: Box<EngineTaskId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +69,6 @@ pub enum EngineTaskKey {
     Proposal {
         pipeline: PipelineKey,
         request: ProposalTaskRequest,
-        stage: ProposalStage,
     },
     Aggregate {
         pipeline: PipelineKey,
@@ -86,46 +86,28 @@ impl EngineTaskKey {
     }
 }
 
-const fn proposal_stage_rank(stage: ProposalStage) -> u8 {
-    match stage {
-        ProposalStage::Preflight => 0,
-        ProposalStage::Validation => 1,
-        ProposalStage::Encode => 2,
-        ProposalStage::Prove => 3,
-    }
-}
-
-const fn pipeline_rank(pipeline: PipelineKey) -> u8 {
-    match pipeline {
-        PipelineKey::ShastaNative => 0,
-        PipelineKey::ShastaRisc0 => 1,
-        PipelineKey::ShastaSp1 => 2,
-        PipelineKey::ShastaRisc0Boundless => 3,
-    }
-}
-
-fn proposal_ready_sort_prefix(
-    proposal_id: u64,
-    stage: ProposalStage,
-    pipeline: PipelineKey,
-) -> [u8; 16] {
+fn proposal_ready_sort_prefix(proposal_id: u64) -> [u8; 16] {
     let mut b = [0u8; 16];
     b[0..8].copy_from_slice(&proposal_id.to_be_bytes());
-    b[8] = proposal_stage_rank(stage);
-    b[9] = pipeline_rank(pipeline);
+    b
+}
+
+fn aggregate_ready_sort_prefix(proposal_ids: &[u64]) -> [u8; 16] {
+    let proposal_id = proposal_ids.iter().copied().min().unwrap_or(u64::MAX);
+    let mut b = [0u8; 16];
+    b[0..8].copy_from_slice(&proposal_id.to_be_bytes());
     b
 }
 
 impl ReadyQueueSort for EngineTaskKey {
     fn ready_queue_sort_prefix(&self) -> [u8; 16] {
         match self {
-            EngineTaskKey::Proposal {
-                request,
-                stage,
-                pipeline,
-            } => proposal_ready_sort_prefix(request.proposal_id, *stage, *pipeline),
-            // Aggregation uses `High` only in practice; if it ever shared Low/Medium queues, sort last.
-            EngineTaskKey::Aggregate { .. } => [0xffu8; 16],
+            EngineTaskKey::Proposal { request, .. } => {
+                proposal_ready_sort_prefix(request.proposal_id)
+            }
+            EngineTaskKey::Aggregate { request, .. } => {
+                aggregate_ready_sort_prefix(&request.proposal_ids)
+            }
         }
     }
 }
@@ -134,6 +116,9 @@ pub type EngineTaskId = TaskId<EngineTaskKey>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EngineTask {
+    Proposal {
+        request: ProposalTaskRequest,
+    },
     Preflight {
         request: ProposalTaskRequest,
     },
@@ -176,16 +161,8 @@ mod tests {
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_queue::{MemoryStore, NewTask, Priority, Scheduler, StoreResult, TaskStoreError};
 
-    fn proposal_task_id(
-        pipeline: PipelineKey,
-        request: ProposalTaskRequest,
-        stage: ProposalStage,
-    ) -> EngineTaskId {
-        TaskId::new(EngineTaskKey::Proposal {
-            pipeline,
-            request,
-            stage,
-        })
+    fn proposal_task_id(pipeline: PipelineKey, request: ProposalTaskRequest) -> EngineTaskId {
+        TaskId::new(EngineTaskKey::Proposal { pipeline, request })
     }
 
     fn proposal_request(proposal_id: u64) -> ProposalTaskRequest {
@@ -202,62 +179,110 @@ mod tests {
         }
     }
 
+    fn proof_artifact(proof_ref: &str) -> ProofArtifactRef {
+        ProofArtifactRef {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: proof_ref.to_string(),
+            proof_path: format!("/tmp/{proof_ref}.json"),
+        }
+    }
+
     #[test]
-    fn proposal_ready_sort_orders_by_proposal_stage_then_pipeline() {
-        let p2_preflight = EngineTaskKey::Proposal {
+    fn proposal_ready_sort_orders_by_proposal_id_only() {
+        let p2 = EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: proposal_request(2),
-            stage: ProposalStage::Preflight,
         };
-        let p1_prove = EngineTaskKey::Proposal {
+        let p1_native = EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: proposal_request(1),
-            stage: ProposalStage::Prove,
         };
-        let p1_encode_sp1 = EngineTaskKey::Proposal {
+        let p1_sp1 = EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaSp1,
             request: proposal_request(1),
-            stage: ProposalStage::Encode,
         };
-        let p1_encode_risc0 = EngineTaskKey::Proposal {
+        let p1_risc0 = EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaRisc0,
             request: proposal_request(1),
-            stage: ProposalStage::Encode,
         };
 
-        let mut keys = [p2_preflight, p1_prove, p1_encode_sp1, p1_encode_risc0];
+        assert_eq!(
+            p1_native.ready_queue_sort_prefix(),
+            p1_sp1.ready_queue_sort_prefix()
+        );
+        assert_eq!(
+            p1_native.ready_queue_sort_prefix(),
+            p1_risc0.ready_queue_sort_prefix()
+        );
+
+        let mut keys = [p2, p1_native, p1_sp1, p1_risc0];
         keys.sort_by(raiko2_queue::ReadyQueueSort::cmp_for_ready_queue);
 
         assert!(matches!(
             keys[0],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                stage: ProposalStage::Encode,
-                pipeline: PipelineKey::ShastaRisc0
+                pipeline: PipelineKey::ShastaNative
             }
         ));
         assert!(matches!(
             keys[1],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                stage: ProposalStage::Encode,
-                pipeline: PipelineKey::ShastaSp1
+                ..
             }
         ));
         assert!(matches!(
             keys[2],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 1, .. },
-                stage: ProposalStage::Prove,
-                pipeline: PipelineKey::ShastaNative
+                ..
             }
         ));
         assert!(matches!(
             keys[3],
             EngineTaskKey::Proposal {
                 request: ProposalTaskRequest { proposal_id: 2, .. },
-                stage: ProposalStage::Preflight,
                 pipeline: PipelineKey::ShastaNative
+            }
+        ));
+    }
+
+    #[test]
+    fn aggregate_ready_sort_stays_with_its_proposal_range() {
+        let p2 = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request: proposal_request(2),
+        };
+        let p1 = EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request: proposal_request(1),
+        };
+        let aggregate = EngineTaskKey::Aggregate {
+            pipeline: PipelineKey::ShastaNative,
+            request: AggregationTaskRequest {
+                request_id: "1-192".to_string(),
+                proposal_ids: vec![1, 192],
+                prover_config: ProverTaskConfig::default(),
+            },
+        };
+
+        let mut keys = [p2, p1, aggregate];
+        keys.sort_by(raiko2_queue::ReadyQueueSort::cmp_for_ready_queue);
+
+        assert!(matches!(
+            keys[0],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 1, .. },
+                ..
+            }
+        ));
+        assert!(matches!(keys[1], EngineTaskKey::Aggregate { .. }));
+        assert!(matches!(
+            keys[2],
+            EngineTaskKey::Proposal {
+                request: ProposalTaskRequest { proposal_id: 2, .. },
+                ..
             }
         ));
     }
@@ -269,20 +294,11 @@ mod tests {
 
         let a1 = sched
             .submit(
-                proposal_task_id(
-                    PipelineKey::ShastaNative,
-                    proposal_request(1),
-                    ProposalStage::Prove,
-                ),
+                proposal_task_id(PipelineKey::ShastaNative, proposal_request(1)),
                 NewTask {
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveProposal {
+                    payload: EngineTask::Proposal {
                         request: proposal_request(1),
-                        input_task: proposal_task_id(
-                            PipelineKey::ShastaNative,
-                            proposal_request(1),
-                            ProposalStage::Encode,
-                        ),
                     },
                 },
                 vec![],
@@ -290,20 +306,11 @@ mod tests {
             .await?;
         let a2 = sched
             .submit(
-                proposal_task_id(
-                    PipelineKey::ShastaNative,
-                    proposal_request(2),
-                    ProposalStage::Prove,
-                ),
+                proposal_task_id(PipelineKey::ShastaNative, proposal_request(2)),
                 NewTask {
                     priority: Priority::Medium,
-                    payload: EngineTask::ProveProposal {
+                    payload: EngineTask::Proposal {
                         request: proposal_request(2),
-                        input_task: proposal_task_id(
-                            PipelineKey::ShastaNative,
-                            proposal_request(2),
-                            ProposalStage::Encode,
-                        ),
                     },
                 },
                 vec![],
@@ -327,7 +334,16 @@ mod tests {
                             proposal_ids: vec![1, 2],
                             prover_config: ProverTaskConfig::default(),
                         },
-                        source: AggregationSource::ProofTasks(vec![a1.clone(), a2.clone()]),
+                        source: AggregationSource::Inputs(vec![
+                            AggregateProofInput::PendingProofArtifact {
+                                artifact: proof_artifact("a1"),
+                                dependency: Box::new(a1.clone()),
+                            },
+                            AggregateProofInput::PendingProofArtifact {
+                                artifact: proof_artifact("a2"),
+                                dependency: Box::new(a2.clone()),
+                            },
+                        ]),
                     },
                 },
                 vec![a1, a2],
@@ -357,6 +373,63 @@ mod tests {
             .await?
             .ok_or_else(|| TaskStoreError::corrupt_msg("expected aggregate task to be ready"))?;
         assert_eq!(next.id, b);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_priority_wins_before_proposal_id_sort() -> StoreResult<()> {
+        let sched: Scheduler<EngineTask, EngineOutput<GuestInput>, EngineTaskKey> =
+            Scheduler::new(MemoryStore::new());
+
+        let proposal = sched
+            .submit(
+                proposal_task_id(PipelineKey::ShastaNative, proposal_request(1)),
+                NewTask {
+                    priority: Priority::Medium,
+                    payload: EngineTask::Proposal {
+                        request: proposal_request(1),
+                    },
+                },
+                vec![],
+            )
+            .await?;
+        let aggregate = sched
+            .submit(
+                TaskId::new(EngineTaskKey::Aggregate {
+                    pipeline: PipelineKey::ShastaNative,
+                    request: AggregationTaskRequest {
+                        request_id: "agg-2".to_string(),
+                        proposal_ids: vec![2],
+                        prover_config: ProverTaskConfig::default(),
+                    },
+                }),
+                NewTask {
+                    priority: Priority::High,
+                    payload: EngineTask::Aggregate {
+                        request: AggregationTaskRequest {
+                            request_id: "agg-2".to_string(),
+                            proposal_ids: vec![2],
+                            prover_config: ProverTaskConfig::default(),
+                        },
+                        source: AggregationSource::Inputs(vec![
+                            AggregateProofInput::ProofArtifact(proof_artifact("agg-2-input")),
+                        ]),
+                    },
+                },
+                vec![],
+            )
+            .await?;
+
+        let first = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected first ready task"))?;
+        assert_eq!(first.id, aggregate);
+        let second = sched
+            .next_ready("w")
+            .await?
+            .ok_or_else(|| TaskStoreError::corrupt_msg("expected second ready task"))?;
+        assert_eq!(second.id, proposal);
         Ok(())
     }
 }

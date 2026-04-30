@@ -14,11 +14,9 @@ pub use types::{EngineStatusView, ProofStatus};
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
-#[cfg(feature = "boundless")]
-use raiko2_pipeline::forks::shasta::RISC0_BOUNDLESS_SHASTA_BACKEND;
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND, ShastaSpec},
+    forks::shasta::{ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
 #[cfg(feature = "boundless")]
@@ -49,7 +47,7 @@ type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProv
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::{TaskMetadata, aggregate_task_ref, proposal_task_ref};
+use super::task_metadata::{ProofArtifactKind, TaskMetadata, root_proof_artifact_refs};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -69,6 +67,7 @@ impl AppState {
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
 
         let mut factory = StaticPipelineFactory::default();
 
@@ -78,6 +77,7 @@ impl AppState {
             let risc0_engine = build_risc0_engine(
                 &config,
                 pair,
+                shasta_backends.risc0.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
             )
@@ -95,6 +95,7 @@ impl AppState {
                 let boundless_engine = build_boundless_engine(
                     &config,
                     pair,
+                    shasta_backends.risc0_boundless.clone(),
                     boundless_scheduler_config,
                     Arc::clone(&runtime_observer),
                 )
@@ -111,6 +112,7 @@ impl AppState {
             let sp1_engine = build_sp1_engine(
                 &config,
                 pair,
+                shasta_backends.sp1.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
             )
@@ -180,7 +182,7 @@ async fn restore_proof_artifacts_from_runtime_task(
     };
     let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
         .context("failed to parse runtime task metadata for proof artifact restore")?;
-    let Some(restored_refs) = persisted_root_proof_refs(&metadata, record.pipeline_key) else {
+    let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
         return Ok(());
     };
     let proof_bytes = fs::read(proof_path)
@@ -189,7 +191,7 @@ async fn restore_proof_artifacts_from_runtime_task(
     let proof: Proof = serde_json::from_slice(&proof_bytes)
         .with_context(|| format!("failed to parse proof file {proof_path}"))?;
 
-    if restored_refs.kind == RestoredProofKind::Proposal
+    if restored_refs.kind == ProofArtifactKind::Proposal
         && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
     {
         warn!(
@@ -219,62 +221,11 @@ async fn restore_proof_artifacts_from_runtime_task(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestoredProofKind {
-    Proposal,
-    Aggregate,
-}
-
-struct RestoredProofRefs {
-    refs: Vec<String>,
-    kind: RestoredProofKind,
-}
-
-fn persisted_root_proof_refs(
-    metadata: &TaskMetadata,
-    pipeline_key: PipelineKey,
-) -> Option<RestoredProofRefs> {
-    if let Some(request) = metadata.aggregate_request.as_ref() {
-        let mut refs = vec![aggregate_task_ref(pipeline_key, request)];
-        if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref()
-            && !refs.contains(legacy_ref)
-        {
-            refs.push(legacy_ref.clone());
-        }
-        return Some(RestoredProofRefs {
-            refs,
-            kind: RestoredProofKind::Aggregate,
-        });
-    }
-    if let Some(legacy_ref) = metadata.aggregate_task_id.as_ref() {
-        return Some(RestoredProofRefs {
-            refs: vec![legacy_ref.clone()],
-            kind: RestoredProofKind::Aggregate,
-        });
-    }
-    match metadata.proposals.as_slice() {
-        [proposal] => {
-            let mut refs = proposal
-                .request
-                .as_ref()
-                .map(|request| vec![proposal_task_ref(pipeline_key, request)])
-                .unwrap_or_default();
-            if !refs.contains(&proposal.task_id) {
-                refs.push(proposal.task_id.clone());
-            }
-            Some(RestoredProofRefs {
-                refs,
-                kind: RestoredProofKind::Proposal,
-            })
-        }
-        _ => None,
-    }
-}
-
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_risc0_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Risc0Spec>> {
@@ -287,7 +238,7 @@ async fn build_risc0_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0,
                 Risc0Prover::new(risc0_config),
-                RISC0_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -318,7 +269,7 @@ async fn build_risc0_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0,
                     Risc0Prover::new(risc0_config),
-                    RISC0_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -346,6 +297,7 @@ async fn build_risc0_engine(
 async fn build_sp1_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Sp1Spec>> {
@@ -358,7 +310,7 @@ async fn build_sp1_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaSp1,
                 Sp1Prover::new(sp1_config),
-                SP1_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -389,7 +341,7 @@ async fn build_sp1_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaSp1,
                     Sp1Prover::new(sp1_config),
-                    SP1_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -490,6 +442,7 @@ async fn build_native_engine(
 async fn build_boundless_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<BoundlessSpec>> {
@@ -502,7 +455,7 @@ async fn build_boundless_engine(
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Boundless,
                 BoundlessProver::new(agent_config),
-                RISC0_BOUNDLESS_SHASTA_BACKEND,
+                backend,
                 provider,
             );
             Engine::with_store_scheduler_config_and_observer(
@@ -536,7 +489,7 @@ async fn build_boundless_engine(
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0Boundless,
                     BoundlessProver::new(agent_config),
-                    RISC0_BOUNDLESS_SHASTA_BACKEND,
+                    backend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(
@@ -563,13 +516,21 @@ async fn build_boundless_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata};
-    use raiko2_engine::{
-        EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest, ProverTaskConfig,
-    };
+    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, proposal_task_ref};
+    use raiko2_engine::{ProposalStage, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-    use raiko2_queue::encode_task_id;
+    use raiko2_queue::{TaskId, encode_task_id};
     use raiko2_runtime::RuntimeTaskRecord;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    enum LegacyEngineTaskKey {
+        Proposal {
+            pipeline: PipelineKey,
+            request: ProposalTaskRequest,
+            stage: ProposalStage,
+        },
+    }
 
     #[tokio::test]
     async fn restore_proof_artifacts_registers_canonical_and_legacy_proposal_refs() -> Result<()> {
@@ -587,7 +548,7 @@ mod tests {
             graffiti: None,
             prover_config: ProverTaskConfig::default(),
         };
-        let legacy_ref = encode_task_id(&EngineTaskId::new(EngineTaskKey::Proposal {
+        let legacy_ref = encode_task_id(&TaskId::new(LegacyEngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: request.clone(),
             stage: ProposalStage::Prove,
@@ -625,6 +586,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         runtime

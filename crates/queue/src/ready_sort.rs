@@ -1,12 +1,10 @@
-//! Ordering for Low/Medium ready queues (High stays FIFO).
+//! Ordering for ready queues.
 
 use crate::types::TaskId;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 
-/// Total order used for **Low** and **Medium** ready queues (smaller runs first).
-///
-/// **High** priority is unchanged (FIFO list / separate path).
+/// Total order used by ready queues (smaller runs first).
 pub trait ReadyQueueSort: Clone + Eq + std::hash::Hash + Send + Sync + 'static {
     /// 16-byte key that sorts lexicographically the same as
     /// [`ReadyQueueSort::cmp_for_ready_queue`].

@@ -371,7 +371,7 @@ mod tests {
     use alloy_consensus::{SignableTransaction, TxEip1559};
     use alloy_primitives::{Address, B256, Signature, TxKind, U256};
     use alloy_sol_types::{SolCall, sol};
-    use raiko2_pipeline::forks::shasta::RISC0_SHASTA_BACKEND;
+    use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
     use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
     use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
     use raiko2_protocol_shasta::TaikoManifest;
@@ -480,9 +480,10 @@ mod tests {
             verify: true,
         });
         let guest_input = fixture_guest_input();
+        let backend = load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs");
 
         let err = prover
-            .prove(guest_input, &ProverConfig::default(), &RISC0_SHASTA_BACKEND)
+            .prove(guest_input, &ProverConfig::default(), &backend)
             .await
             .expect_err("fixture input should reach guest validation and fail there");
 

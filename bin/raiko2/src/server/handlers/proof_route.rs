@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::super::errors::ApiError;
-use super::proof_types::{BatchShastaRequest, HoodiProofType};
+use super::proof_types::{BatchProofType, BatchShastaRequest};
 use crate::config::GuestSystem;
 use crate::server::state::AppState;
 
@@ -34,7 +34,7 @@ impl CanonicalProofRoute {
 }
 
 pub(super) enum BatchProofDecision {
-    Selected(HoodiProofType),
+    Selected(BatchProofType),
     NotDrawn,
 }
 
@@ -49,21 +49,21 @@ pub(super) fn generate_public_task_id() -> String {
 
 pub(super) fn route_for_proof_type(
     state: &AppState,
-    proof_type: HoodiProofType,
+    proof_type: BatchProofType,
 ) -> Result<CanonicalProofRoute, ApiError> {
     let route = match proof_type {
-        HoodiProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-        HoodiProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
-        HoodiProofType::Risc0 => {
+        BatchProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+        BatchProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+        BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        HoodiProofType::Sgx | HoodiProofType::SgxGeth => {
+        BatchProofType::Sgx | BatchProofType::SgxGeth => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()
             )));
         }
-        HoodiProofType::ZkAny => {
+        BatchProofType::ZkAny => {
             return Err(ApiError::bad_request(
                 "proof_type=zk_any must be resolved before route selection",
             ));
@@ -77,7 +77,7 @@ pub(super) fn decide_batch_proof_type(
     state: &AppState,
     req: &BatchShastaRequest,
 ) -> Result<BatchProofDecision, ApiError> {
-    if !matches!(req.proof_type, HoodiProofType::ZkAny) {
+    if !matches!(req.proof_type, BatchProofType::ZkAny) {
         return Ok(BatchProofDecision::Selected(req.proof_type));
     }
 
@@ -97,7 +97,7 @@ pub(super) fn decide_batch_proof_type(
         .map_err(|_| ApiError::internal("failed to lock zk_any sampler"))?;
     let selected = sampler
         .draw(seed)
-        .map(HoodiProofType::from_canonical)
+        .map(BatchProofType::from_canonical)
         .map_or(BatchProofDecision::NotDrawn, BatchProofDecision::Selected);
     Ok(selected)
 }
@@ -130,7 +130,7 @@ const fn default_risc0_runner_for_route(route: PipelineRoute) -> RunnerKind {
     }
 }
 
-impl HoodiProofType {
+impl BatchProofType {
     pub(super) const fn from_canonical(proof_type: ProofType) -> Self {
         match proof_type {
             ProofType::Native => Self::Native,

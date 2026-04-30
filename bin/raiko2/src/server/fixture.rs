@@ -8,10 +8,13 @@ use alloy_primitives::{B256, Bytes};
 use anyhow::Result;
 use axum::{Json, Router, routing::post};
 use raiko2_engine::{Engine, EngineObserver};
+#[cfg(test)]
+use raiko2_pipeline::forks::shasta::{
+    load_risc0_boundless_shasta_backend, load_risc0_shasta_backend, load_sp1_shasta_backend,
+};
 use raiko2_pipeline::{
     NativeBackend, NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight,
-    ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{RISC0_SHASTA_BACKEND, SP1_SHASTA_BACKEND},
+    ProverBackend, Risc0ShastaBackend, Sp1ShastaBackend, forks::shasta::load_shasta_backends,
 };
 use raiko2_primitives::{
     Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
@@ -591,6 +594,7 @@ pub(crate) fn risc0_boundless_fixture_engine(
     risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Boundless, None)
 }
 
+#[cfg(test)]
 fn risc0_fixture_engine_with_observer(
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
@@ -598,18 +602,24 @@ fn risc0_fixture_engine_with_observer(
     risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0, observer)
 }
 
+#[cfg(test)]
 fn risc0_fixture_engine_for_pipeline(
     context_config: serde_json::Value,
     pipeline_key: PipelineKey,
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> Risc0FixtureEngine {
+    let backend = load_risc0_backend_for_pipeline(pipeline_key);
+    risc0_fixture_engine_for_pipeline_with_backend(context_config, pipeline_key, observer, backend)
+}
+
+fn risc0_fixture_engine_for_pipeline_with_backend(
+    context_config: serde_json::Value,
+    pipeline_key: PipelineKey,
+    observer: Option<Arc<dyn EngineObserver>>,
+    backend: Risc0ShastaBackend,
+) -> Risc0FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
-    let spec = FixtureSpec::new(
-        pipeline_key,
-        FixtureRisc0Prover,
-        RISC0_SHASTA_BACKEND,
-        provider,
-    );
+    let spec = FixtureSpec::new(pipeline_key, FixtureRisc0Prover, backend, provider);
     let ctx = ProofContext::new(
         ProofRequest {
             l1_chain_id: 1,
@@ -632,9 +642,19 @@ pub(crate) fn sp1_fixture_engine(context_config: serde_json::Value) -> Sp1Fixtur
     sp1_fixture_engine_with_observer(context_config, None)
 }
 
+#[cfg(test)]
 fn sp1_fixture_engine_with_observer(
     context_config: serde_json::Value,
     observer: Option<Arc<dyn EngineObserver>>,
+) -> Sp1FixtureEngine {
+    let backend = load_sp1_shasta_backend().expect("load SP1 Shasta guest ELFs");
+    sp1_fixture_engine_with_backend(context_config, observer, backend)
+}
+
+fn sp1_fixture_engine_with_backend(
+    context_config: serde_json::Value,
+    observer: Option<Arc<dyn EngineObserver>>,
+    backend: Sp1ShastaBackend,
 ) -> Sp1FixtureEngine {
     let provider = FixtureProvider::from_repo_test_json();
     let spec = FixtureSpec::new(
@@ -646,7 +666,7 @@ fn sp1_fixture_engine_with_observer(
             verify: true,
             ..Sp1Config::default()
         }),
-        SP1_SHASTA_BACKEND,
+        backend,
         provider,
     );
     let ctx = ProofContext::new(
@@ -664,6 +684,15 @@ fn sp1_fixture_engine_with_observer(
         context_config,
     );
     build_engine_with_observer(spec, ctx, observer)
+}
+
+#[cfg(test)]
+fn load_risc0_backend_for_pipeline(pipeline_key: PipelineKey) -> Risc0ShastaBackend {
+    if pipeline_key == PipelineKey::ShastaRisc0Boundless {
+        load_risc0_boundless_shasta_backend().expect("load RISC0 Boundless Shasta guest ELFs")
+    } else {
+        load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs")
+    }
 }
 
 #[cfg(test)]
@@ -735,6 +764,74 @@ pub(crate) fn app_with_observed_native_fixture_engine(
     (app::build_router(state), engine)
 }
 
+#[cfg(test)]
+pub(crate) fn state_with_observed_sp1_fixture_engine(
+    config: Config,
+) -> (AppState, Sp1FixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-sp1-runtime"))
+            .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = sp1_fixture_engine_with_observer(json!({}), Some(observer));
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaSp1,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
+    (state, engine)
+}
+
+#[cfg(test)]
+pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, Sp1FixtureEngine) {
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
+    (app::build_router(state), engine)
+}
+
+#[cfg(all(test, feature = "boundless"))]
+pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
+    config: Config,
+) -> (Router, Risc0FixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root(
+            "raiko2-e2e-observed-risc0-boundless-runtime",
+        ))
+        .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = risc0_fixture_engine_for_pipeline(
+        json!({}),
+        PipelineKey::ShastaRisc0Boundless,
+        Some(observer),
+    );
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaRisc0Boundless,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
+    (app::build_router(state), engine)
+}
+
 pub(crate) async fn spawn_chain_id_rpc(
     chain_id: u64,
 ) -> Result<(String, tokio::task::JoinHandle<()>), std::io::Error> {
@@ -779,6 +876,7 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let observer = engine_observer(Arc::clone(&runtime));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
+    let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
 
     let mut factory = StaticPipelineFactory::default();
 
@@ -790,7 +888,12 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(native_engine),
     );
 
-    let risc0_engine = risc0_fixture_engine_with_observer(json!({}), Some(Arc::clone(&observer)));
+    let risc0_engine = risc0_fixture_engine_for_pipeline_with_backend(
+        json!({}),
+        PipelineKey::ShastaRisc0,
+        Some(Arc::clone(&observer)),
+        shasta_backends.risc0,
+    );
     risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),
@@ -798,7 +901,8 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(risc0_engine),
     );
 
-    let sp1_engine = sp1_fixture_engine_with_observer(json!({}), Some(observer));
+    let sp1_engine =
+        sp1_fixture_engine_with_backend(json!({}), Some(observer), shasta_backends.sp1);
     sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
     factory.insert(
         "taiko_dev/ethereum".to_string(),

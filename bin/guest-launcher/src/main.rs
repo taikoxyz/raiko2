@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use alloy_primitives::{Address, B256, hex};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
-use raiko2_pipeline::forks::shasta::SP1_SHASTA_BACKEND;
+use raiko2_pipeline::forks::shasta::load_sp1_shasta_backend;
 use raiko2_pipeline::{NativeBackend, ProofStage, ProverBackend};
 use raiko2_primitives::{Proof, ProofType as RaikoProofType};
 use raiko2_primitives_shasta::build_proof_carry_data;
@@ -410,10 +410,13 @@ async fn run_aggregation(args: Args) -> Result<()> {
     let mut stdin = SP1Stdin::new();
     stdin.write(&aggregation_input);
 
-    let proposal_elf = SP1_SHASTA_BACKEND
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load SP1 Shasta guest ELFs")?;
+    let proposal_elf = backend
         .elf(ProofStage::Proposal)
         .context("load SP1 proposal ELF")?;
-    let elf = SP1_SHASTA_BACKEND
+    let elf = backend
         .elf(ProofStage::Aggregation)
         .context("load SP1 aggregation ELF")?;
     let start = Instant::now();
@@ -644,7 +647,10 @@ async fn run_sp1_proposal(
     stdin.write(&input);
     record_memory_snapshot(&mut report, "proposal:after_stdin_write");
 
-    let elf = SP1_SHASTA_BACKEND
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load SP1 Shasta guest ELFs")?;
+    let elf = backend
         .elf(ProofStage::Proposal)
         .context("load SP1 proposal ELF")?;
     report.input = input_path.display().to_string();

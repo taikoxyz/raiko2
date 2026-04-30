@@ -130,7 +130,10 @@ cargo run -r -p xtask -- build-guest all
 ```
 
 `build-guest` only rebuilds checked-in ELF artifacts under `crates/guests/elf`.
-It does not register verifier trust-list entries or update any external program registry.
+The host loads those files from that fixed path at process startup; they are not embedded into
+the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
+differs from the source tree. `build-guest` does not register verifier trust-list entries or
+update any external program registry.
 
 Prerequisites:
 

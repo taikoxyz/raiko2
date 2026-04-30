@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::task_metadata::{
-    TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref,
+    TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
@@ -54,6 +54,7 @@ impl RuntimeObserver {
 
     const fn stage_name(task: &EngineTask) -> &'static str {
         match task {
+            EngineTask::Proposal { .. } => "proposal",
             EngineTask::Preflight { .. } => "preflight",
             EngineTask::Validate { .. } => "validation",
             EngineTask::Encode { .. } => "encode",
@@ -185,7 +186,8 @@ impl RuntimeObserver {
                 .is_some_and(TaskRuntimeMetadata::has_resumable_remote_submission),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. } => false,
+            | EngineTask::Encode { .. }
+            | EngineTask::Proposal { .. } => false,
         })
     }
 
@@ -222,22 +224,58 @@ impl RuntimeObserver {
 
     const fn stage_name_from_task_id(id: &EngineTaskId) -> &'static str {
         match &id.0 {
-            EngineTaskKey::Proposal { stage, .. } => match stage {
-                ProposalStage::Preflight => "preflight",
-                ProposalStage::Validation => "validation",
-                ProposalStage::Encode => "encode",
-                ProposalStage::Prove => "prove",
-            },
+            EngineTaskKey::Proposal { .. } => "proposal",
             EngineTaskKey::Aggregate { .. } => "aggregate",
         }
     }
 
-    fn timing_key(id: &EngineTaskId) -> String {
-        stage_task_ref(id)
+    const fn proposal_stage_from_task(task: &EngineTask) -> Option<ProposalStage> {
+        match task {
+            EngineTask::Preflight { .. } => Some(ProposalStage::Preflight),
+            EngineTask::Validate { .. } => Some(ProposalStage::Validation),
+            EngineTask::Encode { .. } => Some(ProposalStage::Encode),
+            EngineTask::ProveProposal { .. } => Some(ProposalStage::Prove),
+            EngineTask::Proposal { .. } | EngineTask::Aggregate { .. } => None,
+        }
     }
 
-    fn mark_stage_started_for_metrics(&self, id: &EngineTaskId) -> bool {
-        let task_id = Self::timing_key(id);
+    fn timing_key_for_stage(id: &EngineTaskId, stage: ProposalStage) -> String {
+        stage_task_ref_for_stage(id, stage)
+    }
+
+    fn timing_key_for_stage_name(id: &EngineTaskId, stage: &str) -> String {
+        match stage {
+            "preflight" => Self::timing_key_for_stage(id, ProposalStage::Preflight),
+            "validation" => Self::timing_key_for_stage(id, ProposalStage::Validation),
+            "encode" => Self::timing_key_for_stage(id, ProposalStage::Encode),
+            "prove" => Self::timing_key_for_stage(id, ProposalStage::Prove),
+            _ => match &id.0 {
+                EngineTaskKey::Proposal { .. } => {
+                    Self::timing_key_for_stage(id, ProposalStage::Prove)
+                }
+                EngineTaskKey::Aggregate { pipeline, request } => {
+                    crate::server::task_metadata::aggregate_task_ref(*pipeline, request)
+                }
+            },
+        }
+    }
+
+    fn timing_key_for_task(id: &EngineTaskId, task: &EngineTask) -> String {
+        Self::proposal_stage_from_task(task).map_or_else(
+            || match &id.0 {
+                EngineTaskKey::Proposal { .. } => {
+                    Self::timing_key_for_stage(id, ProposalStage::Prove)
+                }
+                EngineTaskKey::Aggregate { pipeline, request } => {
+                    crate::server::task_metadata::aggregate_task_ref(*pipeline, request)
+                }
+            },
+            |stage| Self::timing_key_for_stage(id, stage),
+        )
+    }
+
+    fn mark_stage_started_for_metrics(&self, id: &EngineTaskId, task: &EngineTask) -> bool {
+        let task_id = Self::timing_key_for_task(id, task);
         let mut started = self
             .started_stage_tasks
             .lock()
@@ -245,37 +283,34 @@ impl RuntimeObserver {
         started.insert(task_id)
     }
 
-    fn mark_stage_terminal_for_metrics(&self, id: &EngineTaskId) -> bool {
-        let task_id = Self::timing_key(id);
-        let mut started = self
-            .started_stage_tasks
-            .lock()
-            .expect("stage task telemetry mutex poisoned");
-        started.remove(&task_id)
-    }
-
     fn stage_duration_secs(
         record: &RuntimeTaskRecord,
-        id: &EngineTaskId,
+        task_id: &str,
         finished_at_ms: i64,
     ) -> Result<Option<f64>> {
         let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
             .context("failed to parse runtime task metadata for stage duration")?;
-        let task_id = Self::timing_key(id);
-        Ok(metadata.observe_stage_terminal_duration_secs(&task_id, finished_at_ms))
+        Ok(metadata.observe_stage_terminal_duration_secs(task_id, finished_at_ms))
     }
 
     async fn observe_stage_terminal_metrics(
         &self,
         id: &EngineTaskId,
+        task_id: &str,
         stage: &str,
         status: &str,
         finished_at_ms: i64,
     ) {
-        let should_decrement = self.mark_stage_terminal_for_metrics(id);
+        let should_decrement = {
+            let mut started = self
+                .started_stage_tasks
+                .lock()
+                .expect("stage task telemetry mutex poisoned");
+            started.remove(task_id)
+        };
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
-                Ok(context) => match Self::stage_duration_secs(&record, id, finished_at_ms) {
+                Ok(context) => match Self::stage_duration_secs(&record, task_id, finished_at_ms) {
                     Ok(duration_seconds) => {
                         telemetry::record_stage_task_terminal(
                             &context,
@@ -352,7 +387,7 @@ impl RuntimeObserver {
         for record in records {
             let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
                 .context("failed to parse task metadata")?;
-            let task_id = Self::timing_key(id);
+            let task_id = Self::timing_key_for_stage_name(id, stage);
             metadata.mark_stage_terminal(&task_id, stage, 0, "completed");
             if !Self::root_completed_by_proof_success(id, &metadata, record.pipeline_key) {
                 continue;
@@ -374,7 +409,7 @@ impl RuntimeObserver {
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Failed;
                 record.error = Some(message.clone());
-                let task_id = Self::timing_key(id);
+                let task_id = Self::timing_key_for_stage_name(id, stage);
                 update_task_metadata(record, |metadata| {
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -401,16 +436,15 @@ impl RuntimeObserver {
     ) -> bool {
         match &id.0 {
             EngineTaskKey::Aggregate { .. } => true,
-            EngineTaskKey::Proposal {
-                stage: ProposalStage::Prove,
-                ..
-            } if !metadata.aggregate_requested && metadata.aggregate_task_id.is_none() => {
+            EngineTaskKey::Proposal { .. }
+                if !metadata.aggregate_requested && metadata.aggregate_task_id.is_none() =>
+            {
                 !metadata.proposals.is_empty()
                     && metadata.proposals.iter().all(|proposal| {
                         let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
                             return false;
                         };
-                        let task_ref = Self::timing_key(&task_id);
+                        let task_ref = Self::timing_key_for_stage(&task_id, ProposalStage::Prove);
                         metadata
                             .runtime
                             .stage_timings
@@ -428,7 +462,7 @@ impl RuntimeObserver {
 impl EngineObserver for RuntimeObserver {
     async fn on_task_started(&self, id: &EngineTaskId, task: &EngineTask, worker: &str) {
         let stage = Self::stage_name(task);
-        let should_increment = self.mark_stage_started_for_metrics(id);
+        let should_increment = self.mark_stage_started_for_metrics(id, task);
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
                 Ok(context) => {
@@ -453,7 +487,7 @@ impl EngineObserver for RuntimeObserver {
             .update_retry_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Allocated;
                 record.error = None;
-                let task_id = Self::timing_key(id);
+                let task_id = Self::timing_key_for_task(id, task);
                 update_task_metadata(record, |metadata| {
                     metadata.mark_stage_started(&task_id, stage, observed_at_ms);
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -521,7 +555,8 @@ impl EngineObserver for RuntimeObserver {
                             }
                             EngineTask::Preflight { .. }
                             | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. } => {}
+                            | EngineTask::Encode { .. }
+                            | EngineTask::Proposal { .. } => {}
                         },
                         ProverProgress::Sp1NetworkSubmission(submission) => match task {
                             EngineTask::ProveProposal { .. } => {
@@ -535,7 +570,8 @@ impl EngineObserver for RuntimeObserver {
                             }
                             EngineTask::Preflight { .. }
                             | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. } => {}
+                            | EngineTask::Encode { .. }
+                            | EngineTask::Proposal { .. } => {}
                         },
                     }
                 })?;
@@ -560,7 +596,8 @@ impl EngineObserver for RuntimeObserver {
     ) {
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
-        self.observe_stage_terminal_metrics(id, stage, "completed", finished_at_ms)
+        let task_id = Self::timing_key_for_task(id, task);
+        self.observe_stage_terminal_metrics(id, &task_id, stage, "completed", finished_at_ms)
             .await;
         let result = match success {
             EngineTaskSuccess::Proof { proof, .. } => {
@@ -580,7 +617,7 @@ impl EngineObserver for RuntimeObserver {
                 };
                 self.update_root_records(id, move |record, updated_at, observed_at_ms| {
                     record.error = None;
-                    let task_id = Self::timing_key(id);
+                    let task_id = Self::timing_key_for_task(id, task);
                     let mut metadata: TaskMetadata =
                         serde_json::from_value(record.metadata.clone())
                             .context("failed to parse task metadata")?;
@@ -614,11 +651,11 @@ impl EngineObserver for RuntimeObserver {
                 self.update_root_records(id, |record, updated_at, observed_at_ms| {
                     record.runner_status = RunnerStatus::Allocated;
                     record.error = None;
-                    let task_id = Self::timing_key(id);
+                    let task_id = Self::timing_key_for_task(id, task);
                     update_task_metadata(record, |metadata| {
                         metadata.mark_stage_terminal(
                             &task_id,
-                            Self::stage_name_from_task_id(id),
+                            Self::stage_name(task),
                             observed_at_ms,
                             "completed",
                         );
@@ -646,13 +683,13 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_failed(&self, id: &EngineTaskId, task: &EngineTask, error: &str) {
         let stage = Self::stage_name(task);
         let finished_at_ms = now_ms();
-        self.observe_stage_terminal_metrics(id, stage, "failed", finished_at_ms)
+        let task_id = Self::timing_key_for_task(id, task);
+        self.observe_stage_terminal_metrics(id, &task_id, stage, "failed", finished_at_ms)
             .await;
         if let Err(err) = self
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Failed;
                 record.error = Some(error.to_string());
-                let task_id = Self::timing_key(id);
                 update_task_metadata(record, |metadata| {
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "failed");
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -670,13 +707,13 @@ impl EngineObserver for RuntimeObserver {
     async fn on_task_cancelled(&self, id: &EngineTaskId) {
         let stage = Self::stage_name_from_task_id(id);
         let finished_at_ms = now_ms();
-        self.observe_stage_terminal_metrics(id, stage, "cancelled", finished_at_ms)
+        let task_id = Self::timing_key_for_stage_name(id, stage);
+        self.observe_stage_terminal_metrics(id, &task_id, stage, "cancelled", finished_at_ms)
             .await;
         if let Err(err) = self
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Cancelled;
                 record.error = None;
-                let task_id = Self::timing_key(id);
                 update_task_metadata(record, |metadata| {
                     metadata.mark_stage_terminal(&task_id, stage, observed_at_ms, "cancelled");
                     metadata.runtime.active_stage = Some(stage.to_string());
@@ -708,7 +745,8 @@ impl EngineObserver for RuntimeObserver {
                 .flatten(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. } => None,
+            | EngineTask::Encode { .. }
+            | EngineTask::Proposal { .. } => None,
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
@@ -725,7 +763,8 @@ impl EngineObserver for RuntimeObserver {
                 .and_then(|runtime| runtime.provider_request_id.clone()),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. } => None,
+            | EngineTask::Encode { .. }
+            | EngineTask::Proposal { .. } => None,
         }
     }
 
@@ -742,7 +781,8 @@ impl EngineObserver for RuntimeObserver {
                 .flatten(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. } => None,
+            | EngineTask::Encode { .. }
+            | EngineTask::Proposal { .. } => None,
         }?;
 
         let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
@@ -752,7 +792,8 @@ impl EngineObserver for RuntimeObserver {
             EngineTask::Aggregate { .. } => metadata.aggregate_runtime(),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
-            | EngineTask::Encode { .. } => None,
+            | EngineTask::Encode { .. }
+            | EngineTask::Proposal { .. } => None,
         }?;
 
         let expires_at = runtime.expires_at?;
@@ -927,6 +968,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, request)],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -946,7 +988,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaRisc0Boundless,
             request: proposal_request(),
-            stage: ProposalStage::Prove,
         });
         let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0Boundless, &proposal_request());
         runtime
@@ -976,6 +1017,7 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1080,7 +1122,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: request.clone(),
-            stage: ProposalStage::Prove,
         });
         let proposal_ref = proposal_task_ref(pipeline, &request);
         let aggregate_request = AggregationTaskRequest {
@@ -1106,6 +1147,7 @@ mod tests {
                     proposals: vec![proposal_metadata_task(pipeline, &request)],
                     aggregate_task_id: Some(aggregate_ref),
                     aggregate_request: Some(aggregate_request),
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1160,7 +1202,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: request.clone(),
-            stage: ProposalStage::Prove,
         });
 
         register_observer_task(
@@ -1219,7 +1260,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: request.clone(),
-            stage: ProposalStage::Preflight,
         });
         let task = EngineTask::Preflight {
             request: request.clone(),
@@ -1278,7 +1318,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: request.clone(),
-            stage: ProposalStage::Preflight,
         });
         let task = EngineTask::Preflight {
             request: request.clone(),
@@ -1331,12 +1370,10 @@ mod tests {
         let first_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: first_request.clone(),
-            stage: ProposalStage::Prove,
         });
         let second_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline,
             request: second_request.clone(),
-            stage: ProposalStage::Prove,
         });
         let first_ref = proposal_task_ref(pipeline, &first_request);
         let second_ref = proposal_task_ref(pipeline, &second_request);
@@ -1360,6 +1397,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1434,7 +1472,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaSp1,
             request: proposal_request(),
-            stage: ProposalStage::Prove,
         });
         let task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request());
         runtime
@@ -1462,6 +1499,7 @@ mod tests {
                     }],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1537,7 +1575,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaSp1,
             request: proposal_request(),
-            stage: ProposalStage::Prove,
         });
         let other_request = ProposalTaskRequest {
             proposal_id: 43,
@@ -1546,7 +1583,6 @@ mod tests {
         let other_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaSp1,
             request: other_request.clone(),
-            stage: ProposalStage::Prove,
         });
         let task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &proposal_request());
         let other_task_ref = proposal_task_ref(PipelineKey::ShastaSp1, &other_request);
@@ -1586,6 +1622,7 @@ mod tests {
                     ],
                     aggregate_task_id: None,
                     aggregate_request: None,
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1672,6 +1709,7 @@ mod tests {
                     proposals: vec![],
                     aggregate_task_id: Some(task_ref),
                     aggregate_request: Some(aggregate_request.clone()),
+                    aggregate_input_artifacts: Vec::new(),
                     runtime: RuntimeMetadata::default(),
                 })?,
                 request_fingerprint: None,
@@ -1692,7 +1730,7 @@ mod tests {
                     &aggregate_task_id,
                     &EngineTask::Aggregate {
                         request: aggregate_request.clone(),
-                        source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                        source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
                 .await,
@@ -1704,7 +1742,7 @@ mod tests {
                 &aggregate_task_id,
                 &EngineTask::Aggregate {
                     request: aggregate_request.clone(),
-                    source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                    source: raiko2_engine::AggregationSource::Inputs(vec![]),
                 },
                 &ProverProgress::Sp1NetworkSubmission(Sp1NetworkSubmissionProgress {
                     provider_request_id: "0xsp1-aggregate".to_string(),
@@ -1723,7 +1761,7 @@ mod tests {
                     &aggregate_task_id,
                     &EngineTask::Aggregate {
                         request: aggregate_request,
-                        source: raiko2_engine::AggregationSource::Proofs(vec![]),
+                        source: raiko2_engine::AggregationSource::Inputs(vec![]),
                     },
                 )
                 .await
@@ -1741,7 +1779,6 @@ mod tests {
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
             pipeline: PipelineKey::ShastaNative,
             request: proposal_request(),
-            stage: ProposalStage::Preflight,
         });
         let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &proposal_request());
         let preflight_ref = stage_task_ref(&proposal_task_id);
@@ -1763,6 +1800,7 @@ mod tests {
             }],
             aggregate_task_id: None,
             aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
             runtime: RuntimeMetadata::default(),
         };
         metadata.mark_stage_started(&preflight_ref, "preflight", now_ms() - 1_000);

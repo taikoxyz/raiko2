@@ -101,7 +101,10 @@ cargo run -r -p xtask -- release-image risc0 \
 ```
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
-`crates/guests/elf` artifacts and does not rebuild guest sources by itself.
+`crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
+process starts and does not rebuild guest sources by itself. The image sets
+`RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf` so ELF lookup does not depend on the container
+working directory.
 
 If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
 before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
@@ -176,8 +179,21 @@ per_day = 8
 When a client submits `proof_type = "zk_any"` to `/v3/proof/batch/shasta`, the server draws once
 at admission time and either routes the request to `sp1` / `risc0` or returns
 `data.status = "zk_any_not_drawn"` without registering a task.
-If the same request also sets `aggregate = true`, the draw still happens exactly once and the
-resulting backend is reused for both proposal proving and aggregation.
+`zk_any` is only accepted when `aggregate = false`; aggregate requests must specify a concrete
+proof type such as `sp1` or `risc0`.
+
+Operators can adjust the in-memory `zk_any` ballot without restarting the server when
+`server.admin_api_key` is configured:
+
+```bash
+curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/ballot
+curl -X POST -H "x-api-key: $RAIKO2_ADMIN_API_KEY" -H "content-type: application/json" \
+  --data '{"Risc0":[0.1,10],"Sp1":[0.0,0]}' \
+  http://localhost:8080/admin/ballot
+```
+
+Only `Risc0` and `Sp1` are accepted. The second tuple value is the per-day frequency gate; `0`
+disables the gate for that proof type.
 
 ## SP1 Hosted Posture
 

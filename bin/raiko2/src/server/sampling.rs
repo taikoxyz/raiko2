@@ -1,11 +1,13 @@
 use alloy_primitives::B256;
 use raiko2_primitives::ProofType;
-use std::collections::{HashMap, VecDeque, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, VecDeque, hash_map::Entry};
 use std::time::{Duration, SystemTime};
+use tracing::debug;
 
 use crate::config::{ZkAnyConfig, ZkAnyTargetConfig};
 
 const SEED_CACHE_CAPACITY: usize = 8_192;
+pub(crate) type BallotConfig = BTreeMap<String, (f64, u64)>;
 
 #[derive(Debug, Clone)]
 struct SamplingTargetState {
@@ -36,6 +38,24 @@ impl ZkAnySampler {
         }
     }
 
+    pub(crate) fn from_ballot_config(config: BallotConfig) -> Result<Self, String> {
+        let config = zk_any_config_from_ballot(config)?;
+        Ok(Self::from_config(&config))
+    }
+
+    #[must_use]
+    pub(crate) fn to_ballot_config(&self) -> BallotConfig {
+        self.entries
+            .iter()
+            .map(|(proof_type, target)| {
+                (
+                    ballot_key(*proof_type).to_string(),
+                    (target.probability, target.per_day),
+                )
+            })
+            .collect()
+    }
+
     #[must_use]
     pub(crate) fn draw(&mut self, seed: B256) -> Option<ProofType> {
         let now = SystemTime::now();
@@ -45,12 +65,40 @@ impl ZkAnySampler {
     #[must_use]
     fn draw_with_time(&mut self, seed: B256, now: SystemTime) -> Option<ProofType> {
         if let Some(result) = self.cached_results.get(&seed).copied() {
+            debug!(
+                seed = ?seed,
+                selected = result.map(|proof_type| proof_type.to_string()).as_deref().unwrap_or("none"),
+                "zk_any sampling cache hit"
+            );
             return result;
         }
 
-        let draw_result = self
-            .draw_candidate(seed)
-            .filter(|proof_type| self.check_frequency(*proof_type, now));
+        let candidate = self.draw_candidate(seed);
+        let draw_result = match candidate {
+            Some(proof_type) if self.check_frequency(proof_type, now) => {
+                debug!(
+                    seed = ?seed,
+                    selected = %proof_type,
+                    "zk_any sampling selected"
+                );
+                Some(proof_type)
+            }
+            Some(proof_type) => {
+                debug!(
+                    seed = ?seed,
+                    candidate = %proof_type,
+                    "zk_any sampling frequency blocked"
+                );
+                None
+            }
+            None => {
+                debug!(
+                    seed = ?seed,
+                    "zk_any sampling not drawn"
+                );
+                None
+            }
+        };
         self.cache_result(seed, draw_result);
         draw_result
     }
@@ -95,6 +143,14 @@ impl ZkAnySampler {
 
         if should_draw {
             target.last_draw_at = Some(now);
+        } else {
+            debug!(
+                proof_type = %proof_type,
+                per_day = target.per_day,
+                min_interval_secs = min_interval.as_secs(),
+                last_draw_at = ?target.last_draw_at,
+                "zk_any sampling per-day gate blocked"
+            );
         }
 
         should_draw
@@ -126,6 +182,37 @@ impl SamplingTargetState {
             per_day: config.per_day,
             last_draw_at: None,
         }
+    }
+}
+
+fn zk_any_config_from_ballot(config: BallotConfig) -> Result<ZkAnyConfig, String> {
+    let mut zk_any = ZkAnyConfig::default();
+    for (proof_type, (probability, per_day)) in config {
+        let proof_type = proof_type.parse::<ProofType>()?;
+        let target = ZkAnyTargetConfig {
+            probability,
+            per_day,
+        };
+        match proof_type {
+            ProofType::Sp1 => zk_any.sp1 = Some(target),
+            ProofType::Risc0 => zk_any.risc0 = Some(target),
+            ProofType::Native | ProofType::Sgx => {
+                return Err(format!(
+                    "proof type {proof_type} is not supported for zk_any"
+                ));
+            }
+        }
+    }
+    zk_any.validate().map_err(|err| err.to_string())?;
+    Ok(zk_any)
+}
+
+const fn ballot_key(proof_type: ProofType) -> &'static str {
+    match proof_type {
+        ProofType::Sp1 => "Sp1",
+        ProofType::Risc0 => "Risc0",
+        ProofType::Native => "Native",
+        ProofType::Sgx => "Sgx",
     }
 }
 
@@ -191,5 +278,31 @@ mod tests {
 
         assert_eq!(first, Some(ProofType::Sp1));
         assert_eq!(second, None);
+    }
+
+    #[test]
+    fn sampler_accepts_old_raiko_ballot_format() {
+        let sampler = ZkAnySampler::from_ballot_config(BTreeMap::from([
+            ("Sp1".to_string(), (0.1, 50)),
+            ("Risc0".to_string(), (0.2, 10)),
+        ]))
+        .expect("valid ballot");
+
+        assert_eq!(
+            sampler.to_ballot_config(),
+            BTreeMap::from([
+                ("Sp1".to_string(), (0.1, 50)),
+                ("Risc0".to_string(), (0.2, 10)),
+            ])
+        );
+    }
+
+    #[test]
+    fn sampler_rejects_unsupported_ballot_proof_type() {
+        let err =
+            ZkAnySampler::from_ballot_config(BTreeMap::from([("Native".to_string(), (0.1, 50))]))
+                .expect_err("native ballot should be rejected");
+
+        assert!(err.contains("not supported for zk_any"));
     }
 }

@@ -1,8 +1,7 @@
 use raiko2_engine::{
-    AggregationInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
+    AggregateProofInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
     ProposalTaskRequest,
 };
-use raiko2_primitives::Proof;
 use raiko2_queue::{TaskState, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
@@ -20,15 +19,10 @@ pub trait EngineHandle: Send + Sync {
         request: ProposalTaskRequest,
         dependencies: Vec<EngineTaskId>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
-    fn submit_aggregation_proof_from_proofs(
-        &self,
-        request: AggregationTaskRequest,
-        proofs: Vec<Proof>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn submit_aggregation_proof_from_inputs(
         &self,
         request: AggregationTaskRequest,
-        inputs: Vec<AggregationInput>,
+        inputs: Vec<AggregateProofInput>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>>;
     fn get_status(
         &self,
@@ -58,18 +52,12 @@ fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineSt
             error: None,
             extra_data: None,
         },
-        TaskState::Succeeded { output } => {
-            let (proof, extra_data) = match output {
-                EngineOutput::Proof(proof) => (proof.output.proof, proof.output.extra_data),
-                _ => (None, None),
-            };
-            EngineStatusView {
-                status: ProofStatus::Completed,
-                proof,
-                error: None,
-                extra_data,
-            }
-        }
+        TaskState::Succeeded { .. } => EngineStatusView {
+            status: ProofStatus::Completed,
+            proof: None,
+            error: None,
+            extra_data: None,
+        },
         TaskState::Failed { error, .. } => EngineStatusView {
             status: ProofStatus::Failed,
             proof: None,
@@ -103,21 +91,10 @@ where
         })
     }
 
-    fn submit_aggregation_proof_from_proofs(
-        &self,
-        request: AggregationTaskRequest,
-        proofs: Vec<Proof>,
-    ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
-        Box::pin(async move {
-            self.submit_aggregation_proof_from_proofs(request, proofs)
-                .await
-        })
-    }
-
     fn submit_aggregation_proof_from_inputs(
         &self,
         request: AggregationTaskRequest,
-        inputs: Vec<AggregationInput>,
+        inputs: Vec<AggregateProofInput>,
     ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
         Box::pin(async move {
             self.submit_aggregation_proof_from_inputs(request, inputs)
@@ -149,7 +126,7 @@ mod tests {
     use super::summarize_task;
     use crate::server::state::types::ProofStatus;
     use raiko2_engine::tasks::EngineOutput;
-    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalStage, ProposalTaskRequest};
+    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
     use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::GuestInput;
@@ -157,7 +134,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn summarize_task_keeps_extra_data_for_completed_proof() {
+    fn summarize_task_does_not_expose_completed_queue_proof() {
         let proof = Proof {
             proof: Some("0xdeadbeef".to_string()),
             extra_data: Some(json!({
@@ -184,7 +161,6 @@ mod tests {
                     graffiti: None,
                     prover_config: Default::default(),
                 },
-                stage: ProposalStage::Prove,
             }),
             state: TaskState::Succeeded { output },
             priority: Priority::Medium,
@@ -192,14 +168,7 @@ mod tests {
 
         let summary = summarize_task(task);
         assert!(matches!(summary.status, ProofStatus::Completed));
-        assert_eq!(summary.proof.as_deref(), Some("0xdeadbeef"));
-        assert_eq!(
-            summary.extra_data,
-            Some(json!({
-                "zkvm": "risc0",
-                "mode": "mock",
-                "total_cycles": 42
-            }))
-        );
+        assert!(summary.proof.is_none());
+        assert!(summary.extra_data.is_none());
     }
 }

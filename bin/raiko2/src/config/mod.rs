@@ -183,10 +183,24 @@ mod tests {
     }
 
     #[test]
+    fn test_server_config_debug_redacts_admin_key() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            admin_api_key: Some("secret-admin-key".to_string()),
+        };
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("secret-admin-key"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
     fn test_server_config_invalid_host() {
         let config = ServerConfig {
             host: "".to_string(),
             port: 8080,
+            admin_api_key: None,
         };
         assert!(config.validate().is_err());
     }
@@ -196,6 +210,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 0,
+            admin_api_key: None,
         };
         assert!(config.validate().is_err());
     }

@@ -19,8 +19,8 @@ use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
 };
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::{collections::HashSet, future::Future};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
@@ -1050,9 +1050,15 @@ async fn handle_existing_batch_task(
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(&existing, &existing_metadata) {
-        reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata).await?;
-        reset_runtime_task_to_allocated(state, &existing.task_id).await?;
+    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+        let response = compatibility_response_for_task(state, &existing.task_id).await?;
+        if response_is_completed(&response) {
+            return Ok(response);
+        }
+        recover_existing_task(state, &existing, || {
+            reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata)
+        })
+        .await?;
     }
     compatibility_response_for_task(state, &existing.task_id).await
 }
@@ -1247,17 +1253,39 @@ async fn handle_existing_external_aggregate_task(
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(&existing, &existing_metadata) {
-        reenqueue_existing_external_aggregate_task(
-            engine,
-            submission,
-            &existing,
-            &existing_metadata,
-        )
+    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+        let response = compatibility_response_for_task(state, &existing.task_id).await?;
+        if response_is_completed(&response) {
+            return Ok(response);
+        }
+        recover_existing_task(state, &existing, || {
+            reenqueue_existing_external_aggregate_task(
+                engine,
+                submission,
+                &existing,
+                &existing_metadata,
+            )
+        })
         .await?;
-        reset_runtime_task_to_allocated(state, &existing.task_id).await?;
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+async fn recover_existing_task<'a, F, Fut>(
+    state: &AppState,
+    existing: &'a raiko2_runtime::RuntimeTaskRecord,
+    reenqueue: F,
+) -> Result<(), ApiError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), ApiError>> + 'a,
+{
+    reset_runtime_task_to_allocated(state, &existing.task_id).await?;
+    if let Err(err) = reenqueue().await {
+        restore_runtime_task_status(state, existing, &err).await;
+        return Err(err);
+    }
+    Ok(())
 }
 
 async fn reset_runtime_task_to_allocated(state: &AppState, task_id: &str) -> Result<(), ApiError> {
@@ -1268,6 +1296,31 @@ async fn reset_runtime_task_to_allocated(state: &AppState, task_id: &str) -> Res
         .map_err(|err| {
             ApiError::internal(format!("failed to reset recovered task {task_id}: {err}"))
         })
+}
+
+async fn restore_runtime_task_status(
+    state: &AppState,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    enqueue_error: &ApiError,
+) {
+    if let Err(err) = state
+        .runtime
+        .sync_status(
+            &existing.task_id,
+            existing.runner_status,
+            existing.error.clone(),
+            None,
+        )
+        .await
+    {
+        warn!(
+            task_id = existing.task_id,
+            original_status = existing.runner_status.as_str(),
+            enqueue_error = %enqueue_error.message,
+            restore_error = %err,
+            "failed to restore runtime status after recovery enqueue failure"
+        );
+    }
 }
 
 async fn reenqueue_existing_external_aggregate_task(
@@ -2147,7 +2200,35 @@ fn zk_any_not_drawn_response(batch_id: Option<u64>) -> Response {
     )
 }
 
-fn should_reenqueue_existing_submission(
+async fn should_reenqueue_existing_submission(
+    state: &AppState,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<bool, ApiError> {
+    if should_reenqueue_existing_submission_without_engine(record, metadata) {
+        return Ok(true);
+    }
+
+    if !matches!(
+        record.runner_status,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+    ) || !metadata.has_runtime_progress()
+        || metadata.has_remote_submission_progress()
+    {
+        return Ok(false);
+    }
+
+    let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
+    let engine_state_present =
+        registered_engine_state_present(&engine, record.pipeline_key, metadata).await?;
+    Ok(stale_nonterminal_runtime_is_reenqueueable(
+        record,
+        metadata,
+        engine_state_present,
+    ))
+}
+
+fn should_reenqueue_existing_submission_without_engine(
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
 ) -> bool {
@@ -2158,6 +2239,54 @@ fn should_reenqueue_existing_submission(
             !metadata.has_runtime_progress()
         }
     }
+}
+
+fn stale_nonterminal_runtime_is_reenqueueable(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    engine_state_present: bool,
+) -> bool {
+    matches!(
+        record.runner_status,
+        RuntimeRunnerStatus::Allocated | RuntimeRunnerStatus::Running
+    ) && metadata.has_runtime_progress()
+        && !metadata.has_remote_submission_progress()
+        && !engine_state_present
+}
+
+async fn registered_engine_state_present(
+    engine: &Arc<dyn EngineHandle>,
+    pipeline_key: PipelineKey,
+    metadata: &TaskMetadata,
+) -> Result<bool, ApiError> {
+    for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
+
+        for stage_id in proposal_task_chain_ids(&task_id) {
+            if engine
+                .get_status(stage_id)
+                .await
+                .map_err(|err| ApiError::internal(format!("failed to read task status: {err}")))?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key)
+        && engine
+            .get_status(task_id)
+            .await
+            .map_err(|err| ApiError::internal(format!("failed to read aggregation status: {err}")))?
+            .is_some()
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 fn failed_stage_is_reenqueueable(
@@ -2257,6 +2386,13 @@ fn proposal_failed_before_remote_submission(metadata: &TaskMetadata) -> bool {
             .all(|runtime| !runtime.has_remote_submission_progress())
 }
 
+fn response_is_completed(response: &Response) -> bool {
+    response
+        .extensions()
+        .get::<CompatibilityResponseStatus>()
+        .is_some_and(|status| status.completed)
+}
+
 async fn compatibility_response_for_task(
     state: &AppState,
     task_id: &str,
@@ -2265,7 +2401,8 @@ async fn compatibility_response_for_task(
     let proof_type = BatchProofType::from_canonical(lookup.metadata.proof_type);
     let task = load_task_data_from_lookup(state, task_id, &lookup).await?;
 
-    Ok(match task.status {
+    let status = task.status.clone();
+    let response = match task.status {
         ProofStatus::Pending => legacy_status_response(proof_type, LegacyTaskStatus::Registered),
         ProofStatus::Proving => {
             legacy_status_response(proof_type, LegacyTaskStatus::WorkInProgress)
@@ -2282,7 +2419,22 @@ async fn compatibility_response_for_task(
             ),
         ),
         ProofStatus::Cancelled => legacy_status_response(proof_type, LegacyTaskStatus::Cancelled),
-    })
+    };
+    Ok(with_compatibility_status(response, &status))
+}
+
+#[derive(Clone)]
+struct CompatibilityResponseStatus {
+    completed: bool,
+}
+
+fn with_compatibility_status(mut response: Response, status: &ProofStatus) -> Response {
+    response
+        .extensions_mut()
+        .insert(CompatibilityResponseStatus {
+            completed: matches!(status, ProofStatus::Completed),
+        });
+    response
 }
 
 async fn legacy_root_proof_material(
@@ -2565,6 +2717,18 @@ mod tests {
         Ok(())
     }
 
+    fn test_state(runtime: Arc<RuntimeManager>, engine: Arc<dyn EngineHandle>) -> AppState {
+        let config = Config::default();
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert("taiko_dev/ethereum", PipelineKey::ShastaNative, engine);
+        AppState {
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config: Arc::new(config),
+            pipelines: Arc::new(factory),
+            runtime,
+        }
+    }
+
     fn runtime_record(
         runner_status: RuntimeRunnerStatus,
         metadata: &TaskMetadata,
@@ -2630,7 +2794,7 @@ mod tests {
             record.pipeline_key = pipeline_key;
 
             assert!(
-                should_reenqueue_existing_submission(&record, &metadata),
+                should_reenqueue_existing_submission_without_engine(&record, &metadata),
                 "{pipeline_key}"
             );
         }
@@ -2648,7 +2812,9 @@ mod tests {
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
-        assert!(!should_reenqueue_existing_submission(&record, &metadata));
+        assert!(!should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -2674,7 +2840,7 @@ mod tests {
             record.provider_request_id = Some("0x1234".to_string());
 
             assert!(
-                should_reenqueue_existing_submission(&record, &metadata),
+                should_reenqueue_existing_submission_without_engine(&record, &metadata),
                 "{pipeline_key}"
             );
         }
@@ -2685,7 +2851,9 @@ mod tests {
         let metadata = task_metadata_with_stage(Some("prove"));
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
-        assert!(should_reenqueue_existing_submission(&record, &metadata));
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -2714,7 +2882,7 @@ mod tests {
             record.provider_request_id = Some("0xsp1".to_string());
 
             assert!(
-                should_reenqueue_existing_submission(&record, &metadata),
+                should_reenqueue_existing_submission_without_engine(&record, &metadata),
                 "{pipeline_key}"
             );
         }
@@ -2727,7 +2895,112 @@ mod tests {
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.pipeline_key = PipelineKey::ShastaSp1;
 
-        assert!(should_reenqueue_existing_submission(&record, &metadata));
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
+    }
+
+    #[test]
+    fn running_submission_with_stale_runtime_progress_is_reenqueueable() {
+        let metadata = task_metadata_with_stage(Some("prove"));
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+
+        assert!(stale_nonterminal_runtime_is_reenqueueable(
+            &record, &metadata, false
+        ));
+        assert!(!stale_nonterminal_runtime_is_reenqueueable(
+            &record, &metadata, true
+        ));
+    }
+
+    #[test]
+    fn running_submission_with_remote_progress_is_not_reenqueueable() {
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xsp1".to_string()),
+                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.pipeline_key = PipelineKey::ShastaSp1;
+
+        assert!(!stale_nonterminal_runtime_is_reenqueueable(
+            &record, &metadata, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_recovery_returns_cached_artifact_before_reenqueue() -> Result<()> {
+        let route = CanonicalProofRoute {
+            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
+        };
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "stale-cache-before-reenqueue",
+        ))?);
+        let submission = canonical_submission(route, false);
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.proof_type = ProofType::Native;
+        metadata.aggregate_requested = false;
+        metadata.proposals[0].task_id = "proposal-task".to_string();
+        let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
+        record.pipeline_key = PipelineKey::ShastaNative;
+        record.route = "native/local".parse().expect("parse route");
+        record.error = Some("stale running".to_string());
+        runtime.upsert_task(&record).await?;
+        write_test_proof_artifact(
+            &runtime,
+            &metadata.network_pair,
+            &metadata.proposals[0].task_id,
+            &valid_native_proof(),
+        )
+        .await?;
+        let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone())
+            .await
+            .map_err(|err| anyhow::anyhow!(err.message))?;
+
+        assert!(response_is_completed(&response));
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Running);
+        assert_eq!(stored.error.as_deref(), Some("stale running"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_enqueue_failure_restores_previous_runtime_status() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "recover-rollback",
+        ))?);
+        let metadata = task_metadata_with_stage(Some("preflight"));
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.pipeline_key = PipelineKey::ShastaNative;
+        record.route = "native/local".parse().expect("parse route");
+        record.error = Some("old failure".to_string());
+        runtime.upsert_task(&record).await?;
+        let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
+
+        let err = recover_existing_task(&state, &record, || async {
+            Err(ApiError::internal("enqueue failed"))
+        })
+        .await
+        .expect_err("enqueue failure");
+
+        assert_eq!(err.message, "enqueue failed");
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Failed);
+        assert_eq!(stored.error.as_deref(), Some("old failure"));
+        Ok(())
     }
 
     #[test]
@@ -2743,7 +3016,9 @@ mod tests {
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.pipeline_key = PipelineKey::ShastaNative;
 
-        assert!(!should_reenqueue_existing_submission(&record, &metadata));
+        assert!(!should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -2751,7 +3026,9 @@ mod tests {
         let metadata = task_metadata_with_stage(Some("aggregate"));
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
-        assert!(should_reenqueue_existing_submission(&record, &metadata));
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -2772,7 +3049,9 @@ mod tests {
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.provider_request_id = Some("0xproposal".to_string());
 
-        assert!(!should_reenqueue_existing_submission(&record, &metadata));
+        assert!(!should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -2794,7 +3073,9 @@ mod tests {
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.provider_request_id = Some("0xproposal".to_string());
 
-        assert!(should_reenqueue_existing_submission(&record, &metadata));
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[tokio::test]

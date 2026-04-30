@@ -838,6 +838,79 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 }
 
 #[tokio::test]
+async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaNative,
+        engine,
+    );
+    let app = app::build_router(state.clone());
+    let payload = json!({
+        "proposals": [{
+            "proposal_id": 3,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [3],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "native",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["status"], "registered");
+    let task_id = single_report_task_id(&app).await;
+
+    let mut record = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+    let mut metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
+    metadata.runtime.active_stage = Some("prove".to_string());
+    metadata.runtime.last_event = Some("started:engine-3".to_string());
+    record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let restarted_engine = native_fixture_engine();
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaNative,
+        Arc::new(restarted_engine.clone()),
+    );
+    let restarted_state = AppState {
+        config: Arc::clone(&state.config),
+        pipelines: Arc::new(factory),
+        runtime: Arc::clone(&state.runtime),
+        zk_any_sampler: Arc::clone(&state.zk_any_sampler),
+    };
+    let restarted_app = app::build_router(restarted_state);
+
+    let (status, second) = post_json(&restarted_app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["data"]["status"], "work_in_progress");
+    assert_eq!(single_report_task_id(&restarted_app).await, task_id);
+
+    drive_engine_to_idle(&restarted_engine).await;
+
+    let (status, task) = get_json(&restarted_app, &format!("/v3/tasks/{task_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["data"]["status"], "completed");
+}
+
+#[tokio::test]
 async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
     let config = base_config();
     let (app, engine) = app_with_observed_native_fixture_engine(config);

@@ -2,8 +2,8 @@
 ARG RUST_VERSION=1.93
 
 # Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
-# For example, sp1-zkvm 5.2.4 in Cargo.lock corresponds to Docker tag v5.2.4 here.
-ARG SP1_DOCKER_TAG=v5.2.4
+# For example, sp1-zkvm 6.0.2 in Cargo.lock corresponds to Docker tag v6.0.2 here.
+ARG SP1_DOCKER_TAG=v6.0.2
 FROM ghcr.io/succinctlabs/sp1:${SP1_DOCKER_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -29,7 +29,7 @@ ENV CXX_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.s
 ENV AR_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
 
 # Install cargo-prove to enable running `cargo prove build` inside this image.
-# By default, it matches the SP1 docker tag (e.g. v5.2.4).
+# By default, it matches the SP1 docker tag (e.g. v6.0.2).
 ARG CARGO_PROVE_VERSION
 #
 # Security note: verify the downloaded release artifact checksum to mitigate supply-chain attacks.

@@ -4,14 +4,19 @@ use alloy_primitives::{
     map::{AddressMap, B256Map},
 };
 use alloy_trie::EMPTY_ROOT_HASH;
+use raiko2_primitives::{ExecutionWitness, StatelessValidationError, WitnessStateNode};
 use reth_errors::ProviderError;
 use reth_revm::state::Bytecode;
-use reth_stateless::{ExecutionWitness, StatelessTrie, validation::StatelessValidationError};
 use reth_trie_common::HashedPostState;
 use risc0_ethereum_trie::CachedTrie;
-use std::{cell::RefCell, collections::hash_map::Entry, marker::PhantomData};
+use std::{
+    cell::RefCell,
+    collections::hash_map::Entry,
+    marker::PhantomData,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 
-use crate::trie::StatelessTrieExt;
+use crate::trie::{StatelessTrie, StatelessTrieExt};
 
 /// Zero-overhead helper for tries that only contain RLP encoded data.
 #[derive(Debug, Clone, Default)]
@@ -54,6 +59,14 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
     fn hash(&mut self) -> B256 {
         self.inner.hash()
     }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn rlp_nodes(&self) -> Vec<Bytes> {
+        self.inner.rlp_nodes()
+    }
 }
 
 /// Represents a sparse version of the Ethereum world state.
@@ -74,6 +87,33 @@ pub(super) struct SparseState {
 }
 
 impl SparseState {
+    fn rlp_by_digest(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+    ) -> Result<B256Map<Bytes>, StatelessValidationError> {
+        if witness.state_indices.is_empty() {
+            return Ok(witness
+                .state
+                .iter()
+                .map(|node| (keccak256(&node.bytes), node.bytes.clone()))
+                .collect());
+        }
+
+        witness
+            .state_indices
+            .iter()
+            .map(|index| {
+                let node = shared_state_nodes.get(*index as usize).ok_or(
+                    StatelessValidationError::SharedWitnessStateIndexOutOfBounds {
+                        index: *index,
+                        len: shared_state_nodes.len(),
+                    },
+                )?;
+                Ok((keccak256(&node.bytes), node.bytes.clone()))
+            })
+            .collect()
+    }
+
     /// Removes an account from the state.
     fn remove_account(&mut self, hashed_address: &B256) {
         self.state.remove(hashed_address);
@@ -105,13 +145,34 @@ impl SparseState {
 
         Ok(trie)
     }
-}
 
-impl StatelessTrieExt for SparseState {
-    fn append_callers(&mut self, callers: AddressMap<TrieAccount>) {
-        for (addr, caller) in callers {
-            self.callers.insert(addr, caller);
-        }
+    pub(super) fn state_node_count(&self) -> usize {
+        self.state.size()
+    }
+
+    pub(super) fn storage_trie_count(&self) -> usize {
+        self.storages.borrow().len()
+    }
+
+    pub(super) fn storage_node_count(&self) -> usize {
+        self.storages.borrow().values().map(RlpTrie::size).sum()
+    }
+
+    pub(super) fn materialized_witness_state_nodes(&self) -> Vec<WitnessStateNode> {
+        let mut nodes = self
+            .state
+            .rlp_nodes()
+            .into_iter()
+            .map(WitnessStateNode::from_bytes)
+            .collect::<Vec<_>>();
+        nodes.extend(
+            self.storages
+                .borrow()
+                .values()
+                .flat_map(RlpTrie::rlp_nodes)
+                .map(WitnessStateNode::from_bytes),
+        );
+        ExecutionWitness::canonicalize_state_nodes(nodes)
     }
 }
 
@@ -121,12 +182,16 @@ impl StatelessTrie for SparseState {
         witness: &ExecutionWitness,
         pre_state_root: B256,
     ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
-        // fist, hash all the RLP nodes once
-        let rlp_by_digest: B256Map<_> = witness
-            .state
-            .iter()
-            .map(|rlp| (keccak256(rlp), rlp.clone()))
-            .collect();
+        Self::new_with_state_pool(witness, &[], pre_state_root)
+    }
+
+    fn new_with_state_pool(
+        witness: &ExecutionWitness,
+        shared_state_nodes: &[WitnessStateNode],
+        pre_state_root: B256,
+    ) -> Result<(Self, B256Map<Bytecode>), StatelessValidationError> {
+        // First, hash all the RLP nodes once.
+        let rlp_by_digest = Self::rlp_by_digest(witness, shared_state_nodes)?;
 
         // construct the state trie from the witness data and the given state root
         let state = RlpTrie::from_prehashed(pre_state_root, &rlp_by_digest)
@@ -153,7 +218,15 @@ impl StatelessTrie for SparseState {
     /// Returns the `TrieAccount` that corresponds to the `Address`.
     fn account(&self, address: Address) -> Result<Option<TrieAccount>, ProviderError> {
         let hashed_address = keccak256(address);
-        match self.state.get(hashed_address)? {
+        let account = catch_unwind(AssertUnwindSafe(|| self.state.get(hashed_address))).map_err(
+            |_| {
+                ProviderError::TrieWitnessError(format!(
+                    "state trie unresolved while loading account {address} (hashed {hashed_address})"
+                ))
+            },
+        )??;
+
+        match account {
             None => Ok(None),
             Some(account) => {
                 // each time an account is accessed, check whether its storage trie already exists
@@ -179,9 +252,15 @@ impl StatelessTrie for SparseState {
         let storage_trie = storages.get(&keccak256(address)).ok_or_else(|| {
             ProviderError::TrieWitnessError(format!("storage trie missing for {address}"))
         })?;
-        Ok(storage_trie
-            .get(keccak256(B256::from(slot)))?
-            .unwrap_or(U256::ZERO))
+        let hashed_slot = keccak256(B256::from(slot));
+        let value = catch_unwind(AssertUnwindSafe(|| storage_trie.get(hashed_slot))).map_err(
+            |_| {
+                ProviderError::TrieWitnessError(format!(
+                    "storage trie unresolved while loading address {address} slot {slot} (hashed {hashed_slot})"
+                ))
+            },
+        )??;
+        Ok(value.unwrap_or(U256::ZERO))
     }
 
     /// Computes the new state root from the `HashedPostState`.
@@ -243,5 +322,13 @@ impl StatelessTrie for SparseState {
         }
 
         Ok(self.state.hash())
+    }
+}
+
+impl StatelessTrieExt for SparseState {
+    fn append_callers(&mut self, callers: AddressMap<TrieAccount>) {
+        for (addr, caller) in callers {
+            self.callers.insert(addr, caller);
+        }
     }
 }

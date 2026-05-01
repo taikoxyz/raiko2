@@ -8,12 +8,19 @@
 //! It validates blocks without requiring access to the full node state by
 //! using state proofs and witness data.
 
+mod analysis;
 mod sparse;
 mod trie;
 mod validation;
 mod witness_db;
 
-pub use validation::validate_block;
+pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
+pub use crate::trie::StatelessTrie;
+pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
+pub use validation::{
+    FilteredBlockExecutionOutcome, reconstruct_block_from_transactions_with_witness_resources,
+    validate_block, validate_block_with_ancestor_headers, validate_block_with_witness_resources,
+};
 
 #[cfg(test)]
 mod tests {

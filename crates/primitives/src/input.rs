@@ -4,7 +4,6 @@ use crate::{chain_spec::ChainSpec, proof::Proof};
 use alloy_consensus::TrieAccount;
 use alloy_primitives::{B256, map::AddressMap};
 use reth_ethereum_primitives::Block;
-use reth_stateless::ExecutionWitness;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -13,14 +12,12 @@ use serde_with::serde_as;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StatelessInput {
     /// The block being executed in the stateless validation function.
-    #[serde_as(
-        as = "reth_primitives_traits::serde_bincode_compat::Block<reth_ethereum_primitives::TransactionSigned, alloy_consensus::Header>"
-    )]
+    #[serde_as(as = "crate::serde_bincode::EthereumBlock<'_>")]
     pub block: Block,
     /// The network to generate the proof for
     pub chain_spec: ChainSpec,
     /// `ExecutionWitness` for the stateless validation function.
-    pub witness: ExecutionWitness,
+    pub witness: crate::ExecutionWitness,
     /// The accounts being accessed in the stateless validation function.
     pub accounts: AddressMap<TrieAccount>,
 }

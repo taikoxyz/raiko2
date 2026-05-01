@@ -14,11 +14,15 @@ mod error;
 mod input;
 mod output;
 pub mod proof;
-pub(crate) mod proof_type;
+pub mod proof_type;
+mod serde_bincode;
+mod stateless;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
-pub use context::{ProofContext, ProofRequest};
+pub use context::{L2BlockRange, ProofContext, ProofRequest, ShastaCheckpoint, ShastaRequest};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, StatelessInput};
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};
 pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};
+pub use proof_type::ProofType;
+pub use stateless::{ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode};

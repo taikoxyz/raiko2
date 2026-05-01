@@ -1,12 +1,17 @@
 //! HTTP request handlers.
 
+mod admin;
 mod errors;
 mod health;
-mod info;
+mod metrics;
 mod proof;
 mod ready;
 
+pub(crate) use admin::{get_ballot, set_ballot};
 pub use health::health;
-pub use info::get_info;
-pub use proof::{cancel_proof, get_proof_status, request_proposal_proof};
+pub use metrics::metrics;
+pub use proof::{
+    cancel_task, get_task, list_proofs, prune_proofs, report_proofs, request_aggregation_proof,
+    request_batch_shasta_proof,
+};
 pub use ready::ready;

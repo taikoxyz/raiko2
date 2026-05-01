@@ -1,4 +1,9 @@
 # Raiko2 Readiness Roadmap
+
+> Historical roadmap. It predates the current canonical route/config naming and may describe
+> superseded concepts. Use `README.md`, `docs/API.md`, and `config.example.toml` as the current
+> source of truth.
+
 Date: 2026-02-03
 Status: Draft
 
@@ -11,14 +16,14 @@ plus an on-chain verifier for **all** proof backends.
 
 ## Key Decisions (Locked)
 - **Request identifier:** `proposal_id` in the API refers to **L1 proposal id**.
-- **Golden Touch:** sign **all** proofs (native, risc0, sp1, agent), and verify on-chain.
+- **Golden Touch:** sign **all** proofs (native, risc0, sp1), and verify on-chain.
 - **Deployment shape:** single-process (HTTP API + workers in one `raiko2` process).
 
 ## Current Implementation Snapshot (As-Is)
 ### What exists
 - **Engine/queue orchestration:** queue-driven pipeline stages (preflight → validate → encode → prove)
   with workers managed in-process.
-- **Backends:** `risc0`, `sp1`, `native`, and `agent-risc0` are supported via config and wiring.
+- **Backends:** `risc0`, `sp1`, and `native` are supported via config and wiring.
 - **Stateless block verification:** implemented and unit-tested.
 - **Proof data model:** `ProofEnvelope` + `AggregationInput` exist in primitives.
 - **E2E tests:** in-process e2e exists for native proof using repo fixture input.
@@ -27,8 +32,8 @@ plus an on-chain verifier for **all** proof backends.
 - **Proposal derivation is not implemented.**
   - Shasta preflight currently treats `proposal_id` as a *block number*:
     `crates/pipeline/src/forks/shasta/spec.rs:66`.
-  - Manifest builder still has a TODO for “actual L1 proposal fetching” and falls back to request
-    config injection: `crates/pipeline/src/forks/shasta/manifest.rs:234`.
+  - Manifest building still depended on request config injection:
+    `crates/pipeline/src/forks/shasta/manifest.rs:234`.
 - **Blob verification is not wired into the pipeline validation.**
   - Helper exists (`crates/primitives-shasta/src/blob.rs:28`), but must be invoked as part of the
     validation stage to match readiness expectations.
@@ -134,7 +139,7 @@ policy to handle >1000 concurrent requests safely.
 - Implement and deploy Solidity verifier (in `taiko-mono`).
 
 **Acceptance Criteria**
-- For each prover backend (`native`, `risc0`, `sp1`, `agent-risc0`):
+- For each prover backend (`native`, `risc0`, `sp1`):
   - raiko2 returns a Golden Touch signature alongside proof material
   - on-chain verifier accepts valid signatures and rejects invalid/mismatched payloads
 - Default configuration for the server sets prover to `native`, but signing remains enforced for all.

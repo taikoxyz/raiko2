@@ -5,18 +5,22 @@
 
 mod types;
 
-pub use types::{Risc0Config, Risc0Response};
+pub use types::{Risc0Config, Risc0ExecutionMetadata, Risc0Response};
 
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::GuestInput;
-use risc0_zkvm::{ExecutorEnv, ProverOpts, Receipt, compute_image_id, default_prover};
+use raiko2_primitives_shasta::{GuestInput, instance::words_to_bytes_le};
+use risc0_zkvm::{
+    Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
+    default_executor, default_prover, get_prover_server,
+};
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
-    validate_shasta_aggregation_lengths,
+    GuestInputCodec, build_shasta_aggregation_input, encode_risc0_aggregation_proof_payload,
+    encode_risc0_proposal_proof_payload, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -29,6 +33,197 @@ impl Risc0Prover {
     #[must_use]
     pub const fn new(config: Risc0Config) -> Self {
         Self { config }
+    }
+
+    fn prover_opts(&self) -> ProverOpts {
+        if self.config.mock {
+            ProverOpts::default().with_dev_mode(true)
+        } else if self.config.snark {
+            ProverOpts::groth16()
+        } else {
+            ProverOpts::default()
+        }
+    }
+
+    fn verify_receipt(&self, receipt: &Receipt, image_id: Digest) -> RaikoResult<()> {
+        if !self.config.verify {
+            return Ok(());
+        }
+
+        if self.config.mock {
+            receipt.verify_with_context(&VerifierContext::default().with_dev_mode(true), image_id)
+        } else {
+            receipt.verify(image_id)
+        }
+        .map_err(|e| {
+            tracing::error!("Failed to verify RISC0 receipt: {:?}", e);
+            RaikoError::Guest(format!("RISC0 receipt verification failed: {e}"))
+        })
+    }
+
+    fn mock_extra_data(
+        session: &risc0_zkvm::SessionInfo,
+        image_id: Digest,
+        input_hash: B256,
+        journal_bytes: usize,
+        mode: &str,
+    ) -> RaikoResult<Option<serde_json::Value>> {
+        let metadata = Risc0ExecutionMetadata::from_session(
+            session,
+            alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
+            input_hash,
+            journal_bytes,
+            mode,
+            true,
+        );
+        serde_json::to_value(metadata)
+            .map(Some)
+            .map_err(|e| RaikoError::Guest(format!("Failed to serialize RISC0 metadata: {e}")))
+    }
+
+    fn build_framed_env(input: &[u8], execution_po2: u32) -> RaikoResult<ExecutorEnv<'_>> {
+        let mut env_builder = ExecutorEnv::builder();
+        env_builder
+            .write_frame(input)
+            .segment_limit_po2(execution_po2);
+        env_builder
+            .build()
+            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
+    }
+
+    fn build_aggregation_env<'a, T: serde::Serialize>(
+        aggregation_input: &'a T,
+        proofs: &[Proof],
+        execution_po2: u32,
+    ) -> RaikoResult<ExecutorEnv<'a>> {
+        let mut env_builder = ExecutorEnv::builder();
+        env_builder
+            .write(aggregation_input)
+            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?
+            .segment_limit_po2(execution_po2);
+
+        for proof in proofs {
+            if let Some(receipt_json) = &proof.quote {
+                let receipt: Receipt = serde_json::from_str(receipt_json).map_err(|e| {
+                    RaikoError::Guest(format!("Failed to parse RISC0 receipt: {e}"))
+                })?;
+                env_builder.add_assumption(receipt);
+            }
+        }
+
+        env_builder
+            .build()
+            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
+    }
+
+    fn compute_image_id(elf: &[u8]) -> RaikoResult<Digest> {
+        compute_image_id(elf)
+            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))
+    }
+
+    fn image_id_hex(image_id: Digest) -> String {
+        alloy_primitives::hex::encode_prefixed(image_id.as_bytes())
+    }
+
+    fn execute_real_proof(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+        stage: &str,
+    ) -> RaikoResult<Receipt> {
+        if self.config.bonsai {
+            return default_prover()
+                .prove_with_opts(env, elf, opts)
+                .map(|info| info.receipt)
+                .map_err(|e| {
+                    tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
+                    RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
+                });
+        }
+
+        let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
+        get_prover_server(opts)
+            .map_err(|e| {
+                RaikoError::Guest(format!(
+                    "Failed to initialize local RISC0 prover server: {e}"
+                ))
+            })?
+            .prove_with_ctx(env, &ctx, elf)
+            .map(|info| info.receipt)
+            .map_err(|e| {
+                tracing::error!("Failed to generate RISC0 {} proof: {:?}", stage, e);
+                RaikoError::Guest(format!("RISC0 {stage} proof generation failed: {e}"))
+            })
+    }
+
+    fn execute_mock_proof<F>(
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        image_id: Digest,
+        stage: &str,
+        input_hash: F,
+    ) -> RaikoResult<(Receipt, Option<serde_json::Value>)>
+    where
+        F: FnOnce(&[u8]) -> RaikoResult<B256>,
+    {
+        let session = default_executor().execute(env, elf).map_err(|e| {
+            tracing::error!("Failed to execute RISC0 {} in mock mode: {:?}", stage, e);
+            RaikoError::Guest(format!("RISC0 {stage} mock execution failed: {e}"))
+        })?;
+        let claim = session.receipt_claim.clone().ok_or_else(|| {
+            RaikoError::Guest(format!(
+                "RISC0 {stage} mock execution returned no receipt claim"
+            ))
+        })?;
+        let receipt = Receipt::try_from(FakeReceipt::new(claim)).map_err(|e| {
+            RaikoError::Guest(format!("Failed to convert RISC0 {stage} mock receipt: {e}"))
+        })?;
+
+        let journal_bytes = &receipt.journal.bytes;
+        let extra_data = Self::mock_extra_data(
+            &session,
+            image_id,
+            input_hash(journal_bytes)?,
+            journal_bytes.len(),
+            "mock",
+        )?;
+        Ok((receipt, extra_data))
+    }
+
+    fn execute_proof<F>(
+        &self,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        opts: &ProverOpts,
+        image_id: Digest,
+        stage: &str,
+        input_hash: F,
+    ) -> RaikoResult<(Receipt, Option<serde_json::Value>)>
+    where
+        F: FnOnce(&[u8]) -> RaikoResult<B256>,
+    {
+        if self.config.mock {
+            Self::execute_mock_proof(env, elf, image_id, stage, input_hash)
+        } else {
+            self.execute_real_proof(env, elf, opts, stage)
+                .map(|receipt| (receipt, None))
+        }
+    }
+
+    fn finalize_stage(&self, stage: &str, receipt: &Receipt, image_id: Digest) -> RaikoResult<()> {
+        info!("RISC0 {} proof generated successfully", stage);
+        if self.config.mock {
+            info!(
+                "RISC0 mock mode enabled; {} receipt is fake but journal is real",
+                stage
+            );
+        }
+        self.verify_receipt(receipt, image_id)?;
+        if self.config.verify {
+            info!("RISC0 {} proof verified successfully", stage);
+        }
+        Ok(())
     }
 }
 
@@ -54,89 +249,64 @@ where
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let input: GuestInput = bincode::deserialize(input.as_ref())
+        info!("Starting RISC0 proposal proof generation...");
+
+        let elf = backend.elf(ProofStage::Proposal)?.to_vec();
+        let prover_config = self.config.clone();
+        let guest_input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
-        info!("Starting RISC0 proposal proof generation...");
+        let proof_carry_data = guest_input.proof_carry_data;
+        let opts = self.prover_opts();
 
-        // Extract ProofCarryData from config if available
-        let proof_carry_data = parse_proof_carry_data(config);
+        tokio::task::spawn_blocking(move || {
+            let prover = Risc0Prover::new(prover_config);
+            let env = Self::build_framed_env(input.as_ref(), prover.config.execution_po2)?;
+            let image_id = Self::compute_image_id(&elf)?;
+            let (receipt, extra_data) = prover.execute_proof(
+                env,
+                &elf,
+                &opts,
+                image_id,
+                "proposal",
+                parse_shasta_proposal_input_hash,
+            )?;
+            prover.finalize_stage("proposal", &receipt, image_id)?;
 
-        // Build the executor environment with both inputs
-        // The guest reads:
-        // 1. GuestInput via env::read()
-        // 2. ProofCarryData via env::read()
-        let env = ExecutorEnv::builder()
-            .write(&input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to write input: {e}")))?
-            .write(&proof_carry_data)
-            .map_err(|e| RaikoError::Guest(format!("Failed to write proof_carry_data: {e}")))?
-            .build()
-            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
+            let journal_bytes = &receipt.journal.bytes;
+            let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
 
-        let opts = if self.config.snark {
-            ProverOpts::groth16()
-        } else {
-            ProverOpts::default()
-        };
+            info!(
+                "Generated proposal receipt journal: {:?}",
+                alloy_primitives::hex::encode_prefixed(journal_bytes)
+            );
 
-        // Use proposal ELF (will be generated by build-guest.sh)
-        let elf = backend.elf(ProofStage::Proposal)?;
-        let image_id = compute_image_id(elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
+            let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
 
-        info!("Starting RISC0 proposal proof generation...");
-        let prove_info = default_prover()
-            .prove_with_opts(env, elf, &opts)
-            .map_err(|e| {
-                tracing::error!("Failed to generate RISC0 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 proposal proof generation failed: {e}"))
-            })?;
-
-        let receipt = prove_info.receipt;
-
-        info!("RISC0 proposal proof generated successfully");
-
-        // Verify proof if configured
-        if self.config.verify {
-            receipt.verify(image_id).map_err(|e| {
-                tracing::error!("Failed to verify RISC0 proposal proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 proposal proof verification failed: {e}"))
-            })?;
-            info!("RISC0 proposal proof verified successfully");
-        }
-
-        // Extract public values (instance_hash + subproof_input_hash = 64 bytes)
-        let journal_bytes = &receipt.journal.bytes;
-        let input_hash = if journal_bytes.len() >= 32 {
-            B256::from_slice(&journal_bytes[..32])
-        } else {
-            B256::default()
-        };
-
-        info!(
-            "Generated proposal receipt journal: {:?}",
-            alloy_primitives::hex::encode_prefixed(journal_bytes.clone())
-        );
-
-        // Serialize receipt for storage
-        let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
-
-        Ok(Risc0Response {
-            proof: alloy_primitives::hex::encode_prefixed(journal_bytes),
-            receipt: receipt_json,
-            image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
-            input: input_hash,
-        }
-        .into())
+            Ok::<Proof, RaikoError>(
+                Risc0Response {
+                    proof: encode_risc0_proposal_proof_payload(
+                        &receipt,
+                        B256::from_slice(image_id.as_bytes()),
+                    ),
+                    receipt: receipt_json,
+                    image_id: Self::image_id_hex(image_id),
+                    input: input_hash,
+                    extra_data: with_shasta_extra_data(&proof_carry_data, "risc0", extra_data)?,
+                }
+                .into(),
+            )
+        })
+        .await
+        .map_err(|e| RaikoError::Guest(format!("RISC0 proposal proof task join failed: {e}")))?
     }
 
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
         info!(
@@ -144,90 +314,182 @@ where
             input.proofs.len()
         );
 
-        // Extract ShastaZkAggregationGuestInput from config
-        let aggregation_input = parse_shasta_aggregation_input(config)?;
-        validate_shasta_aggregation_lengths(&aggregation_input)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let elf = backend.elf(ProofStage::Aggregation)?.to_vec();
+        let prover_config = self.config.clone();
+        let opts = self.prover_opts();
 
-        // Get proposal image ID for proof verification
-        let proposal_elf = backend.elf(ProofStage::Proposal)?;
-        let _proposal_image_id = compute_image_id(proposal_elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
+        tokio::task::spawn_blocking(move || {
+            let prover = Risc0Prover::new(prover_config);
+            let env = Self::build_aggregation_env(
+                &aggregation_input,
+                &input.proofs,
+                prover.config.execution_po2,
+            )?;
+            let image_id = Self::compute_image_id(&elf)?;
+            let block_image_id = B256::from(words_to_bytes_le(&aggregation_input.image_id));
+            let (receipt, extra_data) = prover.execute_proof(
+                env,
+                &elf,
+                &opts,
+                image_id,
+                "aggregation",
+                parse_shasta_aggregation_input_hash,
+            )?;
+            prover.finalize_stage("aggregation", &receipt, image_id)?;
 
-        // Build executor environment with assumptions (proofs to verify)
-        let mut env_builder = ExecutorEnv::builder();
+            let journal_bytes = &receipt.journal.bytes;
+            let agg_input_hash = parse_shasta_aggregation_input_hash(journal_bytes)?;
 
-        // Write the aggregation input
-        env_builder
-            .write(&aggregation_input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?;
+            let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
 
-        // Add each proof as an assumption for verification
-        for proof in &input.proofs {
-            // Extract the receipt from the Proof struct
-            // The receipt is stored as JSON in the 'quote' field
-            if let Some(receipt_json) = &proof.quote {
-                let receipt: Receipt = serde_json::from_str(receipt_json).map_err(|e| {
-                    RaikoError::Guest(format!("Failed to parse RISC0 receipt: {e}"))
-                })?;
+            Ok::<Proof, RaikoError>(
+                Risc0Response {
+                    proof: encode_risc0_aggregation_proof_payload(
+                        &receipt,
+                        block_image_id,
+                        B256::from_slice(image_id.as_bytes()),
+                    ),
+                    receipt: receipt_json,
+                    image_id: Self::image_id_hex(image_id),
+                    input: agg_input_hash,
+                    extra_data,
+                }
+                .into(),
+            )
+        })
+        .await
+        .map_err(|e| RaikoError::Guest(format!("RISC0 aggregation proof task join failed: {e}")))?
+    }
+}
 
-                // Add the receipt as an assumption
-                env_builder.add_assumption(receipt);
+#[cfg(test)]
+mod tests {
+    use super::{Risc0Config, Risc0Prover};
+    use crate::Prover;
+    use alloy::eips::eip2930::AccessList;
+    use alloy_consensus::{SignableTransaction, TxEip1559};
+    use alloy_primitives::{Address, B256, Signature, TxKind, U256};
+    use alloy_sol_types::{SolCall, sol};
+    use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
+    use raiko2_primitives::{ProofType, ProverConfig, SupportedChainSpecs, WitnessHeader};
+    use raiko2_primitives_shasta::{GuestInput, build_proof_carry_data};
+    use raiko2_protocol_shasta::TaikoManifest;
+    sol! {
+        #[derive(Debug)]
+        struct AnchorV4Checkpoint {
+            uint48 blockNumber;
+            bytes32 blockHash;
+            bytes32 stateRoot;
+        }
+
+        function anchorV4(AnchorV4Checkpoint _checkpoint) external;
+    }
+
+    fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
+        TxEip1559 {
+            chain_id: 167_000,
+            nonce: 0,
+            gas_limit: 1_000_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            input: anchorV4Call {
+                _checkpoint: checkpoint.clone(),
             }
+            .abi_encode()
+            .into(),
         }
+        .into_signed(Signature::test_signature())
+        .into()
+    }
 
-        let env = env_builder
-            .build()
-            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))?;
-
-        let opts = if self.config.snark {
-            ProverOpts::groth16()
-        } else {
-            ProverOpts::default()
+    fn fixture_guest_input() -> GuestInput {
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_000)
+            .expect("supported taiko mainnet chain spec");
+        let parent_header = alloy_consensus::Header {
+            number: 0,
+            timestamp: 1,
+            parent_hash: B256::from([8u8; 32]),
+            state_root: B256::from([0x11; 32]),
+            ..Default::default()
         };
 
-        // Use Shasta aggregation ELF
-        let elf = backend.elf(ProofStage::Aggregation)?;
-        let image_id = compute_image_id(elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
-
-        // Generate aggregation proof
-        let prove_info = default_prover()
-            .prove_with_opts(env, elf, &opts)
-            .map_err(|e| {
-                tracing::error!("Failed to generate RISC0 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 aggregation proof generation failed: {e}"))
-            })?;
-
-        let receipt = prove_info.receipt;
-
-        info!("RISC0 aggregation proof generated successfully");
-
-        // Verify proof if configured
-        if self.config.verify {
-            receipt.verify(image_id).map_err(|e| {
-                tracing::error!("Failed to verify RISC0 aggregation proof: {:?}", e);
-                RaikoError::Guest(format!("RISC0 aggregation proof verification failed: {e}"))
-            })?;
-            info!("RISC0 aggregation proof verified successfully");
-        }
-
-        // Extract public values (agg_public_input_hash = 32 bytes)
-        let journal_bytes = &receipt.journal.bytes;
-        let agg_input_hash = if journal_bytes.len() >= 32 {
-            B256::from_slice(&journal_bytes[..32])
-        } else {
-            B256::default()
+        let mut witness = raiko2_primitives::StatelessInput {
+            chain_spec,
+            ..Default::default()
         };
+        witness.block.header.number = 1;
+        witness.block.header.timestamp = u64::MAX / 2;
+        witness.block.header.parent_hash = parent_header.hash_slow();
+        witness.block.header.state_root = B256::from([1u8; 32]);
+        witness.witness.headers = vec![WitnessHeader::from_header(parent_header)];
 
-        // Serialize receipt for storage
-        let receipt_json = serde_json::to_string(&receipt).unwrap_or_default();
+        let l1_header = alloy_consensus::Header {
+            number: 7,
+            parent_hash: B256::from([0xAA; 32]),
+            state_root: B256::from([0x66; 32]),
+            ..Default::default()
+        };
+        let checkpoint = AnchorV4Checkpoint {
+            blockNumber: l1_header.number.try_into().expect("fits in uint48"),
+            blockHash: l1_header.hash_slow(),
+            stateRoot: l1_header.state_root,
+        };
+        witness.block.body.transactions.push(anchor_tx(&checkpoint));
 
-        Ok(Risc0Response {
-            proof: alloy_primitives::hex::encode_prefixed(journal_bytes),
-            receipt: receipt_json,
-            image_id: alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
-            input: agg_input_hash,
-        }
-        .into())
+        let mut input = GuestInput {
+            witnesses: vec![witness],
+            taiko: TaikoManifest {
+                proposal_id: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        input.taiko.chain_spec.name = "taiko_mainnet".to_string();
+        input.taiko.chain_spec.chain_id = 167_000;
+        input.taiko.chain_spec.is_taiko = true;
+        input.taiko.l1_header = l1_header.clone();
+        input.taiko.l1_ancestor_headers = vec![l1_header.clone()];
+        input.taiko.prover_data.actual_prover = Address::from([0x22; 20]);
+        input.taiko.proposal_event.proposal.id =
+            input.taiko.proposal_id.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.proposer = Address::from([0x33; 20]);
+        input.taiko.proposal_event.proposal.timestamp =
+            123u64.try_into().expect("timestamp fits in uint48");
+        input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x44; 32]);
+        input.taiko.proposal_event.proposal.originBlockNumber =
+            l1_header.number.try_into().expect("fits in uint48");
+        input.taiko.proposal_event.proposal.originBlockHash = l1_header.hash_slow();
+        input.proof_carry_data =
+            build_proof_carry_data(&input, ProofType::Risc0).expect("build carry data");
+        input
+    }
+
+    #[tokio::test]
+    async fn risc0_mock_proposal_surfaces_guest_validation_errors_after_framed_input() {
+        let prover = Risc0Prover::new(Risc0Config {
+            bonsai: false,
+            snark: false,
+            mock: true,
+            profile: false,
+            execution_po2: 20,
+            verify: true,
+        });
+        let guest_input = fixture_guest_input();
+        let backend = load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs");
+
+        let err = prover
+            .prove(guest_input, &ProverConfig::default(), &backend)
+            .await
+            .expect_err("fixture input should reach guest validation and fail there");
+
+        let message = err.to_string();
+        assert!(message.contains("RISC0 proposal mock execution failed"));
+        assert!(message.contains("stateless block validation failed at index 0"));
+        assert!(message.contains("missing expected Shasta block at index 0"));
     }
 }

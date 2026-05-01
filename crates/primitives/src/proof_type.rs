@@ -26,6 +26,11 @@ pub enum ProofType {
     /// Uses the RISC0 prover to build the block.
     #[serde(alias = "RISC0")]
     Risc0 = 3u8,
+    /// # Tdx
+    ///
+    /// Builds the block inside a TDX-protected VM and produces an attestation quote.
+    #[serde(alias = "TDX")]
+    Tdx = 4u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -35,6 +40,7 @@ impl std::fmt::Display for ProofType {
             ProofType::Sp1 => "sp1",
             ProofType::Sgx => "sgx",
             ProofType::Risc0 => "risc0",
+            ProofType::Tdx => "tdx",
         })
     }
 }
@@ -47,6 +53,7 @@ impl std::str::FromStr for ProofType {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
             "risc0" => Ok(ProofType::Risc0),
+            "tdx" => Ok(ProofType::Tdx),
             _ => Err(format!("Unknown proof type {s}")),
         }
     }
@@ -60,24 +67,30 @@ impl TryFrom<u8> for ProofType {
             0 => Ok(Self::Native),
             1 => Ok(Self::Sp1),
             3 => Ok(Self::Risc0),
+            4 => Ok(Self::Tdx),
             _ => Err(format!("Unknown proof type {value}")),
         }
     }
 }
 
 /// Module for serializing `ProofType` as lowercase strings
-#[allow(dead_code)]
 pub mod lowercase {
     use super::ProofType;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S>(proof_type: ProofType, serializer: S) -> Result<S::Ok, S::Error>
+    /// # Errors
+    ///
+    /// Returns an error when the proof type cannot be serialized as a lowercase string.
+    pub fn serialize<S>(proof_type: &ProofType, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_str(&proof_type.to_string())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the proof type string is unknown.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<ProofType, D::Error>
     where
         D: Deserializer<'de>,

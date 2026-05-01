@@ -1,0 +1,2221 @@
+import requests
+import time
+from datetime import datetime
+import json
+import logging
+from typing import Optional, Dict, Any, Tuple
+from collections import deque
+import asyncio
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from random import random
+import web3
+from web3 import Web3
+try:
+    from web3.middleware import ExtraDataToPOAMiddleware
+except ImportError:
+    ExtraDataToPOAMiddleware = None
+import sys
+import os
+from shasta_event_decoder import ShastaEventDecoder
+
+MAX_BLOCKS_PER_PROPOSAL = 192
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent.parent
+DEFAULT_CHAIN_SPEC_LIST = REPO_ROOT / "config" / "chain_spec_list_default.json"
+DEFAULT_SHASTA_IINBOX_ABI = SCRIPT_DIR / "shasta" / "IInbox.json"
+DEFAULT_SHASTA_ANCHOR_ABI = SCRIPT_DIR / "shasta" / "Anchor.json"
+SHASTA_FORK = "SHASTA"
+
+
+@dataclass
+class RaikoResponse:
+    status: str
+    data: Optional[Dict[str, Any]] = None
+    message: Optional[str] = None
+
+
+@dataclass
+class AnchorTxInfo:
+    """Information extracted from anchor transaction"""
+    proposal_id: int
+    anchor_number: int
+    l2_block_number: int
+
+
+@dataclass
+class ProposalGroup:
+    """Group of L2 blocks with the same proposal_id"""
+    proposal_id: int
+    anchor_number: int
+    l2_block_numbers: list[int]
+
+
+@dataclass
+class ResolvedMonitorConfig:
+    l1_rpc: str
+    l2_rpc: str
+    event_contract: str
+    abi_file: str
+    anchor_abi_file: str
+
+
+def load_chain_specs(chain_spec_list: Path) -> list[Dict[str, Any]]:
+    with Path(chain_spec_list).open() as f:
+        specs = json.load(f)
+    if not isinstance(specs, list):
+        raise ValueError(f"chain spec list must contain a JSON array: {chain_spec_list}")
+    return specs
+
+
+def resolve_chain_spec(specs: list[Dict[str, Any]], network: str) -> Dict[str, Any]:
+    for spec in specs:
+        if spec.get("name") == network:
+            return spec
+    raise ValueError(f"unsupported network in chain spec list: {network}")
+
+
+def resolve_rpc_url(role: str, spec: Dict[str, Any], explicit_rpc: Optional[str]) -> str:
+    if explicit_rpc:
+        return explicit_rpc
+    rpc = spec.get("rpc")
+    if not rpc:
+        raise ValueError(f"{role} chain spec {spec.get('name')} has no rpc URL")
+    return str(rpc)
+
+
+def resolve_shasta_contract(l2_spec: Dict[str, Any], explicit_contract: Optional[str]) -> str:
+    if explicit_contract:
+        return explicit_contract
+    contracts = l2_spec.get("l1_contract") or {}
+    contract = contracts.get(SHASTA_FORK)
+    if not contract:
+        raise ValueError(
+            f"L2 chain spec {l2_spec.get('name')} has no {SHASTA_FORK} l1_contract"
+        )
+    return str(contract)
+
+
+def resolve_monitor_config(
+    *,
+    chain_spec_list: Path,
+    network: str,
+    l1_network: str,
+    l1_rpc: Optional[str],
+    l2_rpc: Optional[str],
+    event_contract: Optional[str],
+    abi_file: Optional[str],
+    anchor_abi_file: Optional[str],
+) -> ResolvedMonitorConfig:
+    specs = load_chain_specs(chain_spec_list)
+    l1_spec = resolve_chain_spec(specs, l1_network)
+    l2_spec = resolve_chain_spec(specs, network)
+    return ResolvedMonitorConfig(
+        l1_rpc=resolve_rpc_url("L1", l1_spec, l1_rpc),
+        l2_rpc=resolve_rpc_url("L2", l2_spec, l2_rpc),
+        event_contract=resolve_shasta_contract(l2_spec, event_contract),
+        abi_file=str(Path(abi_file) if abi_file else DEFAULT_SHASTA_IINBOX_ABI),
+        anchor_abi_file=str(
+            Path(anchor_abi_file) if anchor_abi_file else DEFAULT_SHASTA_ANCHOR_ABI
+        ),
+    )
+
+
+def build_discovered_proposal_record(
+    *,
+    network: str,
+    l1_network: str,
+    group: ProposalGroup,
+    l1_inclusion_block: int,
+    last_anchor_block_number: int,
+) -> Dict[str, Any]:
+    if not group.l2_block_numbers:
+        raise ValueError("proposal group must contain at least one L2 block")
+    return {
+        "network": network,
+        "l1_network": l1_network,
+        "proposal_id": group.proposal_id,
+        "l1_inclusion_block_number": l1_inclusion_block,
+        "last_anchor_block_number": last_anchor_block_number,
+        "l2_start": group.l2_block_numbers[0],
+        "l2_end": group.l2_block_numbers[-1],
+        "l2_block_numbers": group.l2_block_numbers,
+    }
+
+
+def discovered_proposals_payload(records: list[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"proposals": records}
+
+
+def write_discovered_proposals(path: Path, records: list[Dict[str, Any]]) -> None:
+    path = Path(path)
+    if path.parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(discovered_proposals_payload(records), indent=2, sort_keys=True) + "\n"
+    )
+
+
+class BatchMonitor:
+    def __init__(
+        self,
+        l1_rpc: str,
+        l2_rpc: str,
+        abi_file: str,
+        evt_address: str,
+        raiko_rpc: str,
+        log_file: str = "block_monitor.log",
+        polling_interval: int = 3,
+        max_retries: int = 3,
+        block_running_ratio: float = 0.1,
+        l2_block_range: Optional[Tuple[int, int]] = None,
+        timeout: int = 3600,  # 1 hour
+        prove_type: str = "native",
+        watch_mode: bool = False,
+        time_speed: float = 1.0,
+        anchor_abi_file: Optional[str] = None,
+        aggregate: int = 0,
+        network: str = "taiko_hoodi",
+        l1_network: str = "hoodi",
+        discover_only: bool = False,
+        proposal_out: Optional[Path] = None,
+        api_key: Optional[str] = None,
+        proposal_ids: Optional[list[int]] = None,
+    ):
+        self.network = network
+        self.l1_network = l1_network
+        self.l1_rpc = l1_rpc
+        self.l2_rpc = l2_rpc
+        self.raiko_rpc = raiko_rpc
+        self.log_file = log_file
+        self.block_polling_interval = polling_interval
+        self.task_polling_interval = polling_interval
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self.last_processed_l2_block = None
+        self.batchs_in_last_block = deque()
+        self.block_running_ratio = block_running_ratio
+        self.l2_block_range = l2_block_range
+        self.last_block = None
+        self.ts_offset: Optional[int] = None
+        self.last_block_ts_in_real_world: int = 0
+        self.running_count = 0
+        self.prove_type = prove_type
+        self.watch_mode = watch_mode
+        self.time_speed = time_speed
+        self.anchor_abi_file = anchor_abi_file
+        self.aggregate = aggregate
+        self.discover_only = discover_only
+        self.proposal_out = proposal_out
+        self.api_key = api_key
+        self.proposal_ids = proposal_ids or []
+        self.discovered_proposals: list[Dict[str, Any]] = []
+        # Initialize Shasta event decoder
+        self.shasta_decoder = ShastaEventDecoder()
+        # Cache for proposal block numbers: proposal_id -> l1_block_number
+        # Used for both normal proposals and bond proposals
+        self.proposal_block_cache: Dict[int, Optional[int]] = {}
+        # Cache parsed anchor info so boundary probes do not re-query the same block.
+        self.anchor_info_cache: Dict[int, Optional[AnchorTxInfo]] = {}
+        # Queue for proposals waiting to be aggregated
+        self.pending_proposals: list[Dict[str, Any]] = []
+        # Aggregate running count
+        self.aggregate_running_count = 0
+        # Track aggregate requests: list of proposal data dicts
+        self.aggregate_requests: list[list[Dict[str, Any]]] = []
+        # logger
+        handlers = [logging.StreamHandler()]
+        if log_file is not None:
+            log_path = Path(log_file)
+            if log_path.parent != Path("."):
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+            handlers.insert(0, logging.FileHandler(log_file))
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=handlers,
+        )
+        self.logger = logging.getLogger(__name__)
+        self.__init_contract_event(l1_rpc, abi_file, evt_address)
+
+    def append_log(self, message: str):
+        if self.log_file is None:
+            return
+        with open(self.log_file, "a") as f:
+            f.write(message)
+
+    def _extract_proposal_id_from_proposed_log(self, log) -> Optional[int]:
+        """
+        Extract proposal id from a Proposed event log.
+
+        New ABI (plain event): `Proposed(uint48 id, address proposer, uint48 endOfSubmissionWindowTimestamp, uint8 basefeeSharingPctg, DerivationSource[] sources)`
+        Old ABI (bytes payload): `Proposed(bytes data)` where proposal id is inside `data`.
+        """
+        try:
+            # New/plain event path
+            if hasattr(log, "args") and hasattr(log.args, "id") and log.args.id is not None:
+                return int(log.args.id)
+
+            # Backward-compatible path: old `data: bytes` payload
+            if hasattr(log, "args") and hasattr(log.args, "data") and log.args.data is not None:
+                event_data = log.args.data
+                decoded = self.shasta_decoder.extract_batch_id(event_data)
+                return int(decoded) if decoded is not None else None
+        except Exception as e:
+            self.logger.debug(f"Failed to extract proposal id from log: {e}")
+            return None
+        return None
+
+    def __init_contract_event(self, l1_rpc, abi_file, evt_address):
+        print(f"l1_rpc = {l1_rpc}, abi_file = {abi_file}, evt_address = {evt_address}")
+        with open(abi_file) as f:
+            abi = json.load(f)
+        l1_w3 = Web3(Web3.HTTPProvider(l1_rpc, {"timeout": 10}))
+        if ExtraDataToPOAMiddleware is not None:
+            l1_w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        self.l1_w3 = l1_w3
+        if l1_w3.is_connected():
+            self.logger.info(f"Connected to l1 node {l1_rpc}")
+        self.evt_contract = l1_w3.eth.contract(address=evt_address, abi=abi["abi"])
+        # Initialize L2 Web3 connection
+        self.l2_w3 = Web3(Web3.HTTPProvider(self.l2_rpc, {"timeout": 10}))
+        if self.l2_w3.is_connected():
+            self.logger.info(f"Connected to l2 node {self.l2_rpc}")
+        
+        # Load anchor ABI if provided, otherwise try to use the event ABI
+        if self.anchor_abi_file:
+            self.logger.info(f"Loading anchor ABI from {self.anchor_abi_file}")
+            try:
+                with open(self.anchor_abi_file) as f:
+                    anchor_abi_data = json.load(f)
+                    self.l2_abi = anchor_abi_data.get("abi", anchor_abi_data if isinstance(anchor_abi_data, list) else [])
+            except Exception as e:
+                self.logger.warning(f"Could not load anchor ABI file {self.anchor_abi_file}: {e}")
+                self.l2_abi = abi.get("abi", [])
+        else:
+            # Fallback to event ABI (might not have anchorV4 function)
+            self.logger.info("No anchor ABI file provided, using event ABI (may not have anchorV4)")
+            self.l2_abi = abi.get("abi", [])
+        
+        # Try to create L2 contract instance for decoding (address doesn't matter for decoding)
+        try:
+            self.l2_contract = self.l2_w3.eth.contract(
+                address=Web3.to_checksum_address("0x0000000000000000000000000000000000000000"), 
+                abi=self.l2_abi
+            )
+            # Check if anchorV4 function exists
+            if hasattr(self.l2_contract.functions, 'anchorV4'):
+                self.logger.info("anchorV4 function found in ABI, will use web3.py decoding")
+            else:
+                self.logger.warning("anchorV4 function not found in ABI, will use manual decoding")
+        except Exception as e:
+            self.logger.warning(f"Could not initialize L2 contract for decoding: {e}")
+            self.l2_contract = None
+
+    async def get_l2_block(self, block_number: int) -> Optional[Dict[str, Any]]:
+        """Get L2 block by number"""
+        try:
+            response = requests.post(
+                self.l2_rpc,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getBlockByNumber",
+                    "params": [hex(block_number), True],  # True to include full transaction data
+                    "id": 1,
+                },
+                timeout=10,
+            )
+            result = response.json()
+            return result.get("result")
+        except Exception as e:
+            self.logger.error(f"Failed to get L2 block {block_number}: {e}")
+            return None
+
+    async def get_l2_block_proposal_id(self, block_number: int) -> Optional[int]:
+        block = await self.get_l2_block(block_number)
+        if block is None:
+            return None
+        return self.extract_proposal_id_from_extradata(block.get("extraData", "0x"))
+
+    def extract_proposal_id_from_extradata(self, extradata: str) -> Optional[int]:
+        """
+        Extract proposal_id from block extradata.
+        
+        Format: byte[0] is config, bytes[1:7] is proposal_id (6 bytes, big-endian uint48)
+        Example: 0x4b000000000005 -> proposal_id = 5
+        
+        Returns proposal_id or None if extraction fails.
+        """
+        try:
+            # Remove 0x prefix if present
+            if extradata.startswith("0x"):
+                extradata = extradata[2:]
+            
+            extradata_bytes = bytes.fromhex(extradata)
+            
+            # Need at least 7 bytes (1 config byte + 6 proposal_id bytes)
+            if len(extradata_bytes) < 7:
+                self.logger.warning(f"extradata too short: {len(extradata_bytes)} bytes (need at least 7)")
+                return None
+            
+            # Extract proposal_id from bytes[1:7] (6 bytes, big-endian)
+            proposal_id_bytes = extradata_bytes[1:7]
+            proposal_id = int.from_bytes(proposal_id_bytes, byteorder="big")
+            
+            self.logger.debug(f"Extracted proposal_id from extradata: {proposal_id}")
+            return proposal_id
+        except Exception as e:
+            self.logger.error(f"Error extracting proposal_id from extradata: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def decode_anchor_tx_input(self, tx_input: str) -> Optional[int]:
+        """
+        Decode anchorV4 transaction input to extract anchor_number.
+        
+        New ABI only has _checkpoint parameter, which contains blockNumber.
+        
+        First tries to use web3.py's contract decoding if ABI is available.
+        Falls back to manual decoding if that fails.
+        
+        Returns anchor_number or None if decoding fails.
+        """
+        try:
+            # Try web3.py contract decoding first if available
+            if self.l2_contract is not None:
+                try:
+                    self.logger.debug(
+                        f"Attempting Web3.py decoding for tx input (length: {len(tx_input)} chars)"
+                    )
+                    
+                    # Decode the function call
+                    func_obj, func_params = self.l2_contract.decode_function_input(tx_input)
+                    self.logger.debug(f"Successfully decoded function: {func_obj.fn_name}")
+                    
+                    # Check if it's anchorV4
+                    if func_obj.fn_name == "anchorV4":
+                        # New anchorV4 ABI: only has `_checkpoint` parameter (ICheckpointStore.Checkpoint)
+                        # Checkpoint: (blockNumber: uint48, blockHash: bytes32, stateRoot: bytes32)
+                        checkpoint_params = func_params.get("_checkpoint", {})
+                        
+                        self.logger.debug(
+                            f"Decoded params - checkpoint_params type: {type(checkpoint_params)}"
+                        )
+                        
+                        anchor_number = None
+                        
+                        # Extract blockNumber from checkpoint
+                        if isinstance(checkpoint_params, (list, tuple)):
+                            anchor_number = checkpoint_params[0] if len(checkpoint_params) > 0 else None
+                            self.logger.debug(f"Extracted anchor_number from checkpoint tuple index 0: {anchor_number}")
+                        elif isinstance(checkpoint_params, dict):
+                            anchor_number = checkpoint_params.get("blockNumber")
+                            self.logger.debug(f"Extracted anchor_number from checkpoint dict: {anchor_number}")
+                        elif hasattr(checkpoint_params, 'blockNumber'):
+                            anchor_number = checkpoint_params.blockNumber
+                            self.logger.debug(f"Extracted anchor_number from checkpoint attribute: {anchor_number}")
+                        
+                        if anchor_number is not None:
+                            self.logger.debug(
+                                f"✓ Decoded via ABI: anchor_number={anchor_number}"
+                            )
+                            return anchor_number
+                        else:
+                            self.logger.warning(
+                                f"anchorV4 decoded but missing anchor_number"
+                            )
+                    else:
+                        self.logger.warning(f"Function is {func_obj.fn_name}, not anchorV4")
+                except Exception as e:
+                    import traceback
+                    self.logger.warning(f"Web3.py decoding failed: {e}")
+                    self.logger.debug(f"Web3.py decoding traceback:\n{traceback.format_exc()}")
+            
+            # Fallback to manual decoding
+            # Remove 0x prefix if present
+            if tx_input.startswith("0x"):
+                tx_input = tx_input[2:]
+            
+            input_bytes = bytes.fromhex(tx_input)
+            
+            # New anchorV4 ABI (updated):
+            #   anchorV4(ICheckpointStore.Checkpoint)
+            #   Checkpoint: (blockNumber: uint48, blockHash: bytes32, stateRoot: bytes32)
+            #
+            # ABI layout after selector (3 * 32 bytes = 96 bytes):
+            #   word0: checkpoint.blockNumber (uint48 in low 6 bytes)   <-- anchor_number
+            #   word1: checkpoint.blockHash (bytes32)
+            #   word2: checkpoint.stateRoot (bytes32)
+            # Total: 4 (selector) + 96 = 100 bytes
+            
+            if len(input_bytes) < 4 + 32 * 3:
+                self.logger.error(f"Anchor tx input too short: {len(input_bytes)} bytes (expected at least {4 + 32 * 3})")
+                return None
+            
+            # Get function selector
+            func_selector = input_bytes[0:4].hex()
+            self.logger.debug(f"Function selector: 0x{func_selector}")
+            
+            params_start = 4
+            # word0: checkpoint.blockNumber (anchor number)
+            checkpoint_block_number_word = input_bytes[params_start:params_start + 32]
+            anchor_number = int.from_bytes(checkpoint_block_number_word[26:32], byteorder="big")
+            
+            self.logger.debug(
+                f"Decoded anchor tx (manual): anchor_number={anchor_number}"
+            )
+            
+            return anchor_number
+        except Exception as e:
+            self.logger.error(f"Error decoding anchor tx input: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    async def parse_l2_block_anchor_tx(self, l2_block_number: int) -> Optional[AnchorTxInfo]:
+        """
+        Parse L2 block to extract anchor transaction information.
+        Returns AnchorTxInfo with proposal_id, anchor_number, and l2_block_number.
+        
+        proposal_id is extracted from block extradata (bytes[1:7]).
+        anchor_number is extracted from anchor transaction checkpoint.
+        """
+        try:
+            block = await self.get_l2_block(l2_block_number)
+            if block is None:
+                return None
+
+            return self._parse_anchor_info_from_block(block, l2_block_number)
+        except Exception as e:
+            self.logger.error(f"Error parsing L2 block {l2_block_number}: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def _parse_anchor_info_from_block(
+        self, block: Dict[str, Any], l2_block_number: int
+    ) -> Optional[AnchorTxInfo]:
+        try:
+            # Extract proposal_id from block extradata
+            extradata = block.get("extraData", "0x")
+            if not extradata or extradata == "0x":
+                self.logger.warning(f"No extradata in L2 block {l2_block_number}")
+                return None
+            
+            proposal_id = self.extract_proposal_id_from_extradata(extradata)
+            if proposal_id is None:
+                self.logger.warning(f"Failed to extract proposal_id from extradata in block {l2_block_number}")
+                return None
+            
+            transactions = block.get("transactions", [])
+            if len(transactions) == 0:
+                self.logger.warning(f"No transactions in L2 block {l2_block_number}")
+                return None
+            
+            # First transaction is the anchor transaction
+            anchor_tx = transactions[0]
+            tx_input = anchor_tx.get("input", "0x")
+            
+            if tx_input == "0x" or len(tx_input) <= 2:
+                self.logger.warning(f"Empty or invalid anchor tx input in block {l2_block_number}")
+                return None
+            
+            # Decode anchor tx input to get anchor_number
+            anchor_number = self.decode_anchor_tx_input(tx_input)
+            if anchor_number is None:
+                self.logger.warning(f"Failed to decode anchor tx input for block {l2_block_number}")
+                return None
+            
+            return AnchorTxInfo(
+                proposal_id=proposal_id,
+                anchor_number=anchor_number,
+                l2_block_number=l2_block_number
+            )
+        except Exception as e:
+            self.logger.error(f"Error parsing L2 block {l2_block_number}: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def format_l2_block_range(self, l2_block_numbers: list[int]) -> str:
+        if not l2_block_numbers:
+            return "(0 blocks)"
+        if len(l2_block_numbers) == 1:
+            return f"{l2_block_numbers[0]} (1 block)"
+        return (
+            f"{l2_block_numbers[0]}..{l2_block_numbers[-1]} "
+            f"({len(l2_block_numbers)} blocks)"
+        )
+
+    def format_proposal_context(
+        self,
+        *,
+        proposal_id: int,
+        l2_block_numbers: list[int],
+        l1_inclusion_block: Optional[int] = None,
+        last_anchor_block_number: Optional[int] = None,
+        current_l1_height: Optional[int] = None,
+    ) -> str:
+        parts = [
+            f"proposal {proposal_id}",
+            f"L2 {self.format_l2_block_range(l2_block_numbers)}",
+        ]
+        if l1_inclusion_block is not None:
+            parts.append(f"L1 inclusion {l1_inclusion_block}")
+        if last_anchor_block_number is not None:
+            parts.append(f"last_anchor_block_number={last_anchor_block_number}")
+        if current_l1_height is not None:
+            parts.append(f"current_l1_height={current_l1_height}")
+        return ", ".join(parts)
+
+    async def get_last_anchor_block_number(self, l2_block_numbers: list[int]) -> int:
+        if not l2_block_numbers:
+            return 0
+
+        first_block = l2_block_numbers[0]
+        if first_block == 0:
+            self.logger.info(
+                "First block is 0, no parent block available, using default last_anchor_block_number=0"
+            )
+            return 0
+
+        parent_block = first_block - 1
+        parent_anchor_info = await self.get_anchor_info(parent_block)
+        if parent_anchor_info is not None:
+            last_anchor_block_number = parent_anchor_info.anchor_number
+            self.logger.info(
+                f"Found last_anchor_block_number={last_anchor_block_number} from parent block {parent_block}"
+            )
+            return last_anchor_block_number
+
+        self.logger.warning(
+            f"Could not parse parent block {parent_block}, using default last_anchor_block_number=0"
+        )
+        return 0
+
+    def group_blocks_by_proposal_id(
+        self, anchor_infos: list[AnchorTxInfo]
+    ) -> list[ProposalGroup]:
+        """
+        Group consecutive L2 blocks by proposal_id.
+        The start point is the first block with a new proposal_id,
+        and the end point is the last block with the same proposal_id.
+        """
+        if not anchor_infos:
+            return []
+        
+        groups = []
+        current_proposal_id = None
+        current_group = None
+        
+        for info in anchor_infos:
+            if current_proposal_id is None or info.proposal_id != current_proposal_id:
+                # Start a new group
+                if current_group is not None:
+                    groups.append(current_group)
+                
+                current_proposal_id = info.proposal_id
+                current_group = ProposalGroup(
+                    proposal_id=info.proposal_id,
+                    anchor_number=info.anchor_number,
+                    l2_block_numbers=[info.l2_block_number]
+                )
+            else:
+                # Continue current group
+                current_group.l2_block_numbers.append(info.l2_block_number)
+                # Update anchor_number to use the first one in the group
+                # (all blocks in a group should have the same anchor_number)
+        
+        # Add the last group
+        if current_group is not None:
+            groups.append(current_group)
+        
+        return groups
+
+    async def get_anchor_info(self, l2_block_number: int) -> Optional[AnchorTxInfo]:
+        if l2_block_number in self.anchor_info_cache:
+            return self.anchor_info_cache[l2_block_number]
+
+        block = await self.get_l2_block(l2_block_number)
+        if block is None:
+            return None
+
+        anchor_info = self._parse_anchor_info_from_block(block, l2_block_number)
+        self.anchor_info_cache[l2_block_number] = anchor_info
+        return anchor_info
+
+    def _request_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        return headers
+
+    async def search_proposal_boundary_in_window(
+        self,
+        proposal_id: int,
+        *,
+        search_start: int,
+        search_end: int,
+        find_start: bool,
+    ) -> int:
+        """
+        Binary search the contiguous proposal range within a bounded window.
+        `find_start=True` returns the leftmost matching block, otherwise the
+        rightmost matching block.
+        """
+        low = search_start
+        high = search_end
+
+        while low < high:
+            mid = (low + high) // 2 if find_start else (low + high + 1) // 2
+            mid_info = await self.get_anchor_info(mid)
+            matches = mid_info is not None and mid_info.proposal_id == proposal_id
+
+            if find_start:
+                if matches:
+                    high = mid
+                else:
+                    low = mid + 1
+            else:
+                if matches:
+                    low = mid
+                else:
+                    high = mid - 1
+
+        return low
+
+    async def find_proposal_end_block_in_window(
+        self, start_block: int, proposal_id: int, search_end: int
+    ) -> int:
+        """
+        Find the end of the current proposal within a bounded window.
+        The protocol caps a proposal to 192 blocks, so we only need to search
+        [start_block, start_block + 191] and verify the next block boundary.
+        """
+        window_end = min(search_end, start_block + MAX_BLOCKS_PER_PROPOSAL - 1)
+        window_end_info = await self.get_anchor_info(window_end)
+
+        if window_end_info is not None and window_end_info.proposal_id == proposal_id:
+            next_block = window_end + 1
+            if next_block <= search_end:
+                next_info = await self.get_anchor_info(next_block)
+                if next_info is not None and next_info.proposal_id == proposal_id:
+                    self.logger.warning(
+                        f"Proposal {proposal_id} still matches at block {next_block} after "
+                        f"{MAX_BLOCKS_PER_PROPOSAL} blocks; falling back to forward scan"
+                    )
+                    return await self.find_proposal_end_block(
+                        window_end,
+                        proposal_id,
+                        max_forward=max(1, search_end - window_end),
+                    )
+                if next_info is not None and next_info.proposal_id != proposal_id + 1:
+                    self.logger.warning(
+                        f"Proposal boundary check mismatch at block {next_block}: "
+                        f"expected proposal {proposal_id + 1}, got {next_info.proposal_id}"
+                    )
+            return window_end
+
+        return await self.search_proposal_boundary_in_window(
+            proposal_id,
+            search_start=start_block,
+            search_end=window_end,
+            find_start=False,
+        )
+
+    async def iter_proposal_groups(self, start_block: int, end_block: int):
+        cursor = start_block
+        while cursor <= end_block:
+            anchor_info = await self.get_anchor_info(cursor)
+            if anchor_info is None:
+                self.logger.warning(
+                    f"Failed to parse anchor tx from L2 block {cursor}, skipping"
+                )
+                cursor += 1
+                continue
+
+            proposal_end = await self.find_proposal_end_block_in_window(
+                cursor, anchor_info.proposal_id, end_block
+            )
+            group = ProposalGroup(
+                proposal_id=anchor_info.proposal_id,
+                anchor_number=anchor_info.anchor_number,
+                l2_block_numbers=list(range(cursor, proposal_end + 1)),
+            )
+            self.logger.info(
+                f"Discovered proposal {group.proposal_id}: "
+                f"L2 blocks {group.l2_block_numbers[0]}..{group.l2_block_numbers[-1]}"
+            )
+            yield group
+            cursor = proposal_end + 1
+
+    async def find_l1_inclusion_block(
+        self, proposal_id: int, anchor_number: int
+    ) -> Optional[int]:
+        """
+        Find L1 inclusion block for a proposal_id.
+        First checks cache, then searches if not cached.
+        """
+        # Check cache first
+        if proposal_id in self.proposal_block_cache:
+            cached_result = self.proposal_block_cache[proposal_id]
+            if cached_result is not None:
+                self.logger.debug(
+                    f"Using cached L1 inclusion block {cached_result} for proposal_id {proposal_id}"
+                )
+            return cached_result
+        
+        # Not in cache, do individual search (fallback, should rarely happen if batch query worked)
+        search_range = self._clamp_l1_search_range(anchor_number + 1, anchor_number + 128)
+        if search_range is None:
+            self.logger.info(
+                f"Skipping L1 search for proposal_id {proposal_id}: "
+                f"L1 head is behind expected range {anchor_number + 1}..{anchor_number + 128}"
+            )
+            self.proposal_block_cache[proposal_id] = None
+            return None
+
+        search_start, search_end = search_range
+        self.logger.info(
+            f"Searching L1 blocks {search_start} to {search_end} for proposal_id {proposal_id} (not in cache)"
+        )
+
+        try:
+            # Get events in the range
+            logs = self.evt_contract.events.Proposed.get_logs(
+                from_block=search_start, to_block=search_end
+            )
+
+            for log in logs:
+                try:
+                    decoded_proposal_id = self._extract_proposal_id_from_proposed_log(log)
+
+                    if decoded_proposal_id == proposal_id:
+                        l1_block_number = log.blockNumber
+                        self.proposal_block_cache[proposal_id] = l1_block_number
+                        self.logger.info(
+                            f"Found proposal_id {proposal_id} in L1 block {l1_block_number}"
+                        )
+                        return l1_block_number
+                except Exception as e:
+                    self.logger.error(f"Error decoding event log: {e}")
+                    continue
+
+            self.logger.warning(
+                f"Proposal_id {proposal_id} not found in L1 blocks {search_start} to {search_end}"
+            )
+            self.proposal_block_cache[proposal_id] = None
+            return None
+        except Exception as e:
+            self.logger.error(f"Error searching L1 events: {e}")
+            self.proposal_block_cache[proposal_id] = None
+            return None
+
+    def find_l1_inclusion_block_by_indexed_proposal_id(
+        self, proposal_id: int
+    ) -> Optional[int]:
+        """
+        Find L1 inclusion block by filtering the indexed `Proposed.id` topic.
+
+        This is the preferred path for direct proposal-id discovery because the
+        L2 anchor number is not always in the same coordinate system as the L1
+        event block number.
+        """
+        if proposal_id in self.proposal_block_cache:
+            return self.proposal_block_cache[proposal_id]
+
+        try:
+            logs = self.evt_contract.events.Proposed.get_logs(
+                from_block=0,
+                to_block="latest",
+                argument_filters={"id": proposal_id},
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Indexed L1 lookup failed for proposal_id {proposal_id}: {e}"
+            )
+            return None
+
+        if not logs:
+            self.logger.warning(
+                f"Proposal_id {proposal_id} not found with indexed L1 lookup"
+            )
+            return None
+
+        l1_block_number = int(logs[0].blockNumber)
+        self.proposal_block_cache[proposal_id] = l1_block_number
+        self.logger.info(
+            f"Found proposal_id {proposal_id} in L1 block {l1_block_number} by indexed lookup"
+        )
+        return l1_block_number
+    
+    async def batch_find_proposal_blocks(
+        self, proposal_queries: list[Tuple[int, int]], search_start: int, search_end: int
+    ) -> Dict[int, Optional[int]]:
+        """
+        Batch query multiple proposal IDs to find their L1 inclusion blocks.
+        
+        Args:
+            proposal_queries: List of (proposal_id, anchor_number) tuples
+            search_start: Starting L1 block number to search
+            search_end: Ending L1 block number to search
+        
+        Returns:
+            Dictionary mapping proposal_id -> l1_block_number (or None if not found)
+        """
+        proposal_ids_to_find = {proposal_id for proposal_id, _ in proposal_queries}
+        # Filter out already cached proposals
+        uncached_queries = [
+            (proposal_id, anchor_number)
+            for proposal_id, anchor_number in proposal_queries
+            if proposal_id not in self.proposal_block_cache
+        ]
+        
+        if not uncached_queries:
+            self.logger.info("All proposals already in cache, skipping batch query")
+            return {
+                proposal_id: self.proposal_block_cache.get(proposal_id)
+                for proposal_id in proposal_ids_to_find
+            }
+        
+        uncached_proposal_ids = {proposal_id for proposal_id, _ in uncached_queries}
+        search_range = self._clamp_l1_search_range(search_start, search_end)
+        if search_range is None:
+            self.logger.info(
+                f"Skipping batch L1 search for proposals {list(uncached_proposal_ids)}: "
+                f"L1 head is behind expected range {search_start}..{search_end}"
+            )
+            for proposal_id in uncached_proposal_ids:
+                self.proposal_block_cache[proposal_id] = None
+            return {
+                proposal_id: self.proposal_block_cache.get(proposal_id)
+                for proposal_id in proposal_ids_to_find
+            }
+
+        search_start, search_end = search_range
+        self.logger.info(
+            f"Batch querying {len(uncached_proposal_ids)} proposals in L1 blocks {search_start} to {search_end}: {list(uncached_proposal_ids)}"
+        )
+        
+        try:
+            logs = self.evt_contract.events.Proposed.get_logs(
+                from_block=search_start, to_block=search_end
+            )
+            
+            # Build a map of proposal_id -> block_number from all logs
+            proposal_to_block = {}
+            for log in logs:
+                try:
+                    decoded_proposal_id = self._extract_proposal_id_from_proposed_log(log)
+                    if decoded_proposal_id in uncached_proposal_ids:
+                        # Only keep the first occurrence (earliest block)
+                        if decoded_proposal_id not in proposal_to_block:
+                            proposal_to_block[decoded_proposal_id] = log.blockNumber
+                            self.logger.debug(
+                                f"Found proposal_id {decoded_proposal_id} in L1 block {log.blockNumber}"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Error decoding event log in batch search: {e}")
+                    continue
+            
+            # Cache all found proposals (including None for not found)
+            for proposal_id in uncached_proposal_ids:
+                if proposal_id in proposal_to_block:
+                    self.proposal_block_cache[proposal_id] = proposal_to_block[proposal_id]
+                    self.logger.info(
+                        f"Cached proposal_id {proposal_id} -> L1 block {proposal_to_block[proposal_id]}"
+                    )
+                else:
+                    self.proposal_block_cache[proposal_id] = None
+                    self.logger.warning(
+                        f"Proposal_id {proposal_id} not found in batch search, cached as None"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Error in batch proposal search: {e}")
+            # Mark all uncached as None if batch search fails
+            for proposal_id in uncached_proposal_ids:
+                self.proposal_block_cache[proposal_id] = None
+        
+        # Return results for all requested proposal IDs (including cached ones)
+        return {
+            proposal_id: self.proposal_block_cache.get(proposal_id)
+            for proposal_id in proposal_ids_to_find
+        }
+
+    def get_latest_l1_block_number(self) -> int:
+        """Get the latest L1 block number."""
+        return int(self.l1_w3.eth.block_number)
+
+    def get_latest_l2_block_number(self) -> int:
+        """Get the latest L2 block number."""
+        return int(self.l2_w3.eth.block_number)
+
+    def _clamp_l1_search_range(
+        self, search_start: int, search_end: int
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Clamp an L1 search window to the current head.
+
+        Near-tip proposal queries can derive an end block beyond the current L1 head, which
+        some RPC providers reject as an invalid range. If the L1 head has not reached the
+        search start yet, return None so callers can skip the query entirely.
+        """
+        try:
+            latest_l1 = self.get_latest_l1_block_number()
+        except Exception as e:
+            self.logger.warning(f"Failed to get latest L1 block number: {e}")
+            return None
+
+        clamped_end = min(search_end, latest_l1)
+        if search_start > clamped_end:
+            return None
+        return search_start, clamped_end
+
+    def parse_batch_proposed_meta(self, log):
+        try:
+            parsed_log = self.evt_contract.events.Proposed.process_log(log)
+            # New/plain event: `id` is the proposal id
+            if hasattr(parsed_log.args, "id"):
+                return int(parsed_log.args.id)
+            # Old/bytes event: decode from `data`
+            if hasattr(parsed_log.args, "data"):
+                decoded = self.shasta_decoder.extract_batch_id(parsed_log.args.data)
+                return int(decoded) if decoded is not None else None
+        except Exception as e:
+            return None
+
+    def get_batch_events_in_block(self, block_number) -> list[int]:
+        try:
+            logs = self.evt_contract.events.Proposed.get_logs(
+                from_block=block_number, to_block=block_number
+            )
+
+            batch_ids = []
+            for log in logs:
+                try:
+                    batch_id = self._extract_proposal_id_from_proposed_log(log)
+                    if batch_id is not None:
+                        batch_ids.append(batch_id)
+                        self.logger.info(f"Decoded batch ID: {batch_id}")
+                    else:
+                        self.logger.warning(
+                            f"Failed to decode batch ID from event data"
+                        )
+                except Exception as e:
+                    self.logger.error(f"Error decoding event data: {e}")
+                    continue
+
+            return batch_ids
+        except Exception as e:
+            self.logger.error(f"Error getting events from block {block_number}: {e}")
+            return []
+
+    @property
+    def block_range(self):
+        """Backward-compatible alias for the configured L2 batch scan range."""
+        return getattr(self, "l2_block_range", None)
+
+    @block_range.setter
+    def block_range(self, value):
+        self.l2_block_range = value
+
+    def _ensure_in_range_state(self) -> None:
+        """Initialize legacy in-range state expected by batch iteration helpers."""
+        if self.block_range is not None and not hasattr(self, "last_block"):
+            self.last_block = None
+
+    async def get_next_batches(self) -> Optional[tuple[int, list[int]]]:
+        """get latest block number"""
+        block_range = self.block_range
+        if block_range is not None:
+            self._ensure_in_range_state()
+            return await self.get_in_range_next_batch()
+        else:
+            return await self.get_latest_block_batchs()
+
+    async def get_block(self, block_number) -> Optional[Dict[str, Any]]:
+        """get block by number"""
+        try:
+            response = requests.post(
+                self.l1_rpc,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getBlockByNumber",
+                    "params": [hex(block_number), False],
+                    "id": 1,
+                },
+                timeout=10,
+            )
+            result = response.json()
+            return result.get("result")
+        except Exception as e:
+            self.logger.error(f"Failed to get block {block_number}: {e}")
+
+    async def align_ts_offset(self, first_block: int) -> bool:
+        # query block timestamp
+        try:
+            block = await self.get_block(first_block)
+            timestamp = int(block["timestamp"], 16)
+            current_timestamp = int(time.time())
+            self.ts_offset = current_timestamp - timestamp
+            self.last_block_ts_in_real_world = current_timestamp
+            self.logger.info(
+                f"Begin timestamp: {timestamp}, timestamp offset: {self.ts_offset}"
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"align_ts_offset from {first_block} failed: {e}")
+            return False
+
+    async def get_in_range_next_batch(self) -> Optional[tuple[int, list[int]]]:
+        """get latest block number"""
+        start_block, end_block = self.block_range
+
+        if self.last_block is None:
+            next_block = start_block
+        else:
+            next_block = self.last_block + 1
+            # align block timestamp offset after first block gets processed
+            if self.ts_offset is None:
+                if not await self.align_ts_offset(start_block):
+                    return None
+
+        while True:
+            if next_block >= end_block:
+                self.logger.info(f"Block range {self.block_range} finished")
+                if self.running_count == 0:
+                    self.logger.info("All blocks finished, exiting")
+                    exit(0)
+                return None
+            else:
+                # check if events exist in this block
+                batch_ids = self.get_batch_events_in_block(next_block)
+                if len(batch_ids) == 0:
+                    self.logger.info(f"No batch events in block {next_block}")
+                    next_block += 1
+                    continue
+
+                if self.ts_offset is None:
+                    if not await self.align_ts_offset(next_block):
+                        return None
+
+                # check if next block timestamp reached
+                block = await self.get_block(next_block)
+                current_block_ts = int(block["timestamp"], 16)
+                current_block_ts_in_real_world = current_block_ts + self.ts_offset
+                real_world_ts = int(time.time())
+                real_world_elapsed_time = (
+                    real_world_ts - self.last_block_ts_in_real_world
+                )
+                accel_elapsed_time = real_world_elapsed_time * self.time_speed
+                self.logger.info(
+                    f"real_world_elapsed_time = {real_world_elapsed_time}, accel_world_elapsed_time = {accel_elapsed_time}"
+                )
+                current_accel_ts = self.last_block_ts_in_real_world + accel_elapsed_time
+                if current_accel_ts >= current_block_ts_in_real_world:
+                    self.last_block = next_block
+                    self.last_block_ts_in_real_world = real_world_ts
+                    self.ts_offset = real_world_ts - current_block_ts
+                    self.logger.info(
+                        f"last block processing timestamp in stress = {self.last_block_ts_in_real_world}"
+                    )
+                    return self.last_block, batch_ids
+                else:
+                    self.logger.info(
+                        f"Block {next_block} timestamp: {current_block_ts_in_real_world} is not reached, current: {current_accel_ts}, sleep {current_block_ts_in_real_world - current_accel_ts} sec."
+                    )
+                    self.last_block = next_block - 1
+                    await asyncio.sleep(
+                        (current_block_ts_in_real_world - current_accel_ts)
+                        / self.time_speed
+                    )
+                    return None
+
+    async def get_latest_block_batchs(self) -> Optional[tuple[int, list[int]]]:
+        """get latest block number"""
+        logs = self.evt_contract.events.Proposed().get_logs(
+            from_block="latest", to_block="latest"
+        )
+        if len(logs) == 0:
+            return None
+
+        batch_ids = []
+        for log in logs:
+            try:
+                batch_id = self._extract_proposal_id_from_proposed_log(log)
+                if batch_id is not None:
+                    batch_ids.append(batch_id)
+                    self.logger.info(f"Decoded batch ID: {batch_id}")
+                else:
+                    self.logger.warning(f"Failed to decode batch ID from event data")
+            except Exception as e:
+                self.logger.error(f"Error decoding event data: {e}")
+                continue
+
+        return logs[0].blockNumber, batch_ids
+
+    def generate_post_data(
+        self, 
+        proposals: list[Dict[str, Any]], 
+        aggregate: bool = False
+    ) -> Dict[str, Any]:
+        """generate post data"""
+        return {
+            "proposals": proposals,
+            "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
+            "proof_type": self.prove_type,
+            "blob_proof_type": "proof_of_equivalence",
+            "aggregate": aggregate,
+            "native": {},
+            "sgx": {
+                "instance_id": 1234,
+                "setup": False,
+                "bootstrap": False,
+                "prove": True,
+            },
+            "risc0": {
+                "bonsai": False,
+                "snark": True,
+                "profile": True,
+                "execution_po2": 20,
+            },
+            "sp1": {"recursion": "plonk", "prover": "network", "verify": True},
+        }
+
+    async def submit_to_raiko(
+        self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
+    ) -> None:
+        """submit batch to Raiko"""
+        try:
+            headers = self._request_headers()
+
+            proposal_data = {
+                "proposal_id": proposal_id,
+                "l1_inclusion_block_number": l1_inclusion_block,
+                "l2_block_numbers": l2_block_numbers,
+                "checkpoint": None,
+                "last_anchor_block_number": last_anchor_block_number,
+            }
+            
+            payload = self.generate_post_data([proposal_data], aggregate=False)
+            print(f"payload = {payload}")
+
+            response = requests.post(
+                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            result = response.json()
+            if "data" in result:
+                result["data"] = {}  # avoid big print
+            if result.get("status") == "ok":
+                self.logger.info(
+                    f"Proposal {proposal_id} (L2 blocks {l2_block_numbers}) in L1 block {l1_inclusion_block} submitted to Raiko with response: {result}"
+                )
+            else:
+                self.logger.error(
+                    f"Failed to submit proposal: {result.get('message', 'Unknown error')}"
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to submit to Raiko: {e}")
+    
+    async def submit_aggregate_to_raiko(self) -> None:
+        """submit aggregate request to Raiko"""
+        if len(self.pending_proposals) == 0:
+            return
+            
+        try:
+            headers = self._request_headers()
+            
+            # Use the collected proposals
+            proposals_to_aggregate = self.pending_proposals.copy()
+            # Sort proposals by proposal_id in ascending order before aggregation
+            proposals_to_aggregate.sort(key=lambda p: p["proposal_id"])
+            self.pending_proposals.clear()
+            
+            payload = self.generate_post_data(proposals_to_aggregate, aggregate=True)
+            proposal_ids = [p["proposal_id"] for p in proposals_to_aggregate]
+            self.logger.info(
+                f"Submitting aggregate request for {len(proposals_to_aggregate)} proposals: {proposal_ids}"
+            )
+            print(f"aggregate payload = {payload}")
+
+            response = requests.post(
+                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            result = response.json()
+            if "data" in result:
+                result["data"] = {}  # avoid big print
+            if result.get("status") == "ok":
+                self.aggregate_running_count += 1
+                self.aggregate_requests.append(proposals_to_aggregate)
+                self.logger.info(
+                    f"Aggregate request for proposals {proposal_ids} submitted to Raiko with response: {result}, "
+                    f"current running aggregate requests: {self.aggregate_running_count}"
+                )
+            else:
+                self.logger.error(
+                    f"Failed to submit aggregate request: {result.get('message', 'Unknown error')}"
+                )
+        except Exception as e:
+            self.logger.error(f"Failed to submit aggregate to Raiko: {e}")
+
+    async def query_raiko_status(
+        self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
+    ) -> RaikoResponse:
+        """query Raiko status"""
+        try:
+            headers = self._request_headers()
+            proposal_data = {
+                "proposal_id": proposal_id,
+                "l1_inclusion_block_number": l1_inclusion_block,
+                "l2_block_numbers": l2_block_numbers,
+                "checkpoint": None,
+                "last_anchor_block_number": last_anchor_block_number,
+            }
+            payload = self.generate_post_data([proposal_data], aggregate=False)
+            response = requests.post(
+                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            result = response.json()
+            if result.get("status") == "error":
+                return RaikoResponse(
+                    status="error", message=result.get("message", "Unknown error")
+                )
+            elif result.get("status") == "ok":
+                return RaikoResponse(status="ok", data=result.get("data", {}))
+            else:
+                return RaikoResponse(status="error", message="Invalid response format")
+        except Exception as e:
+            self.logger.error(f"Failed to query Raiko status: {e}")
+            return RaikoResponse(status="error", message=str(e))
+    
+    async def query_aggregate_status(self, proposals: list[Dict[str, Any]]) -> RaikoResponse:
+        """query aggregate request status"""
+        try:
+            headers = self._request_headers()
+            payload = self.generate_post_data(proposals, aggregate=True)
+            response = requests.post(
+                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            result = response.json()
+            if result.get("status") == "error":
+                return RaikoResponse(
+                    status="error", message=result.get("message", "Unknown error")
+                )
+            elif result.get("status") == "ok":
+                return RaikoResponse(status="ok", data=result.get("data", {}))
+            else:
+                return RaikoResponse(status="error", message="Invalid response format")
+        except Exception as e:
+            self.logger.error(f"Failed to query aggregate status: {e}")
+            return RaikoResponse(status="error", message=str(e))
+
+    async def process_proposal_group(
+        self,
+        group: ProposalGroup,
+        l1_inclusion_block: int,
+        last_anchor_block_number: int,
+    ):
+        """handle new proposal group"""
+        try:
+            if self.watch_mode:
+                self.logger.info(f"Watch mode, skip processing")
+                return
+
+            start_time = datetime.now()
+
+            self.append_log(
+                f"\nproposal {group.proposal_id} (L2 blocks {group.l2_block_numbers}) in L1 block {l1_inclusion_block} processing started at {start_time}\n"
+            )
+
+            self.logger.info(
+                f"Starting to process {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)} at {start_time}"
+            )
+
+            # request Raiko
+            await self.submit_to_raiko(group.proposal_id, l1_inclusion_block, group.l2_block_numbers, last_anchor_block_number)
+
+            # polling
+            retry_count = 0
+            start_polling_time = time.time()
+
+            while True:
+                if time.time() - start_polling_time > self.timeout:
+                    self.logger.error(
+                        f"Timeout waiting for proposal {group.proposal_id} / L1 block {l1_inclusion_block}"
+                    )
+                    break
+
+                response = await self.query_raiko_status(group.proposal_id, l1_inclusion_block, group.l2_block_numbers, last_anchor_block_number)
+
+                if response.status == "error":
+                    self.logger.error(
+                        f"Error processing proposal {group.proposal_id} in L1 block {l1_inclusion_block}: {response.message}"
+                    )
+                    retry_count += 1
+                    if retry_count >= self.max_retries:
+                        self.logger.error(
+                            f"Max retries reached for proposal {group.proposal_id} in L1 block {l1_inclusion_block}"
+                        )
+                        break
+
+                if response.data:
+                    retry_count = 0  # reset retry count
+                    if response.data.get("status") == "registered":
+                        self.logger.info(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} registered"
+                        )
+                    elif response.data.get("status") == "work_in_progress":
+                        self.logger.info(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} in progress"
+                        )
+                    elif response.data.get("proof"):
+                        self.logger.info(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} completed with proof {response.data['proof']['proof']}"
+                        )
+                        # If aggregate mode is enabled, add completed proposal to pending list
+                        if self.aggregate > 0:
+                            proposal_data = {
+                                "proposal_id": group.proposal_id,
+                                "l1_inclusion_block_number": l1_inclusion_block,
+                                "l2_block_numbers": group.l2_block_numbers,
+                                "checkpoint": None,
+                                "last_anchor_block_number": last_anchor_block_number,
+                            }
+                            self.pending_proposals.append(proposal_data)
+                            self.logger.info(
+                                f"Added completed proposal {group.proposal_id} to pending aggregate list ({len(self.pending_proposals)}/{self.aggregate})"
+                            )
+                            
+                            # If we've collected enough proposals, submit aggregate request
+                            if len(self.pending_proposals) >= self.aggregate:
+                                await self.submit_aggregate_to_raiko()
+                        break
+                    else:
+                        self.logger.warning(
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} unhandled status: {response}"
+                        )
+
+                await asyncio.sleep(self.task_polling_interval)
+
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+
+            # log ending status
+            self.append_log(
+                f"Proposal {group.proposal_id} in L1 {l1_inclusion_block} processed {response.status} at {end_time}, duration: {duration} seconds\n"
+            )
+            if response.message:
+                self.append_log(f"Message: {response.message}\n")
+            if response.data and response.data.get("proof"):
+                self.append_log(f"Proof: {response.data['proof']['proof']}\n")
+        finally:
+            self.running_count -= 1
+            self.logger.info(
+                f"Proposal {group.proposal_id} in L1 {l1_inclusion_block} processed, remaining running: {self.running_count}"
+            )
+
+    async def scan_proposal_boundary(
+        self,
+        proposal_id: int,
+        boundary_block: int,
+        *,
+        step: int,
+        max_steps: Optional[int] = None,
+    ) -> int:
+        """
+        Walk backwards or forwards from a known block in a proposal until the
+        proposal changes. Returns the first/last block that still belongs to
+        `proposal_id` depending on `step`.
+        """
+        current_block = boundary_block + step
+        last_valid_block = boundary_block
+        steps_taken = 0
+        direction = "backwards" if step < 0 else "forwards"
+
+        while current_block >= 0 and (max_steps is None or steps_taken < max_steps):
+            self.logger.debug(
+                f"Checking {direction}: block {current_block} for proposal {proposal_id}"
+            )
+            anchor_info = await self.get_anchor_info(current_block)
+
+            if anchor_info is None:
+                self.logger.debug(
+                    f"Could not parse block {current_block}, stopping {direction} search"
+                )
+                break
+
+            if anchor_info.proposal_id != proposal_id:
+                boundary_name = "start" if step < 0 else "end"
+                self.logger.debug(
+                    f"Found different proposal {anchor_info.proposal_id} at block "
+                    f"{current_block}, {boundary_name} is {last_valid_block}"
+                )
+                break
+
+            last_valid_block = current_block
+            current_block += step
+            steps_taken += 1
+
+        return last_valid_block
+
+    async def find_proposal_start_block(
+        self,
+        start_block: int,
+        proposal_id: int,
+        known_same_block: Optional[int] = None,
+    ) -> int:
+        """
+        Find the true start block of a proposal by checking backwards.
+        Returns the first block number that belongs to this proposal_id.
+        """
+        high_true = start_block if known_same_block is None else known_same_block
+        low_false = max(-1, high_true - MAX_BLOCKS_PER_PROPOSAL)
+
+        while high_true - low_false > 1:
+            mid = (low_false + high_true) // 2
+            if mid < 0:
+                break
+            mid_info = await self.get_anchor_info(mid)
+            if mid_info is not None and mid_info.proposal_id == proposal_id:
+                high_true = mid
+            else:
+                low_false = mid
+
+        return high_true
+
+    async def find_proposal_end_block(
+        self,
+        end_block: int,
+        proposal_id: int,
+        known_same_block: Optional[int] = None,
+        max_forward: Optional[int] = None,
+    ) -> int:
+        """
+        Find the true end block of a proposal by checking forwards.
+        Returns the last block number that belongs to this proposal_id.
+        max_forward limits how far forward we'll search to avoid infinite loops.
+        """
+        if max_forward is None:
+            max_forward = MAX_BLOCKS_PER_PROPOSAL - 1
+
+        low_true = end_block if known_same_block is None else known_same_block
+        high_false = end_block + max_forward + 1
+
+        while high_false - low_true > 1:
+            mid = (low_true + high_false) // 2
+            mid_info = await self.get_anchor_info(mid)
+            if mid_info is not None and mid_info.proposal_id == proposal_id:
+                low_true = mid
+            else:
+                high_false = mid
+
+        return low_true
+
+    async def process_l2_block_range(self):
+        """
+        Process L2 block range:
+        1. Resolve true start / end proposal boundaries
+        2. Find true start point if start block is in middle of a proposal
+        3. Discover each proposal group with bounded searches
+        4. Submit each proposal as soon as its range is known
+        """
+        if self.l2_block_range is None:
+            self.logger.error("L2 block range is required")
+            return
+
+        self.anchor_info_cache.clear()
+        start_l2_block, end_l2_block = self.l2_block_range
+        self.logger.info(f"Processing L2 blocks from {start_l2_block} to {end_l2_block}")
+
+        # Step 1: Parse the first block to check if we're in the middle of a proposal
+        first_block_info = await self.get_anchor_info(start_l2_block)
+        if first_block_info is None:
+            self.logger.error(f"Failed to parse first block {start_l2_block}, cannot proceed")
+            return
+
+        # Step 2: Check if we need to go backwards to find the true start
+        true_start_block = start_l2_block
+        if start_l2_block > 0:
+            # Check parent block to see if it has the same proposal_id
+            parent_info = await self.get_anchor_info(start_l2_block - 1)
+            if parent_info is not None and parent_info.proposal_id == first_block_info.proposal_id:
+                # We're in the middle of a proposal, find the true start
+                self.logger.info(
+                    f"Start block {start_l2_block} is in the middle of proposal {first_block_info.proposal_id}, "
+                    f"finding true start..."
+                )
+                true_start_block = await self.find_proposal_start_block(
+                    start_l2_block,
+                    first_block_info.proposal_id,
+                    known_same_block=start_l2_block - 1,
+                )
+                self.logger.info(f"True start block for proposal {first_block_info.proposal_id} is {true_start_block}")
+
+        # Step 3: Parse the last block to check if we're in the middle of a proposal
+        last_block_info = await self.get_anchor_info(end_l2_block)
+        true_end_block = end_l2_block
+        if last_block_info is not None:
+            # Check next block to see if it has the same proposal_id
+            next_block_info = await self.get_anchor_info(end_l2_block + 1)
+            if next_block_info is not None and next_block_info.proposal_id == last_block_info.proposal_id:
+                # We're in the middle of a proposal, find the true end
+                self.logger.info(
+                    f"End block {end_l2_block} is in the middle of proposal {last_block_info.proposal_id}, "
+                    f"finding true end..."
+                )
+                true_end_block = await self.find_proposal_end_block(
+                    end_l2_block,
+                    last_block_info.proposal_id,
+                    known_same_block=end_l2_block + 1,
+                )
+                self.logger.info(f"True end block for proposal {last_block_info.proposal_id} is {true_end_block}")
+
+        # Step 4: Discover proposal groups and submit each one immediately.
+        acc_odds = 1
+        tasks = []
+        first_l1_block = None
+        groups_found = 0
+
+        async for group in self.iter_proposal_groups(true_start_block, true_end_block):
+            groups_found += 1
+
+            # Find L1 inclusion block
+            l1_inclusion_block = await self.find_l1_inclusion_block(
+                group.proposal_id, group.anchor_number
+            )
+
+            if l1_inclusion_block is None:
+                self.logger.warning(
+                    f"Could not find L1 inclusion block for proposal {group.proposal_id}, skipping"
+                )
+                continue
+
+            self.logger.info(
+                f"Found L1 inclusion block {l1_inclusion_block} for proposal {group.proposal_id}"
+            )
+            last_anchor_block_number = await self.get_last_anchor_block_number(
+                group.l2_block_numbers
+            )
+            self.logger.info(
+                f"Processing {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)}"
+            )
+
+            if self.discover_only:
+                self.discovered_proposals.append(
+                    build_discovered_proposal_record(
+                        network=self.network,
+                        l1_network=self.l1_network,
+                        group=group,
+                        l1_inclusion_block=l1_inclusion_block,
+                        last_anchor_block_number=last_anchor_block_number,
+                    )
+                )
+                continue
+
+            # Get L1 block timestamp for time-based throttling
+            l1_block = await self.get_block(l1_inclusion_block)
+            if l1_block is None:
+                self.logger.warning(f"Could not get L1 block {l1_inclusion_block}, skipping time check")
+                l1_timestamp = None
+            else:
+                l1_timestamp = int(l1_block["timestamp"], 16)
+
+            # Initialize time offset with first L1 block
+            if first_l1_block is None and l1_timestamp is not None:
+                first_l1_block = l1_inclusion_block
+                current_timestamp = int(time.time())
+                self.ts_offset = current_timestamp - l1_timestamp
+                self.last_block_ts_in_real_world = current_timestamp
+                self.logger.info(
+                    f"Initialized time offset: L1 block {first_l1_block} timestamp={l1_timestamp}, "
+                    f"offset={self.ts_offset}, time_speed={self.time_speed}"
+                )
+
+            # Apply time-based throttling if time_speed is set and we have timestamps
+            if self.time_speed > 0 and l1_timestamp is not None and self.ts_offset is not None:
+                current_block_ts_in_real_world = l1_timestamp + self.ts_offset
+                real_world_ts = int(time.time())
+                real_world_elapsed_time = real_world_ts - self.last_block_ts_in_real_world
+                accel_elapsed_time = real_world_elapsed_time * self.time_speed
+                current_accel_ts = self.last_block_ts_in_real_world + accel_elapsed_time
+                
+                if current_accel_ts < current_block_ts_in_real_world:
+                    # Need to wait before submitting this proposal
+                    wait_time = (current_block_ts_in_real_world - current_accel_ts) / self.time_speed
+                    self.logger.info(
+                        f"L1 block {l1_inclusion_block} timestamp {current_block_ts_in_real_world} not reached yet, "
+                        f"current accel time: {current_accel_ts}, waiting {wait_time:.2f} seconds..."
+                    )
+                    await asyncio.sleep(wait_time)
+                    # Update after waiting
+                    real_world_ts = int(time.time())
+                    real_world_elapsed_time = real_world_ts - self.last_block_ts_in_real_world
+                    accel_elapsed_time = real_world_elapsed_time * self.time_speed
+                    current_accel_ts = self.last_block_ts_in_real_world + accel_elapsed_time
+                
+                # Update timestamp tracking
+                self.last_block_ts_in_real_world = real_world_ts
+                self.ts_offset = real_world_ts - l1_timestamp
+
+            # Apply block_running_ratio
+            acc_odds += self.block_running_ratio
+            if acc_odds >= 1.0:
+                aggregate_info = ""
+                if self.aggregate > 0:
+                    aggregate_info = f", aggregate running: {self.aggregate_running_count}"
+                self.logger.info(
+                    f"Submitting {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)}, current running tasks: {self.running_count}{aggregate_info}"
+                )
+                self.running_count += 1
+                acc_odds -= 1.0
+                # Create task and add to list
+                task = asyncio.create_task(
+                    self.process_proposal_group(
+                        group,
+                        l1_inclusion_block,
+                        last_anchor_block_number=last_anchor_block_number,
+                    )
+                )
+                tasks.append(task)
+                # Yield control to event loop so task can start executing
+                await asyncio.sleep(0)
+            else:
+                self.logger.info(
+                    f"Proposal {group.proposal_id} skipped due to block_running_ratio:{self.block_running_ratio}"
+                )
+
+        if groups_found == 0:
+            self.logger.error("No valid proposal groups found in L2 block range")
+            return
+
+        if self.discover_only:
+            if self.proposal_out:
+                write_discovered_proposals(self.proposal_out, self.discovered_proposals)
+                self.logger.info(
+                    f"Wrote {len(self.discovered_proposals)} discovered proposal(s) to {self.proposal_out}"
+                )
+            else:
+                print(
+                    json.dumps(
+                        discovered_proposals_payload(self.discovered_proposals),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            return
+
+        # Wait for all tasks to complete
+        self.logger.info(f"Waiting for {len(tasks)} processing tasks to complete...")
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Submit any remaining pending proposals as aggregate if aggregate mode is enabled
+        if self.aggregate > 0 and len(self.pending_proposals) > 0:
+            self.logger.info(
+                f"Submitting remaining {len(self.pending_proposals)} proposals as aggregate"
+            )
+            await self.submit_aggregate_to_raiko()
+        
+        # Check aggregate requests status and decrease count when completed
+        if self.aggregate > 0 and len(self.aggregate_requests) > 0:
+            completed_requests = []
+            for proposals in self.aggregate_requests:
+                response = await self.query_aggregate_status(proposals)
+                if response.data and response.data.get("proof"):
+                    proposal_ids = [p["proposal_id"] for p in proposals]
+                    self.logger.info(
+                        f"Aggregate request for proposals {proposal_ids} completed"
+                    )
+                    completed_requests.append(proposals)
+                    self.aggregate_running_count = max(0, self.aggregate_running_count - 1)
+            
+            # Remove completed requests
+            for completed in completed_requests:
+                self.aggregate_requests.remove(completed)
+        
+        self.logger.info("All L2 blocks processed")
+
+    async def find_l2_block_for_proposal_id(self, proposal_id: int) -> Optional[int]:
+        """
+        Find one L2 block carrying the requested proposal id.
+
+        Proposal ids are monotonic in L2 block extraData, so a binary search avoids
+        scanning the whole chain when callers know only the proposal id.
+        """
+        latest_l2 = self.get_latest_l2_block_number()
+        low = 0
+        high = latest_l2
+        candidate = None
+
+        while low <= high:
+            mid = (low + high) // 2
+            mid_proposal_id = await self.get_l2_block_proposal_id(mid)
+            if mid_proposal_id is None:
+                self.logger.debug(
+                    f"Could not extract proposal id from L2 block {mid}; "
+                    "treating it as pre-Shasta"
+                )
+                low = mid + 1
+                continue
+
+            if mid_proposal_id < proposal_id:
+                low = mid + 1
+            else:
+                candidate = mid
+                high = mid - 1
+
+        if candidate is None:
+            self.logger.warning(
+                f"Proposal {proposal_id} is above latest L2 proposal id at block {latest_l2}"
+            )
+            return None
+
+        candidate_proposal_id = await self.get_l2_block_proposal_id(candidate)
+        if candidate_proposal_id != proposal_id:
+            self.logger.warning(
+                f"Proposal {proposal_id} was not found; first candidate block {candidate} "
+                f"has proposal {candidate_proposal_id}"
+            )
+            return None
+
+        return candidate
+
+    async def discover_proposal_group_by_id(
+        self, proposal_id: int
+    ) -> Optional[ProposalGroup]:
+        known_block = await self.find_l2_block_for_proposal_id(proposal_id)
+        if known_block is None:
+            return None
+
+        known_info = await self.get_anchor_info(known_block)
+        if known_info is None or known_info.proposal_id != proposal_id:
+            self.logger.error(
+                f"Could not parse anchor info from L2 block {known_block} "
+                f"for proposal {proposal_id}"
+            )
+            return None
+
+        start_block = await self.find_proposal_start_block(
+            known_block,
+            proposal_id,
+            known_same_block=known_block,
+        )
+        end_block = await self.find_proposal_end_block(
+            known_block,
+            proposal_id,
+            known_same_block=known_block,
+        )
+        start_info = await self.get_anchor_info(start_block)
+        anchor_number = (
+            start_info.anchor_number
+            if start_info is not None and start_info.proposal_id == proposal_id
+            else known_info.anchor_number
+        )
+        group = ProposalGroup(
+            proposal_id=proposal_id,
+            anchor_number=anchor_number,
+            l2_block_numbers=list(range(start_block, end_block + 1)),
+        )
+        self.logger.info(
+            f"Discovered proposal {proposal_id} by id: "
+            f"L2 blocks {start_block}..{end_block}"
+        )
+        return group
+
+    async def process_proposal_ids(self):
+        """Discover or submit exact proposal ids without needing an L2 block range."""
+        self.anchor_info_cache.clear()
+        tasks = []
+        groups_found = 0
+
+        for proposal_id in self.proposal_ids:
+            group = await self.discover_proposal_group_by_id(proposal_id)
+            if group is None:
+                continue
+            groups_found += 1
+
+            l1_inclusion_block = self.find_l1_inclusion_block_by_indexed_proposal_id(
+                group.proposal_id
+            )
+            if l1_inclusion_block is None:
+                l1_inclusion_block = await self.find_l1_inclusion_block(
+                    group.proposal_id, group.anchor_number
+                )
+            if l1_inclusion_block is None:
+                self.logger.warning(
+                    f"Could not find L1 inclusion block for proposal {group.proposal_id}, skipping"
+                )
+                continue
+
+            last_anchor_block_number = await self.get_last_anchor_block_number(
+                group.l2_block_numbers
+            )
+            self.logger.info(
+                f"Processing {self.format_proposal_context(proposal_id=group.proposal_id, l2_block_numbers=group.l2_block_numbers, l1_inclusion_block=l1_inclusion_block, last_anchor_block_number=last_anchor_block_number)}"
+            )
+
+            if self.discover_only:
+                self.discovered_proposals.append(
+                    build_discovered_proposal_record(
+                        network=self.network,
+                        l1_network=self.l1_network,
+                        group=group,
+                        l1_inclusion_block=l1_inclusion_block,
+                        last_anchor_block_number=last_anchor_block_number,
+                    )
+                )
+                continue
+
+            self.running_count += 1
+            task = asyncio.create_task(
+                self.process_proposal_group(
+                    group,
+                    l1_inclusion_block,
+                    last_anchor_block_number=last_anchor_block_number,
+                )
+            )
+            tasks.append(task)
+            await asyncio.sleep(0)
+
+        if groups_found == 0:
+            self.logger.error("No valid proposal groups found for requested proposal ids")
+            return
+
+        if self.discover_only:
+            if self.proposal_out:
+                write_discovered_proposals(self.proposal_out, self.discovered_proposals)
+                self.logger.info(
+                    f"Wrote {len(self.discovered_proposals)} discovered proposal(s) to {self.proposal_out}"
+                )
+            else:
+                print(
+                    json.dumps(
+                        discovered_proposals_payload(self.discovered_proposals),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            return
+
+        self.logger.info(f"Waiting for {len(tasks)} processing tasks to complete...")
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def run(self):
+        """main loop"""
+        self.logger.info("Starting block monitor")
+        # print start config
+        config_dict = {
+            "network": self.network,
+            "l1_network": self.l1_network,
+            "l1_rpc": self.l1_rpc,
+            "l2_rpc": self.l2_rpc,
+            "raiko_rpc": self.raiko_rpc,
+            "has_api_key": bool(self.api_key),
+            "l2_block_range": self.l2_block_range,
+            "prove_type": self.prove_type,
+            "block_running_ratio": self.block_running_ratio,
+            "aggregate": self.aggregate,
+            "discover_only": self.discover_only,
+            "proposal_ids": self.proposal_ids,
+        }
+        self.logger.info(f"Config:\n{json.dumps(config_dict, indent=2, default=str)}")
+        
+        if self.proposal_ids:
+            await self.process_proposal_ids()
+        elif self.l2_block_range is not None:
+            await self.process_l2_block_range()
+        else:
+            self.logger.error("Either L2 block range or proposal ids are required")
+            return
+
+
+def parse_none_value(value, convert_func=str):
+    if value and isinstance(value, str) and value.lower() in ["none", "null"]:
+        return None
+    return convert_func(value) if value is not None else None
+
+
+def parse_block_range(value):
+    """support block range in format start,end or none"""
+    if value and value.lower() in ["none", "null"]:
+        return None
+    try:
+        start_block, end_block = map(int, value.split(","))
+        return (start_block, end_block)
+    except (ValueError, AttributeError):
+        raise argparse.ArgumentTypeError(
+            'Block range must be in format "start,end" or "none"'
+        )
+
+
+def parse_proposal_ids(value):
+    """support comma-separated proposal IDs"""
+    if value and value.lower() in ["none", "null"]:
+        return []
+    try:
+        proposal_ids = []
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            proposal_id = int(part)
+            if proposal_id < 0:
+                raise ValueError("proposal id must be non-negative")
+            proposal_ids.append(proposal_id)
+        if not proposal_ids:
+            raise ValueError("proposal id list is empty")
+        return proposal_ids
+    except (ValueError, AttributeError) as exc:
+        raise argparse.ArgumentTypeError(
+            'Proposal IDs must be a comma-separated list, for example "22733,22734"'
+        ) from exc
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Block Monitor CLI")
+
+    parser.add_argument(
+        "--chain-spec-list",
+        type=Path,
+        default=DEFAULT_CHAIN_SPEC_LIST,
+        help="Chain spec JSON list used to derive RPC URLs and Shasta contract address",
+    )
+
+    parser.add_argument(
+        "--network",
+        default="taiko_hoodi",
+        help="L2 network key in the chain spec list",
+    )
+
+    parser.add_argument(
+        "--l1-network",
+        default="hoodi",
+        help="L1 network key in the chain spec list",
+    )
+
+    parser.add_argument(
+        "-e",
+        "--l1-rpc",
+        type=lambda x: parse_none_value(x, str),
+        default=None,
+        help="L1 Ethereum RPC endpoint override",
+    )
+
+    parser.add_argument(
+        "-l",
+        "--l2-rpc",
+        type=lambda x: parse_none_value(x, str),
+        default=None,
+        help="L2 RPC endpoint override",
+    )
+
+    parser.add_argument(
+        "-a",
+        "--raiko-rpc",
+        type=lambda x: parse_none_value(x, str),
+        default="http://localhost:8080",
+        help='Raiko RPC endpoint (use "none" for None value)',
+    )
+    parser.add_argument(
+        "--api-key",
+        type=lambda x: parse_none_value(x, str),
+        default=os.environ.get("RAIKO2_API_KEY"),
+        help='Optional x-api-key header value (defaults to RAIKO2_API_KEY when set)',
+    )
+
+    parser.add_argument(
+        "-o",
+        "--log-file",
+        type=lambda x: parse_none_value(x, str),
+        default="block_monitor.log",
+        help='Log file path (use "none" for None value)',
+    )
+
+    parser.add_argument(
+        "-p",
+        "--polling-interval",
+        type=lambda x: parse_none_value(x, int),
+        default=3,
+        help='Polling interval in seconds (use "none" for None value)',
+    )
+
+    parser.add_argument(
+        "-r",
+        "--block-running-ratio",
+        type=lambda x: parse_none_value(x, float),
+        default=1.0,
+        help='Block running ratio (use "none" for None value)',
+    )
+
+    parser.add_argument(
+        "-g",
+        "--l2-block-range",
+        type=parse_block_range,
+        default=None,
+        help='L2 block range in format "start,end" or "none" for None value',
+    )
+
+    parser.add_argument(
+        "--proposal-id",
+        dest="proposal_id",
+        action="append",
+        type=int,
+        default=None,
+        help="Proposal id to discover; can be passed multiple times",
+    )
+
+    parser.add_argument(
+        "--proposal-ids",
+        dest="proposal_ids",
+        type=parse_proposal_ids,
+        default=None,
+        help='Comma-separated proposal ids to discover, for example "22733,22734"',
+    )
+
+    parser.add_argument(
+        "-t",
+        "--prove-type",
+        type=lambda x: parse_none_value(x, str),
+        default="native",
+        help='Prove type (use "none" for None value)',
+    )
+
+    parser.add_argument(
+        "-i",
+        "--abi-file",
+        type=lambda x: parse_none_value(x, str),
+        default=None,
+        help="L1 event ABI file path override",
+    )
+
+    parser.add_argument(
+        "-b",
+        "--anchor-abi-file",
+        type=lambda x: parse_none_value(x, str),
+        default=None,
+        help="L2 anchor contract ABI file path override",
+    )
+
+    parser.add_argument(
+        "-c",
+        "--event-contract",
+        type=lambda x: parse_none_value(x, str),
+        default=None,
+        help="Event contract address override",
+    )
+
+    parser.add_argument(
+        "-w",
+        "--watch-event",
+        action="store_true",
+        default=False,
+        help='Watch proposal event only (use "none" for None value)',
+    )
+
+    parser.add_argument(
+        "-x",
+        "--time-speed",
+        type=lambda x: parse_none_value(x, float),
+        default=1.0,
+        help="time scaling, real world 1s to 1*x s in stress",
+    )
+
+    parser.add_argument(
+        "-A",
+        "--aggregate",
+        type=lambda x: parse_none_value(x, int),
+        default=0,
+        help="Aggregate mode: if > 0, collect n proposals and submit as aggregate request",
+    )
+
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        default=False,
+        help="Discover proposal tuple metadata and do not submit requests to raiko2",
+    )
+
+    parser.add_argument(
+        "--proposal-out",
+        type=Path,
+        default=None,
+        help="Write discover-only proposal metadata JSON to this path",
+    )
+
+    args = parser.parse_args()
+    proposal_ids = []
+    if args.proposal_ids:
+        proposal_ids.extend(args.proposal_ids)
+    if args.proposal_id:
+        proposal_ids.extend(args.proposal_id)
+    proposal_ids = list(dict.fromkeys(proposal_ids))
+    if any(proposal_id < 0 for proposal_id in proposal_ids):
+        parser.error("proposal ids must be non-negative")
+    if proposal_ids and args.l2_block_range is not None:
+        parser.error("--proposal-id/--proposal-ids cannot be combined with --l2-block-range")
+    if not proposal_ids and args.l2_block_range is None:
+        parser.error("either --l2-block-range or --proposal-id/--proposal-ids is required")
+
+    resolved = resolve_monitor_config(
+        chain_spec_list=args.chain_spec_list,
+        network=args.network,
+        l1_network=args.l1_network,
+        l1_rpc=args.l1_rpc,
+        l2_rpc=args.l2_rpc,
+        event_contract=args.event_contract,
+        abi_file=args.abi_file,
+        anchor_abi_file=args.anchor_abi_file,
+    )
+
+    monitor = BatchMonitor(
+        l1_rpc=resolved.l1_rpc,
+        l2_rpc=resolved.l2_rpc,
+        abi_file=resolved.abi_file,
+        evt_address=web3.Web3.to_checksum_address(resolved.event_contract),
+        raiko_rpc=args.raiko_rpc,
+        log_file=args.log_file,
+        polling_interval=args.polling_interval,
+        block_running_ratio=args.block_running_ratio,
+        l2_block_range=args.l2_block_range,
+        prove_type=args.prove_type,
+        watch_mode=args.watch_event,
+        time_speed=args.time_speed,
+        anchor_abi_file=resolved.anchor_abi_file,
+        aggregate=args.aggregate,
+        network=args.network,
+        l1_network=args.l1_network,
+        discover_only=args.discover_only,
+        proposal_out=args.proposal_out,
+        api_key=args.api_key,
+        proposal_ids=proposal_ids,
+    )
+
+    await monitor.run()
+
+
+# Example usage:
+# python stress_shasta_proposal.py -t native -g 1000,2000 -p 10 -o stress_dev.log -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1rpc.internal.taiko.xyz -l https://l2rpc.internal.taiko.xyz -i IInbox.json -b Anchor.json -x 100 -w
+# python stress_shasta_proposal.py -t native -g 1000,2000 -A 5 -a http://localhost:8080 -c 0xe9BDA5fd0C7F8E97b12860a57Cbcc89f33AAfFE8 -e https://l1rpc.internal.taiko.xyz -l https://l2rpc.internal.taiko.xyz -i IInbox.json -b Anchor.json
+# Note: 
+#   -a (--raiko-rpc): Raiko RPC endpoint (default: http://localhost:8080)
+#   -g now specifies L2 block range instead of L1 block range
+#   -b (--anchor-abi-file) is optional but recommended for proper anchorV4 decoding
+#   -A (--aggregate): Aggregate mode, if > 0, collect n proposals and submit as aggregate request
+if __name__ == "__main__":
+    asyncio.run(main())

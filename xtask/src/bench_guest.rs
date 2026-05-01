@@ -7,9 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use serde::{Deserialize, Serialize};
+use xtask_build_guest::Backend;
 
-use crate::Backend;
-use crate::build_guest;
 use crate::util;
 
 #[derive(Args)]
@@ -166,7 +165,8 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
 
     let input_path = prepare_input(root, &args)?;
 
-    let sp1_docker_tag = build_guest::resolve_sp1_docker_tag(root, args.sp1_docker_tag.as_deref());
+    let sp1_docker_tag =
+        xtask_build_guest::resolve_sp1_docker_tag(root, args.sp1_docker_tag.as_deref());
     let built_guest = !args.skip_build_guest;
 
     if args.skip_build_guest {
@@ -176,13 +176,7 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
             "missing SP1 guest ELF; re-run without `--skip-build-guest` or run `cargo run -r -p xtask -- build-guest sp1 --bench` first"
         );
     } else {
-        build_guest::build(
-            root,
-            args.backend,
-            true,
-            Some(sp1_docker_tag.as_str()),
-            false,
-        )?;
+        xtask_build_guest::build(root, args.backend, true, Some(sp1_docker_tag.as_str()))?;
     }
 
     let launcher_path = build_guest_launcher(root)?;
@@ -202,7 +196,14 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
     let mut measured_reports = Vec::with_capacity(args.repeat);
     for i in 0..(args.warmup + args.repeat) {
         let result_path = results_dir.join(format!("sp1-proposal-{run_id}-run{}.json", i + 1));
-        run_guest_launcher(&launcher_path, &input_path, mode, proof_mode, &result_path)?;
+        run_guest_launcher(
+            &launcher_path,
+            &input_path,
+            &args.proof_type,
+            mode,
+            proof_mode,
+            &result_path,
+        )?;
         if i >= args.warmup {
             let report = read_report(&result_path)?;
             measured_reports.push(report);
@@ -306,14 +307,16 @@ fn prepare_input(root: &Path, args: &BenchGuestArgs) -> Result<PathBuf> {
 }
 
 fn build_guest_launcher(root: &Path) -> Result<PathBuf> {
-    println!("[INFO] Building guest-launcher (release)...");
+    println!("[INFO] Building guest-launcher (release, SP1 profiling enabled)...");
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root);
     cmd.arg("build")
         .arg("--locked")
         .arg("--release")
         .arg("--bin")
-        .arg("guest-launcher");
+        .arg("guest-launcher")
+        .arg("--features")
+        .arg("sp1-sdk/profiling");
     util::run(cmd)?;
 
     let bin_name = if cfg!(windows) {
@@ -327,6 +330,7 @@ fn build_guest_launcher(root: &Path) -> Result<PathBuf> {
 fn run_guest_launcher(
     launcher: &Path,
     input: &Path,
+    proof_type: &str,
     mode: &str,
     proof_mode: &str,
     json_out: &Path,
@@ -335,6 +339,8 @@ fn run_guest_launcher(
     let mut cmd = Command::new(launcher);
     cmd.arg("--input")
         .arg(input)
+        .arg("--proof-type")
+        .arg(proof_type)
         .arg("--mode")
         .arg(mode)
         .arg("--proof-mode")

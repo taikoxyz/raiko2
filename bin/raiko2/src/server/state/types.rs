@@ -17,4 +17,5 @@ pub struct EngineStatusView {
     pub status: ProofStatus,
     pub proof: Option<String>,
     pub error: Option<String>,
+    pub extra_data: Option<serde_json::Value>,
 }

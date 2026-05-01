@@ -4,24 +4,48 @@ use std::sync::Arc;
 
 use super::engine::EngineHandle;
 
+/// Engine binding key for a concrete network pair and proving route.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct PipelineBindingKey {
+    pub network_pair: String,
+    pub pipeline: PipelineKey,
+}
+
 /// Pipeline factory for resolving engines.
 pub trait PipelineFactory: Send + Sync {
-    fn get(&self, key: PipelineKey) -> Option<Arc<dyn EngineHandle>>;
+    fn get(&self, network_pair: &str, key: PipelineKey) -> Option<Arc<dyn EngineHandle>>;
 }
 
 #[derive(Default)]
 pub struct StaticPipelineFactory {
-    engines: HashMap<PipelineKey, Arc<dyn EngineHandle>>,
+    engines: HashMap<PipelineBindingKey, Arc<dyn EngineHandle>>,
 }
 
 impl StaticPipelineFactory {
-    pub fn insert(&mut self, key: PipelineKey, engine: Arc<dyn EngineHandle>) {
-        self.engines.insert(key, engine);
+    pub fn insert(
+        &mut self,
+        network_pair: impl Into<String>,
+        key: PipelineKey,
+        engine: Arc<dyn EngineHandle>,
+    ) {
+        let network_pair = network_pair.into();
+        self.engines.insert(
+            PipelineBindingKey {
+                network_pair,
+                pipeline: key,
+            },
+            engine,
+        );
     }
 }
 
 impl PipelineFactory for StaticPipelineFactory {
-    fn get(&self, key: PipelineKey) -> Option<Arc<dyn EngineHandle>> {
-        self.engines.get(&key).cloned()
+    fn get(&self, network_pair: &str, key: PipelineKey) -> Option<Arc<dyn EngineHandle>> {
+        self.engines
+            .get(&PipelineBindingKey {
+                network_pair: network_pair.to_string(),
+                pipeline: key,
+            })
+            .cloned()
     }
 }

@@ -1,5 +1,8 @@
 # Core Readability Simplification Design
 
+> Historical design document. It may not match the current implementation. Use `README.md`,
+> `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 ## Goals
 - Improve readability of core libraries without changing behavior or public interfaces.
 - Reduce repetitive patterns and nested error handling.

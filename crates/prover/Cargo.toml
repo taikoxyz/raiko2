@@ -22,26 +22,37 @@ reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
 secp256k1.workspace = true
+url.workspace = true
 
 anyhow.workspace = true
 
 # Alloy types
+alloy.workspace = true
 alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
 
-# RISC0 dependencies (optional)
-risc0-zkvm = { workspace = true, optional = true }
+# RISC0 dependencies
+risc0-zkvm.workspace = true
+risc0-ethereum-contracts-boundless.workspace = true
+boundless-market = { workspace = true, optional = true }
 
-# SP1 dependencies (optional)
-sp1-sdk = { workspace = true, optional = true }
+# SP1 dependencies
+sp1-sdk.workspace = true
 
 # TDX dependencies (optional)
 dirs = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 
 [features]
-default = ["zkvm"]
-zkvm = ["dep:risc0-zkvm", "dep:sp1-sdk"]
+default = []
+boundless = ["dep:boundless-market"]
 tdx = ["dep:dirs", "dep:rand"]
 
 [dev-dependencies]
 httpmock = "0.7"
+alloy-sol-types.workspace = true
+alloy-consensus.workspace = true
+reth-ethereum-primitives.workspace = true
+risc0-binfmt = "=3.0.4"
+risc0-zkos-v1compat = "2.2.2"
+raiko2-guests.workspace = true

@@ -12,7 +12,7 @@ fn proof_envelope_roundtrip() {
             instance_hash: None,
         },
         payload: ProofPayload {
-            payload_kind: "risc0_journal".to_string(),
+            payload_kind: "risc0_seal".to_string(),
             bytes: vec![1, 2, 3],
         },
         verifier_artifacts: vec![VerifierArtifact {
@@ -27,5 +27,5 @@ fn proof_envelope_roundtrip() {
     let decoded: ProofEnvelope = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(decoded.payload.bytes, vec![1, 2, 3]);
     assert_eq!(decoded.backend, "risc0");
-    assert_eq!(decoded.payload.payload_kind, "risc0_journal");
+    assert_eq!(decoded.payload.payload_kind, "risc0_seal");
 }

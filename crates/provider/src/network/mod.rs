@@ -1,40 +1,185 @@
 use alloy::{
+    consensus::Header,
     providers::{DynProvider, Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
 };
-use alloy_chains::NamedChain;
 use alloy_primitives::{Address, map::AddressMap};
-use raiko2_primitives::{RaikoError, RaikoResult};
-use reth_chainspec::{HOLESKY, HOODI, MAINNET, SEPOLIA};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_protocol::{BlobProofType, InputDataSource};
+use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
-use reth_evm_ethereum::EthEvmConfig;
-use reth_stateless::ExecutionWitness;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
+use serde::{Deserialize, Serialize};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::Provider;
 use crate::rpc::{RpcClientConfig, build_rpc_client};
 
 mod accounts;
+mod blobs;
 mod blocks;
+mod headers;
 mod witness;
 
-pub use witness::WitnessMode;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L2ProviderKind {
+    #[default]
+    Reth,
+    Geth,
+    GethLocalWitness,
+}
 
-// For Taiko chains
-const TAIKO_CHAIN_IDS: [u64; 4] = [167_000, 167_001, 167_013, 167_009];
+impl fmt::Display for L2ProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Reth => f.write_str("reth"),
+            Self::Geth => f.write_str("geth"),
+            Self::GethLocalWitness => f.write_str("geth_local_witness"),
+        }
+    }
+}
 
-pub(super) fn is_taiko_chain_id(chain_id: u64) -> bool {
-    TAIKO_CHAIN_IDS.contains(&chain_id)
+#[async_trait::async_trait]
+pub(crate) trait L2Provider: Send + Sync {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>>;
+
+    async fn batch_accounts(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>>;
+
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
+}
+
+#[derive(Clone)]
+pub(crate) struct RpcL2Provider {
+    client: RpcClient,
+    witness_client: RpcClient,
+    witness_provider: DynProvider,
+    chain_spec: Option<ChainSpec>,
+}
+
+impl RpcL2Provider {
+    fn new(
+        l2_rpc_url: &str,
+        l2_chain_spec: Option<ChainSpec>,
+        l2_witness_rpc_url: Option<&str>,
+        config: &RpcClientConfig,
+    ) -> RaikoResult<Self> {
+        let l2_client = build_rpc_client(l2_rpc_url, config)?;
+        let l2_witness_client = build_rpc_client(l2_witness_rpc_url.unwrap_or(l2_rpc_url), config)?;
+        let l2_witness_provider = ProviderBuilder::new()
+            .connect_client(l2_witness_client.clone())
+            .erased();
+
+        Ok(Self {
+            client: l2_client,
+            witness_client: l2_witness_client,
+            witness_provider: l2_witness_provider,
+            chain_spec: l2_chain_spec,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RethL2Provider {
+    rpc: RpcL2Provider,
+}
+
+#[derive(Clone)]
+pub(crate) struct GethL2Provider {
+    rpc: RpcL2Provider,
+}
+
+#[derive(Clone)]
+pub(crate) struct GethLocalWitnessL2Provider {
+    rpc: RpcL2Provider,
+}
+
+impl RethL2Provider {
+    const fn new(rpc: RpcL2Provider) -> Self {
+        Self { rpc }
+    }
+}
+
+impl GethL2Provider {
+    const fn new(rpc: RpcL2Provider) -> Self {
+        Self { rpc }
+    }
+}
+
+impl GethLocalWitnessL2Provider {
+    const fn new(rpc: RpcL2Provider) -> Self {
+        Self { rpc }
+    }
+}
+
+#[async_trait::async_trait]
+impl L2Provider for RethL2Provider {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+        self.rpc.fetch_blocks(block_numbers).await
+    }
+
+    async fn batch_accounts(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+        self.rpc.fetch_accounts(block_numbers, addresses).await
+    }
+
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses(block_numbers).await
+    }
+}
+
+#[async_trait::async_trait]
+impl L2Provider for GethL2Provider {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+        self.rpc.fetch_blocks(block_numbers).await
+    }
+
+    async fn batch_accounts(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+        self.rpc.fetch_accounts(block_numbers, addresses).await
+    }
+
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses(block_numbers).await
+    }
+}
+
+#[async_trait::async_trait]
+impl L2Provider for GethLocalWitnessL2Provider {
+    async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+        self.rpc.fetch_blocks(block_numbers).await
+    }
+
+    async fn batch_accounts(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+        self.rpc.fetch_accounts(block_numbers, addresses).await
+    }
+
+    async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses(block_numbers).await
+    }
 }
 
 #[derive(Clone)]
 pub struct NetworkProvider {
-    client: RpcClient,
-    provider: DynProvider,
-    evm_config: Arc<OnceCell<Arc<EthEvmConfig>>>,
-    witness_mode: WitnessMode,
-    debug_witness_supported: Option<bool>,
+    _l1_client: RpcClient,
+    l1_provider: DynProvider,
+    l2_provider: Arc<dyn L2Provider>,
+    http_client: reqwest::Client,
+    _l1_chain_spec: Option<ChainSpec>,
+    _l2_chain_spec: Option<ChainSpec>,
 }
 
 impl NetworkProvider {
@@ -49,81 +194,107 @@ impl NetworkProvider {
     ///
     /// Returns an error if the RPC URL is invalid or the client cannot be constructed.
     pub fn new_with_config(rpc_url: &str, config: &RpcClientConfig) -> RaikoResult<Self> {
-        let client = build_rpc_client(rpc_url, config)?;
-        let provider = ProviderBuilder::new()
-            .connect_client(client.clone())
+        Self::new_pair_with_chain_specs_and_config(rpc_url, rpc_url, None, None, None, config)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if either RPC URL is invalid.
+    pub fn new_pair(l1_rpc_url: &str, l2_rpc_url: &str) -> RaikoResult<Self> {
+        Self::new_pair_with_chain_specs_and_config(
+            l1_rpc_url,
+            l2_rpc_url,
+            None,
+            None,
+            None,
+            &RpcClientConfig::default(),
+        )
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if either RPC URL is invalid or a client cannot be constructed.
+    pub fn new_pair_with_config(
+        l1_rpc_url: &str,
+        l2_rpc_url: &str,
+        config: &RpcClientConfig,
+    ) -> RaikoResult<Self> {
+        Self::new_pair_with_chain_specs_and_config(l1_rpc_url, l2_rpc_url, None, None, None, config)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if either RPC URL is invalid or a client cannot be constructed.
+    pub fn new_pair_with_chain_specs_and_config(
+        l1_rpc_url: &str,
+        l2_rpc_url: &str,
+        l1_chain_spec: Option<ChainSpec>,
+        l2_chain_spec: Option<ChainSpec>,
+        l2_witness_rpc_url: Option<&str>,
+        config: &RpcClientConfig,
+    ) -> RaikoResult<Self> {
+        Self::new_pair_with_l2_provider_kind_and_chain_specs_and_config(
+            l1_rpc_url,
+            l2_rpc_url,
+            L2ProviderKind::default(),
+            l1_chain_spec,
+            l2_chain_spec,
+            l2_witness_rpc_url,
+            config,
+        )
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if either RPC URL is invalid or a client cannot be constructed.
+    pub fn new_pair_with_l2_provider_kind_and_chain_specs_and_config(
+        l1_rpc_url: &str,
+        l2_rpc_url: &str,
+        l2_provider_kind: L2ProviderKind,
+        l1_chain_spec: Option<ChainSpec>,
+        l2_chain_spec: Option<ChainSpec>,
+        l2_witness_rpc_url: Option<&str>,
+        config: &RpcClientConfig,
+    ) -> RaikoResult<Self> {
+        let l1_client = build_rpc_client(l1_rpc_url, config)?;
+        let l1_provider = ProviderBuilder::new()
+            .connect_client(l1_client.clone())
             .erased();
+        let l2_rpc = RpcL2Provider::new(
+            l2_rpc_url,
+            l2_chain_spec.clone(),
+            l2_witness_rpc_url,
+            config,
+        )?;
+        let l2_provider: Arc<dyn L2Provider> = match l2_provider_kind {
+            L2ProviderKind::Reth => Arc::new(RethL2Provider::new(l2_rpc)),
+            L2ProviderKind::Geth => Arc::new(GethL2Provider::new(l2_rpc)),
+            L2ProviderKind::GethLocalWitness => Arc::new(GethLocalWitnessL2Provider::new(l2_rpc)),
+        };
+        let mut http_client_builder = reqwest::Client::builder();
+        if config.timeout_ms > 0 {
+            http_client_builder =
+                http_client_builder.timeout(Duration::from_millis(config.timeout_ms));
+        }
+        let http_client = http_client_builder.build().map_err(|e| {
+            raiko2_primitives::RaikoError::RPC(format!("failed to build HTTP client: {e}"))
+        })?;
 
         Ok(Self {
-            client,
-            provider,
-            evm_config: Arc::new(OnceCell::new()),
-            witness_mode: WitnessMode::default(),
-            debug_witness_supported: None,
+            _l1_client: l1_client,
+            l1_provider,
+            l2_provider,
+            http_client,
+            _l1_chain_spec: l1_chain_spec,
+            _l2_chain_spec: l2_chain_spec,
         })
-    }
-
-    #[must_use]
-    pub fn with_evm_config(self, evm_config: Arc<EthEvmConfig>) -> Self {
-        let _ = self.evm_config.set(evm_config);
-        self
-    }
-
-    #[must_use]
-    pub const fn with_witness_mode(mut self, mode: WitnessMode) -> Self {
-        self.witness_mode = mode;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_debug_witness_support(mut self, supported: bool) -> Self {
-        self.debug_witness_supported = Some(supported);
-        self
-    }
-
-    async fn resolve_evm_config(&self) -> RaikoResult<Arc<EthEvmConfig>> {
-        if let Some(config) = self.evm_config.get() {
-            return Ok(config.clone());
-        }
-
-        let chain_id = self
-            .provider
-            .get_chain_id()
-            .await
-            .map_err(|e| RaikoError::RPC(format!("eth_chainId failed: {e}")))?;
-
-        // Map Taiko chains to standard Ethereum config for local witness generation
-        // Taiko forks (SHASTA, PACAYA, etc.) are mapped to SHANGHAI (pre-Cancun)
-        // to avoid EIP-4788 parent beacon block root requirement
-        let evm_config = if is_taiko_chain_id(chain_id) {
-            tracing::info!(
-                "Mapping Taiko chain (chain_id={}) to Ethereum SHANGHAI config for local witness generation",
-                chain_id
-            );
-            // Use HOLESKY config as it supports SHANGHAI, which is a reasonable approximation
-            // for Taiko forks like SHASTA/PACAYA (pre-Cancun)
-            Arc::new(EthEvmConfig::ethereum(HOLESKY.clone()))
-        } else {
-            let chain: NamedChain = chain_id
-                .try_into()
-                .map_err(|e| RaikoError::RPC(format!("Invalid chain_id: {e}")))?;
-            match chain {
-                NamedChain::Mainnet => Arc::new(EthEvmConfig::ethereum(MAINNET.clone())),
-                NamedChain::Holesky => Arc::new(EthEvmConfig::ethereum(HOLESKY.clone())),
-                NamedChain::Hoodi => Arc::new(EthEvmConfig::ethereum(HOODI.clone())),
-                NamedChain::Sepolia => Arc::new(EthEvmConfig::ethereum(SEPOLIA.clone())),
-                _ => return Err(RaikoError::RPC(format!("Unsupported chain: {chain}"))),
-            }
-        };
-        let _ = self.evm_config.set(evm_config.clone());
-        Ok(evm_config)
     }
 }
 
 #[async_trait::async_trait]
 impl Provider for NetworkProvider {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
-        self.fetch_blocks(block_numbers).await
+        self.l2_provider.batch_blocks(block_numbers).await
     }
 
     async fn batch_accounts(
@@ -131,10 +302,36 @@ impl Provider for NetworkProvider {
         block_numbers: &[u64],
         addresses: &[Vec<Address>],
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
-        self.fetch_accounts(block_numbers, addresses).await
+        self.l2_provider
+            .batch_accounts(block_numbers, addresses)
+            .await
     }
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.fetch_witnesses(block_numbers).await
+        self.l2_provider.batch_witnesses(block_numbers).await
+    }
+
+    async fn batch_l1_headers(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Header>> {
+        self.fetch_l1_headers(block_numbers).await
+    }
+
+    async fn shasta_proposal_event(
+        &self,
+        l1_contract: Address,
+        l1_inclusion_block_number: u64,
+        proposal_id: u64,
+    ) -> RaikoResult<ShastaEventData> {
+        self.fetch_shasta_proposal_event(l1_contract, l1_inclusion_block_number, proposal_id)
+            .await
+    }
+
+    async fn shasta_data_sources(
+        &self,
+        l1_chain_spec: &raiko2_primitives::ChainSpec,
+        proposal_event: &ShastaEventData,
+        blob_proof_type: BlobProofType,
+    ) -> RaikoResult<Vec<InputDataSource>> {
+        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
+            .await
     }
 }

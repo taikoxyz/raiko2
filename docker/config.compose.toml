@@ -1,0 +1,36 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+l1_rpc = "http://host.docker.internal:8545"
+l2_rpc = "http://host.docker.internal:9545"
+l1_chain_id = 1
+l2_chain_id = 167000
+
+[rpc.client]
+timeout_ms = 10000
+concurrency_limit = 32
+
+[rpc.client.retry]
+max_attempts = 3
+initial_backoff_ms = 500
+compute_units_per_second = 1000
+
+[prover]
+prover_type = "risc0"
+
+[prover.risc0]
+bonsai = true
+snark = true
+
+[prover.sp1]
+network = true
+plonk = true
+
+[queue]
+backend = "memory"
+namespace = "raiko2:docker"
+workers = 6
+maintenance_interval_ms = 200
+task_timeout_secs = 14400

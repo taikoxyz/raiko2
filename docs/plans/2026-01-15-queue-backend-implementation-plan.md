@@ -1,5 +1,8 @@
 # Queue Backend Manual Selection Implementation Plan
 
+> Historical implementation plan. It may reference superseded config examples and agent workflows.
+> Use `README.md`, `docs/API.md`, and `config.example.toml` as the current source of truth.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add explicit test coverage for CLI queue-backend selection and document the CLI examples for memory vs. Redis backends in `bin/raiko2`.
@@ -41,10 +44,9 @@ host = "0.0.0.0"
 port = 8080
 
 [rpc]
-l1_rpc = "http://localhost:8545"
-l2_rpc = "http://localhost:9545"
-l1_chain_id = 1
-l2_chain_id = 167000
+pairs = [
+  { network = "taiko_dev", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
 
 [prover]
 prover_type = "risc0"
@@ -82,10 +84,9 @@ host = "0.0.0.0"
 port = 8080
 
 [rpc]
-l1_rpc = "http://localhost:8545"
-l2_rpc = "http://localhost:9545"
-l1_chain_id = 1
-l2_chain_id = 167000
+pairs = [
+  { network = "taiko_dev", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
 
 [prover]
 prover_type = "risc0"

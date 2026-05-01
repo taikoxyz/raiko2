@@ -6,3 +6,5 @@
 TODO.md
 .worktrees/
 test.json
+__pycache__/
+*.pyc

@@ -10,14 +10,13 @@ use core::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// Blob proof type for Taiko.
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BlobProofType {
-    /// Guest runs through the entire computation from blob to Kzg commitment
-    /// then to version hash.
-    #[default]
-    KzgVersionedHash,
     /// Simplified Proof of Equivalence with fiat input in non-aligned field.
+    #[default]
     ProofOfEquivalence,
 }
 
@@ -27,7 +26,6 @@ impl FromStr for BlobProofType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
             "proof_of_equivalence" => Ok(BlobProofType::ProofOfEquivalence),
-            "kzg_versioned_hash" => Ok(BlobProofType::KzgVersionedHash),
             _ => Err(anyhow!("invalid blob proof type")),
         }
     }
@@ -82,8 +80,14 @@ pub struct TaikoManifest<E = (), Cp = ()> {
     pub chain_spec: ManifestChainSpec,
     /// Prover-specific data.
     pub prover_data: TaikoProverData<Cp>,
+    /// The blob proof strategy resolved for the current prover backend.
+    #[serde(default)]
+    pub blob_proof_type: BlobProofType,
     /// Data sources for the proposal.
     pub data_sources: Vec<InputDataSource>,
+    /// L1 header chain covering Shasta anchor checkpoints through the proposal origin block.
+    #[serde(default, with = "l1_header_vec_bincode_compat")]
+    pub l1_ancestor_headers: Vec<Header>,
 }
 
 mod l1_header_bincode_compat {
@@ -120,6 +124,45 @@ mod l1_header_bincode_compat {
     }
 }
 
+mod l1_header_vec_bincode_compat {
+    use super::Header;
+    use alloy_rlp::Decodable;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(headers: &[Header], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return headers.serialize(serializer);
+        }
+
+        let encoded = headers
+            .iter()
+            .map(|header| alloy_rlp::encode(header).clone())
+            .collect::<Vec<_>>();
+        encoded.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Header>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            return Vec::<Header>::deserialize(deserializer);
+        }
+
+        let encoded = Vec::<Vec<u8>>::deserialize(deserializer)?;
+        encoded
+            .into_iter()
+            .map(|bytes| {
+                let mut slice = bytes.as_slice();
+                Header::decode(&mut slice).map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,13 +170,10 @@ mod tests {
     #[test]
     fn test_blob_proof_type_from_str() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(
-            "kzg_versioned_hash".parse::<BlobProofType>()?,
-            BlobProofType::KzgVersionedHash
-        );
-        assert_eq!(
             "proof_of_equivalence".parse::<BlobProofType>()?,
             BlobProofType::ProofOfEquivalence
         );
+        assert!("kzg_versioned_hash".parse::<BlobProofType>().is_err());
         assert!("invalid".parse::<BlobProofType>().is_err());
         Ok(())
     }
@@ -143,6 +183,8 @@ mod tests {
         let manifest: TaikoManifest<(), ()> = TaikoManifest::default();
         assert_eq!(manifest.proposal_id, 0);
         assert!(manifest.data_sources.is_empty());
+        assert!(manifest.l1_ancestor_headers.is_empty());
+        assert_eq!(manifest.blob_proof_type, BlobProofType::ProofOfEquivalence);
     }
 
     #[test]

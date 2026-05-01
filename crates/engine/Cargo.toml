@@ -7,16 +7,21 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+boundless = ["raiko2-prover/boundless"]
+
 [dependencies]
 raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-primitives.workspace = true
+raiko2-primitives-shasta.workspace = true
 raiko2-queue.workspace = true
-# raiko2-stateless.workspace = true # TODO: add validation back
 raiko2-prover.workspace = true
 
 alloy-primitives.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
@@ -24,8 +29,8 @@ async-trait.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 reth.workspace = true
+alloy-consensus.workspace = true
 alloy-trie.workspace = true
 reth-ethereum-primitives.workspace = true
-reth-stateless.workspace = true
 bincode.workspace = true
 raiko2-primitives-shasta.workspace = true

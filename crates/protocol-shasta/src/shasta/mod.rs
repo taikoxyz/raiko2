@@ -4,31 +4,40 @@
 
 #[cfg(feature = "net")]
 pub mod anchor;
-#[cfg(feature = "net")]
 pub mod blob_coder;
-#[cfg(feature = "net")]
 pub mod constants;
-#[cfg(feature = "net")]
+pub mod derivation;
 pub mod error;
 pub mod manifest;
-#[cfg(feature = "net")]
 pub mod payload_helpers;
-#[cfg(feature = "net")]
-pub mod rpc_methods;
 
 #[cfg(feature = "net")]
 pub use anchor::{AnchorTxConstructor, AnchorTxConstructorError, AnchorV4Input};
-#[cfg(feature = "net")]
 pub use blob_coder::BlobCoder;
-#[cfg(feature = "net")]
+pub use derivation::{
+    ParentBlockContext, ProposalMetadata, SourceDerivationError, ValidationContext,
+    ValidationError, apply_inherited_metadata, manifest_is_default, prepare_source_manifest,
+    validate_source_manifest,
+};
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
-#[cfg(feature = "net")]
 pub use payload_helpers::{
     PAYLOAD_ID_VERSION_V2, calculate_shasta_difficulty, encode_extra_data, encode_transactions,
     encode_tx_list, payload_id_to_bytes,
 };
-#[cfg(feature = "net")]
-pub use rpc_methods::DriverRpcMethod;
+
+/// Byte length of Shasta block header extra data.
+pub const SHASTA_EXTRA_DATA_LEN: usize = 7;
+
+/// Decode the Shasta proposal id embedded in block header extra data.
+#[must_use]
+pub fn decode_proposal_id_from_extra_data(extra_data: &[u8]) -> Option<u64> {
+    if extra_data.len() < SHASTA_EXTRA_DATA_LEN {
+        return None;
+    }
+    let mut proposal_bytes = [0_u8; 8];
+    proposal_bytes[2..8].copy_from_slice(&extra_data[1..SHASTA_EXTRA_DATA_LEN]);
+    Some(u64::from_be_bytes(proposal_bytes))
+}
 
 use alloy_primitives::{Address, B256, ChainId};
 use alloy_sol_types::sol;
@@ -419,7 +428,7 @@ impl<'de> Deserialize<'de> for ShastaEventData {
 
 #[cfg(test)]
 mod tests {
-    use super::{Proposed, ShastaEventData};
+    use super::{Proposed, ShastaEventData, decode_proposal_id_from_extra_data};
 
     #[test]
     fn shasta_event_data_from_proposed() -> Result<(), Box<dyn std::error::Error>> {
@@ -427,5 +436,30 @@ mod tests {
         let event = ShastaEventData::from_proposal_event(&proposed)?;
         assert_eq!(event.proposal.id, proposed.id);
         Ok(())
+    }
+
+    #[test]
+    fn decodes_proposal_id_from_extra_data() {
+        let proposal_id = 2_670_u64;
+        let proposal_bytes = proposal_id.to_be_bytes();
+        let extra_data = [
+            0,
+            proposal_bytes[2],
+            proposal_bytes[3],
+            proposal_bytes[4],
+            proposal_bytes[5],
+            proposal_bytes[6],
+            proposal_bytes[7],
+        ];
+
+        assert_eq!(
+            decode_proposal_id_from_extra_data(&extra_data),
+            Some(proposal_id)
+        );
+    }
+
+    #[test]
+    fn returns_none_for_short_extra_data() {
+        assert_eq!(decode_proposal_id_from_extra_data(&[1, 2, 3]), None);
     }
 }

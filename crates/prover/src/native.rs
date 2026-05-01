@@ -4,18 +4,17 @@ use alloy_primitives::{Address, B256, Bytes, keccak256};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    GuestInput, ShastaZkAggregationGuestInput, encode_proof_carry_data,
+    GuestInput, encode_proof_carry_data,
     instance::{
-        ProtocolInstance, ShastaProposalMetadata, ShastaTransition,
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_public_input_from_proof_carry_data_vec, words_to_bytes_be,
         words_to_bytes_le,
     },
 };
-use raiko2_protocol_shasta::shasta::ProofCarryData;
+use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
-use crate::{GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input};
+use crate::{GuestInputCodec, build_shasta_aggregation_input};
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,7 +47,7 @@ where
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
         let input: GuestInput = bincode::deserialize(input.as_ref())
@@ -59,46 +58,18 @@ where
             ));
         }
 
-        let proof_carry_data: ProofCarryData = parse_proof_carry_data(config);
-
-        let first = input.witnesses.first().ok_or_else(|| {
-            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
-        })?;
-        let last = input.witnesses.last().ok_or_else(|| {
-            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
-        })?;
-
-        let transition = ShastaTransition {
-            parent_hash: first.block.header.parent_hash,
-            block_hash: last.block.header.hash_slow(),
-            state_root: last.block.header.state_root,
-        };
-
-        let proposal_metadata = ShastaProposalMetadata {
-            info_hash: B256::default(),
-            proposer: proof_carry_data.transition_input.transition.proposer,
-            proposal_id: proof_carry_data.transition_input.proposal_id,
-            proposed_at: proof_carry_data.transition_input.transition.timestamp,
-        };
-
-        let instance = ProtocolInstance {
-            transition,
-            proposal_metadata,
-            prover: proof_carry_data.transition_input.actual_prover,
-            chain_id: proof_carry_data.chain_id,
-            verifier_address: proof_carry_data.verifier,
-        };
+        let proof_carry_data = input.proof_carry_data;
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let instance_hash = instance.instance_hash();
-        let signature = sign_hash(instance_hash)?;
+        let input_hash = hash_shasta_subproof_input(&proof_carry_data);
+        let signature = sign_hash(input_hash)?;
         let sgx_instance = signer_address()?;
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
         Ok(Proof {
             proof: Some(format!("0x{}", hex::encode(proof))),
-            input: Some(instance_hash),
+            input: Some(input_hash),
             extra_data: Some(extra_data),
             ..Default::default()
         })
@@ -106,12 +77,11 @@ where
 
     async fn aggregate(
         &self,
-        _input: raiko2_primitives::AggregationGuestInput,
+        input: raiko2_primitives::AggregationGuestInput,
         config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let aggregation_input: ShastaZkAggregationGuestInput =
-            parse_shasta_aggregation_input(config)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
         let endianness = config
             .get("native_image_id_endianness")
@@ -215,12 +185,12 @@ fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) 
 #[cfg(test)]
 mod tests {
     use super::NativeProver;
-    use crate::Prover;
+    use crate::{Prover, hash_shasta_subproof_input};
     use alloy_primitives::{Address, B256, keccak256};
     use raiko2_pipeline::NativeBackend;
-    use raiko2_primitives::{AggregationGuestInput, ProverConfig};
+    use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
     use raiko2_primitives_shasta::{
-        GuestInput, ShastaZkAggregationGuestInput,
+        GuestInput, encode_proof_carry_data,
         instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
     };
     use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -231,7 +201,7 @@ mod tests {
     const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
 
     fn recover_address(sig_bytes: &[u8; 65], message: B256) -> Address {
-        let rec_id = secp256k1::ecdsa::RecoveryId::try_from((sig_bytes[64] - 27) as i32)
+        let rec_id = secp256k1::ecdsa::RecoveryId::try_from(i32::from(sig_bytes[64] - 27))
             .expect("recovery id");
         let sig = RecoverableSignature::from_compact(&sig_bytes[..64], rec_id)
             .expect("recoverable signature");
@@ -272,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_proposal_proof_matches_shasta_format() {
-        let prover = NativeProver::default();
+        let prover = NativeProver;
         let config = ProverConfig::default();
         let input = minimal_guest_input();
         let proof = prover
@@ -295,22 +265,24 @@ mod tests {
 
     #[tokio::test]
     async fn native_aggregation_proof_signs_pcd_hash() {
-        let prover = NativeProver::default();
+        let prover = NativeProver;
 
-        let mut proof_carry = ProofCarryData::default();
-        proof_carry.chain_id = 1;
-        let aggregation_input = ShastaZkAggregationGuestInput {
-            image_id: [0u32; 8],
-            block_inputs: vec![B256::ZERO],
-            proof_carry_data_vec: vec![proof_carry.clone()],
-            prover_address: Address::ZERO,
+        let proof_carry = ProofCarryData {
+            chain_id: 1,
+            ..ProofCarryData::default()
         };
-        let config = serde_json::json!({
-            "shasta_zk_aggregation_input": aggregation_input,
-        });
+        let proofs = vec![Proof {
+            input: Some(hash_shasta_subproof_input(&proof_carry)),
+            extra_data: Some(encode_proof_carry_data(&proof_carry).expect("encode carry data")),
+            ..Proof::default()
+        }];
 
         let proof = prover
-            .aggregate(AggregationGuestInput::default(), &config, &NativeBackend)
+            .aggregate(
+                AggregationGuestInput { proofs },
+                &serde_json::json!({}),
+                &NativeBackend,
+            )
             .await
             .expect("aggregate");
 

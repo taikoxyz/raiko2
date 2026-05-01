@@ -1,6 +1,9 @@
 use crate::ManifestBuilder;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
-use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
+use raiko2_primitives::{
+    ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, SupportedChainSpecs,
+};
+use raiko2_protocol::BlobProofType;
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol::ManifestChainSpec;
 use raiko2_protocol_shasta::shasta::{
@@ -22,34 +25,69 @@ impl ShastaManifestBuilder {
         Self
     }
 
-    fn parse_prover_data(ctx: &ProofContext) -> TaikoProverData {
+    fn parse_prover_data(ctx: &ProofContext) -> RaikoResult<TaikoProverData> {
         let prover_address = ctx
             .request
             .prover
-            .as_ref()
-            .and_then(|s| s.parse().ok())
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!("invalid prover address: {err}"))
+            })?
             .unwrap_or_default();
 
-        TaikoProverData {
+        let graffiti = ctx
+            .request
+            .graffiti
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| RaikoError::InvalidRequestConfig(format!("invalid graffiti: {err}")))?
+            .unwrap_or_default();
+
+        let checkpoint = ctx.request.shasta.and_then(|shasta| shasta.checkpoint);
+        let checkpoint = checkpoint
+            .map(|checkpoint| {
+                let block_number = checkpoint.block_number.try_into().map_err(|_| {
+                    RaikoError::InvalidRequestConfig(
+                        "checkpoint.block_number does not fit in uint48".to_string(),
+                    )
+                })?;
+                Ok::<_, RaikoError>(raiko2_protocol_shasta::shasta::Checkpoint {
+                    blockNumber: block_number,
+                    blockHash: checkpoint.block_hash,
+                    stateRoot: checkpoint.state_root,
+                })
+            })
+            .transpose()?;
+
+        Ok(TaikoProverData {
             actual_prover: prover_address,
             designated_prover: None,
-            graffiti: ctx
-                .request
-                .graffiti
-                .as_ref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default(),
+            graffiti,
             parent_transition_hash: None,
-            checkpoint: None,
-            last_anchor_block_number: None,
-        }
+            checkpoint,
+            last_anchor_block_number: ctx
+                .request
+                .shasta
+                .map(|shasta| shasta.last_anchor_block_number),
+        })
     }
 
     fn build_chain_spec(ctx: &ProofContext) -> ManifestChainSpec {
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .unwrap_or_else(|| ChainSpec {
+                name: "unknown".to_string(),
+                chain_id: ctx.request.l2_chain_id,
+                is_taiko: true,
+                ..Default::default()
+            });
         ManifestChainSpec {
-            name: ctx.l2_chain_spec.inner.chain.to_string(),
-            chain_id: ctx.l2_chain_spec.inner.chain.id(),
-            is_taiko: true,
+            name: chain_spec.name,
+            chain_id: chain_spec.chain_id,
+            is_taiko: chain_spec.is_taiko,
         }
     }
 
@@ -65,6 +103,23 @@ impl ShastaManifestBuilder {
             });
         }
         Ok(ShastaEventData::default())
+    }
+
+    fn resolve_blob_proof_type(ctx: &ProofContext) -> RaikoResult<BlobProofType> {
+        let hint = ctx
+            .request
+            .blob_proof_type
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|err| {
+                RaikoError::InvalidRequestConfig(format!("invalid blob_proof_type: {err}"))
+            })?;
+
+        Ok(match ctx.request.proof_type {
+            ProofType::Native | ProofType::Tdx => hint.unwrap_or_default(),
+            ProofType::Sgx | ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
+        })
     }
 
     fn resolve_manifest_payload(
@@ -93,26 +148,30 @@ impl ShastaManifestBuilder {
     ) -> Vec<InputDataSource> {
         let sources = &proposal_event.proposal.sources;
         if sources.is_empty() {
-            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
-                payloads.clone()
-            } else {
-                vec![payload.to_vec()]
-            };
             return vec![InputDataSource {
-                tx_data_from_blob,
+                tx_data_from_calldata: if let Some(payloads) = manifest_payloads {
+                    payloads
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
+                } else {
+                    payload.to_vec()
+                },
                 is_forced_inclusion: false,
                 ..Default::default()
             }];
         }
 
         if sources.len() == 1 {
-            let tx_data_from_blob = if let Some(payloads) = manifest_payloads {
-                payloads.clone()
-            } else {
-                vec![payload.to_vec()]
-            };
             return vec![InputDataSource {
-                tx_data_from_blob,
+                tx_data_from_calldata: if let Some(payloads) = manifest_payloads {
+                    payloads
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
+                } else {
+                    payload.to_vec()
+                },
                 is_forced_inclusion: sources[0].isForcedInclusion,
                 ..Default::default()
             }];
@@ -124,14 +183,17 @@ impl ShastaManifestBuilder {
             for source in sources {
                 let expected = source.blobSlice.blobHashes.len();
                 let end = cursor.saturating_add(expected).min(payloads.len());
-                let blob_payloads = if cursor < end {
-                    payloads[cursor..end].to_vec()
+                let inline_payload = if cursor < end {
+                    payloads[cursor..end]
+                        .iter()
+                        .flat_map(|chunk| chunk.iter().copied())
+                        .collect()
                 } else {
                     Vec::new()
                 };
                 cursor = end;
                 data_sources.push(InputDataSource {
-                    tx_data_from_blob: blob_payloads,
+                    tx_data_from_calldata: inline_payload,
                     is_forced_inclusion: source.isForcedInclusion,
                     ..Default::default()
                 });
@@ -139,18 +201,17 @@ impl ShastaManifestBuilder {
             return data_sources;
         }
 
-        let tx_data_from_blob = vec![payload.to_vec()];
         sources
             .iter()
             .enumerate()
             .map(|(index, source)| {
-                let blob_payloads = if index == sources.len() - 1 {
-                    tx_data_from_blob.clone()
+                let inline_payload = if index == sources.len() - 1 {
+                    payload.to_vec()
                 } else {
                     Vec::new()
                 };
                 InputDataSource {
-                    tx_data_from_blob: blob_payloads,
+                    tx_data_from_calldata: inline_payload,
                     is_forced_inclusion: source.isForcedInclusion,
                     ..Default::default()
                 }
@@ -165,7 +226,7 @@ impl ShastaManifestBuilder {
         let Some(value) = config.get(key) else {
             return Ok(None);
         };
-        serde_json::from_value(value.clone())
+        T::deserialize(value)
             .map(Some)
             .map_err(|e| RaikoError::InvalidRequestConfig(format!("invalid {key}: {e}")))
     }
@@ -225,19 +286,47 @@ impl ManifestBuilder for ShastaManifestBuilder {
         ctx: &ProofContext,
         blocks: &[Block],
     ) -> RaikoResult<TaikoManifest> {
+        Self::build_taiko_manifest(ctx, blocks, None)
+    }
+}
+
+impl ShastaManifestBuilder {
+    /// Build a Shasta manifest using an already-resolved proposal event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if manifest config or payload data is invalid.
+    pub fn taiko_manifest_with_event(
+        ctx: &ProofContext,
+        blocks: &[Block],
+        proposal_event: ShastaEventData,
+    ) -> RaikoResult<TaikoManifest> {
+        Self::build_taiko_manifest(ctx, blocks, Some(proposal_event))
+    }
+
+    fn build_taiko_manifest(
+        ctx: &ProofContext,
+        blocks: &[Block],
+        proposal_event_override: Option<ShastaEventData>,
+    ) -> RaikoResult<TaikoManifest> {
         info!(
             "Creating Taiko manifest for proposal {} with {} blocks",
             ctx.request.proposal_id,
             blocks.len()
         );
 
-        // TODO: Implement actual L1 proposal fetching using raiko2-protocol.
-        let prover_data = Self::parse_prover_data(ctx);
+        // Proposal events are resolved by preflight and may be passed in explicitly by callers.
+        let prover_data = Self::parse_prover_data(ctx)?;
         let chain_spec = Self::build_chain_spec(ctx);
+        let blob_proof_type = Self::resolve_blob_proof_type(ctx)?;
 
         let l1_header = Self::parse_config(&ctx.config, "l1_header")?
             .unwrap_or_else(alloy_consensus::Header::default);
-        let proposal_event = Self::parse_proposal_event(ctx)?;
+        let l1_ancestor_headers =
+            Self::parse_config::<Vec<alloy_consensus::Header>>(&ctx.config, "l1_ancestor_headers")?
+                .unwrap_or_default();
+        let proposal_event =
+            proposal_event_override.map_or_else(|| Self::parse_proposal_event(ctx), Ok)?;
         let mut data_sources =
             Self::parse_config::<Vec<InputDataSource>>(&ctx.config, "shasta_data_sources")?
                 .unwrap_or_default();
@@ -282,7 +371,67 @@ impl ManifestBuilder for ShastaManifestBuilder {
             proposal_event,
             chain_spec,
             prover_data,
+            blob_proof_type,
             data_sources,
+            l1_ancestor_headers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+    use raiko2_primitives::{ProofRequest, ProofType, ProverConfig, ShastaCheckpoint};
+
+    fn context_with_request(request: ProofRequest) -> ProofContext {
+        ProofContext::new(request, ProverConfig::default())
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_invalid_prover_address() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            prover: Some("not-an-address".to_string()),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("invalid prover address"));
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_invalid_graffiti() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            graffiti: Some("not-a-b256".to_string()),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("invalid graffiti"));
+    }
+
+    #[test]
+    fn parse_prover_data_rejects_checkpoint_block_number_overflow() {
+        let ctx = context_with_request(ProofRequest {
+            proof_type: ProofType::Native,
+            shasta: Some(raiko2_primitives::ShastaRequest {
+                l1_inclusion_block_number: 1,
+                last_anchor_block_number: 0,
+                checkpoint: Some(ShastaCheckpoint {
+                    block_number: u64::MAX,
+                    block_hash: B256::default(),
+                    state_root: B256::default(),
+                }),
+            }),
+            ..Default::default()
+        });
+
+        let err = ShastaManifestBuilder::parse_prover_data(&ctx).expect_err("reject");
+
+        assert!(err.to_string().contains("does not fit in uint48"));
     }
 }

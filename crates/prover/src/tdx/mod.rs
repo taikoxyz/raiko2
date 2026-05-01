@@ -1,23 +1,23 @@
 //! TDX Prover for Raiko V2
 //!
-//! This module provides a Trusted Domain Extensions (TDX) prover that runs
-//! inside a TDX-protected VM. Unlike zkVM provers (RISC0, SP1), the TDX prover
-//! trusts the host execution environment, and produces TEE attestation quotes
-//! instead of zero-knowledge proofs.
+//! Trusted Domain Extensions (TDX) prover that runs inside a TDX-protected VM.
+//! Unlike zkVM provers (RISC0, SP1) the TDX prover trusts the host execution
+//! environment and produces a TEE attestation quote bound to the proof's
+//! public input hash.
 //!
 //! ## Bootstrap
 //!
-//! On the first proof request the prover auto-bootstraps:
+//! On first use the prover auto-bootstraps:
 //! 1. Generates a fresh secp256k1 private key
 //! 2. Requests a TDX attestation quote embedding the derived Ethereum address
 //! 3. Persists key + quote to `~/.config/raiko2/tdx/`
 //!
 //! ## Proof flow
 //!
-//! 1. Compute the protocol instance hash from the block data and carry data
+//! 1. Compute the Shasta sub-proof input hash from `GuestInput::proof_carry_data`
 //! 2. Sign the hash with the bootstrapped private key
-//! 3. Build the 89-byte proof (`instance_id` ‖ address ‖ signature)
-//! 4. Request a TDX attestation quote over the instance hash
+//! 3. Build the 89-byte SGX-compatible proof (`instance_id` ‖ address ‖ signature)
+//! 4. Request a TDX attestation quote over the input hash
 
 mod attestation_client;
 pub mod config;
@@ -25,22 +25,22 @@ mod proof;
 pub mod signature;
 pub mod types;
 
-use raiko2_primitives_shasta::instance::shasta_aggregation_output_from_proof_carry_data_vec;
 pub use types::{TdxConfig, TdxResponse};
 
-use alloy_primitives::{Bytes, Uint};
+use alloy_primitives::Bytes;
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data};
+use raiko2_primitives::{
+    AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, RaikoResult,
+};
+use raiko2_primitives_shasta::{
+    GuestInput, encode_proof_carry_data,
+    instance::shasta_aggregation_output_from_proof_carry_data_vec,
+};
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData};
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::{
-    GuestInputCodec, parse_proof_carry_data, parse_shasta_aggregation_input,
-    validate_shasta_aggregation_lengths,
-};
+use crate::{GuestInputCodec, build_shasta_aggregation_input};
 
 /// TDX Prover for Shasta proposal and aggregation proofs.
 pub struct TdxProver {
@@ -61,8 +61,7 @@ impl TdxProver {
 
     /// Ensure the prover has been bootstrapped (key + quote generated).
     ///
-    /// This is idempotent — if bootstrap data already exists on disk it is reused.
-    /// Call at startup to fail fast if the TDX environment is misconfigured.
+    /// Idempotent — reuses existing bootstrap data on disk if present.
     ///
     /// # Errors
     ///
@@ -76,6 +75,35 @@ impl TdxProver {
             })
             .await?;
         Ok(())
+    }
+
+    /// Return the bootstrap quote, public key, nonce, and attestation metadata.
+    ///
+    /// Bootstraps lazily if necessary, then reads `~/.config/raiko2/tdx/bootstrap.json`.
+    /// Mirrors raiko's `get_guest_data` for on-chain prover registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if bootstrap or disk access fails.
+    pub async fn get_guest_data(&self) -> RaikoResult<serde_json::Value> {
+        self.ensure_bootstrapped().await?;
+
+        let bootstrap = config::read_bootstrap()
+            .map_err(|e| RaikoError::Guest(format!("Failed to read TDX bootstrap data: {e}")))?;
+
+        let issuer_type = config::issuer_proof_type()
+            .map_err(|e| RaikoError::Guest(format!("Failed to resolve TDX issuer type: {e}")))?
+            .to_string();
+
+        Ok(serde_json::json!({
+            issuer_type: {
+                "issuer_type": bootstrap.issuer_type,
+                "public_key": bootstrap.public_key,
+                "quote": bootstrap.quote,
+                "nonce": bootstrap.nonce,
+                "metadata": bootstrap.metadata,
+            }
+        }))
     }
 }
 
@@ -101,13 +129,14 @@ where
     async fn prove_encoded(
         &self,
         input: Bytes,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
         info!("Starting TDX proposal proof generation...");
 
-        // Auto-bootstrap on first call
         self.ensure_bootstrapped().await?;
+        config::validate_issuer_type(ProofType::Tdx)
+            .map_err(|e| RaikoError::Guest(format!("TDX issuer mismatch: {e}")))?;
 
         let input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
@@ -118,29 +147,10 @@ where
             ));
         }
 
-        let mut proof_carry_data: ProofCarryData = parse_proof_carry_data(config);
-
-        // Update checkpoint from actual block execution results.
-        // This is the source of truth — matches raiko v1 behaviour where the
-        // checkpoint is always derived from the executed blocks, not config.
-        let last = input.witnesses.last().ok_or_else(|| {
-            RaikoError::Guest("GuestInput must contain at least one witness".to_string())
-        })?;
-
-        proof_carry_data.transition_input.checkpoint = Checkpoint {
-            blockNumber: Uint::from(last.block.header.number),
-            blockHash: last.block.header.hash_slow(),
-            stateRoot: last.block.header.state_root,
-        };
-
-        // Use the same domain-separated hash as raiko v1's TDX prover.
-        // `hash_shasta_subproof_input` hashes all TransitionInputData fields
-        // (proposal linkage, prover identity, full checkpoint) with a
-        // VERIFY_PROOF domain tag, chain_id, and verifier address.
+        let proof_carry_data = input.proof_carry_data;
         let instance_hash = hash_shasta_subproof_input(&proof_carry_data);
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
 
-        // Generate TDX proof: sign + attestation quote
         let prove_data = proof::prove(
             &self.config.socket_path,
             self.config.instance_id,
@@ -162,7 +172,7 @@ where
     async fn aggregate(
         &self,
         input: AggregationGuestInput,
-        config: &ProverConfig,
+        _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
         info!(
@@ -170,11 +180,11 @@ where
             input.proofs.len()
         );
 
-        // Auto-bootstrap on first call
         self.ensure_bootstrapped().await?;
+        config::validate_issuer_type(ProofType::Tdx)
+            .map_err(|e| RaikoError::Guest(format!("TDX issuer mismatch: {e}")))?;
 
-        let aggregation_input = parse_shasta_aggregation_input(config)?;
-        validate_shasta_aggregation_lengths(&aggregation_input)?;
+        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
         let sgx_instance = config::load_private_key()
             .map(|key| signature::address_from_private_key(&key))
@@ -190,7 +200,6 @@ where
             )
         })?;
 
-        // Collect sub-proof bytes + input hashes for verification
         let sub_proofs = input
             .proofs
             .iter()
@@ -227,8 +236,6 @@ where
         .into())
     }
 }
-
-// ────────────────────────── Bootstrap ──────────────────────────
 
 /// Bootstrap the TDX prover (idempotent).
 ///

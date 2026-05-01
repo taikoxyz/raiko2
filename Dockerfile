@@ -1,125 +1,84 @@
-# Raiko V2 Dockerfile - zkVM only (RISC0 + SP1)
-# No SGX support
+# Raiko2 runtime image for Docker and Docker Compose deployments.
+# This image intentionally excludes SGX-specific setup.
 
-FROM rust:1.85.0 AS base-builder
+FROM rust:1.93.0-bookworm AS chef
+
+ARG BIN_FEATURES=""
+ARG CARGO_CHEF_VERSION=0.1.77
 
 ENV DEBIAN_FRONTEND=noninteractive
-ARG BUILD_FLAGS=""
+ENV RUSTUP_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
 
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
     build-essential \
     clang \
-    pkg-config \
+    libprotobuf-dev \
     libssl-dev \
-    jq \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    protobuf-compiler \
+    pkg-config \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/raiko
+RUN cargo install --locked cargo-chef --version ${CARGO_CHEF_VERSION}
 
-# Install zkVM toolchains
-COPY script/install.sh script/install.sh
-COPY makefile makefile
+WORKDIR /app
 
-# Install RISC0 toolchain
-ENV TARGET=risc0
-RUN mkdir -p ~/.cargo/bin && make install
+FROM chef AS planner
 
-# Install SP1 toolchain
-ENV TARGET=sp1
-RUN make install
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY bin ./bin
+COPY xtask ./xtask
+COPY config ./config
+COPY config.example.toml ./
+COPY test/guest_inputs ./test/guest_inputs
 
-# =============================================================================
-FROM base-builder AS builder
+RUN cargo chef prepare --recipe-path recipe.json
 
-WORKDIR /opt/raiko
+FROM chef AS builder
 
-# Copy workspace files
-COPY Cargo.lock Cargo.lock
-COPY Cargo.toml Cargo.toml
-COPY rust-toolchain rust-toolchain
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY --from=planner /app/recipe.json ./recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
 
-# Copy raiko2 crates
-COPY crates/primitives crates/primitives
-COPY crates/pipeline crates/pipeline
-COPY crates/provider crates/provider
-COPY crates/stateless crates/stateless
-COPY crates/prover crates/prover
-COPY crates/engine crates/engine
-COPY crates/protocol crates/protocol
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY bin ./bin
+COPY xtask ./xtask
+COPY config ./config
+COPY config.example.toml ./
+COPY test/guest_inputs ./test/guest_inputs
 
-# Copy raiko2 binary
-COPY bin/raiko2 bin/raiko2
+RUN cargo +1.93.0 build --release -p raiko2 ${BIN_FEATURES}
 
-# Copy guest programs
-COPY raiko-guests raiko-guests
+FROM debian:bookworm-slim AS runtime
 
-# Copy required legacy crates (for dependencies)
-COPY lib lib
-COPY core core
-COPY host host
-COPY provers provers
-COPY pipeline pipeline
-COPY harness harness
-COPY taskdb taskdb
-COPY reqpool reqpool
-COPY reqactor reqactor
-COPY ballot ballot
-COPY redis-derive redis-derive
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
 
-# Copy build scripts
-COPY script script
-
-# Copy KZG settings
-COPY kzg_settings_raw.bin kzg_settings_raw.bin
-
-# Build guest programs
-ENV TARGET=risc0
-RUN echo "Building RISC0 guests..." && \
-    ./script/build-guest.sh risc0 2>&1 | tee /tmp/risc0_build.log || true
-
-ENV TARGET=sp1
-RUN echo "Building SP1 guests..." && \
-    ./script/build-guest.sh sp1 2>&1 | tee /tmp/sp1_build.log || true
-
-# Build raiko2 binary
-RUN echo "Building raiko2 binary..." && \
-    cargo build --release -p raiko2 ${BUILD_FLAGS}
-
-# =============================================================================
-FROM ubuntu:22.04 AS raiko2
-
-RUN mkdir -p \
-    /opt/raiko/bin \
-    /etc/raiko \
-    /var/log/raiko \
-    /tmp/risc0-cache
-
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
-    openssl \
-    curl \
-    jq \
-    && rm -rf /var/lib/apt/lists/*
+    curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy binary
-COPY --from=builder /opt/raiko/target/release/raiko2 /opt/raiko/bin/
+WORKDIR /app
 
-# Copy config files
-COPY --from=builder /opt/raiko/host/config/chain_spec_list_default.json /etc/raiko/
+RUN mkdir -p /etc/raiko2
 
-# Copy environment file with image IDs (if exists)
-COPY --from=builder /opt/raiko/.env* /opt/raiko/ 2>/dev/null || true
+COPY --from=builder /app/target/release/raiko2 /usr/local/bin/raiko2
+COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
+COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json
+COPY --from=builder /app/config.example.toml /etc/raiko2/config.example.toml
 
-WORKDIR /opt/raiko/bin
-
-# Default configuration
 ENV RAIKO2_HOST=0.0.0.0
 ENV RAIKO2_PORT=8080
+ENV RAIKO2_CONFIG=/etc/raiko2/config.toml
+ENV RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf
 ENV RUST_LOG=info
 
 EXPOSE 8080
 
-ENTRYPOINT ["/opt/raiko/bin/raiko2"]
-CMD ["--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["raiko2"]
+CMD []

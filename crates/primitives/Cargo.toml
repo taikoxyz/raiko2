@@ -7,17 +7,24 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+kzg-host = ["dep:c-kzg"]
+
 [dependencies]
 
 alethia-reth-chainspec.workspace = true
 
 reth-revm.workspace = true
 reth-chainspec.workspace = true
+reth-consensus.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
-reth-stateless.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-eips.workspace = true
+alloy-rpc-types-debug.workspace = true
+alloy-rlp.workspace = true
 
 serde.workspace = true
 serde_with.workspace = true
@@ -27,7 +34,16 @@ anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 
-kzg = { workspace = true, features = ["bincode"] }
-kzg_traits.workspace = true
+c-kzg = { workspace = true, optional = true }
 
 bincode.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+critical-section = { version = "1.2", features = ["std"] }
+
+[target.'cfg(target_vendor = "succinct")'.dependencies]
+kzg-rs = { workspace = true, default-features = false, features = ["sp1"] }
+
+[target.'cfg(not(target_vendor = "succinct"))'.dependencies]
+kzg-rs = { workspace = true, default-features = false, features = ["standard"] }

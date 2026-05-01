@@ -17,15 +17,23 @@ path = "src/main.rs"
 [dependencies]
 # Raiko2 crates
 raiko2-primitives.workspace = true
+raiko2-primitives-shasta.workspace = true
+raiko2-protocol-shasta.workspace = true
 raiko2-engine.workspace = true
 raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-prover.workspace = true
 raiko2-queue.workspace = true
+raiko2-runtime.workspace = true
 
 alloy.workspace = true
+alloy-signer-local.workspace = true
+alloy-primitives.workspace = true
+alloy-trie.workspace = true
 axum.workspace = true
+reth-ethereum-primitives.workspace = true
 tower-http.workspace = true
+url.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -41,24 +49,21 @@ clap = { version = "4", features = ["derive", "env"] }
 # Logging
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+prometheus.workspace = true
 
 anyhow.workspace = true
+async-trait.workspace = true
+bincode.workspace = true
 
 # Utilities
 dotenvy = "0.15"
 
 [features]
-default = ["zkvm"]
-zkvm = ["raiko2-prover/zkvm"]
+default = []
+boundless = ["raiko2-engine/boundless", "raiko2-prover/boundless"]
 redis-queue = ["raiko2-queue/redis"]
 tdx = ["raiko2-prover/tdx"]
 
 [dev-dependencies]
 tower.workspace = true
 http-body-util = "0.1"
-async-trait.workspace = true
-raiko2-primitives-shasta.workspace = true
-reth-ethereum-primitives.workspace = true
-reth-stateless.workspace = true
-alloy-primitives.workspace = true
-alloy-trie.workspace = true

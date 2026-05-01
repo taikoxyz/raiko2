@@ -13,22 +13,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alloy::{
+    consensus::TrieAccount,
     consensus::transaction::SignerRecoverable,
+    primitives::{Address, B256, address},
     providers::{Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
+    rpc::types::EIP1186AccountProofResponse,
 };
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use raiko2_primitives::chain_spec::SupportedChainSpecs;
+use raiko2_primitives::{ExecutionWitness, WitnessStateNode};
 use raiko2_provider::{NetworkProvider, Provider};
 use raiko2_stateless::validate_block;
 use reth_ethereum_primitives::Block;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+const GOLDEN_TOUCH_ADDRESS: alloy_primitives::Address =
+    address!("0000777735367b36bc9b61c50022d9d0700db4ec");
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    /// Optional chain spec JSON file merged over the built-in chain spec list.
+    #[arg(long)]
+    chain_spec_file: Option<PathBuf>,
+
     /// Upstream RPC URL to fetch block/witness data.
     #[arg(long, env)]
     rpc_url: String,
@@ -41,43 +58,38 @@ struct Args {
     #[arg(long)]
     chain_id: Option<u64>,
 
-    /// Whether the RPC supports `debug_executionWitness`.
-    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
-    debug_witness: bool,
-
     /// Print a small timing summary (network fetches + validation).
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     metrics: bool,
+
+    /// Compare the witness against the golden-touch account proof from `eth_getProof`.
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
+    diagnose_golden_touch: bool,
+
+    /// Compare the witness against the account proof for an arbitrary address.
+    #[arg(long = "diagnose-address")]
+    diagnose_addresses: Vec<Address>,
+
+    /// Compare the witness against the account+storage proof for an arbitrary address using the
+    /// witness storage-key set.
+    #[arg(long = "diagnose-storage-address")]
+    diagnose_storage_addresses: Vec<Address>,
+
+    /// Temporarily merge the golden-touch account proof into the witness and validate again.
+    #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
+    supplement_golden_touch_proof: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Enable tracing subscriber for debug/pretty log output.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
-        )
-        .init();
+    init_tracing();
 
     let args = Args::parse();
-
     let mut metrics = RunMetrics::new(args.metrics);
-
-    let url = reqwest::Url::parse(&args.rpc_url).context("Invalid rpc_url")?;
-    let rpc_client = RpcClient::builder().http(url);
-    let rpc_provider = ProviderBuilder::new().connect_client(rpc_client);
-
-    let chain_id = if let Some(chain_id) = args.chain_id {
-        chain_id
-    } else {
-        let start = Instant::now();
-        let res = rpc_provider.get_chain_id().await;
-        metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
-        res.context("eth_chainId failed")?
-    };
-
-    let chain_spec = SupportedChainSpecs::default()
+    let rpc_provider = build_rpc_provider(&args)?;
+    let chain_id = resolve_chain_id(&args, &rpc_provider, &mut metrics).await?;
+    let supported_chain_specs = load_supported_chain_specs(args.chain_spec_file.as_ref())?;
+    let chain_spec = supported_chain_specs
         .get_chain_spec_with_chain_id(chain_id)
         .context("Unsupported chain_id")?;
     if !chain_spec.is_taiko() {
@@ -89,10 +101,97 @@ async fn main() -> Result<()> {
         .context("Failed to convert to Taiko chain spec")?;
     let evm_config = alethia_reth_block::config::TaikoEvmConfig::new(taiko_chain_spec.clone());
 
-    let provider =
-        NetworkProvider::new(&args.rpc_url)?.with_debug_witness_support(args.debug_witness);
+    let provider = NetworkProvider::new_pair_with_chain_specs_and_config(
+        &args.rpc_url,
+        &args.rpc_url,
+        None,
+        Some(chain_spec.clone()),
+        None,
+        &raiko2_provider::RpcClientConfig::default(),
+    )?;
+    let mut validation_env = ValidationEnv {
+        chain_spec: &taiko_chain_spec,
+        evm_config: &evm_config,
+        metrics: &mut metrics,
+    };
+    let (blocks, witnesses, accounts) =
+        fetch_inputs(&provider, args.block_number, validation_env.metrics).await?;
+    validation_env.metrics.set_block_stats(&blocks);
 
-    let block_numbers = vec![args.block_number];
+    for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
+        diagnose_witness_addresses(&args, &rpc_provider, &block, &witness)
+            .await
+            .context("diagnose witness address coverage")?;
+
+        if maybe_validate_with_golden_touch(
+            &args,
+            &rpc_provider,
+            &block,
+            &witness,
+            &callers,
+            &mut validation_env,
+        )
+        .await?
+        {
+            continue;
+        }
+
+        let start = Instant::now();
+        let block_hash =
+            validate_block_captured(block, &witness, callers, &taiko_chain_spec, &evm_config)
+                .context("Stateless validation failed")?;
+        validation_env
+            .metrics
+            .observe("stateless.validate_block", start.elapsed(), 1);
+        println!("stateless validation ok: {block_hash:?}");
+    }
+
+    validation_env
+        .metrics
+        .print_summary(chain_id, args.block_number);
+    Ok(())
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
+        )
+        .init();
+}
+
+fn build_rpc_provider(args: &Args) -> Result<impl AlloyProvider> {
+    let url = reqwest::Url::parse(&args.rpc_url).context("Invalid rpc_url")?;
+    let rpc_client = RpcClient::builder().http(url);
+    Ok(ProviderBuilder::new().connect_client(rpc_client))
+}
+
+async fn resolve_chain_id<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    metrics: &mut RunMetrics,
+) -> Result<u64> {
+    if let Some(chain_id) = args.chain_id {
+        return Ok(chain_id);
+    }
+
+    let start = Instant::now();
+    let res = rpc_provider.get_chain_id().await;
+    metrics.observe("rpc.eth_chainId", start.elapsed(), 1);
+    res.context("eth_chainId failed")
+}
+
+async fn fetch_inputs(
+    provider: &NetworkProvider,
+    block_number: u64,
+    metrics: &mut RunMetrics,
+) -> Result<(
+    Vec<Block>,
+    Vec<ExecutionWitness>,
+    Vec<alloy_primitives::map::AddressMap<TrieAccount>>,
+)> {
+    let block_numbers = vec![block_number];
     let blocks = {
         let start = Instant::now();
         let res = provider.batch_blocks(&block_numbers).await;
@@ -113,7 +212,6 @@ async fn main() -> Result<()> {
         );
         res.context("Failed to fetch witnesses")?
     };
-
     let signers = blocks.iter().map(collect_signers).collect::<Vec<_>>();
     let signer_count = signers.iter().map(Vec::len).sum::<usize>();
     let accounts = {
@@ -127,18 +225,281 @@ async fn main() -> Result<()> {
         bail!("Provider returned mismatched input lengths");
     }
 
-    metrics.set_block_stats(&blocks);
+    Ok((blocks, witnesses, accounts))
+}
 
-    for ((block, witness), callers) in blocks.into_iter().zip(witnesses).zip(accounts) {
-        let start = Instant::now();
-        let block_hash = validate_block(block, &witness, callers, &taiko_chain_spec, &evm_config)
-            .context("Stateless validation failed")?;
-        metrics.observe("stateless.validate_block", start.elapsed(), 1);
-        println!("stateless validation ok: {block_hash:?}");
+struct ValidationEnv<'a> {
+    chain_spec: &'a std::sync::Arc<TaikoChainSpec>,
+    evm_config: &'a alethia_reth_block::config::TaikoEvmConfig,
+    metrics: &'a mut RunMetrics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WitnessDiagnosisKind {
+    AccountOnly,
+    StorageBacked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WitnessDiagnosisTarget {
+    address: Address,
+    kind: WitnessDiagnosisKind,
+}
+
+async fn diagnose_witness_addresses<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    block: &Block,
+    witness: &ExecutionWitness,
+) -> Result<()> {
+    let mut targets = Vec::new();
+    if args.diagnose_golden_touch {
+        targets.push(WitnessDiagnosisTarget {
+            address: GOLDEN_TOUCH_ADDRESS,
+            kind: WitnessDiagnosisKind::AccountOnly,
+        });
+    }
+    targets.extend(
+        args.diagnose_addresses
+            .iter()
+            .copied()
+            .map(|address| WitnessDiagnosisTarget {
+                address,
+                kind: WitnessDiagnosisKind::AccountOnly,
+            }),
+    );
+    targets.extend(
+        args.diagnose_storage_addresses
+            .iter()
+            .copied()
+            .map(|address| WitnessDiagnosisTarget {
+                address,
+                kind: WitnessDiagnosisKind::StorageBacked,
+            }),
+    );
+    targets.sort_unstable_by_key(|target| {
+        (
+            target.address,
+            matches!(target.kind, WitnessDiagnosisKind::StorageBacked),
+        )
+    });
+    targets.dedup();
+
+    if targets.is_empty() {
+        return Ok(());
     }
 
-    metrics.print_summary(chain_id, args.block_number);
+    let parent_block_number = block
+        .header
+        .number
+        .checked_sub(1)
+        .context("cannot diagnose witness coverage for genesis block")?;
+    let witness_storage_keys = witness_storage_keys(witness);
+
+    for target in targets {
+        let storage_keys = match target.kind {
+            WitnessDiagnosisKind::AccountOnly => Vec::new(),
+            WitnessDiagnosisKind::StorageBacked => witness_storage_keys.clone(),
+        };
+        let proof = fetch_account_proof(
+            rpc_provider,
+            target.address,
+            storage_keys,
+            parent_block_number,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "fetch witness diagnosis proof for address {}",
+                target.address
+            )
+        })?;
+
+        if target.address == GOLDEN_TOUCH_ADDRESS
+            && target.kind == WitnessDiagnosisKind::AccountOnly
+        {
+            print_golden_touch_coverage(witness, &proof);
+        } else {
+            print_address_coverage(witness, &proof, target);
+        }
+    }
+
     Ok(())
+}
+
+async fn maybe_validate_with_golden_touch<P: AlloyProvider>(
+    args: &Args,
+    rpc_provider: &P,
+    block: &Block,
+    witness: &ExecutionWitness,
+    callers: &alloy_primitives::map::AddressMap<TrieAccount>,
+    validation_env: &mut ValidationEnv<'_>,
+) -> Result<bool> {
+    if !args.diagnose_golden_touch && !args.supplement_golden_touch_proof {
+        return Ok(false);
+    }
+
+    let parent_block_number = block
+        .header
+        .number
+        .checked_sub(1)
+        .context("cannot diagnose golden-touch proof for genesis block")?;
+    let proof = fetch_account_proof(
+        rpc_provider,
+        GOLDEN_TOUCH_ADDRESS,
+        Vec::new(),
+        parent_block_number,
+    )
+    .await
+    .context("fetch golden-touch account proof")?;
+
+    if !args.supplement_golden_touch_proof {
+        return Ok(false);
+    }
+
+    let mut supplemented_witness = witness.clone();
+    supplemented_witness.state.extend(
+        proof
+            .account_proof
+            .iter()
+            .cloned()
+            .map(WitnessStateNode::from_bytes),
+    );
+    supplemented_witness.state =
+        ExecutionWitness::canonicalize_state_nodes(supplemented_witness.state);
+
+    let start = Instant::now();
+    let block_hash = validate_block_captured(
+        block.clone(),
+        &supplemented_witness,
+        callers.clone(),
+        validation_env.chain_spec,
+        validation_env.evm_config,
+    )
+    .context("Stateless validation failed after supplementing golden-touch proof")?;
+    validation_env
+        .metrics
+        .observe("stateless.validate_block.supplemented", start.elapsed(), 1);
+    println!("stateless validation ok after supplement: {block_hash:?}");
+    Ok(true)
+}
+
+async fn fetch_account_proof<P: AlloyProvider>(
+    rpc_provider: &P,
+    address: Address,
+    storage_keys: Vec<B256>,
+    block_number: u64,
+) -> Result<EIP1186AccountProofResponse> {
+    rpc_provider
+        .get_proof(address, storage_keys)
+        .number(block_number)
+        .await
+        .context("eth_getProof failed")
+}
+
+fn witness_storage_keys(witness: &ExecutionWitness) -> Vec<B256> {
+    let mut keys = witness
+        .keys
+        .iter()
+        .filter(|key| key.len() == B256::len_bytes())
+        .map(|key| B256::from_slice(key.as_ref()))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+fn print_golden_touch_coverage(witness: &ExecutionWitness, proof: &EIP1186AccountProofResponse) {
+    let witness_hashes = witness
+        .state
+        .iter()
+        .map(|node| node.hash)
+        .collect::<HashSet<_>>();
+    let missing = proof
+        .account_proof
+        .iter()
+        .map(alloy_primitives::keccak256)
+        .filter(|hash| !witness_hashes.contains(hash))
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "golden_touch_proof_nodes={} missing_from_witness={} address={:?}",
+        proof.account_proof.len(),
+        missing.len(),
+        proof.address
+    );
+    if !missing.is_empty() {
+        eprintln!("golden_touch_missing_hashes={missing:?}");
+    }
+}
+
+fn print_address_coverage(
+    witness: &ExecutionWitness,
+    proof: &EIP1186AccountProofResponse,
+    target: WitnessDiagnosisTarget,
+) {
+    let witness_hashes = witness
+        .state
+        .iter()
+        .map(|node| node.hash)
+        .collect::<HashSet<_>>();
+    let missing_account = proof
+        .account_proof
+        .iter()
+        .map(alloy_primitives::keccak256)
+        .filter(|hash| !witness_hashes.contains(hash))
+        .collect::<Vec<_>>();
+    let missing_storage = proof
+        .storage_proof
+        .iter()
+        .flat_map(|storage_proof| storage_proof.proof.iter())
+        .map(alloy_primitives::keccak256)
+        .filter(|hash| !witness_hashes.contains(hash))
+        .collect::<Vec<_>>();
+    let mode = match target.kind {
+        WitnessDiagnosisKind::AccountOnly => "account",
+        WitnessDiagnosisKind::StorageBacked => "storage",
+    };
+
+    eprintln!(
+        "diagnose_{mode}_address={} account_proof_nodes={} missing_account_nodes={} storage_slots={} missing_storage_nodes={}",
+        target.address,
+        proof.account_proof.len(),
+        missing_account.len(),
+        proof.storage_proof.len(),
+        missing_storage.len(),
+    );
+    if !missing_account.is_empty() {
+        eprintln!("diagnose_{mode}_address_missing_account_hashes={missing_account:?}");
+    }
+    if !missing_storage.is_empty() {
+        eprintln!("diagnose_{mode}_address_missing_storage_hashes={missing_storage:?}");
+    }
+}
+
+fn validate_block_captured(
+    block: Block,
+    witness: &ExecutionWitness,
+    callers: alloy_primitives::map::AddressMap<TrieAccount>,
+    chain_spec: &std::sync::Arc<TaikoChainSpec>,
+    evm_config: &alethia_reth_block::config::TaikoEvmConfig,
+) -> Result<alloy_primitives::B256> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        validate_block(block, witness, callers, chain_spec, evm_config)
+    })) {
+        Ok(result) => result.context("validate_block returned error"),
+        Err(payload) => bail!("validate_block panicked: {}", panic_message(payload)),
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
+    }
 }
 
 fn collect_signers(block: &Block) -> Vec<alloy_primitives::Address> {
@@ -147,6 +508,13 @@ fn collect_signers(block: &Block) -> Vec<alloy_primitives::Address> {
         .transactions()
         .filter_map(|tx| tx.recover_signer().ok())
         .collect()
+}
+
+fn load_supported_chain_specs(chain_spec_file: Option<&PathBuf>) -> Result<SupportedChainSpecs> {
+    match chain_spec_file {
+        Some(path) => SupportedChainSpecs::merge_from_file(path.clone()),
+        None => Ok(SupportedChainSpecs::default()),
+    }
 }
 
 #[derive(Debug, Default)]

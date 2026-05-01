@@ -9,6 +9,7 @@ use raiko2_primitives::{ProofContext, RaikoError, RaikoResult};
 use raiko2_provider::Provider;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr, sync::Arc};
 
 pub mod forks;
 mod pipeline;
@@ -38,7 +39,7 @@ pub enum PipelineKey {
     ShastaRisc0,
     ShastaSp1,
     ShastaNative,
-    ShastaAgentRisc0,
+    ShastaRisc0Boundless,
     ShastaTdx,
 }
 
@@ -46,12 +47,227 @@ impl PipelineKey {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
-            PipelineKey::ShastaRisc0 => "shasta-risc0",
-            PipelineKey::ShastaSp1 => "shasta-sp1",
-            PipelineKey::ShastaNative => "shasta-native",
-            PipelineKey::ShastaAgentRisc0 => "shasta-agent-risc0",
-            PipelineKey::ShastaTdx => "shasta-tdx",
+            PipelineKey::ShastaRisc0 => "shasta-risc0-local",
+            PipelineKey::ShastaSp1 => "shasta-sp1-local",
+            PipelineKey::ShastaNative => "shasta-native-local",
+            PipelineKey::ShastaRisc0Boundless => "shasta-risc0-boundless",
+            PipelineKey::ShastaTdx => "shasta-tdx-local",
         }
+    }
+
+    #[must_use]
+    pub const fn route(self) -> PipelineRoute {
+        match self {
+            Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
+            Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+            Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            Self::ShastaRisc0Boundless => {
+                PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
+            }
+            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
+        }
+    }
+}
+
+impl fmt::Display for PipelineKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PipelineKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "shasta-risc0-local" => Ok(Self::ShastaRisc0),
+            "shasta-sp1-local" => Ok(Self::ShastaSp1),
+            "shasta-native-local" => Ok(Self::ShastaNative),
+            "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Boundless),
+            "shasta-tdx-local" => Ok(Self::ShastaTdx),
+            _ => Err(format!("Unknown pipeline key: {s}")),
+        }
+    }
+}
+
+/// Guest execution system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestSystem {
+    #[default]
+    Risc0,
+    Sp1,
+    Native,
+    Tdx,
+}
+
+impl GuestSystem {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Risc0 => "risc0",
+            Self::Sp1 => "sp1",
+            Self::Native => "native",
+            Self::Tdx => "tdx",
+        }
+    }
+}
+
+impl fmt::Display for GuestSystem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GuestSystem {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "risc0" => Ok(Self::Risc0),
+            "sp1" => Ok(Self::Sp1),
+            "native" => Ok(Self::Native),
+            "tdx" => Ok(Self::Tdx),
+            _ => Err(format!("Unknown guest_system: {s}")),
+        }
+    }
+}
+
+/// Prover runner implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunnerKind {
+    #[default]
+    Local,
+    Boundless,
+}
+
+impl RunnerKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Boundless => "boundless",
+        }
+    }
+}
+
+impl fmt::Display for RunnerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RunnerKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "boundless" => Ok(Self::Boundless),
+            _ => Err(format!("Unknown runner: {s}")),
+        }
+    }
+}
+
+/// Canonical route for a proving request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PipelineRoute {
+    pub guest_system: GuestSystem,
+    pub runner: RunnerKind,
+}
+
+impl PipelineRoute {
+    #[must_use]
+    pub const fn new(guest_system: GuestSystem, runner: RunnerKind) -> Self {
+        Self {
+            guest_system,
+            runner,
+        }
+    }
+
+    #[must_use]
+    pub const fn proof_type(self) -> raiko2_primitives::ProofType {
+        match self.guest_system {
+            GuestSystem::Risc0 => raiko2_primitives::ProofType::Risc0,
+            GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
+            GuestSystem::Native => raiko2_primitives::ProofType::Native,
+            GuestSystem::Tdx => raiko2_primitives::ProofType::Tdx,
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the guest system and runner combination is not supported by the
+    /// current canonical pipeline set.
+    pub fn pipeline_key(self) -> Result<PipelineKey, String> {
+        match (self.guest_system, self.runner) {
+            (GuestSystem::Risc0, RunnerKind::Local) => Ok(PipelineKey::ShastaRisc0),
+            (GuestSystem::Risc0, RunnerKind::Boundless) => Ok(PipelineKey::ShastaRisc0Boundless),
+            (GuestSystem::Sp1, RunnerKind::Local) => Ok(PipelineKey::ShastaSp1),
+            (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
+            (GuestSystem::Tdx, RunnerKind::Local) => Ok(PipelineKey::ShastaTdx),
+            (GuestSystem::Sp1, RunnerKind::Boundless) => {
+                Err("Unsupported proving route: sp1/boundless".to_string())
+            }
+            (GuestSystem::Native, RunnerKind::Boundless) => {
+                Err("Unsupported proving route: native/boundless".to_string())
+            }
+            (GuestSystem::Tdx, RunnerKind::Boundless) => {
+                Err("Unsupported proving route: tdx/boundless".to_string())
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn from_pipeline_key(pipeline_key: PipelineKey) -> Self {
+        pipeline_key.route()
+    }
+}
+
+impl fmt::Display for PipelineRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.guest_system, self.runner)
+    }
+}
+
+impl FromStr for PipelineRoute {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (guest_system, runner) = s
+            .split_once('/')
+            .ok_or_else(|| format!("Invalid route '{s}', expected <guest_system>/<runner>"))?;
+        Ok(Self::new(guest_system.parse()?, runner.parse()?))
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{GuestSystem, PipelineKey, PipelineRoute, RunnerKind};
+
+    #[test]
+    fn pipeline_route_roundtrips_with_pipeline_key() {
+        let route = PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless);
+        let pipeline_key = route.pipeline_key().expect("supported route");
+
+        assert_eq!(pipeline_key, PipelineKey::ShastaRisc0Boundless);
+        assert_eq!(PipelineRoute::from_pipeline_key(pipeline_key), route);
+        assert_eq!(
+            "shasta-risc0-boundless"
+                .parse::<PipelineKey>()
+                .expect("parse pipeline key"),
+            pipeline_key
+        );
+    }
+
+    #[test]
+    fn pipeline_route_rejects_unsupported_combo() {
+        let route = PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Boundless);
+        assert_eq!(
+            route.pipeline_key().expect_err("unsupported route"),
+            "Unsupported proving route: sp1/boundless"
+        );
     }
 }
 
@@ -159,7 +375,7 @@ pub trait ProverBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the backend cannot provide an ELF for the requested stage.
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]>;
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]>;
 }
 
 /// Native backend placeholder (no ELF).
@@ -167,7 +383,7 @@ pub trait ProverBackend: Send + Sync {
 pub struct NativeBackend;
 
 impl ProverBackend for NativeBackend {
-    fn elf(&self, _stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, _stage: ProofStage) -> RaikoResult<&[u8]> {
         Err(RaikoError::InvalidRequestConfig(
             "native backend does not provide ELF".to_string(),
         ))
@@ -175,15 +391,15 @@ impl ProverBackend for NativeBackend {
 }
 
 /// Shared ELF selector for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ShastaElfBackend {
-    proposal_elf: &'static [u8],
-    aggregation_elf: &'static [u8],
+    proposal_elf: Arc<[u8]>,
+    aggregation_elf: Arc<[u8]>,
 }
 
 impl ShastaElfBackend {
     #[must_use]
-    pub(crate) const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub(crate) const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             proposal_elf,
             aggregation_elf,
@@ -192,23 +408,23 @@ impl ShastaElfBackend {
 }
 
 impl ProverBackend for ShastaElfBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         Ok(match stage {
-            ProofStage::Proposal => self.proposal_elf,
-            ProofStage::Aggregation => self.aggregation_elf,
+            ProofStage::Proposal => self.proposal_elf.as_ref(),
+            ProofStage::Aggregation => self.aggregation_elf.as_ref(),
         })
     }
 }
 
 /// RISC0 backend for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Risc0ShastaBackend {
     elf_backend: ShastaElfBackend,
 }
 
 impl Risc0ShastaBackend {
     #[must_use]
-    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
         }
@@ -220,20 +436,20 @@ impl Risc0ShastaBackend {
 }
 
 impl ProverBackend for Risc0ShastaBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }
 }
 
 /// SP1 backend for Shasta guest programs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Sp1ShastaBackend {
     elf_backend: ShastaElfBackend,
 }
 
 impl Sp1ShastaBackend {
     #[must_use]
-    pub const fn new(proposal_elf: &'static [u8], aggregation_elf: &'static [u8]) -> Self {
+    pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
         }
@@ -245,7 +461,7 @@ impl Sp1ShastaBackend {
 }
 
 impl ProverBackend for Sp1ShastaBackend {
-    fn elf(&self, stage: ProofStage) -> RaikoResult<&'static [u8]> {
+    fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
     }
 }

@@ -3,23 +3,31 @@
 #![allow(missing_docs)]
 risc0_zkvm::guest::entry!(main);
 
+extern crate alloc;
+
+mod crypto;
 mod sys;
 
-use raiko2_guest_common::prove_shasta_proposal;
+use alloc::vec;
+use bincode;
+use raiko2_guest_common::prove_shasta_proposal_for_proof_type;
+use raiko2_primitives::ProofType;
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_protocol_shasta::shasta::ProofCarryData;
 use risc0_zkvm::guest::env;
 
 pub fn main() {
-    // Read the guest input prepared by the host
-    let guest_input: GuestInput = env::read();
+    crypto::install_guest_crypto();
 
-    // Read the proof carry data that contains the transition input
-    let proof_carry_data: ProofCarryData = env::read();
+    let mut len = 0u32;
+    env::read_slice(core::slice::from_mut(&mut len));
 
-    let (instance_hash, subproof_input_hash) =
-        prove_shasta_proposal(&guest_input, &proof_carry_data).expect("proposal proving failed");
+    let mut input_buf = vec![0u8; len as usize];
+    env::read_slice(&mut input_buf);
+    let guest_input: GuestInput =
+        bincode::deserialize(&input_buf).expect("failed to deserialize proposal guest input");
 
-    env::commit_slice(instance_hash.as_slice());
+    let subproof_input_hash =
+        prove_shasta_proposal_for_proof_type(&guest_input, ProofType::Risc0)
+            .expect("proposal proving failed");
     env::commit_slice(subproof_input_hash.as_slice());
 }

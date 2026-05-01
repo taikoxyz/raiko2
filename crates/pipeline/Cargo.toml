@@ -11,7 +11,7 @@ workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true
-raiko2-protocol-shasta = { workspace = true }
+raiko2-protocol-shasta.workspace = true
 raiko2-guests.workspace = true
 raiko2-stateless.workspace = true
 raiko2-provider.workspace = true
@@ -21,14 +21,16 @@ alethia-reth-block.workspace = true
 alethia-reth-consensus.workspace = true
 
 alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 
 tracing.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
 alloy-trie.workspace = true
 alloy-primitives.workspace = true
-reth-stateless.workspace = true

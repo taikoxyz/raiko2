@@ -78,7 +78,7 @@ impl FromStr for PipelineKey {
             "shasta-risc0-local" => Ok(Self::ShastaRisc0),
             "shasta-sp1-local" => Ok(Self::ShastaSp1),
             "shasta-native-local" => Ok(Self::ShastaNative),
-            "shasta-risc0-network" => Ok(Self::ShastaRisc0Network),
+            "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -155,7 +155,7 @@ impl FromStr for RunnerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
-            "network" => Ok(Self::Network),
+            "network" | "boundless" => Ok(Self::Network),
             _ => Err(format!("Unknown runner: {s}")),
         }
     }
@@ -243,6 +243,28 @@ mod route_tests {
                 .parse::<PipelineKey>()
                 .expect("parse pipeline key"),
             pipeline_key
+        );
+    }
+
+    #[test]
+    fn pipeline_route_accepts_legacy_boundless_persisted_names() {
+        assert_eq!(
+            "shasta-risc0-boundless"
+                .parse::<PipelineKey>()
+                .expect("parse legacy pipeline key"),
+            PipelineKey::ShastaRisc0Network
+        );
+        assert_eq!(
+            "boundless"
+                .parse::<RunnerKind>()
+                .expect("parse legacy runner"),
+            RunnerKind::Network
+        );
+        assert_eq!(
+            "risc0/boundless"
+                .parse::<PipelineRoute>()
+                .expect("parse legacy route"),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
         );
     }
 

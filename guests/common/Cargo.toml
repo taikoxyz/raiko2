@@ -15,12 +15,12 @@ alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "
     "serde",
 ] }
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false }
-alloy-primitives = { version = "1.5.0", default-features = false }
-alloy-consensus = { version = "2.0", default-features = false, features = ["serde"] }
-alloy-sol-types = { version = "1.5.0", default-features = false }
-alloy-rlp = { version = "0.3.4", default-features = false }
-alloy-hardforks = "0.4.7"
-anyhow = "1.0"
+alloy-primitives = { version = "=1.5.7", default-features = false }
+alloy-consensus = { version = "=2.0.1", default-features = false, features = ["serde"] }
+alloy-sol-types = { version = "=1.5.7", default-features = false }
+alloy-rlp = { version = "=0.3.15", default-features = false }
+alloy-hardforks = "=0.4.7"
+anyhow = "=1.0.102"
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f", default-features = false, features = [
     "serde",
 ] }

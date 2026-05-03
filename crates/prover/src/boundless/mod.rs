@@ -257,17 +257,30 @@ fn env_var(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn env_bool(name: &str) -> Option<bool> {
-    env_var(name).and_then(|value| value.parse::<bool>().ok())
+fn parse_env_bool(name: &str, value: &str) -> RaikoResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => Err(RaikoError::InvalidRequestConfig(format!(
+            "Invalid {name} boolean value, expected true/false/1/0/yes/no/on/off"
+        ))),
+    }
+}
+
+fn env_bool(name: &str) -> RaikoResult<Option<bool>> {
+    env_var(name)
+        .map(|value| parse_env_bool(name, &value))
+        .transpose()
+}
+
+fn parse_env_url(name: &str, value: &str) -> RaikoResult<Url> {
+    Url::parse(value)
+        .map_err(|e| RaikoError::InvalidRequestConfig(format!("Invalid {name} URL: {e}")))
 }
 
 fn env_url(name: &str) -> RaikoResult<Option<Url>> {
     env_var(name)
-        .map(|value| {
-            Url::parse(&value).map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Invalid {name} URL {value}: {e}"))
-            })
-        })
+        .map(|value| parse_env_url(name, &value))
         .transpose()
 }
 
@@ -278,7 +291,7 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
         Some("s3") => StorageUploaderType::S3,
         Some("pinata") => StorageUploaderType::Pinata,
         Some("file") => StorageUploaderType::File,
-        Some("none" | "") => StorageUploaderType::None,
+        Some("none") => StorageUploaderType::None,
         Some(other) => {
             return Err(RaikoError::InvalidRequestConfig(format!(
                 "Invalid STORAGE_UPLOADER value {other}"
@@ -294,8 +307,8 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     config.aws_access_key_id = env_var("AWS_ACCESS_KEY_ID");
     config.aws_secret_access_key = env_var("AWS_SECRET_ACCESS_KEY");
     config.aws_region = env_var("AWS_REGION");
-    config.s3_presigned = env_bool("S3_PRESIGNED");
-    config.s3_public_url = env_bool("S3_PUBLIC_URL");
+    config.s3_presigned = env_bool("S3_PRESIGNED")?;
+    config.s3_public_url = env_bool("S3_PUBLIC_URL")?;
     config.pinata_jwt = env_var("PINATA_JWT");
     config.pinata_api_url = env_url("PINATA_API_URL")?;
     config.ipfs_gateway_url = env_url("IPFS_GATEWAY_URL")?;
@@ -1163,8 +1176,9 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, proof_to_envelope,
-        quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, parse_env_bool,
+        parse_env_url, proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use boundless_market::price_oracle::Asset;
     use raiko2_primitives::Proof;
@@ -1255,6 +1269,39 @@ mod tests {
         assert_eq!(validated.min_price.asset, Asset::ETH);
         assert!(validated.max_price.value > validated.min_price.value);
         assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_common_operator_values() {
+        for value in ["true", "1", "yes", "y", "on"] {
+            assert!(parse_env_bool("S3_PRESIGNED", value).expect("true value"));
+        }
+        for value in ["false", "0", "no", "n", "off"] {
+            assert!(!parse_env_bool("S3_PRESIGNED", value).expect("false value"));
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_rejects_invalid_values() {
+        let err = parse_env_bool("S3_PRESIGNED", "maybe").expect_err("invalid bool");
+        assert!(
+            err.to_string()
+                .contains("Invalid S3_PRESIGNED boolean value")
+        );
+    }
+
+    #[test]
+    fn parse_env_url_does_not_echo_secret_url() {
+        let err = parse_env_url(
+            "PINATA_API_URL",
+            "https://user:pass@example.com:bad/path?token=1",
+        )
+        .expect_err("invalid url");
+        let message = err.to_string();
+
+        assert!(message.contains("Invalid PINATA_API_URL URL"));
+        assert!(!message.contains("user:pass"));
+        assert!(!message.contains("token=1"));
     }
 
     #[test]

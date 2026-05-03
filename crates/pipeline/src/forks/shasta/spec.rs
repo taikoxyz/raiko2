@@ -107,6 +107,23 @@ where
         let proof_type = proof_type_from_context(ctx);
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id) = extract_block_range(ctx, &chain_spec)?;
+        let first_block_no = block_numbers.first().copied().ok_or_else(|| {
+            RaikoError::InvalidRequestConfig("request l2_block_range is empty".to_string())
+        })?;
+        let proposal_block = fetch_preflight_proposal_block(provider, first_block_no).await?;
+        let proposal_event = resolve_shasta_proposal_event(
+            ctx,
+            provider,
+            &chain_spec,
+            std::slice::from_ref(&proposal_block),
+        )
+        .await?;
+        validate_derivation_source_block_limit(
+            block_numbers.len(),
+            first_block_no,
+            proposal_event.proposal.timestamp.to::<u64>(),
+            &chain_spec,
+        )?;
         let chunk_size = preflight_chunk_size();
         let chunk_concurrency = preflight_chunk_concurrency();
         info!(
@@ -157,14 +174,6 @@ where
             .map(|witness| witness.block.clone())
             .collect::<Vec<_>>();
 
-        let proposal_event =
-            resolve_shasta_proposal_event(ctx, provider, &chain_spec, &blocks).await?;
-        validate_derivation_source_block_limit(
-            block_numbers.len(),
-            block_numbers[0],
-            proposal_event.proposal.timestamp.to::<u64>(),
-            &chain_spec,
-        )?;
         let mut manifest =
             ShastaManifestBuilder::taiko_manifest_with_event(ctx, &blocks, proposal_event)?;
         hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
@@ -368,10 +377,34 @@ async fn fetch_preflight_chunk<P: Provider>(
     Ok((chunk_index, witnesses))
 }
 
+async fn fetch_preflight_proposal_block<P: Provider>(
+    provider: &P,
+    block_number: u64,
+) -> RaikoResult<reth_ethereum_primitives::Block> {
+    retry_shasta_preflight_operation("fetch shasta proposal block", || async {
+        let requested = [block_number];
+        let mut blocks = provider.batch_blocks(&requested).await?;
+        validate_fetched_block_numbers(&requested, &blocks)?;
+        blocks.pop().ok_or_else(|| {
+            RaikoError::Preflight(format!(
+                "provider returned no block for requested proposal block {block_number}"
+            ))
+        })
+    })
+    .await
+}
+
 fn validate_fetched_block_numbers(
     expected_block_numbers: &[u64],
     blocks: &[reth_ethereum_primitives::Block],
 ) -> RaikoResult<()> {
+    if blocks.len() != expected_block_numbers.len() {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "provider returned {} blocks for {} requested block numbers",
+            blocks.len(),
+            expected_block_numbers.len()
+        )));
+    }
     for (index, (expected, block)) in expected_block_numbers.iter().zip(blocks).enumerate() {
         if block.header.number != *expected {
             return Err(RaikoError::Preflight(format!(
@@ -1309,6 +1342,32 @@ mod tests {
         .expect_err("inactive unzen environment should reject");
 
         assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_pre_unzen_range_before_witness_fetch() {
+        let provider = sample_provider();
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_011;
+        let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: max_blocks + 1,
+        });
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let err = spec
+            .preflight(&ctx, &provider)
+            .await
+            .expect_err("pre-Unzen oversized range should fail before witness fetch");
+
+        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -86,6 +86,31 @@ where
     }
 }
 
+async fn compute_boundless_image_id(elf: Vec<u8>, stage: &str) -> RaikoResult<Digest> {
+    tokio::task::spawn_blocking(move || compute_image_id(&elf))
+        .await
+        .map_err(|err| RaikoError::Guest(format!("{stage} image id task failed: {err}")))?
+        .map_err(|e| RaikoError::Guest(format!("Failed to compute {stage} image id: {e}")))
+}
+
+async fn build_boundless_aggregation_input(
+    proofs: Vec<Proof>,
+    expected_image_id: Digest,
+) -> RaikoResult<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let agg = AggregationInput {
+            proofs: proofs.into_iter().map(proof_to_envelope).collect(),
+            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
+                expected_image_id.as_bytes(),
+            )),
+            metadata: None,
+        };
+        aggregation::build_risc0_aggregation_input(&agg)
+    })
+    .await
+    .map_err(|err| RaikoError::Guest(format!("Boundless aggregation input task failed: {err}")))?
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -139,6 +164,15 @@ impl BoundlessConfig {
 enum ElfType {
     Batch,
     Aggregation,
+}
+
+impl ElfType {
+    const fn stage_name(self) -> &'static str {
+        match self {
+            Self::Batch => "batch",
+            Self::Aggregation => "aggregation",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -364,8 +398,7 @@ impl BoundlessProver {
         elf_type: ElfType,
         elf: &[u8],
     ) -> RaikoResult<UploadedProgram> {
-        let image_id = compute_image_id(elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute image id: {e}")))?;
+        let image_id = compute_boundless_image_id(elf.to_vec(), elf_type.stage_name()).await?;
 
         if let Some(program) = self.programs.read().await.get(&elf_type).cloned()
             && program.image_id == image_id
@@ -993,17 +1026,11 @@ where
         _config: &ProverConfig,
         backend: &B,
     ) -> RaikoResult<Proof> {
-        let proposal_elf = backend.elf(ProofStage::Proposal)?;
-        let proposal_image_id = compute_image_id(proposal_elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute proposal image id: {e}")))?;
-        let agg = AggregationInput {
-            proofs: input.proofs.into_iter().map(proof_to_envelope).collect(),
-            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
-                proposal_image_id.as_bytes(),
-            )),
-            metadata: None,
-        };
-        let aggregation_input = aggregation::build_risc0_aggregation_input(&agg)?;
+        let proposal_image_id =
+            compute_boundless_image_id(backend.elf(ProofStage::Proposal)?.to_vec(), "proposal")
+                .await?;
+        let aggregation_input =
+            build_boundless_aggregation_input(input.proofs, proposal_image_id).await?;
         let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
@@ -1025,17 +1052,11 @@ where
         backend: &B,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
-        let proposal_elf = backend.elf(ProofStage::Proposal)?;
-        let proposal_image_id = compute_image_id(proposal_elf)
-            .map_err(|e| RaikoError::Guest(format!("Failed to compute proposal image id: {e}")))?;
-        let agg = AggregationInput {
-            proofs: input.proofs.into_iter().map(proof_to_envelope).collect(),
-            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
-                proposal_image_id.as_bytes(),
-            )),
-            metadata: None,
-        };
-        let aggregation_input = aggregation::build_risc0_aggregation_input(&agg)?;
+        let proposal_image_id =
+            compute_boundless_image_id(backend.elf(ProofStage::Proposal)?.to_vec(), "proposal")
+                .await?;
+        let aggregation_input =
+            build_boundless_aggregation_input(input.proofs, proposal_image_id).await?;
         let aggregation_elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,

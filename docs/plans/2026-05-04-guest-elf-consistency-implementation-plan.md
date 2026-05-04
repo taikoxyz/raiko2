@@ -60,13 +60,24 @@ just build-guest sp1
 
 **Step 4: Add the drift check**
 
-Use shell logic that fails if `crates/guests/elf` changes and emits a GitHub Actions error message
+Use shell logic based on:
+
+```bash
+git status --porcelain --untracked-files=all -- crates/guests/elf
+```
+
+Fail if that path reports any tracked or untracked changes, and emit a GitHub Actions error message
 that tells authors to run `sync-guest-elf`.
 
 **Step 5: Keep the job always present**
 
 Do not hide the job behind paths filters. It should exist on every PR so branch protection can rely
 on a single stable check name.
+
+**Step 6: Guard self-hosted execution on pull requests**
+
+Add a job-level condition so forked `pull_request` events do not execute arbitrary code on the
+self-hosted runner. Push and `workflow_dispatch` runs should remain unaffected.
 
 ### Task 3: Verify workflow integrity
 

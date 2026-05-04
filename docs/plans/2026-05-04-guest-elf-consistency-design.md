@@ -58,7 +58,8 @@ Use approach 2.
 - Rebuild both guest stacks with:
   - `just build-guest risc0`
   - `just build-guest sp1`
-- Fail if `git diff --quiet -- crates/guests/elf` is not clean.
+- On `pull_request`, only run on same-repository branches so forked PRs do not execute arbitrary code on the self-hosted runner.
+- Fail if `git status --porcelain --untracked-files=all -- crates/guests/elf` reports any changes.
 
 ## Failure UX
 

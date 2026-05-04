@@ -232,6 +232,7 @@ jobs:
   # This job is the main guest build gate; no separate build-guest-* jobs remain in ci.yml.
   # If this detects drift, authors should repair the branch with the manual sync-guest-elf workflow.
   guest-elf-consistency:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, raiko2]
     env:
       CARGO_TERM_COLOR: always
@@ -259,7 +260,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          status_output="$(git status --short --untracked-files=all -- crates/guests/elf)"
+          status_output="$(git status --porcelain --untracked-files=all -- crates/guests/elf)"
           if [ -n "${status_output}" ]; then
             printf '%s\n' "${status_output}"
             git diff --stat -- crates/guests/elf

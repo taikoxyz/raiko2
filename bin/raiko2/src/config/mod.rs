@@ -372,11 +372,15 @@ mod tests {
             "native/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
-        assert!("risc0/boundless".parse::<PipelineRoute>().is_err());
-        assert!(
+        assert_eq!(
+            "risc0/boundless".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
+        );
+        assert_eq!(
             "shasta-risc0-boundless"
                 .parse::<raiko2_pipeline::PipelineKey>()
-                .is_err()
+                .unwrap(),
+            raiko2_pipeline::PipelineKey::ShastaRisc0Network
         );
         assert!("invalid".parse::<PipelineRoute>().is_err());
     }

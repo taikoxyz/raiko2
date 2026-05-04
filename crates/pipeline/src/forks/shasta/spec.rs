@@ -106,105 +106,24 @@ where
         let preflight_started_at = Instant::now();
         let proof_type = proof_type_from_context(ctx);
         let chain_spec = chain_spec_from_context(ctx);
-        let (block_numbers, expected_proposal_id) = extract_block_range(ctx, &chain_spec)?;
-        let first_block_no = block_numbers.first().copied().ok_or_else(|| {
-            RaikoError::InvalidRequestConfig("request l2_block_range is empty".to_string())
-        })?;
-        let proposal_block = fetch_preflight_proposal_block(provider, first_block_no).await?;
-        let proposal_event = resolve_shasta_proposal_event(
-            ctx,
+        let (block_numbers, expected_proposal_id, proposal_event) =
+            resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
+        let witnesses = fetch_preflight_witnesses(
             provider,
             &chain_spec,
-            std::slice::from_ref(&proposal_block),
+            ctx.request.proposal_id,
+            &block_numbers,
         )
         .await?;
-        validate_derivation_source_block_limit(
-            block_numbers.len(),
-            first_block_no,
-            proposal_event.proposal.timestamp.to::<u64>(),
-            &chain_spec,
-        )?;
-        let chunk_size = preflight_chunk_size();
-        let chunk_concurrency = preflight_chunk_concurrency();
-        info!(
-            proposal_id = ctx.request.proposal_id,
-            block_count = block_numbers.len(),
-            chunk_size,
-            chunk_concurrency,
-            "starting shasta preflight"
-        );
-        let chunked_block_numbers = block_numbers
-            .chunks(chunk_size)
-            .map(<[u64]>::to_vec)
-            .collect::<Vec<_>>();
-        let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
-            stream::iter(chunked_block_numbers.into_iter().enumerate())
-                .map(|(chunk_index, chunk_block_numbers)| {
-                    let chain_spec = chain_spec.clone();
-                    async move {
-                        let operation = format!("shasta preflight chunk {chunk_index}");
-                        retry_shasta_preflight_operation(&operation, || {
-                            let chain_spec = chain_spec.clone();
-                            async {
-                                fetch_preflight_chunk(
-                                    provider,
-                                    chunk_index,
-                                    &chunk_block_numbers,
-                                    chain_spec,
-                                )
-                                .await
-                            }
-                        })
-                        .await
-                    }
-                })
-                .buffer_unordered(chunk_concurrency)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<RaikoResult<Vec<_>>>()?;
-        chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
-
-        let witnesses = chunk_results
-            .into_iter()
-            .flat_map(|(_, chunk)| chunk)
-            .collect::<Vec<_>>();
         let blocks = witnesses
             .iter()
             .map(|witness| witness.block.clone())
             .collect::<Vec<_>>();
-
-        let mut manifest =
-            ShastaManifestBuilder::taiko_manifest_with_event(ctx, &blocks, proposal_event)?;
-        hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
-        if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty()
-        {
-            let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
-            manifest.data_sources =
-                retry_shasta_preflight_operation("fetch shasta data sources", || async {
-                    provider
-                        .shasta_data_sources(
-                            &l1_chain_spec,
-                            &manifest.proposal_event,
-                            manifest.blob_proof_type,
-                        )
-                        .await
-                })
-                .await?;
-        }
-
+        let manifest =
+            build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
         validate_block_range(&witnesses, expected_proposal_id)?;
+        let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
 
-        let mut input = GuestInput {
-            taiko: manifest,
-            witnesses,
-            proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
-            proposal_ancestor_headers: Vec::new(),
-            proposal_state_nodes: Vec::new(),
-        };
-        input.compact_proposal_witness_data();
-        input.proof_carry_data =
-            raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
         info!(
             proposal_id = ctx.request.proposal_id,
             block_count = block_numbers.len(),
@@ -213,6 +132,128 @@ where
         );
         Ok(input)
     }
+}
+
+async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
+    ctx: &ProofContext,
+    provider: &P,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<(Vec<u64>, u64, ShastaEventData)> {
+    let (block_numbers, expected_proposal_id) = extract_block_range(ctx, chain_spec)?;
+    let first_block_no = block_numbers.first().copied().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig("request l2_block_range is empty".to_string())
+    })?;
+    let proposal_block = fetch_preflight_proposal_block(provider, first_block_no).await?;
+    let proposal_event = resolve_shasta_proposal_event(
+        ctx,
+        provider,
+        chain_spec,
+        std::slice::from_ref(&proposal_block),
+    )
+    .await?;
+    validate_derivation_source_block_limit(
+        block_numbers.len(),
+        first_block_no,
+        proposal_event.proposal.timestamp.to::<u64>(),
+        chain_spec,
+    )?;
+    Ok((block_numbers, expected_proposal_id, proposal_event))
+}
+
+async fn fetch_preflight_witnesses<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    proposal_id: u64,
+    block_numbers: &[u64],
+) -> RaikoResult<Vec<StatelessInput>> {
+    let chunk_size = preflight_chunk_size();
+    let chunk_concurrency = preflight_chunk_concurrency();
+    info!(
+        proposal_id,
+        block_count = block_numbers.len(),
+        chunk_size,
+        chunk_concurrency,
+        "starting shasta preflight"
+    );
+    let chunked_block_numbers = block_numbers
+        .chunks(chunk_size)
+        .map(<[u64]>::to_vec)
+        .collect::<Vec<_>>();
+    let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
+        stream::iter(chunked_block_numbers.into_iter().enumerate())
+            .map(|(chunk_index, chunk_block_numbers)| {
+                let chain_spec = chain_spec.clone();
+                async move {
+                    let operation = format!("shasta preflight chunk {chunk_index}");
+                    retry_shasta_preflight_operation(&operation, || {
+                        let chain_spec = chain_spec.clone();
+                        async {
+                            fetch_preflight_chunk(
+                                provider,
+                                chunk_index,
+                                &chunk_block_numbers,
+                                chain_spec,
+                            )
+                            .await
+                        }
+                    })
+                    .await
+                }
+            })
+            .buffer_unordered(chunk_concurrency)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<RaikoResult<Vec<_>>>()?;
+    chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
+    Ok(chunk_results
+        .into_iter()
+        .flat_map(|(_, chunk)| chunk)
+        .collect())
+}
+
+async fn build_preflight_manifest<P: Provider>(
+    ctx: &ProofContext,
+    provider: &P,
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+    proposal_event: ShastaEventData,
+) -> RaikoResult<raiko2_protocol_shasta::TaikoManifest> {
+    let mut manifest =
+        ShastaManifestBuilder::taiko_manifest_with_event(ctx, blocks, proposal_event)?;
+    hydrate_shasta_l1_headers(provider, chain_spec.chain_id, blocks, &mut manifest).await?;
+    if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
+        let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
+        manifest.data_sources =
+            retry_shasta_preflight_operation("fetch shasta data sources", || async {
+                provider
+                    .shasta_data_sources(
+                        &l1_chain_spec,
+                        &manifest.proposal_event,
+                        manifest.blob_proof_type,
+                    )
+                    .await
+            })
+            .await?;
+    }
+    Ok(manifest)
+}
+
+fn build_preflight_guest_input(
+    manifest: raiko2_protocol_shasta::TaikoManifest,
+    witnesses: Vec<StatelessInput>,
+    proof_type: ProofType,
+) -> RaikoResult<GuestInput> {
+    let mut input = GuestInput {
+        taiko: manifest,
+        witnesses,
+        proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
+        proposal_ancestor_headers: Vec::new(),
+        proposal_state_nodes: Vec::new(),
+    };
+    input.compact_proposal_witness_data();
+    input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
+    Ok(input)
 }
 
 fn preflight_chunk_size() -> usize {

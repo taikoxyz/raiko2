@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      zk: ${{ steps.filter.outputs.zk }}
       workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@v4
@@ -40,16 +39,6 @@ jobs:
               - 'xtask/**'
               - 'config/**'
               - 'test.json'
-              - 'justfile'
-            zk:
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'crates/**'
-              - '!crates/guests/elf/**'
-              - 'guests/**'
-              - 'xtask/**'
-              - 'docker/**'
               - 'justfile'
             workflow:
               - '.github/workflows/ci.yml'
@@ -239,73 +228,8 @@ jobs:
           test "${{ needs.rust-test-pipeline.result }}" = "success"
           test "${{ needs.rust-test-runtime.result }}" = "success"
 
-  # Guest backend versions are pinned by repo-owned toolchain definitions:
-  # - RISC0: docker/risc0-toolchain/Dockerfile
-  # - SP1: guests/sp1/Cargo.lock + docker/sp1-toolchain/Dockerfile
-  build-guest-risc0:
-    needs: changes
-    if: needs.changes.outputs.zk == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-      RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.94.0"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-zk-build
-
-      - uses: taiki-e/install-action@just
-
-      - name: build guest risc0
-        run: just build-guest risc0
-
-      # Temporary: treat guest build as a compile/producibility check only.
-      # The generated ELFs are uploaded for inspection instead of enforcing
-      # byte-for-byte equality with the checked-in copies.
-      - name: upload guest elf outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: guest-elf-risc0
-          path: crates/guests/elf/risc0_*.elf
-          retention-days: 7
-
-  build-guest-sp1:
-    needs: changes
-    if: needs.changes.outputs.zk == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-      SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.94.0"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-zk-build
-
-      - uses: taiki-e/install-action@just
-
-      - name: build guest sp1
-        run: just build-guest sp1
-
-      - name: upload guest elf outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: guest-elf-sp1
-          path: crates/guests/elf/sp1_*.elf
-          retention-days: 7
-
   # Stable required check: always rebuild checked-in guest ELFs on the self-hosted runner.
+  # This job is the main guest build gate; no separate build-guest-* jobs remain in ci.yml.
   # If this detects drift, authors should repair the branch with the manual sync-guest-elf workflow.
   guest-elf-consistency:
     runs-on: [self-hosted, linux, x64, raiko2]

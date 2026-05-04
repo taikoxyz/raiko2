@@ -6,10 +6,10 @@
 artifacts on the self-hosted `raiko2` runner and fails when the repository copy drifts from a clean
 rebuild.
 
-**Architecture:** Extend `.github/workflows/ci.yml` with one always-on self-hosted job that
-rebuilds both guest backends and checks `crates/guests/elf` with `git diff`. Keep
-`.github/workflows/sync-guest-elf.yml` as the manual remediation path referenced by the failure
-message.
+**Architecture:** Simplify `.github/workflows/ci.yml` so one always-on self-hosted job rebuilds both
+guest backends and checks `crates/guests/elf` for drift. Remove the redundant standalone
+`build-guest-risc0` and `build-guest-sp1` jobs, and keep `.github/workflows/sync-guest-elf.yml` as
+the manual remediation path referenced by the failure message.
 
 **Tech Stack:** GitHub Actions, Cargo, `just`, self-hosted Actions runner labels, git diff
 
@@ -31,12 +31,17 @@ required check that always verifies checked-in ELF freshness.
 Capture the exact workflow change, the self-hosted runner target, and the failure guidance that
 points authors to `sync-guest-elf`.
 
-### Task 2: Add the stable CI job
+### Task 2: Replace redundant guest build lanes with the stable CI job
 
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-**Step 1: Add the job skeleton**
+**Step 1: Remove the standalone guest build jobs**
+
+Delete the separate `build-guest-risc0` and `build-guest-sp1` jobs. Their build coverage will be
+subsumed by the consistency gate.
+
+**Step 2: Add the job skeleton**
 
 Add a `guest-elf-consistency` job that runs on:
 
@@ -44,7 +49,7 @@ Add a `guest-elf-consistency` job that runs on:
 runs-on: [self-hosted, linux, x64, raiko2]
 ```
 
-**Step 2: Rebuild both guest stacks**
+**Step 3: Rebuild both guest stacks**
 
 Use:
 
@@ -53,12 +58,12 @@ just build-guest risc0
 just build-guest sp1
 ```
 
-**Step 3: Add the drift check**
+**Step 4: Add the drift check**
 
 Use shell logic that fails if `crates/guests/elf` changes and emits a GitHub Actions error message
 that tells authors to run `sync-guest-elf`.
 
-**Step 4: Keep the job always present**
+**Step 5: Keep the job always present**
 
 Do not hide the job behind paths filters. It should exist on every PR so branch protection can rely
 on a single stable check name.

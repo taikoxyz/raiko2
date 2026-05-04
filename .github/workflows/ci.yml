@@ -305,5 +305,41 @@ jobs:
           path: crates/guests/elf/sp1_*.elf
           retention-days: 7
 
+  # Stable required check: always rebuild checked-in guest ELFs on the self-hosted runner.
+  # If this detects drift, authors should repair the branch with the manual sync-guest-elf workflow.
+  guest-elf-consistency:
+    runs-on: [self-hosted, linux, x64, raiko2]
+    env:
+      CARGO_TERM_COLOR: always
+      RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
+      SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-zk-build
+
+      - uses: taiki-e/install-action@just
+
+      - name: rebuild guest elfs
+        run: |
+          just build-guest risc0
+          just build-guest sp1
+
+      - name: verify guest elf consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- crates/guests/elf; then
+            git diff --stat -- crates/guests/elf
+            echo "::error title=Guest ELF drift detected::Checked-in guest ELFs differ from a clean rebuild. Run the sync-guest-elf workflow for this branch and commit the resulting ELF update."
+            exit 1
+          fi
+
   # TODO: add a native smoke lane here once the repo has a deterministic CI-safe
   # fixture/regression entrypoint for native proving.

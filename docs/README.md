@@ -23,9 +23,6 @@ This directory contains the contributor- and operator-facing documentation for `
 
 ## Historical Notes
 
-The files under [`plans/`](plans) are historical design and implementation notes. They are not the
-current source of truth.
-
-Latest dated assessment:
-
-- [2026-04-15 production readiness assessment](plans/2026-04-15-raiko2-production-readiness.md)
+The files under [`plans/`](plans) and [`issues/`](issues) are historical design, implementation,
+and review notes. They are useful background, but they are not the current source of truth for
+using or operating the project.

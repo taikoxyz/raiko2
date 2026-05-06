@@ -10,10 +10,6 @@ Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs fro
 validates them, runs local or remote proving routes, and exposes an asynchronous,
 Hoodi-compatible v3 API.
 
-For Codex, this repo also carries a build-only project skill at
-`.codex/skills/raiko2-image-release/`. `AGENTS.md` explicitly points image publication tasks at
-that skill; it does not cover deployment or rollout.
-
 ## At a Glance
 
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation

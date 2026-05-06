@@ -45,7 +45,9 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Workspace checks:
   - `cargo fmt --all`
   - `cargo clippy --workspace -- -D warnings`
-  - `cargo nextest run --workspace`
+  - `cargo test -p raiko2-primitives -p raiko2-primitives-shasta -p raiko2-protocol -p raiko2-protocol-shasta`
+  - `cargo test -p raiko2-provider -p raiko2-pipeline -p preflight`
+  - `cargo test -p raiko2-queue -p raiko2-runtime`
 - Guest builds:
   - `just build-guest risc0`
   - `just build-guest sp1`
@@ -74,7 +76,7 @@ Run the smallest set of checks that proves the change safely, then scale up when
   - Run focused tests for the touched package when practical, plus any relevant targeted command.
 - Shared types, config, workspace wiring, or cross-crate behavior changes:
   - Run `cargo clippy --workspace -- -D warnings`
-  - Run `cargo nextest run --workspace`
+  - Run the targeted `cargo test` lanes from `.github/workflows/ci.yml`
 - Formatting-sensitive Rust changes:
   - Run `cargo fmt --all`
 - Guest, prover backend, `xtask`, or ELF contract changes:

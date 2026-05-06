@@ -22,7 +22,9 @@ Recommended checks before opening a PR:
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
-cargo nextest run --workspace
+cargo test -p raiko2-primitives -p raiko2-primitives-shasta -p raiko2-protocol -p raiko2-protocol-shasta
+cargo test -p raiko2-provider -p raiko2-pipeline -p preflight
+cargo test -p raiko2-queue -p raiko2-runtime
 ```
 
 ## Alethia Reth Integration Workflow

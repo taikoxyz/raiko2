@@ -70,9 +70,85 @@ pub(crate) fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
+pub(crate) fn restore_docker_ownership(
+    image: &str,
+    root: &Path,
+    target_mount: Option<&Path>,
+    paths: &[&Path],
+) -> Result<()> {
+    let Some((uid, gid)) = docker_user_ids()? else {
+        return Ok(());
+    };
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new("docker");
+    cmd.arg("run")
+        .arg("--rm")
+        .arg("--entrypoint")
+        .arg("chown")
+        .arg("-v")
+        .arg(format!("{}:/work", root.display()));
+
+    if let Some(target_mount) = target_mount {
+        cmd.arg("-v")
+            .arg(format!("{}:/target", target_mount.display()));
+    }
+
+    cmd.arg(image).arg("-R").arg(format!("{uid}:{gid}"));
+    for path in paths {
+        cmd.arg(container_path(root, target_mount, path)?);
+    }
+
+    run(cmd)
+}
+
+pub(crate) fn docker_user_ids() -> Result<Option<(String, String)>> {
+    #[cfg(unix)]
+    {
+        let uid = current_id_arg("-u")?;
+        let gid = current_id_arg("-g")?;
+        return Ok(Some((uid, gid)));
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn current_id_arg(flag: &str) -> Result<String> {
+    let output = Command::new("id")
+        .arg(flag)
+        .output()
+        .with_context(|| format!("failed to run id {flag}"))?;
+    if !output.status.success() {
+        bail!("id {flag} failed with status {}", output.status);
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .with_context(|| format!("id {flag} returned non-utf8 output"))
+}
+
+fn container_path(root: &Path, target_mount: Option<&Path>, path: &Path) -> Result<String> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Ok(PathBuf::from("/work").join(rel).display().to_string());
+    }
+    if let Some(target_mount) = target_mount
+        && let Ok(rel) = path.strip_prefix(target_mount)
+    {
+        return Ok(PathBuf::from("/target").join(rel).display().to_string());
+    }
+    bail!(
+        "cannot restore ownership for path outside mounted roots: {}",
+        path.display()
+    );
 }
 
 fn repo_name(root: &Path) -> String {
@@ -136,4 +212,35 @@ pub(crate) fn run(mut cmd: Command) -> Result<()> {
         bail!("command failed: {cmd:?}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn container_path_maps_worktree_relative_paths() {
+        assert_eq!(
+            super::container_path(
+                Path::new("/repo"),
+                None,
+                Path::new("/repo/target/elf-compilation/.rustc_info.json")
+            )
+            .unwrap(),
+            "/work/target/elf-compilation/.rustc_info.json"
+        );
+    }
+
+    #[test]
+    fn container_path_maps_explicit_target_mount_paths() {
+        assert_eq!(
+            super::container_path(
+                Path::new("/repo"),
+                Some(Path::new("/tmp/target")),
+                Path::new("/tmp/target/risc0/.rustc_info.json")
+            )
+            .unwrap(),
+            "/target/risc0/.rustc_info.json"
+        );
+    }
 }

@@ -101,6 +101,8 @@ impl Config {
             config.queue.redis_url = Some(redis_url.clone());
         }
 
+        config.normalize();
+
         // Validate configuration
         config.validate()?;
 
@@ -142,6 +144,22 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Applies cross-field defaults that cannot be represented by Serde defaults alone.
+    pub fn normalize(&mut self) {
+        self.prover.normalize_route();
+    }
+}
+
+fn override_single_rpc_pair(
+    rpc_config: &mut RpcConfig,
+    update: impl FnOnce(&mut NetworkPairConfig),
+) -> Result<()> {
+    let [pair] = rpc_config.pairs.as_mut_slice() else {
+        anyhow::bail!("RPC CLI endpoint overrides require exactly one rpc.pairs entry");
+    };
+    update(pair);
+    Ok(())
 }
 
 fn override_single_rpc_pair(
@@ -350,12 +368,16 @@ mod tests {
             PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local)
         );
         assert_eq!(
-            "RISC0/BOUNDLESS".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Boundless)
+            "RISC0/NETWORK".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
         );
         assert_eq!(
             "sp1/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
+        );
+        assert_eq!(
+            "sp1/network".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
         );
         assert_eq!(
             "native/local".parse::<PipelineRoute>().unwrap(),
@@ -364,6 +386,16 @@ mod tests {
         assert_eq!(
             "tdx/local".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local)
+        );
+        assert_eq!(
+            "risc0/boundless".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network)
+        );
+        assert_eq!(
+            "shasta-risc0-boundless"
+                .parse::<raiko2_pipeline::PipelineKey>()
+                .unwrap(),
+            raiko2_pipeline::PipelineKey::ShastaRisc0Network
         );
         assert!("invalid".parse::<PipelineRoute>().is_err());
     }
@@ -497,6 +529,365 @@ maintenance_interval_ms = 200
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_pairs_only_config_loads_without_legacy_rpc_fields() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545" },
+]
+
+[rpc.client]
+concurrency_limit = 24
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l1_rpc, "http://hoodi.example.test:8545");
+        assert_eq!(pair.l2_rpc, "http://taiko-hoodi.example.test:8545");
+        assert_eq!(pair.l2_provider, L2ProviderKind::Reth);
+        assert_eq!(pair.l2_witness_rpc, "http://taiko-hoodi.example.test:8545");
+        assert_eq!(pair.l1_chain_id(), 560048);
+        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(config.rpc.client.concurrency_limit, 24);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_l2_rpc_cli_override_preserves_configured_witness_rpc() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545", l2_witness_rpc = "http://localhost:9547" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from([
+            "raiko2",
+            "--config",
+            path.to_str().expect("path utf8"),
+            "--l2-rpc",
+            "http://localhost:9555",
+        ]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l2_rpc, "http://localhost:9555");
+        assert_eq!(pair.l2_witness_rpc, "http://localhost:9547");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_rejects_unknown_fields() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+unexpected = true
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("unknown config field must fail");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("unknown field")),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_rejects_legacy_queue_retry_table() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+
+[queue.retry]
+strategy = "fixed"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("legacy queue retry config must fail");
+        assert!(
+            err.chain()
+                .any(|source| source.to_string().contains("unknown field")),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_accepts_geth_l2_provider() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", l2_rpc = "http://taiko-hoodi.example.test:8545", l2_provider = "geth" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+
+        assert_eq!(pair.l2_provider, L2ProviderKind::Geth);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_accepts_geth_local_witness_l2_provider() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth_local_witness" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+
+        assert_eq!(pair.l2_provider, L2ProviderKind::GethLocalWitness);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_boundless_route_requires_signer_key() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Network;
+        config.prover.boundless.signer_key.clear();
+
+        let err = config.prover.validate().expect_err("missing signer key");
+        assert!(err.to_string().contains("signer_key"));
+    }
+
+    #[test]
+    fn test_boundless_route_requires_rpc_url() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Network;
+        config.prover.boundless.rpc_url.clear();
+        config.prover.boundless.signer_key =
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string();
+
+        let err = config.prover.validate().expect_err("missing rpc url");
+        assert!(err.to_string().contains("rpc_url"));
+    }
+
+    #[test]
+    fn test_risc0_execution_po2_must_be_non_zero() {
+        let mut config = Config::default();
+        config.prover.risc0.execution_po2 = 0;
+
+        let err = config.prover.validate().expect_err("zero po2 should fail");
+        assert!(err.to_string().contains("execution_po2"));
+    }
+
+    #[test]
+    fn test_config_loads_risc0_execution_po2() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "risc0"
+runner = "local"
+
+[prover.risc0]
+execution_po2 = 24
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.prover.risc0.execution_po2, 24);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_values_are_not_overridden_by_cli_defaults() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi.example.test", l2_rpc = "http://taiko-hoodi.example.test:8545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.server.host, "127.0.0.1");
+        assert_eq!(config.server.port, 9090);
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(pair.l1_chain_id(), 560048);
+        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_cli_sp1_network_route_sets_sp1_network_prover() {
+        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/network"]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Network)
+        );
+        assert_eq!(
+            config.prover.sp1.prover,
+            raiko2_prover::sp1::ProverMode::Network
+        );
+    }
+
+    #[test]
+    fn test_cli_sp1_local_route_sets_sp1_local_prover() {
+        let cli = Cli::parse_from(["raiko2", "--prover", "sp1/local"]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config.prover.route(),
+            PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local)
+        );
+        assert_eq!(
+            config.prover.sp1.prover,
+            raiko2_prover::sp1::ProverMode::Local
+        );
     }
 
     #[test]

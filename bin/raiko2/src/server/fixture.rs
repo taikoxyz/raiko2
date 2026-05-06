@@ -550,11 +550,6 @@ where
     )
 }
 
-#[cfg(test)]
-pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
-    native_fixture_engine_with_observer(None)
-}
-
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
@@ -585,13 +580,6 @@ fn native_fixture_engine_with_observer(
 #[cfg(test)]
 pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0FixtureEngine {
     risc0_fixture_engine_with_observer(context_config, None)
-}
-
-#[cfg(all(test, feature = "boundless"))]
-pub(crate) fn risc0_boundless_fixture_engine(
-    context_config: serde_json::Value,
-) -> Risc0FixtureEngine {
-    risc0_fixture_engine_for_pipeline(context_config, PipelineKey::ShastaRisc0Boundless, None)
 }
 
 #[cfg(test)]
@@ -688,7 +676,7 @@ fn sp1_fixture_engine_with_backend(
 
 #[cfg(test)]
 fn load_risc0_backend_for_pipeline(pipeline_key: PipelineKey) -> Risc0ShastaBackend {
-    if pipeline_key == PipelineKey::ShastaRisc0Boundless {
+    if pipeline_key == PipelineKey::ShastaRisc0Network {
         load_risc0_boundless_shasta_backend().expect("load RISC0 Boundless Shasta guest ELFs")
     } else {
         load_risc0_shasta_backend().expect("load RISC0 Shasta guest ELFs")
@@ -723,34 +711,31 @@ where
 }
 
 #[cfg(test)]
-pub(crate) fn app_with_native_fixture_engine(
-    config: Config,
-    engine: NativeFixtureEngine,
-) -> Router {
+pub(crate) fn app_with_risc0_fixture_engine(config: Config, engine: Risc0FixtureEngine) -> Router {
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     app::build_router(state)
 }
 
 #[cfg(test)]
-pub(crate) fn app_with_observed_native_fixture_engine(
+pub(crate) fn app_with_observed_risc0_fixture_engine(
     config: Config,
-) -> (Router, NativeFixtureEngine) {
+) -> (Router, Risc0FixtureEngine) {
     let runtime = Arc::new(
         RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-runtime"))
             .expect("runtime manager"),
     );
     let observer = engine_observer(Arc::clone(&runtime));
-    let engine = native_fixture_engine_with_observer(Some(observer));
+    let engine = risc0_fixture_engine_with_observer(json!({}), Some(observer));
 
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         Arc::new(engine.clone()),
     );
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
@@ -798,7 +783,7 @@ pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, S
     (app::build_router(state), engine)
 }
 
-#[cfg(all(test, feature = "boundless"))]
+#[cfg(test)]
 pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     config: Config,
 ) -> (Router, Risc0FixtureEngine) {
@@ -811,14 +796,14 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     let observer = engine_observer(Arc::clone(&runtime));
     let engine = risc0_fixture_engine_for_pipeline(
         json!({}),
-        PipelineKey::ShastaRisc0Boundless,
+        PipelineKey::ShastaRisc0Network,
         Some(observer),
     );
 
     let mut factory = StaticPipelineFactory::default();
     factory.insert(
         "taiko_dev/ethereum".to_string(),
-        PipelineKey::ShastaRisc0Boundless,
+        PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));

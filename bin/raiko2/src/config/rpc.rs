@@ -101,7 +101,7 @@ pub struct ResolvedNetworkPair {
     pub l2_spec: ChainSpec,
 }
 
-/// Pair-specific Boundless overrides for RISC0/Boundless routes.
+/// Pair-specific Boundless overrides for RISC0 network routes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {

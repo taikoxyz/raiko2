@@ -15,9 +15,7 @@ use http_body_util::BodyExt;
 use raiko2_engine::{Engine, EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
 use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
-#[cfg(feature = "boundless")]
 use raiko2_primitives_shasta::encode_proof_carry_data;
-#[cfg(feature = "boundless")]
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
 use raiko2_queue::encode_task_id;
@@ -27,13 +25,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
 use super::app;
-#[cfg(feature = "boundless")]
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
-    app_with_engine, app_with_native_fixture_engine, app_with_observed_native_fixture_engine,
-    app_with_observed_sp1_fixture_engine, base_config, native_fixture_engine, risc0_fixture_engine,
-    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine,
-    unique_runtime_root,
+    app_with_engine, app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
+    app_with_risc0_fixture_engine, base_config, risc0_fixture_engine, sp1_fixture_engine,
+    spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
@@ -210,6 +206,7 @@ fn duplicate_request_fingerprint(
     let payload = json!({
         "pair_key": pair_key,
         "route": route,
+        "prover_type": "local",
         "aggregate_requested": aggregate_requested,
         "execution_mode": Value::Null,
         "blob_proof_type": Value::Null,
@@ -236,14 +233,13 @@ fn sp1_fixture_app() -> (
     app_with_observed_sp1_fixture_engine(config)
 }
 
-#[cfg(feature = "boundless")]
 fn risc0_boundless_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Risc0FixtureSpec>,
 ) {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
 
     app_with_observed_risc0_boundless_fixture_engine(config)
 }
@@ -263,7 +259,6 @@ fn sp1_external_proof(proof_hex: String) -> Value {
     })
 }
 
-#[cfg(feature = "boundless")]
 fn risc0_boundless_external_proof() -> Value {
     let extra_data =
         encode_proof_carry_data(&ProofCarryData::default()).expect("encode proof carry data");
@@ -373,7 +368,6 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     l2_handle.abort();
 }
 
-#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -391,7 +385,7 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key = "not-a-private-key".to_string();
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
@@ -539,7 +533,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.prover.guest_system = GuestSystem::Risc0;
-    config.prover.runner = RunnerKind::Boundless;
+    config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key =
         "0x45f40b61ccb3a68af7eca7d54035df42ec3786c940387d3a14dea058ac68ef3b".to_string();
@@ -577,10 +571,10 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
 }
 
 #[tokio::test]
-async fn e2e_proposal_proof_native_completes_from_fixture() {
+async fn e2e_proposal_proof_risc0_completes_from_fixture() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine.clone());
 
     let (status, res) = post_json(
         &app,
@@ -593,7 +587,7 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -616,9 +610,9 @@ async fn e2e_proposal_proof_native_completes_from_fixture() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
-    let config = base_config();
-    let (app, engine) = app_with_observed_native_fixture_engine(config);
+async fn e2e_shasta_rejects_boundless_public_proof_type() {
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(base_config(), engine);
 
     let (status, res) = post_json(
         &app,
@@ -631,7 +625,37 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "boundless",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=boundless is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
+    let config = base_config();
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine.clone());
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "risc0",
             "prover": "1111111111111111111111111111111111111111"
         }),
     )
@@ -653,8 +677,8 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
 #[tokio::test]
 async fn e2e_shasta_request_rejects_partial_network_pair() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -667,7 +691,7 @@ async fn e2e_shasta_request_rejects_partial_network_pair() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev"
         }),
     )
@@ -685,8 +709,8 @@ async fn e2e_shasta_request_rejects_partial_network_pair() {
 #[tokio::test]
 async fn e2e_shasta_request_rejects_unknown_fields() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -700,7 +724,7 @@ async fn e2e_shasta_request_rejects_unknown_fields() {
                 "unexpected_proposal_field": true
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -722,8 +746,8 @@ async fn e2e_shasta_request_rejects_unknown_fields() {
 #[tokio::test]
 async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -751,10 +775,41 @@ async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
 }
 
 #[tokio::test]
+async fn e2e_shasta_rejects_native_public_proof_type() {
+    let config = base_config();
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "native",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=native is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
 async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
     let payload = json!({
         "proposals": [{
             "proposal_id": 3,
@@ -763,7 +818,7 @@ async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
             "last_anchor_block_number": 0
         }],
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -783,13 +838,41 @@ async fn e2e_duplicate_shasta_post_reuses_same_root_task() {
 }
 
 #[tokio::test]
+async fn e2e_batch_public_task_id_is_stable_after_runtime_loss() {
+    let payload = json!({
+        "proposals": [{
+            "proposal_id": 3,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [3],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "risc0",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let first_app = app_with_risc0_fixture_engine(base_config(), risc0_fixture_engine(json!({})));
+    let (status, first) = post_json(&first_app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = single_report_task_id(&first_app).await;
+
+    let second_app = app_with_risc0_fixture_engine(base_config(), risc0_fixture_engine(json!({})));
+    let (status, second) = post_json(&second_app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_id = single_report_task_id(&second_app).await;
+
+    assert_eq!(second_id, first_id);
+}
+
+#[tokio::test]
 async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_progress() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state.clone());
@@ -801,7 +884,7 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
             "last_anchor_block_number": 0
         }],
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -838,9 +921,16 @@ async fn e2e_duplicate_shasta_post_returns_work_in_progress_when_runtime_has_pro
 }
 
 #[tokio::test]
-async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
+async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart() {
     let config = base_config();
-    let (app, engine) = app_with_observed_native_fixture_engine(config);
+    let engine = risc0_fixture_engine(json!({}));
+    let state = app_with_engine(
+        config,
+        "taiko_dev/ethereum",
+        PipelineKey::ShastaRisc0,
+        engine,
+    );
+    let app = app::build_router(state.clone());
     let payload = json!({
         "proposals": [{
             "proposal_id": 3,
@@ -849,7 +939,73 @@ async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
             "last_anchor_block_number": 0
         }],
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
+
+    let (status, first) = post_json(&app, "/v3/proof/batch/shasta", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["status"], "registered");
+    let task_id = single_report_task_id(&app).await;
+
+    let mut record = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+    let mut metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
+    metadata.runtime.active_stage = Some("prove".to_string());
+    metadata.runtime.last_event = Some("started:engine-3".to_string());
+    record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let restarted_engine = risc0_fixture_engine(json!({}));
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaRisc0,
+        Arc::new(restarted_engine.clone()),
+    );
+    let restarted_state = AppState {
+        config: Arc::clone(&state.config),
+        pipelines: Arc::new(factory),
+        runtime: Arc::clone(&state.runtime),
+        zk_any_sampler: Arc::clone(&state.zk_any_sampler),
+    };
+    let restarted_app = app::build_router(restarted_state);
+
+    let (status, second) = post_json(&restarted_app, "/v3/proof/batch/shasta", payload).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["data"]["status"], "work_in_progress");
+    assert_eq!(single_report_task_id(&restarted_app).await, task_id);
+
+    drive_engine_to_idle(&restarted_engine).await;
+
+    let (status, task) = get_json(&restarted_app, &format!("/v3/tasks/{task_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["data"]["status"], "completed");
+}
+
+#[tokio::test]
+async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
+    let config = base_config();
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
+    let payload = json!({
+        "proposals": [{
+            "proposal_id": 3,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [3],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -871,11 +1027,11 @@ async fn e2e_duplicate_shasta_post_returns_completed_legacy_proof() {
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_children() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine.clone(),
     );
     let app = app::build_router(state.clone());
@@ -888,7 +1044,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
     let payload = json!({
         "proposals": request_proposals,
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -904,7 +1060,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         prover_config: ProverTaskConfig::default(),
     };
     let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaNative,
+        pipeline: PipelineKey::ShastaRisc0,
         request: proposal_request.clone(),
     });
     let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode proposal task");
@@ -912,7 +1068,8 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
-        proof_type: raiko2_primitives::ProofType::Native,
+        proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {
@@ -942,7 +1099,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
     })];
     let request_fingerprint = duplicate_request_fingerprint(
         "taiko_dev/ethereum",
-        "native/local",
+        "risc0/local",
         false,
         &canonical_proposals,
     );
@@ -950,9 +1107,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_orphan_registered".to_string(),
-            route: "native/local"
-                .parse::<PipelineRoute>()
-                .expect("parse route"),
+            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
             proof_ids: vec![encode_task_id(&proposal_task_id).expect("encode orphan task id")],
@@ -1016,11 +1171,11 @@ async fn e2e_duplicate_shasta_post_keeps_completed_without_root_proof_as_success
 #[tokio::test]
 async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state.clone());
@@ -1032,7 +1187,7 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
             "last_anchor_block_number": 0
         }],
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -1057,7 +1212,7 @@ async fn e2e_duplicate_shasta_post_recovers_failed_task_before_remote_submission
     let (status, second) = post_json(&app, "/v3/proof/batch/shasta", payload).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["status"], "ok");
-    assert_eq!(second["proof_type"], "native");
+    assert_eq!(second["proof_type"], "risc0");
     assert_eq!(second["data"]["status"], "registered");
     assert_eq!(single_report_task_id(&app).await, task_id);
 }
@@ -1162,7 +1317,7 @@ async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
 #[tokio::test]
 async fn e2e_metrics_endpoint_exposes_key_metric_families() {
     let config = base_config();
-    let (app, engine) = app_with_observed_native_fixture_engine(config);
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let (status, _res) = post_json(
         &app,
@@ -1175,7 +1330,7 @@ async fn e2e_metrics_endpoint_exposes_key_metric_families() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -1202,11 +1357,11 @@ async fn e2e_metrics_endpoint_exposes_key_metric_families() {
 async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
     let mut config = base_config();
     config.prover.zk_any = Default::default();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state);
@@ -1231,7 +1386,7 @@ async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["status"], "ok");
-    assert_eq!(res["proof_type"], "native");
+    assert_eq!(res["proof_type"], "zk_any");
     assert_eq!(res["data"]["status"], "zk_any_not_drawn");
     assert_eq!(res["batch_id"], 3);
     assert!(res["data"].get("task_id").is_none(), "{res}");
@@ -1241,11 +1396,11 @@ async fn e2e_zk_any_returns_not_drawn_when_ballot_is_disabled() {
 async fn e2e_zk_any_still_validates_request_when_not_drawn() {
     let mut config = base_config();
     config.prover.zk_any = Default::default();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state);
@@ -1316,14 +1471,15 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["status"], "completed");
 }
 
 #[tokio::test]
 async fn e2e_zk_any_rejects_prover_args() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -1358,8 +1514,8 @@ async fn e2e_zk_any_rejects_prover_args() {
 #[tokio::test]
 async fn e2e_admin_ballot_authenticates_before_body_parse() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, body) =
         post_raw_json_text_with_optional_admin_key(&app, "/admin/ballot", None, "{not-json").await;
@@ -1367,8 +1523,8 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
 
     let mut config = base_config();
     config.server.admin_api_key = Some("secret-admin-key".to_string());
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, body) =
         post_raw_json_text_with_optional_admin_key(&app, "/admin/ballot", None, "{not-json").await;
@@ -1451,8 +1607,8 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
 async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
     let mut config = base_config();
     config.server.admin_api_key = Some("secret-admin-key".to_string());
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json_with_admin_key(
         &app,
@@ -1514,6 +1670,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["data"]["route"], "sp1/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["execution_mode"], "execute");
     assert_eq!(res["data"]["status"], "completed");
     assert!(
@@ -2037,7 +2194,6 @@ async fn e2e_aggregate_request_uses_default_pair_when_network_fields_are_omitted
     assert_eq!(res["data"]["l1_network"], "ethereum");
 }
 
-#[cfg(feature = "boundless")]
 #[tokio::test]
 async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() {
     let (app, engine) = risc0_boundless_fixture_app();
@@ -2065,7 +2221,8 @@ async fn e2e_aggregate_risc0_boundless_external_proofs_completes_from_fixture() 
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "risc0/boundless");
+    assert_eq!(res["data"]["route"], "risc0/network");
+    assert_eq!(res["data"]["prover_type"], "network");
     assert_eq!(res["data"]["status"], "completed");
     assert_eq!(res["data"]["aggregate"]["status"], "completed");
     assert_eq!(res["data"]["proof"], "0xfixture-risc0-aggregation");
@@ -2126,9 +2283,61 @@ async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
 }
 
 #[tokio::test]
+async fn e2e_aggregate_rejects_boundless_public_proof_type() {
+    let (app, _engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "boundless",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=boundless is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_aggregate_rejects_native_public_proof_type() {
+    let (app, _engine) = sp1_fixture_app();
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                sp1_external_proof("0xfixture-proof-a".to_string()),
+                sp1_external_proof("0xfixture-proof-b".to_string())
+            ],
+            "proof_type": "native",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(res["message"], "proof_type=native is not supported");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
 async fn e2e_report_and_list_expose_root_tasks_only() {
     let config = base_config();
-    let (app, engine) = app_with_observed_native_fixture_engine(config);
+    let (app, engine) = app_with_observed_risc0_fixture_engine(config);
 
     let payload = |proposal_id| {
         json!({
@@ -2139,7 +2348,7 @@ async fn e2e_report_and_list_expose_root_tasks_only() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         })
@@ -2180,8 +2389,8 @@ async fn e2e_report_and_list_expose_root_tasks_only() {
 #[tokio::test]
 async fn e2e_prune_clears_runtime_and_alias_routes() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -2194,7 +2403,7 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -2221,8 +2430,8 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
 #[tokio::test]
 async fn e2e_sp1_execute_rejects_aggregate_requests() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -2369,13 +2578,19 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
     assert_eq!(res["proof_type"], "sp1");
     assert_eq!(res["data"]["status"], "registered");
     assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["data"]["route"], "sp1/network");
+    assert_eq!(res["data"]["prover_type"], "network");
 }
 
 #[tokio::test]
 async fn e2e_sp1_network_settings_require_network_prover() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -2410,8 +2625,8 @@ async fn e2e_sp1_network_settings_require_network_prover() {
 #[tokio::test]
 async fn e2e_cancel_marks_task_cancelled_without_workers() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, res) = post_json(
         &app,
@@ -2424,7 +2639,7 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -2443,8 +2658,8 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
 #[tokio::test]
 async fn e2e_duplicate_batch_request_reuses_existing_root_task() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine);
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
     let payload = json!({
         "proposals": [{
             "proposal_id": 3,
@@ -2453,7 +2668,7 @@ async fn e2e_duplicate_batch_request_reuses_existing_root_task() {
             "last_anchor_block_number": 0
         }],
         "aggregate": false,
-        "proof_type": "native",
+        "proof_type": "risc0",
         "network": "taiko_dev",
         "l1_network": "ethereum"
     });
@@ -2475,8 +2690,8 @@ async fn e2e_duplicate_batch_request_reuses_existing_root_task() {
 #[tokio::test]
 async fn e2e_task_status_completes_after_single_proposal_task() {
     let config = base_config();
-    let engine = native_fixture_engine();
-    let app = app_with_native_fixture_engine(config, engine.clone());
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine.clone());
 
     let (status, res) = post_json(
         &app,
@@ -2489,7 +2704,7 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
                 "last_anchor_block_number": 0
             }],
             "aggregate": false,
-            "proof_type": "native",
+            "proof_type": "risc0",
             "network": "taiko_dev",
             "l1_network": "ethereum"
         }),
@@ -2505,8 +2720,10 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
 
     let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "native/local");
+    assert_eq!(res["data"]["route"], "risc0/local");
+    assert_eq!(res["data"]["prover_type"], "local");
     assert_eq!(res["data"]["status"], "completed");
+    assert!(res["data"]["current_index"].is_null());
     assert_eq!(res["data"]["proposals"][0]["status"], "completed");
     assert!(
         res["data"]["proposals"][0].get("runtime").is_none(),
@@ -2517,17 +2734,17 @@ async fn e2e_task_status_completes_after_single_proposal_task() {
 #[tokio::test]
 async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime_store() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state.clone());
 
     let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaNative,
+        pipeline: PipelineKey::ShastaRisc0,
         request: ProposalTaskRequest {
             proposal_id: 3,
             l2_block_range: None,
@@ -2545,7 +2762,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
-        proof_type: raiko2_primitives::ProofType::Native,
+        proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {
@@ -2599,9 +2817,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
-            route: "native/local"
-                .parse::<PipelineRoute>()
-                .expect("parse route"),
+            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
             proof_ids: vec![encoded_task_id.clone()],
@@ -2626,7 +2842,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
 
     let (status, res) = get_json(&app, "/v3/tasks/task_runtime_fallback").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["route"], "native/local");
+    assert_eq!(res["data"]["route"], "risc0/local");
     assert_eq!(res["data"]["status"], "proving");
     assert_eq!(res["data"]["runtime"]["runner_status"], "allocated");
     assert_eq!(res["data"]["runtime"]["active_stage"], "prove");
@@ -2676,11 +2892,11 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
 #[tokio::test]
 async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = risc0_fixture_engine(json!({}));
     let state = app_with_engine(
         config,
         "taiko_dev/ethereum",
-        PipelineKey::ShastaNative,
+        PipelineKey::ShastaRisc0,
         engine,
     );
     let app = app::build_router(state.clone());
@@ -2697,7 +2913,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         prover_config: Default::default(),
     };
     let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-        pipeline: PipelineKey::ShastaNative,
+        pipeline: PipelineKey::ShastaRisc0,
         request: proposal_request.clone(),
     });
     let encoded_task_id = encode_task_id(&proposal_task_id).expect("encode task id");
@@ -2705,7 +2921,8 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         network_pair: "taiko_dev/ethereum".to_string(),
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
-        proof_type: raiko2_primitives::ProofType::Native,
+        proof_type: raiko2_primitives::ProofType::Risc0,
+        prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
         proposals: vec![ProposalTask {
@@ -2730,9 +2947,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_persisted_proof".to_string(),
-            route: "native/local"
-                .parse::<PipelineRoute>()
-                .expect("parse route"),
+            route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
             proof_ids: vec![encoded_task_id],

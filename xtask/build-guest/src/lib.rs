@@ -10,6 +10,7 @@ use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod guest_digests;
 mod util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
@@ -24,7 +25,6 @@ const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unk
 pub enum Backend {
     Risc0,
     Sp1,
-    Tdx,
     All,
 }
 
@@ -63,11 +63,6 @@ pub fn build(
         }
         Backend::Sp1 => {
             build_sp1(root, bench, sp1_docker_tag)?;
-        }
-        Backend::Tdx => {
-            println!(
-                "[INFO] Backend `tdx` has no guest ELF to build (the prover runs natively in a TDX VM)."
-            );
         }
         Backend::All => {
             build_risc0(root, bench)?;
@@ -132,7 +127,6 @@ pub fn ensure_release_guest_elves(
     match backend {
         Backend::Risc0 => ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag),
         Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag),
-        Backend::Tdx => Ok(()),
         Backend::All => {
             ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
             ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
@@ -189,7 +183,6 @@ fn ensure_release_backend(
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
-        Backend::Tdx => unreachable!("tdx has no guest ELF"),
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
     let outputs_exist = guest_outputs_exist(root, backend)?;
@@ -272,7 +265,6 @@ fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>>
     match backend {
         Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0")?),
         Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1")?),
-        Backend::Tdx => {}
         Backend::All => {
             outputs.extend(expected_backend_outputs(root, "risc0")?);
             outputs.extend(expected_backend_outputs(root, "sp1")?);
@@ -314,7 +306,6 @@ fn compute_guest_fingerprint(
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
             include_outputs,
         )?,
-        Backend::Tdx => unreachable!("tdx has no guest fingerprint"),
         Backend::All => unreachable!("fingerprints are computed per concrete backend"),
     }
 
@@ -706,6 +697,12 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     println!("[INFO] Building RISC0 guest package (toolchain image)...");
     util::run(cmd)?;
+    util::restore_docker_ownership(
+        image,
+        root,
+        extra_mount.as_deref(),
+        &[target_root.as_path()],
+    )?;
 
     export_risc0_elves(root, &manifest, &target_root)?;
     println!("[INFO] RISC0 guest build complete");
@@ -888,7 +885,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
 
-    let target_root = util::target_root(root);
+    let target_root = util::target_root(root).join("sp1");
     let export_dir = target_root.join("sp1-export");
     let output_dir = root.join("crates/guests/elf");
     fs::create_dir_all(&export_dir)?;
@@ -974,6 +971,12 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
 
     println!("[INFO] Building SP1 guest package (toolchain image)...");
     util::run(cmd)?;
+    util::restore_docker_ownership(
+        image,
+        root,
+        extra_mount.as_deref(),
+        &[target_root.as_path()],
+    )?;
     export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");

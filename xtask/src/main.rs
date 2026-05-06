@@ -30,6 +30,9 @@ enum Cmd {
     /// Build guest ELFs, build and push the runtime image.
     ReleaseImage(release_image::ReleaseImageArgs),
 
+    /// Export the current Shasta guest registration digests.
+    GuestDigests(xtask_build_guest::guest_digests::GuestDigestsArgs),
+
     /// Register the current Shasta guest image ids on verifier contracts.
     RegisterImage(register_image::RegisterImageArgs),
 
@@ -47,6 +50,7 @@ async fn main() -> Result<()> {
         Cmd::BenchGuest(args) => bench_guest::run(&root, *args),
         Cmd::LatestProposalRequest(args) => latest_proposal_request::run(&root, args).await,
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
+        Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
         Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),
     }

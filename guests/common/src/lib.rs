@@ -25,8 +25,11 @@ use raiko2_primitives_shasta::{
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
-    calculate_shasta_difficulty, encode_extra_data, manifest::BlockManifest,
-    prepare_source_manifest, ParentBlockContext, ProposalMetadata,
+    calculate_shasta_difficulty,
+    constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
+    encode_extra_data,
+    manifest::BlockManifest,
+    prepare_source_manifest_with_max_blocks, ParentBlockContext, ProposalMetadata,
 };
 use raiko2_stateless::reconstruct_block_from_transactions_with_witness_resources;
 use std::sync::Arc;
@@ -294,6 +297,17 @@ fn shasta_fork_timestamp(chain_spec: &TaikoChainSpec) -> Result<u64> {
     }
 }
 
+fn derivation_source_max_blocks(chain_spec: &TaikoChainSpec, proposal_timestamp: u64) -> usize {
+    if chain_spec
+        .taiko_fork_activation(TaikoHardfork::Unzen)
+        .active_at_timestamp(proposal_timestamp)
+    {
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+    } else {
+        DERIVATION_SOURCE_MAX_BLOCKS
+    }
+}
+
 fn derive_expected_shasta_blocks(
     guest_input: &GuestInput,
     runtime: &TaikoRuntime,
@@ -340,13 +354,15 @@ fn derive_expected_shasta_blocks(
     };
 
     let mut blocks = Vec::new();
+    let max_blocks = derivation_source_max_blocks(runtime.chain_spec.as_ref(), meta.proposal_timestamp);
     for (source_index, source) in proposal.sources.iter().enumerate() {
-        let manifest = prepare_source_manifest(
+        let manifest = prepare_source_manifest_with_max_blocks(
             source,
             guest_input.taiko.data_sources.get(source_index),
             parent,
             meta,
             fork_timestamp,
+            max_blocks,
         )
         .with_context(|| format!("failed to prepare derivation source {source_index}"))?;
 
@@ -565,7 +581,7 @@ fn manifest_transactions_for_reconstruction(
         .transactions
         .iter()
         .map(|transaction| {
-            alloy_rlp::decode_exact(&alloy_rlp::encode(transaction))
+            alloy_rlp::decode_exact(alloy_rlp::encode(transaction))
                 .context("failed to decode Shasta manifest transaction")
         })
         .collect()

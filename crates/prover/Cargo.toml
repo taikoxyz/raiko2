@@ -24,8 +24,6 @@ hex.workspace = true
 secp256k1.workspace = true
 url.workspace = true
 
-anyhow.workspace = true
-
 # Alloy types
 alloy.workspace = true
 alloy-primitives.workspace = true
@@ -34,7 +32,7 @@ alloy-signer-local.workspace = true
 # RISC0 dependencies
 risc0-zkvm.workspace = true
 risc0-ethereum-contracts-boundless.workspace = true
-boundless-market = { workspace = true, optional = true }
+boundless-market.workspace = true
 
 # SP1 dependencies
 sp1-sdk.workspace = true
@@ -44,8 +42,6 @@ dirs = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 
 [features]
-default = []
-boundless = ["dep:boundless-market"]
 tdx = ["dep:dirs", "dep:rand"]
 
 [dev-dependencies]

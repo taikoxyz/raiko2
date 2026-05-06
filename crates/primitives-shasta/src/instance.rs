@@ -34,6 +34,12 @@ pub fn words_to_bytes_be(words: &[u32; 8]) -> [u8; 32] {
     bytes
 }
 
+/// Converts SP1 `HashableKey::hash_u32()` words into the onchain block program id.
+#[must_use]
+pub fn sp1_contract_block_program_id(words: &[u32; 8]) -> B256 {
+    B256::from(words_to_bytes_be(words))
+}
+
 #[cfg(test)]
 pub(crate) fn validate_shasta_aggregate_proof_carry_data(
     aggregation_input: &ShastaRawAggregationGuestInput,
@@ -139,24 +145,11 @@ pub fn shasta_zk_aggregation_public_input_from_proof_carry_data_vec(
     proof_carry_data_vec: &[ProofCarryData],
     prover_address: Address,
 ) -> Option<B256> {
-    let aggregation_hash =
-        shasta_aggregation_output_from_proof_carry_data_vec(proof_carry_data_vec, prover_address)?;
-    Some(shasta_zk_aggregation_output(sub_image_id, aggregation_hash))
-}
-
-#[must_use]
-pub fn shasta_aggregation_output_from_proof_carry_data_vec(
-    proof_carry_data_vec: &[ProofCarryData],
-    sgx_instance: Address,
-) -> Option<B256> {
     let commitment = build_shasta_commitment_from_proof_carry_data_vec(proof_carry_data_vec)?;
     let first = proof_carry_data_vec.first()?;
-    Some(shasta_aggregation_output(
-        &commitment,
-        first.chain_id,
-        first.verifier,
-        sgx_instance,
-    ))
+    let aggregation_hash =
+        shasta_aggregation_output(&commitment, first.chain_id, first.verifier, prover_address);
+    Some(shasta_zk_aggregation_output(sub_image_id, aggregation_hash))
 }
 
 #[must_use]

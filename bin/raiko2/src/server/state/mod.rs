@@ -19,15 +19,13 @@ use raiko2_pipeline::{
     forks::shasta::{ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
-#[cfg(feature = "boundless")]
 use raiko2_prover::boundless::BoundlessProver;
-#[cfg(feature = "tdx")]
-use raiko2_prover::tdx::TdxProver;
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs;
@@ -44,14 +42,14 @@ type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
-#[cfg(feature = "boundless")]
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
-#[cfg(feature = "tdx")]
-type TdxSpec = ShastaSpec<TdxProver, NativeBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
-use super::task_metadata::{ProofArtifactKind, TaskMetadata, root_proof_artifact_refs};
+use super::task_metadata::{
+    ProofArtifactKind, TaskMetadata, aggregate_task_ref, proposal_task_ref,
+    root_proof_artifact_refs,
+};
 
 /// Shared application state.
 #[derive(Clone)]
@@ -64,8 +62,9 @@ pub struct AppState {
 
 impl AppState {
     /// Create new application state.
-    #[allow(clippy::too_many_lines)]
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(mut config: Config) -> Result<Self> {
+        config.normalize();
+        config.validate()?;
         let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
@@ -73,6 +72,13 @@ impl AppState {
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
+        let sp1_config = setup::sp1_prover_config(&config);
+        let sp1_backend = shasta_backends.sp1.clone();
+        let sp1_prover = tokio::task::spawn_blocking(move || {
+            Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
+        })
+        .await
+        .context("SP1 setup task panicked")??;
 
         let mut factory = StaticPipelineFactory::default();
 
@@ -94,29 +100,26 @@ impl AppState {
                 Arc::new(risc0_engine),
             );
 
-            #[cfg(feature = "boundless")]
-            {
-                let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
-                let boundless_engine = build_boundless_engine(
-                    &config,
-                    pair,
-                    shasta_backends.risc0_boundless.clone(),
-                    boundless_scheduler_config,
-                    Arc::clone(&runtime_observer),
-                )
-                .await?;
-                boundless_engine
-                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
-                factory.insert(
-                    pair.key.clone(),
-                    PipelineKey::ShastaRisc0Boundless,
-                    Arc::new(boundless_engine),
-                );
-            }
+            let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
+            let boundless_engine = build_boundless_engine(
+                &config,
+                pair,
+                shasta_backends.risc0_boundless.clone(),
+                boundless_scheduler_config,
+                Arc::clone(&runtime_observer),
+            )
+            .await?;
+            boundless_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
+            factory.insert(
+                pair.key.clone(),
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(boundless_engine),
+            );
 
             let sp1_engine = build_sp1_engine(
                 &config,
                 pair,
+                sp1_prover.clone(),
                 shasta_backends.sp1.clone(),
                 scheduler_config.clone(),
                 Arc::clone(&runtime_observer),
@@ -142,23 +145,6 @@ impl AppState {
                 PipelineKey::ShastaNative,
                 Arc::new(native_engine),
             );
-
-            #[cfg(feature = "tdx")]
-            {
-                let tdx_engine = build_tdx_engine(
-                    &config,
-                    pair,
-                    scheduler_config.clone(),
-                    Arc::clone(&runtime_observer),
-                )
-                .await?;
-                tdx_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-                factory.insert(
-                    pair.key.clone(),
-                    PipelineKey::ShastaTdx,
-                    Arc::new(tdx_engine),
-                );
-            }
         }
 
         let config = Arc::new(config);
@@ -196,14 +182,16 @@ async fn restore_proof_artifacts_from_runtime_task(
     runtime: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<()> {
+    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
+        .context("failed to parse runtime task metadata for proof artifact restore")?;
+    restore_cached_proof_artifacts_from_metadata(runtime, record, &metadata).await;
+
     if record.runner_status != RunnerStatus::Completed {
         return Ok(());
     }
     let Some(proof_path) = record.proof_path.as_deref() else {
         return Ok(());
     };
-    let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-        .context("failed to parse runtime task metadata for proof artifact restore")?;
     let Some(restored_refs) = root_proof_artifact_refs(&metadata, record.pipeline_key) else {
         return Ok(());
     };
@@ -241,6 +229,125 @@ async fn restore_proof_artifacts_from_runtime_task(
             .await?;
     }
     Ok(())
+}
+
+async fn restore_cached_proof_artifacts_from_metadata(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) {
+    for (proof_ref, kind) in persisted_child_proof_refs(metadata, record.pipeline_key) {
+        if let Err(err) =
+            restore_cached_proof_artifact(runtime, record, metadata, &proof_ref, kind).await
+        {
+            warn!(
+                task_id = record.task_id,
+                proof_ref,
+                error = %err,
+                "failed to restore cached proof artifact; skipping"
+            );
+        }
+    }
+}
+
+async fn restore_cached_proof_artifact(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+    proof_ref: &str,
+    kind: ProofArtifactKind,
+) -> Result<()> {
+    let proof_path = runtime.proof_artifact_path(&metadata.network_pair, proof_ref);
+    if !fs::try_exists(&proof_path)
+        .await
+        .with_context(|| format!("failed to inspect proof artifact for {proof_ref}"))?
+    {
+        return Ok(());
+    }
+
+    let proof_bytes = fs::read(&proof_path)
+        .await
+        .with_context(|| format!("failed to read proof artifact for {proof_ref}"))?;
+    let proof: Proof = serde_json::from_slice(&proof_bytes)
+        .with_context(|| format!("failed to parse proof artifact for {proof_ref}"))?;
+    if kind == ProofArtifactKind::Proposal
+        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
+    {
+        warn!(
+            task_id = record.task_id,
+            proof_ref,
+            error = %err,
+            "cached proposal proof is not aggregatable; skipping artifact restore"
+        );
+        return Ok(());
+    }
+
+    runtime
+        .upsert_proof_artifact(ProofArtifactRegistration {
+            network_pair: metadata.network_pair.clone(),
+            proof_ref: proof_ref.to_string(),
+            pipeline_key: record.pipeline_key,
+            route: record.route,
+            proof_path: proof_path.display().to_string(),
+        })
+        .await?;
+    Ok(())
+}
+
+fn persisted_child_proof_refs(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> Vec<(String, ProofArtifactKind)> {
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+
+    for proposal in &metadata.proposals {
+        if let Some(request) = proposal.request.as_ref() {
+            push_restored_ref(
+                &mut refs,
+                &mut seen,
+                proposal_task_ref(pipeline_key, request),
+                ProofArtifactKind::Proposal,
+            );
+        }
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            proposal.task_id.clone(),
+            ProofArtifactKind::Proposal,
+        );
+    }
+
+    if let Some(request) = metadata.aggregate_request.as_ref() {
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            aggregate_task_ref(pipeline_key, request),
+            ProofArtifactKind::Aggregate,
+        );
+    }
+    if let Some(task_id) = metadata.aggregate_task_id.as_ref() {
+        push_restored_ref(
+            &mut refs,
+            &mut seen,
+            task_id.clone(),
+            ProofArtifactKind::Aggregate,
+        );
+    }
+
+    refs
+}
+
+fn push_restored_ref(
+    refs: &mut Vec<(String, ProofArtifactKind)>,
+    seen: &mut BTreeSet<String>,
+    proof_ref: String,
+    kind: ProofArtifactKind,
+) {
+    if proof_ref.is_empty() || !seen.insert(proof_ref.clone()) {
+        return;
+    }
+    refs.push((proof_ref, kind));
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
@@ -319,22 +426,16 @@ async fn build_risc0_engine(
 async fn build_sp1_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
+    prover: Sp1Prover,
     backend: Sp1ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<Sp1Spec>> {
-    let sp1_config = setup::sp1_prover_config(config);
-
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Sp1)?;
-            let spec = ShastaSpec::new(
-                PipelineKey::ShastaSp1,
-                Sp1Prover::new(sp1_config),
-                backend,
-                provider,
-            );
+            let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider);
             Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
@@ -360,12 +461,7 @@ async fn build_sp1_engine(
                         scheduler_config.lease_duration,
                     )
                     .await?;
-                let spec = ShastaSpec::new(
-                    PipelineKey::ShastaSp1,
-                    Sp1Prover::new(sp1_config),
-                    backend,
-                    provider,
-                );
+                let spec = ShastaSpec::new(PipelineKey::ShastaSp1, prover, backend, provider);
                 Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,
@@ -459,85 +555,6 @@ async fn build_native_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "tdx")]
-#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
-async fn build_tdx_engine(
-    config: &Config,
-    pair: &ResolvedNetworkPair,
-    scheduler_config: SchedulerConfig,
-    observer: Arc<dyn EngineObserver>,
-) -> Result<Engine<TdxSpec>> {
-    let tdx_config = setup::tdx_prover_config(config);
-    let prover = TdxProver::new(tdx_config);
-
-    prover
-        .ensure_bootstrapped()
-        .await
-        .map_err(|e| anyhow::anyhow!("TDX bootstrap failed: {e}"))?;
-
-    let engine = match config.queue.backend {
-        QueueBackend::Memory => {
-            let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, ProofType::Tdx)?;
-            let spec = ShastaSpec::new_trusted(
-                PipelineKey::ShastaTdx,
-                prover,
-                NativeBackend,
-                provider,
-            );
-            Engine::with_store_scheduler_config_and_observer(
-                spec,
-                context,
-                MemoryStore::with_lease(scheduler_config.lease_duration),
-                scheduler_config,
-                Some(Arc::clone(&observer)),
-            )
-        }
-        QueueBackend::Redis => {
-            #[cfg(feature = "redis-queue")]
-            {
-                type TdxOutput =
-                    EngineOutput<<TdxSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
-                let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, ProofType::Tdx)?;
-                let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaTdx);
-                let store =
-                    raiko2_queue::RedisStore::<EngineTask, TdxOutput, EngineTaskKey>::connect(
-                        &url,
-                        &namespace,
-                        scheduler_config.lease_duration,
-                    )
-                    .await?;
-                let spec = ShastaSpec::new_trusted(
-                    PipelineKey::ShastaTdx,
-                    prover,
-                    NativeBackend,
-                    provider,
-                );
-                Engine::with_store_scheduler_config_and_observer(
-                    spec,
-                    context,
-                    store,
-                    scheduler_config,
-                    Some(Arc::clone(&observer)),
-                )
-            }
-
-            #[cfg(not(feature = "redis-queue"))]
-            {
-                anyhow::bail!(
-                    "queue backend redis requires building raiko2 with `--features redis-queue`"
-                );
-            }
-        }
-    };
-
-    Ok(engine)
-}
-
-#[cfg(feature = "boundless")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_boundless_engine(
     config: &Config,
@@ -553,7 +570,7 @@ async fn build_boundless_engine(
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
-                PipelineKey::ShastaRisc0Boundless,
+                PipelineKey::ShastaRisc0Network,
                 BoundlessProver::new(agent_config),
                 backend,
                 provider,
@@ -577,7 +594,7 @@ async fn build_boundless_engine(
                 let namespace = setup::queue_namespace(
                     &config.queue.namespace,
                     pair,
-                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaRisc0Network,
                 );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, BoundlessOutput, EngineTaskKey>::connect(
@@ -587,7 +604,7 @@ async fn build_boundless_engine(
                     )
                     .await?;
                 let spec = ShastaSpec::new(
-                    PipelineKey::ShastaRisc0Boundless,
+                    PipelineKey::ShastaRisc0Network,
                     BoundlessProver::new(agent_config),
                     backend,
                     provider,
@@ -673,6 +690,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {
@@ -714,6 +732,74 @@ mod tests {
                 .await?
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_proof_artifacts_registers_cached_child_proposal_refs() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "restore-child-proposal",
+        ))?);
+        let request = ProposalTaskRequest {
+            proposal_id: 9,
+            l2_block_range: Some(raiko2_primitives::L2BlockRange { start: 9, end: 9 }),
+            l1_inclusion_block_number: 20,
+            last_anchor_block_number: 8,
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        };
+        let proposal_ref = proposal_task_ref(PipelineKey::ShastaNative, &request);
+        runtime
+            .write_proof_artifact_bytes(
+                "taiko_dev/ethereum",
+                &proposal_ref,
+                &serde_json::to_vec_pretty(&valid_native_proof())?,
+            )
+            .await?;
+
+        let metadata = TaskMetadata {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            proof_type: ProofType::Native,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: true,
+            proposals: vec![ProposalTask {
+                proposal_id: 9,
+                checkpoint: None,
+                l1_inclusion_block_number: 20,
+                l2_block_numbers: vec![9],
+                last_anchor_block_number: 8,
+                task_id: proposal_ref.clone(),
+                request: Some(request),
+            }],
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        runtime
+            .upsert_task(&runtime_record(
+                "aggregate-root",
+                PipelineKey::ShastaNative,
+                PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+                RunnerStatus::Allocated,
+                None,
+                serde_json::to_value(metadata)?,
+            ))
+            .await?;
+
+        restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
+
+        let artifact = runtime
+            .get_proof_artifact("taiko_dev/ethereum", &proposal_ref)
+            .await?
+            .expect("proposal proof artifact");
+        assert!(tokio::fs::try_exists(artifact.proof_path).await?);
         Ok(())
     }
 

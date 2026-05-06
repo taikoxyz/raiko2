@@ -12,6 +12,24 @@ use raiko2_queue::decode_task_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ProverType {
+    Mock,
+    Local,
+    Network,
+}
+
+impl ProverType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::Local => "local",
+            Self::Network => "network",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TaskMetadata {
     pub(crate) network_pair: String,
@@ -19,6 +37,8 @@ pub(crate) struct TaskMetadata {
     pub(crate) l1_network: String,
     #[serde(with = "lowercase")]
     pub(crate) proof_type: ProofType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prover_type: Option<ProverType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
@@ -44,6 +64,7 @@ pub(crate) struct BuildTaskMetadataParams<'a> {
     pub(crate) network: &'a str,
     pub(crate) l1_network: &'a str,
     pub(crate) proof_type: ProofType,
+    pub(crate) prover_type: Option<ProverType>,
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
 }
@@ -117,6 +138,10 @@ pub(crate) struct TaskRuntimeMetadata {
 }
 
 impl TaskMetadata {
+    pub(crate) fn prover_type_str(&self) -> Option<String> {
+        self.prover_type.map(|kind| kind.as_str().to_string())
+    }
+
     pub(crate) fn execution_mode_str(&self) -> Option<String> {
         self.execution_mode.map(|mode| mode.as_str().to_string())
     }
@@ -534,6 +559,7 @@ mod tests {
             network: "taiko_hoodi".to_string(),
             l1_network: "hoodi".to_string(),
             proof_type: ProofType::Risc0,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: Vec::new(),
@@ -555,6 +581,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: Vec::new(),

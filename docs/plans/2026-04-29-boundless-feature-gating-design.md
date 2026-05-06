@@ -25,7 +25,7 @@ source tree, while GitHub runners rebuild from fresh cargo registry contents eac
 
 - Do not vendor `boundless-market` into this repository.
 - Do not change the public config file shape unless necessary.
-- Keep the Boundless route model (`risc0/boundless`, `ShastaRisc0Boundless`) in the canonical
+- Keep the RISC0 network route model (`risc0/network`, `ShastaRisc0Network`) in the canonical
   route/pipeline enums so persisted runtime records and API payloads continue to round-trip.
 - When the `boundless` feature is disabled, do not register the Boundless engine in `raiko2`.
 - When the feature is disabled, allow config files to contain Boundless fields without failing
@@ -59,9 +59,9 @@ Compile these only with `--features boundless`:
 
 Behavior remains unchanged:
 
-- `config.prover.runner = "boundless"` is valid for RISC0
-- `ShastaRisc0Boundless` engine is created
-- explicit `risc0/boundless` requests resolve to the Boundless engine
+- `config.prover.runner = "network"` is valid for RISC0
+- `ShastaRisc0Network` engine is created
+- explicit `risc0/network` routes resolve to the Boundless-backed engine
 
 ### Feature disabled
 
@@ -70,9 +70,9 @@ Behavior changes in a narrow way:
 - Boundless config fields may still be present and parse successfully
 - startup does not register a Boundless engine
 - the default RISC0 route selection in HTTP handlers falls back to `risc0/local` even if
-  `config.prover.runner = "boundless"`
-- explicit `risc0/boundless` requests still parse as a canonical route, but engine resolution
-  returns the existing `404 pipeline not available: shasta-risc0-boundless`
+  `config.prover.runner = "network"`
+- explicit `risc0/network` routes still parse as a canonical route, but engine resolution
+  returns the existing `404 pipeline not available: shasta-risc0-network`
 
 This matches the requested behavior: “not registered” rather than “config rejected”.
 

@@ -15,7 +15,7 @@ use raiko2_guests::{
     load_risc0_shasta_guest_elves_from_dir, load_sp1_shasta_guest_elves_from_dir,
 };
 use risc0_zkvm::compute_image_id;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sp1_sdk::{HashableKey, Prover as _, ProverClient};
 use xtask_build_guest::Backend;
 
@@ -183,23 +183,6 @@ struct SummaryFile {
     registrations: Vec<PlannedRegistration>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     receipt_files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tdx_guest_data: Option<TdxGuestData>,
-}
-
-/// TDX bootstrap data — what the on-chain TDX verifier needs to register the prover.
-///
-/// Read from `~/.config/raiko2/tdx/bootstrap.json`, which is written by the TDX
-/// prover the first time it bootstraps (i.e. the first time the server starts
-/// with `--features tdx` and a reachable attestation socket).
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TdxGuestData {
-    issuer_type: String,
-    public_key: String,
-    quote: String,
-    nonce: String,
-    metadata: serde_json::Value,
 }
 
 pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
@@ -207,27 +190,9 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     let output_dir = resolve_output_dir(root, args.output_dir.as_deref())?;
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
-    let summary_path = output_dir.join("summary.json");
-
-    if matches!(args.backend, Backend::Tdx) {
-        return run_tdx_only(args, &config, &output_dir, &summary_path);
-    }
-
-    let tdx_guest_data = if matches!(args.backend, Backend::All) {
-        match read_tdx_guest_data() {
-            Ok(data) => Some(data),
-            Err(err) => {
-                println!(
-                    "[WARN] Skipping TDX guest data: {err}. Run the server with --features tdx once to bootstrap, then re-run."
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     let plan = build_plan(args.backend, &config, root)?;
+    let summary_path = output_dir.join("summary.json");
     let read_provider = ProviderBuilder::new().connect_http(
         config
             .rpc_url
@@ -259,7 +224,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
             created_at_unix: unix_timestamp(),
             registrations: materialize_checked_plan(&checked_plan),
             receipt_files: Vec::new(),
-            tdx_guest_data,
         };
         write_json(&summary_path, &summary)?;
         println!(
@@ -269,11 +233,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
             pending,
             summary_path.display(),
         );
-        if summary.tdx_guest_data.is_some() {
-            println!(
-                "TDX guest data attached to summary (on-chain TDX registration is not implemented yet)."
-            );
-        }
         return Ok(());
     }
 
@@ -323,12 +282,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
         receipt_files.push(file_name);
     }
 
-    if tdx_guest_data.is_some() {
-        println!(
-            "[WARN] On-chain TDX prover registration is not implemented yet; TDX guest data is attached to the summary file for manual use."
-        );
-    }
-
     let summary = SummaryFile {
         mode: "apply",
         profile: profile_name(config.profile),
@@ -341,7 +294,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
         created_at_unix: unix_timestamp(),
         registrations: materialize_checked_plan(&checked_plan),
         receipt_files,
-        tdx_guest_data,
     };
     write_json(&summary_path, &summary)?;
     println!(
@@ -354,66 +306,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
         summary_path.display()
     );
     Ok(())
-}
-
-/// Handle `--backend tdx`: skip RPC/chain interaction entirely. TDX has no
-/// per-image registration call yet, so we just dump the bootstrap data into
-/// summary.json so it can be used for manual on-chain registration.
-fn run_tdx_only(
-    args: RegisterImageArgs,
-    config: &ResolvedProfile,
-    output_dir: &Path,
-    summary_path: &Path,
-) -> Result<()> {
-    if args.apply {
-        bail!(
-            "--apply is not supported for backend=tdx: on-chain TDX prover registration is not implemented yet. Run with --backend tdx (without --apply) to dump the bootstrap values into summary.json."
-        );
-    }
-
-    let tdx_guest_data = read_tdx_guest_data().with_context(|| {
-        format!(
-            "failed to read TDX bootstrap data from {}",
-            tdx_bootstrap_path().display()
-        )
-    })?;
-
-    let summary = SummaryFile {
-        mode: "dry-run",
-        profile: profile_name(config.profile),
-        network: config.network,
-        chain_id: 0,
-        backend: backend_name(args.backend),
-        rpc_url: String::new(),
-        output_dir: output_dir.display().to_string(),
-        sender: None,
-        created_at_unix: unix_timestamp(),
-        registrations: Vec::new(),
-        receipt_files: Vec::new(),
-        tdx_guest_data: Some(tdx_guest_data),
-    };
-    write_json(summary_path, &summary)?;
-    println!(
-        "TDX guest data dumped to {} (on-chain TDX registration is not implemented yet).",
-        summary_path.display()
-    );
-    Ok(())
-}
-
-fn tdx_bootstrap_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".config")
-        .join("raiko2")
-        .join("tdx")
-        .join("bootstrap.json")
-}
-
-fn read_tdx_guest_data() -> Result<TdxGuestData> {
-    let path = tdx_bootstrap_path();
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("TDX bootstrap file not found at {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse TDX bootstrap file {}", path.display()))
 }
 
 fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
@@ -470,10 +362,6 @@ fn build_plan(
                 format!("failed to load SP1 guest ELFs from {}", elf_dir.display())
             })?;
             plan.extend(build_sp1_calls(config, &elves)?);
-        }
-        Backend::Tdx => {
-            // TDX has no on-chain image registration call yet; the bootstrap data
-            // is gathered separately via `read_tdx_guest_data` in `run`.
         }
         Backend::All => {
             let risc0_elves =
@@ -799,11 +687,10 @@ fn profile_name(profile: RegisterImageProfile) -> &'static str {
     }
 }
 
-const fn backend_name(backend: Backend) -> &'static str {
+fn backend_name(backend: Backend) -> &'static str {
     match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
-        Backend::Tdx => "tdx",
         Backend::All => "all",
     }
 }

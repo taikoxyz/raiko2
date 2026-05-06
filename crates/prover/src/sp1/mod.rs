@@ -16,7 +16,7 @@ use alloy::{providers::ProviderBuilder, sol};
 use alloy_primitives::{Address, B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use serde::Deserialize;
 use sp1_sdk::{
     CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
@@ -24,6 +24,7 @@ use sp1_sdk::{
     network::Error as Sp1NetworkError,
 };
 use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::info;
@@ -50,8 +51,21 @@ sol!(
 );
 
 /// SP1 Prover for Shasta proposal proofs.
+#[derive(Clone)]
 pub struct Sp1Prover {
     config: Sp1Config,
+    setup_cache: Arc<Sp1SetupCache>,
+}
+
+struct Sp1SetupCache {
+    proposal: OnceLock<Arc<Sp1ProgramSetup>>,
+    aggregation: OnceLock<Arc<Sp1ProgramSetup>>,
+}
+
+#[derive(Clone)]
+struct Sp1ProgramSetup {
+    pk: SP1ProvingKey,
+    vk: SP1VerifyingKey,
 }
 
 #[must_use]
@@ -71,8 +85,9 @@ pub fn sp1_vk_digest(vk: &SP1VerifyingKey) -> String {
 
 /// Parses either an SP1 verifying key JSON string or a 32-byte hex image id.
 ///
-/// Raw 32-byte image ids are encoded into little-endian `u32` words because the Shasta
-/// aggregation guest ABI reconstructs them with `words_to_bytes_le`.
+/// SP1 verifying key JSON is kept in SP1's native `hash_u32` word form. Raw 32-byte
+/// image ids are encoded into little-endian `u32` words so RISC0/Boundless aggregation
+/// paths can round-trip them back to their original bytes.
 ///
 /// # Errors
 ///
@@ -103,9 +118,44 @@ pub fn sp1_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
 
 impl Sp1Prover {
     /// Create a new SP1 prover with the given configuration.
+    ///
+    /// Call `preload_setup` before using this prover to prove. Server code should prefer
+    /// `new_with_backend` so SP1 setup happens during startup instead of the async proving path.
     #[must_use]
-    pub const fn new(config: Sp1Config) -> Self {
-        Self { config }
+    pub fn new(config: Sp1Config) -> Self {
+        Self {
+            config,
+            setup_cache: Arc::new(Sp1SetupCache::new()),
+        }
+    }
+
+    /// Create a new SP1 prover and eagerly prepare proving/verifying keys for the configured ELF
+    /// backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot provide the configured proposal or aggregation ELF.
+    pub fn new_with_backend<B>(config: Sp1Config, backend: &B) -> RaikoResult<Self>
+    where
+        B: ProverBackend,
+    {
+        let prover = Self::new(config);
+        prover.preload_setup(backend)?;
+        Ok(prover)
+    }
+
+    /// Eagerly prepare proving/verifying keys for both SP1 proof stages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot provide either ELF.
+    pub fn preload_setup<B>(&self, backend: &B) -> RaikoResult<()>
+    where
+        B: ProverBackend,
+    {
+        self.preload_setup_for_stage(backend, ProofStage::Proposal)?;
+        self.preload_setup_for_stage(backend, ProofStage::Aggregation)?;
+        Ok(())
     }
 
     fn resolve_config_for_request(
@@ -134,6 +184,69 @@ impl Sp1Prover {
         Ok(system
             .as_ref()
             .map_or(effective.clone(), |system| system.applied_to(&effective)))
+    }
+
+    fn preload_setup_for_stage<B>(
+        &self,
+        backend: &B,
+        stage: ProofStage,
+    ) -> RaikoResult<Arc<Sp1ProgramSetup>>
+    where
+        B: ProverBackend,
+    {
+        let cell = self.setup_cache.cell(stage);
+        if let Some(setup) = cell.get() {
+            return Ok(Arc::clone(setup));
+        }
+
+        let elf = backend.elf(stage)?;
+        let client = ProverClient::builder().cpu().build();
+        let (pk, vk) = client.setup(elf);
+        let setup = Arc::new(Sp1ProgramSetup { pk, vk });
+
+        match cell.set(Arc::clone(&setup)) {
+            Ok(()) => {
+                tracing::info!(
+                    stage = sp1_stage_name(stage),
+                    vkey_hash = %sp1_vk_digest(&setup.vk),
+                    "Initialized SP1 program setup"
+                );
+                Ok(setup)
+            }
+            Err(setup) => Ok(cell.get().cloned().unwrap_or(setup)),
+        }
+    }
+
+    fn cached_setup_for_stage(&self, stage: ProofStage) -> RaikoResult<Arc<Sp1ProgramSetup>> {
+        self.setup_cache.cell(stage).get().cloned().ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "SP1 {} setup is not initialized; call Sp1Prover::preload_setup before proving",
+                sp1_stage_name(stage)
+            ))
+        })
+    }
+}
+
+impl Sp1SetupCache {
+    const fn new() -> Self {
+        Self {
+            proposal: OnceLock::new(),
+            aggregation: OnceLock::new(),
+        }
+    }
+
+    const fn cell(&self, stage: ProofStage) -> &OnceLock<Arc<Sp1ProgramSetup>> {
+        match stage {
+            ProofStage::Proposal => &self.proposal,
+            ProofStage::Aggregation => &self.aggregation,
+        }
+    }
+}
+
+const fn sp1_stage_name(stage: ProofStage) -> &'static str {
+    match stage {
+        ProofStage::Proposal => "proposal",
+        ProofStage::Aggregation => "aggregation",
     }
 }
 
@@ -179,15 +292,10 @@ where
         )?;
         info!(mode = %effective_config.mode.as_str(), "Starting SP1 proposal run...");
 
-        // Prepare stdin for SP1 guest program
-        // The guest reads a single GuestInput via typed IO.
-        let mut stdin = SP1Stdin::new();
         let guest_input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
-        stdin.write(&guest_input);
 
         // Use the proposal ELF selected by the configured backend.
-        let elf = backend.elf(ProofStage::Proposal)?;
         match effective_config.mode {
             ExecutionMode::Execute => {
                 if effective_config.prover == ProverMode::Network {
@@ -195,70 +303,34 @@ where
                         "sp1.mode=execute does not support sp1.prover=network".to_string(),
                     ));
                 }
-                let client = match effective_config.prover {
-                    ProverMode::Mock => ProverClient::builder().mock().build(),
-                    ProverMode::Local => ProverClient::builder().cpu().build(),
-                    ProverMode::Network => unreachable!("network mode is rejected above"),
-                };
-                let (public_values, execution_report) =
-                    client.execute(elf, &stdin).run().map_err(|e| {
-                        tracing::error!("Failed to execute SP1 proposal: {:?}", e);
-                        RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
-                    })?;
-                let public_values_raw = public_values.raw();
-                let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
-                let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
-                    public_values_raw,
-                    &execution_report,
-                ))
-                .map_err(|e| {
-                    RaikoError::Guest(format!("Failed to serialize SP1 execution metadata: {e}"))
-                })?;
-
-                Ok(Sp1Response {
-                    proof: None,
-                    vkey_hash: None,
-                    input: input_hash,
-                    sp1_proof: None,
-                    vkey: None,
-                    extra_data: with_shasta_extra_data(
-                        &guest_input.proof_carry_data,
-                        "sp1",
-                        Some(metadata),
-                    )?,
-                }
-                .into())
+                execute_proposal_with_local_client(
+                    effective_config.prover,
+                    backend.elf(ProofStage::Proposal)?.to_vec(),
+                    guest_input,
+                )
+                .await
             }
             ExecutionMode::Prove => {
                 let proof_mode: SP1ProofMode = effective_config.recursion.into();
+                let setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
                 match effective_config.prover {
-                    ProverMode::Mock => {
-                        let client = ProverClient::builder().mock().build();
-                        prove_proposal_with_client(
-                            &client,
-                            elf,
-                            &stdin,
+                    ProverMode::Mock | ProverMode::Local => {
+                        prove_proposal_with_local_client(
+                            effective_config.prover,
+                            setup,
+                            guest_input,
                             proof_mode,
                             effective_config.verify,
-                            &guest_input,
                         )
-                    }
-                    ProverMode::Local => {
-                        let client = ProverClient::builder().cpu().build();
-                        prove_proposal_with_client(
-                            &client,
-                            elf,
-                            &stdin,
-                            proof_mode,
-                            effective_config.verify,
-                            &guest_input,
-                        )
+                        .await
                     }
                     ProverMode::Network => {
+                        let mut stdin = SP1Stdin::new();
+                        stdin.write(&guest_input);
                         let client = build_network_prover(&effective_config)?;
                         prove_proposal_with_network_client(
                             &client,
-                            elf,
+                            setup.as_ref(),
                             stdin,
                             proof_mode,
                             &effective_config,
@@ -276,7 +348,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        backend: &B,
+        _backend: &B,
     ) -> RaikoResult<Proof> {
         let effective_config =
             self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
@@ -287,47 +359,34 @@ where
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
-        // Prepare stdin for SP1 aggregation guest program
-        // The guest reads ShastaZkAggregationGuestInput via sp1_zkvm::io::read()
-        let mut stdin = SP1Stdin::new();
-        stdin.write(&aggregation_input);
-
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
-        let elf = backend.elf(ProofStage::Aggregation)?;
+        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
+        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
-            ProverMode::Mock => {
-                let client = ProverClient::builder().mock().build();
-                aggregate_with_client(
-                    &client,
-                    elf,
-                    backend,
-                    &input,
-                    stdin,
+            ProverMode::Mock | ProverMode::Local => {
+                aggregate_with_local_client(
+                    effective_config.prover,
+                    proposal_setup,
+                    aggregation_setup,
+                    input,
+                    aggregation_input,
                     proof_mode,
                     effective_config.verify,
                 )
-            }
-            ProverMode::Local => {
-                let client = ProverClient::builder().cpu().build();
-                aggregate_with_client(
-                    &client,
-                    elf,
-                    backend,
-                    &input,
-                    stdin,
-                    proof_mode,
-                    effective_config.verify,
-                )
+                .await
             }
             ProverMode::Network => {
+                // The guest reads ShastaZkAggregationGuestInput via sp1_zkvm::io::read().
+                let mut stdin = SP1Stdin::new();
+                stdin.write(&aggregation_input);
                 let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
-                    elf,
-                    backend,
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     &effective_config,
@@ -342,7 +401,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        backend: &B,
+        _backend: &B,
         observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let effective_config =
@@ -353,43 +412,31 @@ where
         );
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
-        let mut stdin = SP1Stdin::new();
-        stdin.write(&aggregation_input);
-
-        let elf = backend.elf(ProofStage::Aggregation)?;
+        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
+        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
-            ProverMode::Mock => {
-                let client = ProverClient::builder().mock().build();
-                aggregate_with_client(
-                    &client,
-                    elf,
-                    backend,
-                    &input,
-                    stdin,
+            ProverMode::Mock | ProverMode::Local => {
+                aggregate_with_local_client(
+                    effective_config.prover,
+                    proposal_setup,
+                    aggregation_setup,
+                    input,
+                    aggregation_input,
                     proof_mode,
                     effective_config.verify,
                 )
-            }
-            ProverMode::Local => {
-                let client = ProverClient::builder().cpu().build();
-                aggregate_with_client(
-                    &client,
-                    elf,
-                    backend,
-                    &input,
-                    stdin,
-                    proof_mode,
-                    effective_config.verify,
-                )
+                .await
             }
             ProverMode::Network => {
+                let mut stdin = SP1Stdin::new();
+                stdin.write(&aggregation_input);
                 let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
-                    elf,
-                    backend,
+                    proposal_setup.as_ref(),
+                    aggregation_setup.as_ref(),
                     &input,
                     stdin,
                     &effective_config,
@@ -612,17 +659,96 @@ async fn verify_sp1_remote_contract(
     Ok(())
 }
 
+fn local_sp1_client(prover_mode: ProverMode) -> CpuProver {
+    match prover_mode {
+        ProverMode::Mock => ProverClient::builder().mock().build(),
+        ProverMode::Local => ProverClient::builder().cpu().build(),
+        ProverMode::Network => unreachable!("network prover is handled by the network path"),
+    }
+}
+
+fn blocking_sp1_join_error(operation: &str, err: &tokio::task::JoinError) -> RaikoError {
+    RaikoError::Guest(format!("SP1 {operation} task join failed: {err}"))
+}
+
+async fn execute_proposal_with_local_client(
+    prover_mode: ProverMode,
+    elf: Vec<u8>,
+    guest_input: GuestInput,
+) -> RaikoResult<Proof> {
+    tokio::task::spawn_blocking(move || {
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&guest_input);
+
+        let client = local_sp1_client(prover_mode);
+        let (public_values, execution_report) =
+            client.execute(&elf, &stdin).run().map_err(|e| {
+                tracing::error!("Failed to execute SP1 proposal: {:?}", e);
+                RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
+            })?;
+        let public_values_raw = public_values.raw();
+        let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
+        let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
+            public_values_raw,
+            &execution_report,
+        ))
+        .map_err(|e| {
+            RaikoError::Guest(format!("Failed to serialize SP1 execution metadata: {e}"))
+        })?;
+
+        Ok(Sp1Response {
+            proof: None,
+            vkey_hash: None,
+            input: input_hash,
+            sp1_proof: None,
+            vkey: None,
+            extra_data: with_shasta_extra_data(
+                &guest_input.proof_carry_data,
+                "sp1",
+                Some(metadata),
+            )?,
+        }
+        .into())
+    })
+    .await
+    .map_err(|err| blocking_sp1_join_error("proposal execute", &err))?
+}
+
+async fn prove_proposal_with_local_client(
+    prover_mode: ProverMode,
+    setup: Arc<Sp1ProgramSetup>,
+    guest_input: GuestInput,
+    proof_mode: SP1ProofMode,
+    verify: bool,
+) -> RaikoResult<Proof> {
+    tokio::task::spawn_blocking(move || {
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&guest_input);
+
+        let client = local_sp1_client(prover_mode);
+        prove_proposal_with_client(
+            &client,
+            setup.as_ref(),
+            &stdin,
+            proof_mode,
+            verify,
+            &guest_input,
+        )
+    })
+    .await
+    .map_err(|err| blocking_sp1_join_error("proposal proof", &err))?
+}
+
 fn prove_proposal_with_client(
     client: &CpuProver,
-    elf: &[u8],
+    setup: &Sp1ProgramSetup,
     stdin: &SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
     guest_input: &GuestInput,
 ) -> RaikoResult<Proof> {
-    let (pk, vk) = client.setup(elf);
     let proof = client
-        .prove(&pk, stdin)
+        .prove(&setup.pk, stdin)
         .mode(proof_mode)
         .run()
         .map_err(|e| {
@@ -631,7 +757,7 @@ fn prove_proposal_with_client(
         })?;
 
     if verify {
-        client.verify(&proof, &vk).map_err(|e| {
+        client.verify(&proof, &setup.vk).map_err(|e| {
             tracing::error!("Failed to verify SP1 proposal proof: {:?}", e);
             RaikoError::Guest(format!("SP1 proposal proof verification failed: {e}"))
         })?;
@@ -641,11 +767,11 @@ fn prove_proposal_with_client(
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
 
     Ok(Sp1Response {
-        proof: encode_sp1_proposal_proof_payload(&proof, &vk),
-        vkey_hash: Some(sp1_vk_digest(&vk)),
+        proof: encode_sp1_proposal_proof_payload(&proof, &setup.vk),
+        vkey_hash: Some(sp1_vk_digest(&setup.vk)),
         input: input_hash,
         sp1_proof: Some(proof),
-        vkey: Some(vk),
+        vkey: Some(setup.vk.clone()),
         extra_data: with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?,
     }
     .into())
@@ -653,19 +779,20 @@ fn prove_proposal_with_client(
 
 async fn prove_proposal_with_network_client(
     client: &NetworkProver,
-    elf: &[u8],
+    setup: &Sp1ProgramSetup,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     config: &Sp1Config,
     guest_input: &GuestInput,
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof> {
-    let (pk, vk) = client.setup(elf);
-    let request =
-        request_network_proof(client, &pk, stdin, proof_mode, config, observer, "proposal").await?;
+    let request = request_network_proof(
+        client, &setup.pk, stdin, proof_mode, config, observer, "proposal",
+    )
+    .await?;
 
     if config.verify {
-        verify_network_proposal_proof(config, &request.proof, &vk).await?;
+        verify_network_proposal_proof(config, &request.proof, &setup.vk).await?;
     }
 
     let public_values = request.proof.public_values.as_slice();
@@ -676,11 +803,11 @@ async fn prove_proposal_with_network_client(
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
 
     Ok(Sp1Response {
-        proof: encode_sp1_proposal_proof_payload(&request.proof, &vk),
-        vkey_hash: Some(sp1_vk_digest(&vk)),
+        proof: encode_sp1_proposal_proof_payload(&request.proof, &setup.vk),
+        vkey_hash: Some(sp1_vk_digest(&setup.vk)),
         input: input_hash,
         sp1_proof: Some(request.proof),
-        vkey: Some(vk),
+        vkey: Some(setup.vk.clone()),
         extra_data: insert_sp1_metadata(
             base_extra_data,
             serde_json::json!({ "network": network_metadata }),
@@ -689,26 +816,47 @@ async fn prove_proposal_with_network_client(
     .into())
 }
 
-fn aggregate_with_client<B>(
+async fn aggregate_with_local_client(
+    prover_mode: ProverMode,
+    proposal_setup: Arc<Sp1ProgramSetup>,
+    aggregation_setup: Arc<Sp1ProgramSetup>,
+    input: AggregationGuestInput,
+    aggregation_input: ShastaZkAggregationGuestInput,
+    proof_mode: SP1ProofMode,
+    verify: bool,
+) -> RaikoResult<Proof> {
+    tokio::task::spawn_blocking(move || {
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&aggregation_input);
+
+        let client = local_sp1_client(prover_mode);
+        aggregate_with_client(
+            &client,
+            proposal_setup.as_ref(),
+            aggregation_setup.as_ref(),
+            &input,
+            stdin,
+            proof_mode,
+            verify,
+        )
+    })
+    .await
+    .map_err(|err| blocking_sp1_join_error("aggregation proof", &err))?
+}
+
+fn aggregate_with_client(
     client: &CpuProver,
-    elf: &[u8],
-    backend: &B,
+    proposal_setup: &Sp1ProgramSetup,
+    aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
-) -> RaikoResult<Proof>
-where
-    B: ProverBackend,
-{
-    let proposal_elf = backend.elf(ProofStage::Proposal)?;
-    let (_, proposal_vk) = client.setup(proposal_elf);
-    let verifier_key = proposal_vk.clone();
-
+) -> RaikoResult<Proof> {
     for proof in &input.proofs {
         match load_sp1_subproof_for_aggregation(proof)? {
             SP1Proof::Compressed(reduce_proof) => {
-                stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
+                stdin.write_proof(*reduce_proof, proposal_setup.vk.vk.clone());
             }
             _ => {
                 return Err(RaikoError::Guest(
@@ -718,9 +866,8 @@ where
         }
     }
 
-    let (pk, vk) = client.setup(elf);
     let proof = client
-        .prove(&pk, &stdin)
+        .prove(&aggregation_setup.pk, &stdin)
         .mode(proof_mode)
         .run()
         .map_err(|e| {
@@ -729,7 +876,7 @@ where
         })?;
 
     if verify {
-        client.verify(&proof, &vk).map_err(|e| {
+        client.verify(&proof, &aggregation_setup.vk).map_err(|e| {
             tracing::error!("Failed to verify SP1 aggregation proof: {:?}", e);
             RaikoError::Guest(format!("SP1 aggregation proof verification failed: {e}"))
         })?;
@@ -739,36 +886,33 @@ where
     let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
 
     Ok(Sp1Response {
-        proof: encode_sp1_aggregation_proof_payload(&proof, &vk, &proposal_vk),
-        vkey_hash: Some(sp1_vk_digest(&vk)),
+        proof: encode_sp1_aggregation_proof_payload(
+            &proof,
+            &aggregation_setup.vk,
+            &proposal_setup.vk,
+        ),
+        vkey_hash: Some(sp1_vk_digest(&aggregation_setup.vk)),
         input: agg_input_hash,
         sp1_proof: Some(proof),
-        vkey: Some(vk),
+        vkey: Some(aggregation_setup.vk.clone()),
         extra_data: None,
     }
     .into())
 }
 
-async fn aggregate_with_network_client<B>(
+async fn aggregate_with_network_client(
     client: &NetworkProver,
-    elf: &[u8],
-    backend: &B,
+    proposal_setup: &Sp1ProgramSetup,
+    aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     config: &Sp1Config,
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
-) -> RaikoResult<Proof>
-where
-    B: ProverBackend,
-{
-    let proposal_elf = backend.elf(ProofStage::Proposal)?;
-    let (_, proposal_vk) = client.setup(proposal_elf);
-    let verifier_key = proposal_vk.clone();
-
+) -> RaikoResult<Proof> {
     for proof in &input.proofs {
         match load_sp1_subproof_for_aggregation(proof)? {
             SP1Proof::Compressed(reduce_proof) => {
-                stdin.write_proof(*reduce_proof, verifier_key.vk.clone());
+                stdin.write_proof(*reduce_proof, proposal_setup.vk.vk.clone());
             }
             _ => {
                 return Err(RaikoError::Guest(
@@ -778,11 +922,10 @@ where
         }
     }
 
-    let (pk, vk) = client.setup(elf);
     let proof_mode: SP1ProofMode = config.recursion.into();
     let request = request_network_proof(
         client,
-        &pk,
+        &aggregation_setup.pk,
         stdin,
         proof_mode,
         config,
@@ -792,7 +935,7 @@ where
     .await?;
 
     if config.verify {
-        verify_network_aggregation_proof(config, &request.proof, &vk).await?;
+        verify_network_aggregation_proof(config, &request.proof, &aggregation_setup.vk).await?;
     }
 
     let public_values = request.proof.public_values.as_slice();
@@ -802,11 +945,15 @@ where
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
 
     Ok(Sp1Response {
-        proof: encode_sp1_aggregation_proof_payload(&request.proof, &vk, &proposal_vk),
-        vkey_hash: Some(sp1_vk_digest(&vk)),
+        proof: encode_sp1_aggregation_proof_payload(
+            &request.proof,
+            &aggregation_setup.vk,
+            &proposal_setup.vk,
+        ),
+        vkey_hash: Some(sp1_vk_digest(&aggregation_setup.vk)),
         input: agg_input_hash,
         sp1_proof: Some(request.proof),
-        vkey: Some(vk),
+        vkey: Some(aggregation_setup.vk.clone()),
         extra_data: insert_sp1_metadata(None, serde_json::json!({ "network": network_metadata }))?,
     }
     .into())
@@ -1014,17 +1161,61 @@ fn insert_sp1_metadata(
 mod tests {
     use super::{
         encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
-        remote_verifier_program_vkey, remote_verifier_proof_bytes,
+        remote_verifier_program_vkey, remote_verifier_proof_bytes, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
+    use raiko2_pipeline::ProofStage;
+    use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
     use raiko2_primitives::Proof;
-    use raiko2_primitives_shasta::instance::words_to_bytes_le;
-    use sp1_sdk::{HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues};
+    use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
+    use sp1_sdk::{
+        HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues,
+        SP1VerifyingKey,
+    };
     use std::str::FromStr;
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    }
+
+    fn legacy_raiko_sp1_aggregation_payload(
+        aggregation_vk: &SP1VerifyingKey,
+        block_vk: &SP1VerifyingKey,
+        proof_bytes: impl AsRef<[u8]>,
+    ) -> String {
+        format!(
+            "{}{}{}",
+            aggregation_vk.bytes32(),
+            alloy_primitives::hex::encode(block_vk.hash_bytes()),
+            alloy_primitives::hex::encode(proof_bytes)
+        )
+    }
+
+    #[test]
+    fn sp1_setup_cache_requires_preload_before_use() {
+        let prover = super::Sp1Prover::new(super::Sp1Config::default());
+
+        let err = match prover.cached_setup_for_stage(ProofStage::Proposal) {
+            Ok(_) => panic!("setup should not be initialized"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("setup is not initialized"));
+    }
+
+    #[test]
+    fn sp1_new_with_backend_preloads_setup_cache() {
+        let backend = sp1_shasta_backend_from_elves(sp1_test_elves());
+        let prover = super::Sp1Prover::new_with_backend(super::Sp1Config::default(), &backend)
+            .expect("preload SP1 setup");
+
+        assert!(prover.cached_setup_for_stage(ProofStage::Proposal).is_ok());
+        assert!(
+            prover
+                .cached_setup_for_stage(ProofStage::Aggregation)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1046,6 +1237,48 @@ mod tests {
         let words = super::sp1_image_id_words_from_uuid(&expected.to_string()).expect("image id");
 
         assert_eq!(B256::from(words_to_bytes_le(&words)), expected);
+    }
+
+    #[test]
+    fn sp1_vkey_words_match_contract_block_program_encoding() {
+        let client = ProverClient::builder().mock().build();
+        let elves = sp1_test_elves();
+        let (_, vk) = client.setup(elves.proposal.as_ref());
+        let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&vk)).expect("image id");
+
+        assert_eq!(words, vk.hash_u32());
+        assert_eq!(
+            sp1_contract_block_program_id(&words),
+            B256::from_slice(&vk.hash_bytes())
+        );
+        assert_ne!(
+            B256::from(words_to_bytes_le(&words)),
+            B256::from_slice(&vk.hash_bytes())
+        );
+    }
+
+    #[test]
+    fn sp1_aggregation_public_input_matches_contract_payload_program_id() {
+        let client = ProverClient::builder().mock().build();
+        let elves = sp1_test_elves();
+        let (_, block_vk) = client.setup(elves.proposal.as_ref());
+        let (_, aggregation_vk) = client.setup(elves.aggregation.as_ref());
+        let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&block_vk)).expect("image id");
+        let proof_bytes = [0xaa, 0xbb, 0xcc];
+
+        let payload = legacy_raiko_sp1_aggregation_payload(&aggregation_vk, &block_vk, proof_bytes);
+        let payload_bytes = alloy_primitives::hex::decode(payload.strip_prefix("0x").unwrap())
+            .expect("payload hex");
+        let block_program_from_contract_payload = B256::from_slice(&payload_bytes[32..64]);
+
+        assert_eq!(
+            block_program_from_contract_payload,
+            sp1_contract_block_program_id(&words)
+        );
+        assert_ne!(
+            block_program_from_contract_payload,
+            B256::from(words_to_bytes_le(&words))
+        );
     }
 
     #[test]
@@ -1096,12 +1329,7 @@ mod tests {
 
         assert_eq!(
             payload,
-            format!(
-                "{}{}{}",
-                aggregation_vk.bytes32(),
-                alloy_primitives::hex::encode(block_vk.hash_bytes()),
-                alloy_primitives::hex::encode(proof_bytes)
-            )
+            legacy_raiko_sp1_aggregation_payload(&aggregation_vk, &block_vk, proof_bytes)
         );
     }
 

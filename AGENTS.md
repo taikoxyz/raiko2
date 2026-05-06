@@ -94,8 +94,8 @@ Run the smallest set of checks that proves the change safely, then scale up when
 
 ## Alethia Reth Integration
 
-- Use `~/code/github.com/taikoxyz/alethia-reth` branch `feat/raiko2` as the canonical base for all
-  raiko2-specific alethia-reth patches.
+- Use the `feat/raiko2` branch from `https://github.com/taikoxyz/alethia-reth` as the canonical
+  base for all raiko2-specific alethia-reth patches, regardless of local checkout path.
 - Put every alethia-reth fix required by raiko2 on `feat/raiko2`; do not keep those fixes only in
   one-off PR branches, local worktrees, or raiko2-side workaround layers.
 - Rebase `feat/raiko2` onto alethia-reth `origin/main` when upstream alethia-reth or reth changes are

@@ -29,9 +29,9 @@ cargo test -p raiko2-queue -p raiko2-runtime
 
 ## Alethia Reth Integration Workflow
 
-Raiko2 consumes alethia-reth through the `feat/raiko2` branch in
-`~/code/github.com/taikoxyz/alethia-reth`. That branch is the single integration baseline for
-raiko2-specific alethia-reth patches.
+Raiko2 consumes [taikoxyz/alethia-reth](https://github.com/taikoxyz/alethia-reth) through the
+`feat/raiko2` branch. That branch is the single integration baseline for raiko2-specific
+alethia-reth patches, regardless of where you keep your local checkout.
 
 Development rules:
 

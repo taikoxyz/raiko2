@@ -8,6 +8,6 @@ TODO.md
 test.json
 __pycache__/
 *.pyc
-core.*
+core.[0-9]*
 regression.log
 test/regression/**/*.log

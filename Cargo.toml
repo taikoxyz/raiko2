@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "xtask",
     "xtask/build-guest",
+    "crates/guest-common",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",
@@ -53,6 +54,7 @@ lto = true
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
+raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }

@@ -17,7 +17,7 @@ name = "risc0-shasta-boundless-aggregation"
 path = "src/boundless_aggregation.rs"
 
 [dependencies]
-raiko2-guest-common = { path = "../common", default-features = false }
+raiko2-guest-common = { path = "../../crates/guest-common", default-features = false }
 raiko2-primitives = { path = "../../crates/primitives" }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }

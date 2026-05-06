@@ -2,13 +2,14 @@
 name = "raiko2-guest-common"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-raiko2-primitives = { path = "../../crates/primitives" }
-raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
-raiko2-protocol = { path = "../../crates/protocol" }
-raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
-raiko2-stateless = { path = "../../crates/stateless" }
+raiko2-primitives = { path = "../primitives" }
+raiko2-primitives-shasta = { path = "../primitives-shasta" }
+raiko2-protocol = { path = "../protocol" }
+raiko2-protocol-shasta = { path = "../protocol-shasta" }
+raiko2-stateless = { path = "../stateless" }
 alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false }
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false, features = [
     "prover",
@@ -36,5 +37,3 @@ risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag
 [features]
 default = []
 bench = []
-
-[workspace]

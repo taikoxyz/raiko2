@@ -214,15 +214,15 @@ mod tests {
         let mut counts = BTreeMap::<(String, String), usize>::new();
         for entry in &summary.digests {
             *counts
-                .entry((entry.object_name.clone(), format!("{:?}", entry.digest_source)))
+                .entry((
+                    entry.object_name.clone(),
+                    format!("{:?}", entry.digest_source),
+                ))
                 .or_default() += 1;
         }
 
         assert_eq!(
-            counts.get(&(
-                "risc0_shasta_proposal".to_string(),
-                "ImageId".to_string()
-            )),
+            counts.get(&("risc0_shasta_proposal".to_string(), "ImageId".to_string())),
             Some(&1)
         );
         assert_eq!(
@@ -240,24 +240,15 @@ mod tests {
             Some(&1)
         );
         assert_eq!(
-            counts.get(&(
-                "sp1_shasta_proposal".to_string(),
-                "VkBn254".to_string()
-            )),
+            counts.get(&("sp1_shasta_proposal".to_string(), "VkBn254".to_string())),
             Some(&1)
         );
         assert_eq!(
-            counts.get(&(
-                "sp1_shasta_proposal".to_string(),
-                "VkHashBytes".to_string()
-            )),
+            counts.get(&("sp1_shasta_proposal".to_string(), "VkHashBytes".to_string())),
             Some(&1)
         );
         assert_eq!(
-            counts.get(&(
-                "sp1_shasta_aggregation".to_string(),
-                "VkBn254".to_string()
-            )),
+            counts.get(&("sp1_shasta_aggregation".to_string(), "VkBn254".to_string())),
             Some(&1)
         );
         assert_eq!(

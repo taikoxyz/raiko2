@@ -617,6 +617,9 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm").arg("--entrypoint").arg("");
+    for arg in util::docker_user_args()? {
+        cmd.arg(arg);
+    }
     cmd.arg("-v")
         .arg(format!("{}:/work", root.display()))
         .arg("-w")
@@ -896,6 +899,9 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm");
+    for arg in util::docker_user_args()? {
+        cmd.arg(arg);
+    }
     if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
         && !platform.is_empty()
     {

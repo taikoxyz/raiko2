@@ -70,9 +70,36 @@ pub(crate) fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
+pub(crate) fn docker_user_args() -> Result<Vec<String>> {
+    #[cfg(unix)]
+    {
+        let uid = current_id_arg("-u")?;
+        let gid = current_id_arg("-g")?;
+        return Ok(docker_user_args_from_ids(&uid, &gid));
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(Vec::new())
+    }
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn current_id_arg(flag: &str) -> Result<String> {
+    let output = Command::new("id")
+        .arg(flag)
+        .output()
+        .with_context(|| format!("failed to run id {flag}"))?;
+    if !output.status.success() {
+        bail!("id {flag} failed with status {}", output.status);
+    }
+    String::from_utf8(output.stdout)
+        .map(|value| value.trim().to_string())
+        .with_context(|| format!("id {flag} returned non-utf8 output"))
 }
 
 fn repo_name(root: &Path) -> String {
@@ -128,6 +155,10 @@ fn is_valid_docker_volume_name(value: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
+fn docker_user_args_from_ids(uid: &str, gid: &str) -> Vec<String> {
+    vec!["--user".to_string(), format!("{uid}:{gid}")]
+}
+
 pub(crate) fn run(mut cmd: Command) -> Result<()> {
     let status = cmd
         .status()
@@ -136,4 +167,15 @@ pub(crate) fn run(mut cmd: Command) -> Result<()> {
         bail!("command failed: {cmd:?}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn docker_user_args_format_uid_gid_pair() {
+        assert_eq!(
+            super::docker_user_args_from_ids("1000", "1001"),
+            ["--user".to_string(), "1000:1001".to_string()]
+        );
+    }
 }

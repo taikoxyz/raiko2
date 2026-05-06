@@ -84,6 +84,15 @@ pub(crate) fn docker_user_args() -> Result<Vec<String>> {
     }
 }
 
+pub(crate) fn docker_non_root_env_args() -> Vec<String> {
+    vec![
+        "-e".to_string(),
+        "HOME=/tmp".to_string(),
+        "-e".to_string(),
+        "RUSTUP_HOME=/root/.rustup".to_string(),
+    ]
+}
+
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -176,6 +185,19 @@ mod tests {
         assert_eq!(
             super::docker_user_args_from_ids("1000", "1001"),
             ["--user".to_string(), "1000:1001".to_string()]
+        );
+    }
+
+    #[test]
+    fn docker_non_root_env_args_include_home_and_rustup_home() {
+        assert_eq!(
+            super::docker_non_root_env_args(),
+            vec![
+                "-e".to_string(),
+                "HOME=/tmp".to_string(),
+                "-e".to_string(),
+                "RUSTUP_HOME=/root/.rustup".to_string(),
+            ]
         );
     }
 }

@@ -299,9 +299,10 @@ mod test {
     #[cfg(feature = "kzg-host")]
     #[test]
     fn blob_proof_of_equivalence_handles_non_canonical_challenge() -> Result<()> {
-        let (blob_bytes, commitment) = (0u16..=u8::MAX as u16)
+        let (blob_bytes, commitment) = (0u16..=u16::from(u8::MAX))
             .find_map(|seed| {
-                let blob_bytes = vec![seed as u8; BYTES_PER_BLOB];
+                let seed = u8::try_from(seed).expect("seed is within u8 range");
+                let blob_bytes = vec![seed; BYTES_PER_BLOB];
                 let commitment = blob_to_commitment(&blob_bytes).ok()?;
                 let raw = proof_of_equivalence_point_bytes(&blob_bytes, &commitment);
                 let canonical =

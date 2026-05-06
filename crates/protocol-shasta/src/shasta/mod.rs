@@ -17,7 +17,7 @@ pub use blob_coder::BlobCoder;
 pub use derivation::{
     ParentBlockContext, ProposalMetadata, SourceDerivationError, ValidationContext,
     ValidationError, apply_inherited_metadata, manifest_is_default, prepare_source_manifest,
-    validate_source_manifest,
+    prepare_source_manifest_with_max_blocks, validate_source_manifest,
 };
 pub use error::{ForkConfigResult, ProtocolError, Result, ShastaForkConfigError};
 pub use payload_helpers::{

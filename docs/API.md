@@ -140,10 +140,11 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
-  - `native -> native/local`
-  - `sp1 -> sp1/local`
-  - `risc0 -> risc0/<server default runner>`
+  - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
+  - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
+  - `boundless -> unsupported legacy error response`
+  - `native -> unsupported legacy error response`
   - `sgx -> unsupported legacy error response`
   - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
@@ -152,10 +153,12 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   canonical route, task key, and proof artifact key.
 - `aggregate=true` requires a concrete `proof_type` such as `sp1` or `risc0`. Aggregate requests
   may reuse existing proposal proof artifacts for that concrete proof type.
+- Boundless is the current network provider for `proof_type=risc0`; the canonical HTTP task
+  field is `prover_type = "network"`.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
 - Hosted `proof_type=sp1` aggregation always emits a Plonk proof.
 - When a `zk_any` request is not drawn, the server returns HTTP 200 with:
-  - `proof_type = "native"`
+  - `proof_type = "zk_any"`
   - `batch_id = first proposal_id`
   - `data.status = "zk_any_not_drawn"`
 - Request-scoped prover overrides are strict and typed. The public API accepts flattened
@@ -242,7 +245,7 @@ Example not-drawn response:
 ```json
 {
   "status": "ok",
-  "proof_type": "native",
+  "proof_type": "zk_any",
   "batch_id": 42,
   "data": {
     "status": "zk_any_not_drawn"
@@ -289,15 +292,15 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
-- `proof_type=zk_any` is not supported on `POST /v3/proof/aggregate`; use concrete proposal
-  proofs there.
+- `proof_type` must be a concrete proof type: `risc0` or `sp1`.
+- `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
   If either field is provided, both fields must be provided together.
 - `proof_type=sp1` requires each proof to include `proof`, `input`, `uuid`, and `extra_data`.
 - Hosted `proof_type=sp1` aggregate requests expect Compressed proposal proofs and emit a Plonk
   aggregation proof.
-- `proof_type=risc0` on the hosted Boundless route requires each proof to include `quote`.
+- `proof_type=risc0` on the hosted network route requires each proof to include `quote`.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires pair-level SP1 verifier config on the
   selected `(network, l1_network)`.
@@ -372,7 +375,8 @@ Returns the root-task view derived from the original batch request.
   "proof_type": "risc0",
   "data": {
     "task_id": "task_...",
-    "route": "risc0/boundless",
+    "route": "risc0/network",
+    "prover_type": "network",
     "execution_mode": "prove",
     "status": "completed",
     "network": "taiko_hoodi",
@@ -417,7 +421,9 @@ Returns the root-task view derived from the original batch request.
 ### Runtime Semantics
 
 - `data.route` is the canonical resolved route that accepted the request, such as
-  `native/local`, `sp1/local`, `risc0/local`, or `risc0/boundless`.
+  `native/local`, `sp1/local`, `sp1/network`, `risc0/local`, or `risc0/network`.
+- `data.prover_type` is present for zkVM proof types and reports the effective prover mode:
+  `mock`, `local`, or `network`. For RISC0, the network mode is currently backed by Boundless.
 - `data.execution_mode` is present for SP1 tasks and distinguishes `prove` from `execute`.
 - `data.runtime.runner_status` is the persisted root runtime lifecycle stored in `runtime.sqlite`:
   `allocated`, `running`, `completed`, `failed`, or `cancelled`.
@@ -427,7 +433,7 @@ Returns the root-task view derived from the original batch request.
   resolved concrete route. For `zk_any` requests these fields use the selected `sp1` or `risc0`
   artifact key, never `zk_any`.
 - `proposals[].runtime` and `aggregate.runtime` expose runner-specific runtime metadata when it
-  exists. For `risc0/boundless`, that includes `provider_request_id`, `remote_tx_hash`,
+  exists. For `risc0/network`, that includes `provider_request_id`, `remote_tx_hash`,
   `expires_at`, `image_ref`, `deployment`, `offchain`, `quoted_mcycles_count`, and
   `evaluated_mcycles_count`.
 - Terminal root tasks may be automatically removed from `runtime.sqlite` and `tasks/...` after
@@ -471,7 +477,7 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
-- `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/boundless`
+- `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
   when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional

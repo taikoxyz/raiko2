@@ -1105,7 +1105,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task-public".to_string(),
-                route: "risc0/boundless"
+                route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
@@ -1145,7 +1145,7 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.to_string(),
-                    route: "risc0/boundless"
+                    route: "risc0/network"
                         .parse::<PipelineRoute>()
                         .expect("parse route"),
                     task_kind: "hoodi_batch".to_string(),
@@ -1391,7 +1391,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task-public".to_string(),
-                route: "risc0/boundless"
+                route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
@@ -1423,7 +1423,7 @@ mod tests {
         let created = runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "task-created".to_string(),
-                route: "risc0/boundless"
+                route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
@@ -1440,7 +1440,7 @@ mod tests {
         let existing = runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "task-duplicate".to_string(),
-                route: "risc0/boundless"
+                route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
@@ -1477,7 +1477,7 @@ mod tests {
                 runtime
                     .register_task_if_absent(TaskRegistration {
                         task_id: format!("task-{index}"),
-                        route: "risc0/boundless"
+                        route: "risc0/network"
                             .parse::<PipelineRoute>()
                             .expect("parse route"),
                         task_kind: "hoodi_batch".to_string(),

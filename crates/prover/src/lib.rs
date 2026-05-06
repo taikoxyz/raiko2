@@ -18,8 +18,8 @@
 //! // Create RISC0 prover
 //! let risc0_prover = Risc0Prover::new(Default::default());
 //!
-//! // Create SP1 prover
-//! let sp1_prover = Sp1Prover::new(Default::default());
+//! // Create SP1 prover after loading the SP1 backend ELFs.
+//! let sp1_prover = Sp1Prover::new_with_backend(Default::default(), &sp1_backend)?;
 //! ```
 
 pub mod boundless;
@@ -93,7 +93,6 @@ pub trait ProverProgressObserver: Send + Sync {
 }
 
 const B256_BYTES: usize = 32;
-#[cfg(feature = "boundless")]
 pub(crate) const RISC0_SEAL_PAYLOAD_KIND: &str = "risc0_seal";
 
 pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoResult<B256> {
@@ -161,7 +160,6 @@ pub(crate) fn encode_risc0_aggregation_proof_payload(
     )
 }
 
-#[cfg(any(feature = "boundless", test))]
 pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
     value
         .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())
@@ -285,7 +283,7 @@ pub fn validate_external_aggregate_proofs(
                     )));
                 }
             }
-            raiko2_pipeline::PipelineKey::ShastaRisc0Boundless => {
+            raiko2_pipeline::PipelineKey::ShastaRisc0Network => {
                 if proof.quote.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing Boundless aggregation metadata"
@@ -483,7 +481,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_missing_boundless_receipt() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let mut proof = aggregate_proof_fixture();
@@ -498,7 +496,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_rejects_boundless_proof_without_carry_data() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let proof = Proof {
@@ -519,7 +517,7 @@ mod tests {
 
     #[test]
     fn aggregate_validator_accepts_boundless_proof_with_receipt_and_carry_data() {
-        let route = "risc0/boundless"
+        let route = "risc0/network"
             .parse::<PipelineRoute>()
             .expect("parse route");
         let proof = Proof {

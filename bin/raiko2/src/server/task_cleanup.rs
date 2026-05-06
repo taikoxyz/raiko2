@@ -787,6 +787,7 @@ mod tests {
             network: network.to_string(),
             l1_network: l1_network.to_string(),
             proof_type: ProofType::Risc0,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {

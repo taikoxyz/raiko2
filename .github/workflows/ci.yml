@@ -65,7 +65,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
           components: rustfmt
 
       - name: fmt
@@ -85,7 +85,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
           components: clippy
 
       - uses: rui314/setup-mold@v1
@@ -96,10 +96,8 @@ jobs:
         with:
           shared-key: ci-rust
 
-      # Keep the main clippy lane on core library crates plus preflight.
-      # The prover/engine/server stack currently pulls boundless-market through raiko2-prover,
-      # which is failing in CI due to upstream generated-contract issues, so those packages stay
-      # out of the default lane until we decide how to cover them separately.
+      # Keep the main clippy lane on fast foundational crates plus preflight. The heavier
+      # prover/engine/server stack is covered by the manually dispatched rust-heavy workflow.
       - name: clippy
         run: >
           cargo clippy
@@ -133,7 +131,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -168,7 +166,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -204,7 +202,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@v1
 
@@ -220,11 +218,8 @@ jobs:
           -p raiko2-queue
           -p raiko2-runtime
 
-  # Keep the prover/engine/server stack out of the default PR gate for now.
-  # Those packages pull boundless-market through raiko2-prover, and the published
-  # boundless-market crate is currently failing in CI while generating/parsing its
-  # contract bindings. Reintroduce these lanes once that upstream dependency is
-  # pinned to a working source or otherwise covered separately.
+  # Keep the prover/engine/server stack out of the default PR gate for now; those heavier lanes
+  # are covered by the manually dispatched rust-heavy workflow.
   rust:
     needs:
       - changes
@@ -259,7 +254,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -292,7 +287,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.93"
+          toolchain: "1.94.0"
 
       - uses: Swatinem/rust-cache@v2
         with:

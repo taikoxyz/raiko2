@@ -3,7 +3,7 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
-    sp1::Sp1Config,
+    sp1::{ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,14 +37,38 @@ impl ProverConfig {
         PipelineRoute::new(self.guest_system, self.runner)
     }
 
+    /// Applies the canonical server route to backend-specific prover defaults.
+    pub fn normalize_route(&mut self) {
+        match self.route() {
+            PipelineRoute {
+                guest_system: GuestSystem::Sp1,
+                runner: RunnerKind::Network,
+            } => {
+                self.sp1.prover = Sp1ProverMode::Network;
+            }
+            PipelineRoute {
+                guest_system: GuestSystem::Sp1,
+                runner: RunnerKind::Local,
+            } if self.sp1.prover == Sp1ProverMode::Network => {
+                self.sp1.prover = Sp1ProverMode::Local;
+            }
+            _ => {}
+        }
+    }
+
     /// # Errors
     ///
     /// Returns an error if the configured guest system and runner are incompatible.
     pub fn validate(&self) -> Result<()> {
         self.route().pipeline_key().map_err(anyhow::Error::msg)?;
 
-        #[cfg(feature = "boundless")]
-        if matches!(self.runner, RunnerKind::Boundless) {
+        if matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Risc0,
+                runner: RunnerKind::Network,
+            }
+        ) {
             if self.boundless.rpc_url.trim().is_empty() {
                 bail!("prover.boundless.rpc_url must not be empty");
             }

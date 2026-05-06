@@ -1,15 +1,13 @@
 use alloy_primitives::keccak256;
+use raiko2_engine::ProverTaskConfig;
 use raiko2_pipeline::{PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use raiko2_prover::sp1::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
 use crate::config::GuestSystem;
 use crate::server::state::AppState;
-
-static PUBLIC_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CanonicalProofRoute {
@@ -38,26 +36,31 @@ pub(super) enum BatchProofDecision {
     NotDrawn,
 }
 
-pub(super) fn generate_public_task_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let seq = PUBLIC_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("task_{nanos:x}_{seq:x}")
+pub(super) fn public_task_id_from_fingerprint(request_fingerprint: &str) -> String {
+    let fingerprint = request_fingerprint
+        .strip_prefix("0x")
+        .unwrap_or(request_fingerprint);
+    format!("task_{fingerprint}")
 }
 
 pub(super) fn route_for_proof_type(
     state: &AppState,
     proof_type: BatchProofType,
+    prover_config: &ProverTaskConfig,
+    sp1_context: Sp1RequestContext,
 ) -> Result<CanonicalProofRoute, ApiError> {
     let route = match proof_type {
-        BatchProofType::Native => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-        BatchProofType::Sp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
+        BatchProofType::Sp1 => PipelineRoute::new(
+            GuestSystem::Sp1,
+            sp1_runner_for_request(state, prover_config, sp1_context)?,
+        ),
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Sgx | BatchProofType::SgxGeth => {
+        BatchProofType::Native
+        | BatchProofType::Boundless
+        | BatchProofType::Sgx
+        | BatchProofType::SgxGeth => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()
@@ -71,6 +74,23 @@ pub(super) fn route_for_proof_type(
     };
 
     CanonicalProofRoute::new(route)
+}
+
+fn sp1_runner_for_request(
+    state: &AppState,
+    prover_config: &ProverTaskConfig,
+    sp1_context: Sp1RequestContext,
+) -> Result<RunnerKind, ApiError> {
+    let effective_config = state
+        .config
+        .prover
+        .sp1
+        .resolve_request_config(prover_config.sp1.as_ref(), sp1_context)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    Ok(match effective_config.prover {
+        Sp1ProverMode::Network => RunnerKind::Network,
+        Sp1ProverMode::Mock | Sp1ProverMode::Local => RunnerKind::Local,
+    })
 }
 
 pub(super) fn decide_batch_proof_type(
@@ -110,18 +130,8 @@ const fn default_risc0_runner_for_route(route: PipelineRoute) -> RunnerKind {
     match route {
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
-            runner: RunnerKind::Boundless,
-        } => {
-            #[cfg(feature = "boundless")]
-            {
-                RunnerKind::Boundless
-            }
-
-            #[cfg(not(feature = "boundless"))]
-            {
-                RunnerKind::Local
-            }
-        }
+            runner: RunnerKind::Network,
+        } => RunnerKind::Network,
         PipelineRoute {
             guest_system: GuestSystem::Risc0,
             runner,
@@ -157,27 +167,14 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "boundless")]
     #[test]
-    fn default_risc0_runner_keeps_boundless_when_feature_enabled() {
+    fn default_risc0_runner_keeps_network_routes_network() {
         assert_eq!(
             default_risc0_runner_for_route(PipelineRoute::new(
                 GuestSystem::Risc0,
-                RunnerKind::Boundless,
+                RunnerKind::Network,
             )),
-            RunnerKind::Boundless
-        );
-    }
-
-    #[cfg(not(feature = "boundless"))]
-    #[test]
-    fn default_risc0_runner_falls_back_to_local_when_feature_disabled() {
-        assert_eq!(
-            default_risc0_runner_for_route(PipelineRoute::new(
-                GuestSystem::Risc0,
-                RunnerKind::Boundless,
-            )),
-            RunnerKind::Local
+            RunnerKind::Network
         );
     }
 }

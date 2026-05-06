@@ -29,17 +29,13 @@ alloy.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
 
-# RISC0 dependencies (optional)
+# RISC0 dependencies
 risc0-zkvm.workspace = true
 risc0-ethereum-contracts-boundless.workspace = true
-boundless-market = { workspace = true, optional = true }
+boundless-market.workspace = true
 
-# SP1 dependencies (optional)
+# SP1 dependencies
 sp1-sdk.workspace = true
-
-[features]
-default = []
-boundless = ["dep:boundless-market"]
 
 [dev-dependencies]
 httpmock = "0.7"

@@ -963,6 +963,7 @@ mod tests {
                     network: network.to_string(),
                     l1_network: l1_network.to_string(),
                     proof_type: ProofType::Native,
+                    prover_type: None,
                     execution_mode: None,
                     aggregate_requested: false,
                     proposals: vec![proposal_metadata_task(pipeline, request)],
@@ -986,14 +987,14 @@ mod tests {
             "runtime-observer",
         ))?);
         let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
-            pipeline: PipelineKey::ShastaRisc0Boundless,
+            pipeline: PipelineKey::ShastaRisc0Network,
             request: proposal_request(),
         });
-        let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0Boundless, &proposal_request());
+        let task_ref = proposal_task_ref(PipelineKey::ShastaRisc0Network, &proposal_request());
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public".to_string(),
-                route: "risc0/boundless"
+                route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
@@ -1004,6 +1005,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Risc0,
+                    prover_type: None,
                     execution_mode: None,
                     aggregate_requested: false,
                     proposals: vec![ProposalTask {
@@ -1142,6 +1144,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: true,
                     proposals: vec![proposal_metadata_task(pipeline, &request)],
@@ -1389,6 +1392,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
                     proposals: vec![
@@ -1486,6 +1490,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
                     proposals: vec![ProposalTask {
@@ -1598,6 +1603,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
                     proposals: vec![
@@ -1704,6 +1710,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: true,
                     proposals: vec![],
@@ -1787,6 +1794,7 @@ mod tests {
             network: "telemetry_restart".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
             proposals: vec![ProposalTask {

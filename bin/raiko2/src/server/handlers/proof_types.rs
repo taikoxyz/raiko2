@@ -12,6 +12,8 @@ pub(super) enum BatchProofType {
     Native,
     Sp1,
     Risc0,
+    #[serde(rename = "boundless", alias = "BOUNDLESS")]
+    Boundless,
     Sgx,
     #[serde(rename = "sgxgeth", alias = "SGXGETH")]
     SgxGeth,
@@ -24,10 +26,19 @@ impl BatchProofType {
             Self::Native => "native",
             Self::Sp1 => "sp1",
             Self::Risc0 => "risc0",
+            Self::Boundless => "boundless",
             Self::Sgx => "sgx",
             Self::SgxGeth => "sgxgeth",
             Self::ZkAny => "zk_any",
         }
+    }
+
+    pub(super) const fn is_public_batch_request_type(self) -> bool {
+        matches!(self, Self::Sp1 | Self::Risc0 | Self::ZkAny)
+    }
+
+    pub(super) const fn is_concrete_public_proof_type(self) -> bool {
+        matches!(self, Self::Sp1 | Self::Risc0)
     }
 }
 
@@ -148,6 +159,8 @@ pub(crate) enum LegacyTaskStatus {
 pub(crate) struct TaskData {
     pub(crate) task_id: String,
     pub(crate) route: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prover_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) execution_mode: Option<String>,
     pub(crate) status: ProofStatus,

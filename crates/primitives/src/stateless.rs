@@ -519,25 +519,25 @@ pub enum StatelessValidationError {
 mod tests {
     use super::{ExecutionWitness, WitnessHeader, WitnessStateNode, WitnessStateNodeSerde};
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, keccak256};
+    use alloy_primitives::{Address, B64, B256, Bloom, Bytes, U256, keccak256};
 
     fn sample_header(number: u64) -> Header {
         Header {
             parent_hash: B256::repeat_byte(0x11),
             ommers_hash: B256::repeat_byte(0x22),
-            beneficiary: Default::default(),
+            beneficiary: Address::default(),
             state_root: B256::repeat_byte(0x33),
             transactions_root: B256::repeat_byte(0x44),
             receipts_root: B256::repeat_byte(0x55),
-            logs_bloom: Default::default(),
-            difficulty: Default::default(),
+            logs_bloom: Bloom::default(),
+            difficulty: U256::default(),
             number,
             gas_limit: 30_000_000,
             gas_used: 21_000,
             timestamp: 1_700_000_000 + number,
             extra_data: Bytes::from_static(b"raiko2"),
             mix_hash: B256::repeat_byte(0x66),
-            nonce: Default::default(),
+            nonce: B64::default(),
             base_fee_per_gas: Some(1_000_000_000),
             withdrawals_root: None,
             blob_gas_used: None,

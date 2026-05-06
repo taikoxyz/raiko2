@@ -168,6 +168,7 @@ pub enum TaikoFork {
     Ontake,
     Pacaya,
     Shasta,
+    Unzen,
 }
 
 impl TaikoFork {
@@ -177,6 +178,7 @@ impl TaikoFork {
             Self::Ontake => "ONTAKE",
             Self::Pacaya => "PACAYA",
             Self::Shasta => "SHASTA",
+            Self::Unzen => "UNZEN",
         }
     }
 
@@ -186,6 +188,7 @@ impl TaikoFork {
             "ONTAKE" => Ok(Self::Ontake),
             "PACAYA" => Ok(Self::Pacaya),
             "SHASTA" => Ok(Self::Shasta),
+            "UNZEN" => Ok(Self::Unzen),
             _ => Err(format!("unknown Taiko fork: {value}")),
         }
     }
@@ -201,6 +204,7 @@ impl ForkId {
     const fn as_spec_id(self) -> SpecId {
         match self {
             Self::Standard(spec_id) => spec_id,
+            Self::Taiko(TaikoFork::Unzen) => SpecId::OSAKA,
             Self::Taiko(_) => SpecId::CANCUN,
         }
     }
@@ -499,6 +503,27 @@ impl ChainSpec {
         None
     }
 
+    fn active_configured_fork_value<'a, T>(
+        &self,
+        map: &'a BTreeMap<ForkId, T>,
+        block_no: BlockNumber,
+        timestamp: u64,
+    ) -> Option<(ForkId, &'a T)> {
+        let active_fork_id = self.active_fork_id(block_no, timestamp)?;
+        map.iter().rev().find_map(|(fork_id, value)| {
+            if *fork_id <= active_fork_id
+                && self
+                    .hard_forks
+                    .get(fork_id)
+                    .is_some_and(|fork| fork.active(block_no, timestamp))
+            {
+                Some((*fork_id, value))
+            } else {
+                None
+            }
+        })
+    }
+
     /// # Errors
     ///
     /// Returns an error if no active fork or verifier address is configured.
@@ -508,10 +533,11 @@ impl ChainSpec {
         block_timestamp: u64,
         proof_type: ProofType,
     ) -> Result<Address> {
-        // fall down to the first fork that is active as default
-        if let Some(fork_id) = self.active_fork_id(block_num, block_timestamp)
-            && let Some(fork_verifier) = self.verifier_address_forks.get(&fork_id)
-        {
+        if let Some((_fork_id, fork_verifier)) = self.active_configured_fork_value(
+            &self.verifier_address_forks,
+            block_num,
+            block_timestamp,
+        ) {
             return fork_verifier
                 .get(&proof_type)
                 .ok_or_else(|| anyhow!("Verifier type not found"))
@@ -537,9 +563,8 @@ impl ChainSpec {
         block_num: u64,
         block_timestamp: u64,
     ) -> Result<Address> {
-        // fall down to the first fork that is active as default
-        if let Some(fork_id) = self.active_fork_id(block_num, block_timestamp)
-            && let Some(l1_address) = self.l1_contract.get(&fork_id)
+        if let Some((_fork_id, l1_address)) =
+            self.active_configured_fork_value(&self.l1_contract, block_num, block_timestamp)
         {
             return Ok(*l1_address);
         }
@@ -651,7 +676,7 @@ mod tests {
             .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
-        assert_eq!(spec.hard_forks.len(), 5);
+        assert_eq!(spec.hard_forks.len(), 6);
         assert_eq!(spec.l1_contract.len(), 2);
         assert!(
             spec.hard_forks
@@ -661,6 +686,10 @@ mod tests {
             spec.hard_forks
                 .contains_key(&ForkId::Taiko(TaikoFork::Shasta))
         );
+        assert!(
+            spec.hard_forks
+                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        );
         assert_eq!(
             spec.get_fork_l1_contract_address_at(5_412_478, 1_775_988_339)?,
             address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f")
@@ -668,6 +697,27 @@ mod tests {
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::Sp1)?,
             address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_masaya_unzen_inherits_shasta_contracts() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_masaya")
+            .ok_or_else(|| anyhow!("missing taiko_masaya spec"))?;
+        let unzen_timestamp = 1_778_158_800;
+
+        assert_eq!(spec.spec_id(0, unzen_timestamp), Some(SpecId::OSAKA));
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
+            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::Risc0)?,
+            address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
         );
         Ok(())
     }

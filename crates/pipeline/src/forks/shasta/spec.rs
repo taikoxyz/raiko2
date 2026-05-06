@@ -11,13 +11,16 @@ use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
     ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs,
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData, constants::DERIVATION_SOURCE_MAX_BLOCKS, decode_proposal_id_from_extra_data,
+    ShastaEventData,
+    constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
+    decode_proposal_id_from_extra_data,
 };
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -102,91 +105,25 @@ where
     ) -> RaikoResult<GuestInput> {
         let preflight_started_at = Instant::now();
         let proof_type = proof_type_from_context(ctx);
-        let (block_numbers, expected_proposal_id) = extract_block_range(ctx)?;
         let chain_spec = chain_spec_from_context(ctx);
-        let chunk_size = preflight_chunk_size();
-        let chunk_concurrency = preflight_chunk_concurrency();
-        info!(
-            proposal_id = ctx.request.proposal_id,
-            block_count = block_numbers.len(),
-            chunk_size,
-            chunk_concurrency,
-            "starting shasta preflight"
-        );
-        let chunked_block_numbers = block_numbers
-            .chunks(chunk_size)
-            .map(<[u64]>::to_vec)
-            .collect::<Vec<_>>();
-        let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
-            stream::iter(chunked_block_numbers.into_iter().enumerate())
-                .map(|(chunk_index, chunk_block_numbers)| {
-                    let chain_spec = chain_spec.clone();
-                    async move {
-                        let operation = format!("shasta preflight chunk {chunk_index}");
-                        retry_shasta_preflight_operation(&operation, || {
-                            let chain_spec = chain_spec.clone();
-                            async {
-                                fetch_preflight_chunk(
-                                    provider,
-                                    chunk_index,
-                                    &chunk_block_numbers,
-                                    chain_spec,
-                                )
-                                .await
-                            }
-                        })
-                        .await
-                    }
-                })
-                .buffer_unordered(chunk_concurrency)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<RaikoResult<Vec<_>>>()?;
-        chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
-
-        let witnesses = chunk_results
-            .into_iter()
-            .flat_map(|(_, chunk)| chunk)
-            .collect::<Vec<_>>();
+        let (block_numbers, expected_proposal_id, proposal_event) =
+            resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
+        let witnesses = fetch_preflight_witnesses(
+            provider,
+            &chain_spec,
+            ctx.request.proposal_id,
+            &block_numbers,
+        )
+        .await?;
         let blocks = witnesses
             .iter()
             .map(|witness| witness.block.clone())
             .collect::<Vec<_>>();
-
-        let proposal_event =
-            resolve_shasta_proposal_event(ctx, provider, &chain_spec, &blocks).await?;
-        let mut manifest =
-            ShastaManifestBuilder::taiko_manifest_with_event(ctx, &blocks, proposal_event)?;
-        hydrate_shasta_l1_headers(provider, chain_spec.chain_id, &blocks, &mut manifest).await?;
-        if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty()
-        {
-            let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
-            manifest.data_sources =
-                retry_shasta_preflight_operation("fetch shasta data sources", || async {
-                    provider
-                        .shasta_data_sources(
-                            &l1_chain_spec,
-                            &manifest.proposal_event,
-                            manifest.blob_proof_type,
-                        )
-                        .await
-                })
-                .await?;
-        }
-
+        let manifest =
+            build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
         validate_block_range(&witnesses, expected_proposal_id)?;
+        let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
 
-        let mut input = GuestInput {
-            taiko: manifest,
-            witnesses,
-            proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
-            proposal_ancestor_headers: Vec::new(),
-            proposal_state_nodes: Vec::new(),
-        };
-        input.compact_proposal_witness_data();
-        input.proof_carry_data =
-            raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
         info!(
             proposal_id = ctx.request.proposal_id,
             block_count = block_numbers.len(),
@@ -195,6 +132,128 @@ where
         );
         Ok(input)
     }
+}
+
+async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
+    ctx: &ProofContext,
+    provider: &P,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<(Vec<u64>, u64, ShastaEventData)> {
+    let (block_numbers, expected_proposal_id) = extract_block_range(ctx, chain_spec)?;
+    let first_block_no = block_numbers.first().copied().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig("request l2_block_range is empty".to_string())
+    })?;
+    let proposal_block = fetch_preflight_proposal_block(provider, first_block_no).await?;
+    let proposal_event = resolve_shasta_proposal_event(
+        ctx,
+        provider,
+        chain_spec,
+        std::slice::from_ref(&proposal_block),
+    )
+    .await?;
+    validate_derivation_source_block_limit(
+        block_numbers.len(),
+        first_block_no,
+        proposal_event.proposal.timestamp.to::<u64>(),
+        chain_spec,
+    )?;
+    Ok((block_numbers, expected_proposal_id, proposal_event))
+}
+
+async fn fetch_preflight_witnesses<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    proposal_id: u64,
+    block_numbers: &[u64],
+) -> RaikoResult<Vec<StatelessInput>> {
+    let chunk_size = preflight_chunk_size();
+    let chunk_concurrency = preflight_chunk_concurrency();
+    info!(
+        proposal_id,
+        block_count = block_numbers.len(),
+        chunk_size,
+        chunk_concurrency,
+        "starting shasta preflight"
+    );
+    let chunked_block_numbers = block_numbers
+        .chunks(chunk_size)
+        .map(<[u64]>::to_vec)
+        .collect::<Vec<_>>();
+    let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
+        stream::iter(chunked_block_numbers.into_iter().enumerate())
+            .map(|(chunk_index, chunk_block_numbers)| {
+                let chain_spec = chain_spec.clone();
+                async move {
+                    let operation = format!("shasta preflight chunk {chunk_index}");
+                    retry_shasta_preflight_operation(&operation, || {
+                        let chain_spec = chain_spec.clone();
+                        async {
+                            fetch_preflight_chunk(
+                                provider,
+                                chunk_index,
+                                &chunk_block_numbers,
+                                chain_spec,
+                            )
+                            .await
+                        }
+                    })
+                    .await
+                }
+            })
+            .buffer_unordered(chunk_concurrency)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<RaikoResult<Vec<_>>>()?;
+    chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
+    Ok(chunk_results
+        .into_iter()
+        .flat_map(|(_, chunk)| chunk)
+        .collect())
+}
+
+async fn build_preflight_manifest<P: Provider>(
+    ctx: &ProofContext,
+    provider: &P,
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+    proposal_event: ShastaEventData,
+) -> RaikoResult<raiko2_protocol_shasta::TaikoManifest> {
+    let mut manifest =
+        ShastaManifestBuilder::taiko_manifest_with_event(ctx, blocks, proposal_event)?;
+    hydrate_shasta_l1_headers(provider, chain_spec.chain_id, blocks, &mut manifest).await?;
+    if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
+        let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
+        manifest.data_sources =
+            retry_shasta_preflight_operation("fetch shasta data sources", || async {
+                provider
+                    .shasta_data_sources(
+                        &l1_chain_spec,
+                        &manifest.proposal_event,
+                        manifest.blob_proof_type,
+                    )
+                    .await
+            })
+            .await?;
+    }
+    Ok(manifest)
+}
+
+fn build_preflight_guest_input(
+    manifest: raiko2_protocol_shasta::TaikoManifest,
+    witnesses: Vec<StatelessInput>,
+    proof_type: ProofType,
+) -> RaikoResult<GuestInput> {
+    let mut input = GuestInput {
+        taiko: manifest,
+        witnesses,
+        proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
+        proposal_ancestor_headers: Vec::new(),
+        proposal_state_nodes: Vec::new(),
+    };
+    input.compact_proposal_witness_data();
+    input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;
+    Ok(input)
 }
 
 fn preflight_chunk_size() -> usize {
@@ -359,10 +418,34 @@ async fn fetch_preflight_chunk<P: Provider>(
     Ok((chunk_index, witnesses))
 }
 
+async fn fetch_preflight_proposal_block<P: Provider>(
+    provider: &P,
+    block_number: u64,
+) -> RaikoResult<reth_ethereum_primitives::Block> {
+    retry_shasta_preflight_operation("fetch shasta proposal block", || async {
+        let requested = [block_number];
+        let mut blocks = provider.batch_blocks(&requested).await?;
+        validate_fetched_block_numbers(&requested, &blocks)?;
+        blocks.pop().ok_or_else(|| {
+            RaikoError::Preflight(format!(
+                "provider returned no block for requested proposal block {block_number}"
+            ))
+        })
+    })
+    .await
+}
+
 fn validate_fetched_block_numbers(
     expected_block_numbers: &[u64],
     blocks: &[reth_ethereum_primitives::Block],
 ) -> RaikoResult<()> {
+    if blocks.len() != expected_block_numbers.len() {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "provider returned {} blocks for {} requested block numbers",
+            blocks.len(),
+            expected_block_numbers.len()
+        )));
+    }
     for (index, (expected, block)) in expected_block_numbers.iter().zip(blocks).enumerate() {
         if block.header.number != *expected {
             return Err(RaikoError::Preflight(format!(
@@ -656,7 +739,53 @@ fn validate_l1_headers(
     Ok(())
 }
 
-fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
+fn derivation_source_max_blocks_for_chain_spec_at(
+    chain_spec: &ChainSpec,
+    block_no: u64,
+    proposal_timestamp: u64,
+) -> usize {
+    if chain_spec
+        .hard_forks
+        .get(&ForkId::Taiko(TaikoFork::Unzen))
+        .is_some_and(|fork| fork.active(block_no, proposal_timestamp))
+    {
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+    } else {
+        DERIVATION_SOURCE_MAX_BLOCKS
+    }
+}
+
+fn validate_derivation_source_block_limit(
+    block_count: usize,
+    first_block_no: u64,
+    proposal_timestamp: u64,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<()> {
+    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
+        chain_spec,
+        first_block_no,
+        proposal_timestamp,
+    );
+    if block_count > max_blocks {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "request l2_block_range contains {block_count} blocks, max {max_blocks}"
+        )));
+    }
+    Ok(())
+}
+
+fn possible_derivation_source_max_blocks_for_chain_spec(chain_spec: &ChainSpec) -> usize {
+    if matches!(
+        chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+        Some(ForkCondition::Block(_) | ForkCondition::Timestamp(_))
+    ) {
+        UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+    } else {
+        DERIVATION_SOURCE_MAX_BLOCKS
+    }
+}
+
+fn extract_block_range(ctx: &ProofContext, chain_spec: &ChainSpec) -> RaikoResult<(Vec<u64>, u64)> {
     if let Some(range) = ctx.request.l2_block_range {
         if !range.is_valid() {
             return Err(RaikoError::InvalidRequestConfig(
@@ -672,8 +801,10 @@ fn extract_block_range(ctx: &ProofContext) -> RaikoResult<(Vec<u64>, u64)> {
                     "request l2_block_range contains too many blocks".into(),
                 )
             })?;
-        let max_blocks = u64::try_from(DERIVATION_SOURCE_MAX_BLOCKS)
-            .expect("derivation source max blocks fits u64");
+        let max_blocks = u64::try_from(possible_derivation_source_max_blocks_for_chain_spec(
+            chain_spec,
+        ))
+        .expect("derivation source max blocks fits u64");
         if block_count > max_blocks {
             return Err(RaikoError::InvalidRequestConfig(format!(
                 "request l2_block_range contains {block_count} blocks, max {max_blocks}"
@@ -1136,7 +1267,8 @@ mod tests {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_block_range = None;
 
-        let err = super::extract_block_range(&ctx).expect_err("missing range");
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("missing range");
 
         assert!(
             err.to_string()
@@ -1152,24 +1284,131 @@ mod tests {
             end: u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
         });
 
-        let (blocks, proposal_id) = super::extract_block_range(&ctx).expect("valid range");
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let (blocks, proposal_id) =
+            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
 
         assert_eq!(proposal_id, 42);
         assert_eq!(blocks.len(), super::DERIVATION_SOURCE_MAX_BLOCKS);
     }
 
     #[test]
-    fn extract_block_range_rejects_more_than_protocol_max_blocks() {
+    fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
+        });
+
+        let chain_spec = super::chain_spec_from_context(&ctx);
+        let (blocks, proposal_id) =
+            super::extract_block_range(&ctx, &chain_spec).expect("valid range");
+
+        assert_eq!(proposal_id, 42);
+        assert_eq!(blocks.len(), super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS);
+    }
+
+    #[test]
+    fn extract_block_range_rejects_unzen_range_when_environment_has_no_activation() {
         let mut ctx = sample_context(42, 11, 9);
         let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
             end: max_blocks + 1,
         });
+        let chain_spec = super::chain_spec_from_context(&ctx);
 
-        let err = super::extract_block_range(&ctx).expect_err("oversized range");
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
 
         assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    }
+
+    #[test]
+    fn extract_block_range_rejects_more_than_unzen_max_blocks() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_001;
+        let max_blocks =
+            u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: max_blocks + 1,
+        });
+        let chain_spec = super::chain_spec_from_context(&ctx);
+
+        let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
+
+        assert!(err.to_string().contains("contains 769 blocks, max 768"));
+    }
+
+    #[test]
+    fn derivation_source_limit_uses_environment_hardfork_activation() {
+        let mut ctx = sample_context(42, 11, 9);
+        let hoodi = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&hoodi, 1, u64::MAX),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+
+        ctx.request.l2_chain_id = 167_001;
+        let devnet = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+        );
+
+        ctx.request.l2_chain_id = 167_011;
+        let masaya = super::chain_spec_from_context(&ctx);
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_799),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_800),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+        );
+    }
+
+    #[test]
+    fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
+        let ctx = sample_context(42, 11, 9);
+        let chain_spec = super::chain_spec_from_context(&ctx);
+
+        let err = super::validate_derivation_source_block_limit(
+            super::DERIVATION_SOURCE_MAX_BLOCKS + 1,
+            1,
+            u64::MAX,
+            &chain_spec,
+        )
+        .expect_err("inactive unzen environment should reject");
+
+        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_pre_unzen_range_before_witness_fetch() {
+        let provider = sample_provider();
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_011;
+        let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
+        ctx.request.l2_block_range = Some(L2BlockRange {
+            start: 1,
+            end: max_blocks + 1,
+        });
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let err = spec
+            .preflight(&ctx, &provider)
+            .await
+            .expect_err("pre-Unzen oversized range should fail before witness fetch");
+
+        assert!(err.to_string().contains("contains 193 blocks, max 192"));
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

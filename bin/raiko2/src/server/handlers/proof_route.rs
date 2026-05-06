@@ -57,6 +57,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
+        BatchProofType::Tdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
         BatchProofType::Native
         | BatchProofType::Boundless
         | BatchProofType::Sgx
@@ -147,6 +148,7 @@ impl BatchProofType {
             ProofType::Sp1 => Self::Sp1,
             ProofType::Sgx => Self::Sgx,
             ProofType::Risc0 => Self::Risc0,
+            ProofType::Tdx => Self::Tdx,
         }
     }
 }

@@ -17,6 +17,7 @@ pub(super) enum BatchProofType {
     Sgx,
     #[serde(rename = "sgxgeth", alias = "SGXGETH")]
     SgxGeth,
+    Tdx,
     ZkAny,
 }
 
@@ -29,6 +30,7 @@ impl BatchProofType {
             Self::Boundless => "boundless",
             Self::Sgx => "sgx",
             Self::SgxGeth => "sgxgeth",
+            Self::Tdx => "tdx",
             Self::ZkAny => "zk_any",
         }
     }

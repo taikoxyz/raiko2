@@ -162,17 +162,6 @@ fn override_single_rpc_pair(
     Ok(())
 }
 
-fn override_single_rpc_pair(
-    rpc_config: &mut RpcConfig,
-    update: impl FnOnce(&mut NetworkPairConfig),
-) -> Result<()> {
-    let [pair] = rpc_config.pairs.as_mut_slice() else {
-        anyhow::bail!("RPC CLI endpoint overrides require exactly one rpc.pairs entry");
-    };
-    update(pair);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

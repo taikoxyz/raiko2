@@ -40,6 +40,7 @@ pub enum PipelineKey {
     ShastaSp1,
     ShastaNative,
     ShastaRisc0Network,
+    ShastaTdx,
 }
 
 impl PipelineKey {
@@ -50,6 +51,7 @@ impl PipelineKey {
             PipelineKey::ShastaSp1 => "shasta-sp1-local",
             PipelineKey::ShastaNative => "shasta-native-local",
             PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
+            PipelineKey::ShastaTdx => "shasta-tdx-local",
         }
     }
 
@@ -60,6 +62,7 @@ impl PipelineKey {
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
+            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
         }
     }
 }
@@ -79,6 +82,7 @@ impl FromStr for PipelineKey {
             "shasta-sp1-local" => Ok(Self::ShastaSp1),
             "shasta-native-local" => Ok(Self::ShastaNative),
             "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
+            "shasta-tdx-local" => Ok(Self::ShastaTdx),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -92,6 +96,7 @@ pub enum GuestSystem {
     Risc0,
     Sp1,
     Native,
+    Tdx,
 }
 
 impl GuestSystem {
@@ -101,6 +106,7 @@ impl GuestSystem {
             Self::Risc0 => "risc0",
             Self::Sp1 => "sp1",
             Self::Native => "native",
+            Self::Tdx => "tdx",
         }
     }
 }
@@ -119,6 +125,7 @@ impl FromStr for GuestSystem {
             "risc0" => Ok(Self::Risc0),
             "sp1" => Ok(Self::Sp1),
             "native" => Ok(Self::Native),
+            "tdx" => Ok(Self::Tdx),
             _ => Err(format!("Unknown guest_system: {s}")),
         }
     }
@@ -183,6 +190,7 @@ impl PipelineRoute {
             GuestSystem::Risc0 => raiko2_primitives::ProofType::Risc0,
             GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
             GuestSystem::Native => raiko2_primitives::ProofType::Native,
+            GuestSystem::Tdx => raiko2_primitives::ProofType::Tdx,
         }
     }
 
@@ -200,6 +208,10 @@ impl PipelineRoute {
             (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
             (GuestSystem::Native, RunnerKind::Network) => {
                 Err("Unsupported proving route: native/network".to_string())
+            }
+            (GuestSystem::Tdx, RunnerKind::Local) => Ok(PipelineKey::ShastaTdx),
+            (GuestSystem::Tdx, RunnerKind::Network) => {
+                Err("Unsupported proving route: tdx/network".to_string())
             }
         }
     }

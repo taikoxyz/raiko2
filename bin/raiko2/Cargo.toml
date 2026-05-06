@@ -60,7 +60,6 @@ dotenvy = "0.15"
 
 [features]
 default = []
-boundless = ["raiko2-engine/boundless", "raiko2-prover/boundless"]
 redis-queue = ["raiko2-queue/redis"]
 tdx = ["raiko2-prover/tdx"]
 

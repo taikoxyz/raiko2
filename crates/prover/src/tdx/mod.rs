@@ -34,7 +34,7 @@ use raiko2_primitives::{
 };
 use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
-    instance::shasta_aggregation_output_from_proof_carry_data_vec,
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use tokio::sync::OnceCell;
@@ -203,15 +203,24 @@ where
             .map(|key| signature::address_from_private_key(&key))
             .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
 
-        let aggregation_hash = shasta_aggregation_output_from_proof_carry_data_vec(
+        let commitment = build_shasta_commitment_from_proof_carry_data_vec(
             &aggregation_input.proof_carry_data_vec,
-            sgx_instance,
         )
         .ok_or_else(|| {
             RaikoError::InvalidRequestConfig(
                 "Invalid proof_carry_data_vec for aggregation".to_string(),
             )
         })?;
+        let first = aggregation_input
+            .proof_carry_data_vec
+            .first()
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "Missing proof_carry_data_vec for aggregation".to_string(),
+                )
+            })?;
+        let aggregation_hash =
+            shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
 
         let sub_proofs = input
             .proofs

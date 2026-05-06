@@ -40,9 +40,10 @@ sp1-sdk.workspace = true
 # TDX dependencies (optional)
 dirs = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 
 [features]
-tdx = ["dep:dirs", "dep:rand"]
+tdx = ["dep:dirs", "dep:rand", "dep:anyhow"]
 
 [dev-dependencies]
 httpmock = "0.7"

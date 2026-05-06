@@ -70,27 +70,52 @@ pub(crate) fn ensure_cargo_prove() -> Result<()> {
     ensure_command(cmd, "cargo-prove", "Install via: sp1up")
 }
 
-pub(crate) fn docker_user_args() -> Result<Vec<String>> {
+pub(crate) fn restore_docker_ownership(
+    image: &str,
+    root: &Path,
+    target_mount: Option<&Path>,
+    paths: &[&Path],
+) -> Result<()> {
+    let Some((uid, gid)) = docker_user_ids()? else {
+        return Ok(());
+    };
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new("docker");
+    cmd.arg("run")
+        .arg("--rm")
+        .arg("--entrypoint")
+        .arg("chown")
+        .arg("-v")
+        .arg(format!("{}:/work", root.display()));
+
+    if let Some(target_mount) = target_mount {
+        cmd.arg("-v")
+            .arg(format!("{}:/target", target_mount.display()));
+    }
+
+    cmd.arg(image).arg("-R").arg(format!("{uid}:{gid}"));
+    for path in paths {
+        cmd.arg(container_path(root, target_mount, path)?);
+    }
+
+    run(cmd)
+}
+
+pub(crate) fn docker_user_ids() -> Result<Option<(String, String)>> {
     #[cfg(unix)]
     {
         let uid = current_id_arg("-u")?;
         let gid = current_id_arg("-g")?;
-        return Ok(docker_user_args_from_ids(&uid, &gid));
+        return Ok(Some((uid, gid)));
     }
 
     #[cfg(not(unix))]
     {
-        Ok(Vec::new())
+        Ok(None)
     }
-}
-
-pub(crate) fn docker_non_root_env_args() -> Vec<String> {
-    vec![
-        "-e".to_string(),
-        "HOME=/tmp".to_string(),
-        "-e".to_string(),
-        "RUSTUP_HOME=/root/.rustup".to_string(),
-    ]
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -109,6 +134,21 @@ fn current_id_arg(flag: &str) -> Result<String> {
     String::from_utf8(output.stdout)
         .map(|value| value.trim().to_string())
         .with_context(|| format!("id {flag} returned non-utf8 output"))
+}
+
+fn container_path(root: &Path, target_mount: Option<&Path>, path: &Path) -> Result<String> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Ok(PathBuf::from("/work").join(rel).display().to_string());
+    }
+    if let Some(target_mount) = target_mount
+        && let Ok(rel) = path.strip_prefix(target_mount)
+    {
+        return Ok(PathBuf::from("/target").join(rel).display().to_string());
+    }
+    bail!(
+        "cannot restore ownership for path outside mounted roots: {}",
+        path.display()
+    );
 }
 
 fn repo_name(root: &Path) -> String {
@@ -164,10 +204,6 @@ fn is_valid_docker_volume_name(value: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
-fn docker_user_args_from_ids(uid: &str, gid: &str) -> Vec<String> {
-    vec!["--user".to_string(), format!("{uid}:{gid}")]
-}
-
 pub(crate) fn run(mut cmd: Command) -> Result<()> {
     let status = cmd
         .status()
@@ -180,24 +216,31 @@ pub(crate) fn run(mut cmd: Command) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     #[test]
-    fn docker_user_args_format_uid_gid_pair() {
+    fn container_path_maps_worktree_relative_paths() {
         assert_eq!(
-            super::docker_user_args_from_ids("1000", "1001"),
-            ["--user".to_string(), "1000:1001".to_string()]
+            super::container_path(
+                Path::new("/repo"),
+                None,
+                Path::new("/repo/target/elf-compilation/.rustc_info.json")
+            )
+            .unwrap(),
+            "/work/target/elf-compilation/.rustc_info.json"
         );
     }
 
     #[test]
-    fn docker_non_root_env_args_include_home_and_rustup_home() {
+    fn container_path_maps_explicit_target_mount_paths() {
         assert_eq!(
-            super::docker_non_root_env_args(),
-            vec![
-                "-e".to_string(),
-                "HOME=/tmp".to_string(),
-                "-e".to_string(),
-                "RUSTUP_HOME=/root/.rustup".to_string(),
-            ]
+            super::container_path(
+                Path::new("/repo"),
+                Some(Path::new("/tmp/target")),
+                Path::new("/tmp/target/risc0/.rustc_info.json")
+            )
+            .unwrap(),
+            "/target/risc0/.rustc_info.json"
         );
     }
 }

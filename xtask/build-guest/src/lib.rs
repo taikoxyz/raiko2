@@ -617,22 +617,12 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm").arg("--entrypoint").arg("");
-    let docker_user_args = util::docker_user_args()?;
-    let run_as_host_user = !docker_user_args.is_empty();
-    for arg in docker_user_args {
-        cmd.arg(arg);
-    }
-    if run_as_host_user {
-        for arg in util::docker_non_root_env_args() {
-            cmd.arg(arg);
-        }
-    }
     cmd.arg("-v")
         .arg(format!("{}:/work", root.display()))
         .arg("-w")
         .arg("/work");
 
-    if !run_as_host_user && let Some(volume) = util::docker_cargo_cache_volume(root, "risc0")? {
+    if let Some(volume) = util::docker_cargo_cache_volume(root, "risc0")? {
         println!("[INFO] Using docker cargo cache volume: {volume}");
         cmd.arg("-v")
             .arg(format!("{volume}:{}", util::DOCKER_CARGO_HOME));
@@ -706,6 +696,12 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
 
     println!("[INFO] Building RISC0 guest package (toolchain image)...");
     util::run(cmd)?;
+    util::restore_docker_ownership(
+        image,
+        root,
+        extra_mount.as_deref(),
+        &[target_root.as_path()],
+    )?;
 
     export_risc0_elves(root, &manifest, &target_root)?;
     println!("[INFO] RISC0 guest build complete");
@@ -906,16 +902,6 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm");
-    let docker_user_args = util::docker_user_args()?;
-    let run_as_host_user = !docker_user_args.is_empty();
-    for arg in docker_user_args {
-        cmd.arg(arg);
-    }
-    if run_as_host_user {
-        for arg in util::docker_non_root_env_args() {
-            cmd.arg(arg);
-        }
-    }
     if let Ok(platform) = env::var("DOCKER_DEFAULT_PLATFORM")
         && !platform.is_empty()
     {
@@ -926,7 +912,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         .arg("-w")
         .arg("/work/guests/sp1");
 
-    if !run_as_host_user && let Some(volume) = util::docker_cargo_cache_volume(root, "sp1")? {
+    if let Some(volume) = util::docker_cargo_cache_volume(root, "sp1")? {
         println!("[INFO] Using docker cargo cache volume: {volume}");
         cmd.arg("-v")
             .arg(format!("{volume}:{}", util::DOCKER_CARGO_HOME));
@@ -984,6 +970,12 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
 
     println!("[INFO] Building SP1 guest package (toolchain image)...");
     util::run(cmd)?;
+    util::restore_docker_ownership(
+        image,
+        root,
+        extra_mount.as_deref(),
+        &[target_root.as_path()],
+    )?;
     export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");

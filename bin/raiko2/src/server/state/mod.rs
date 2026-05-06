@@ -22,6 +22,8 @@ use raiko2_primitives::{Proof, ProofType};
 use raiko2_prover::boundless::BoundlessProver;
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
+#[cfg(feature = "tdx")]
+use raiko2_prover::tdx::TdxProver;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -43,6 +45,8 @@ type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
+#[cfg(feature = "tdx")]
+type TdxSpec = ShastaSpec<TdxProver, NativeBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
@@ -145,6 +149,24 @@ impl AppState {
                 PipelineKey::ShastaNative,
                 Arc::new(native_engine),
             );
+
+            #[cfg(feature = "tdx")]
+            {
+                let tdx_engine = build_tdx_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                )
+                .await?;
+                tdx_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(
+                    pair.key.clone(),
+                    PipelineKey::ShastaTdx,
+                    Arc::new(tdx_engine),
+                );
+            }
         }
 
         let config = Arc::new(config);
@@ -484,6 +506,89 @@ async fn build_sp1_engine(
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
+#[cfg(feature = "tdx")]
+async fn build_tdx_engine(
+    config: &Config,
+    pair: &ResolvedNetworkPair,
+    scheduler_config: SchedulerConfig,
+    observer: Arc<dyn EngineObserver>,
+) -> Result<Engine<TdxSpec>> {
+    let tdx_config = raiko2_prover::tdx::TdxConfig {
+        instance_id: config.prover.tdx.instance_id,
+        socket_path: config.prover.tdx.socket_path.clone(),
+    };
+    let tdx_prover = TdxProver::new(tdx_config);
+    tdx_prover
+        .ensure_bootstrapped()
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("TDX bootstrap failed")?;
+
+    let engine = match config.queue.backend {
+        QueueBackend::Memory => {
+            let provider = setup::build_provider(config, pair)?;
+            let context = setup::build_context(config, pair, ProofType::Tdx)?;
+            let spec = ShastaSpec::new(
+                PipelineKey::ShastaTdx,
+                tdx_prover,
+                NativeBackend,
+                provider,
+            );
+            Engine::with_store_scheduler_config_and_observer(
+                spec,
+                context,
+                MemoryStore::with_lease(scheduler_config.lease_duration),
+                scheduler_config,
+                Some(Arc::clone(&observer)),
+            )
+        }
+        QueueBackend::Redis => {
+            #[cfg(feature = "redis-queue")]
+            {
+                type TdxOutput =
+                    EngineOutput<<TdxSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
+                let provider = setup::build_provider(config, pair)?;
+                let context = setup::build_context(config, pair, ProofType::Tdx)?;
+                let url = config.queue.redis_url.clone().unwrap_or_default();
+                let namespace = setup::queue_namespace(
+                    &config.queue.namespace,
+                    pair,
+                    PipelineKey::ShastaTdx,
+                );
+                let store =
+                    raiko2_queue::RedisStore::<EngineTask, TdxOutput, EngineTaskKey>::connect(
+                        &url,
+                        &namespace,
+                        scheduler_config.lease_duration,
+                    )
+                    .await?;
+                let spec = ShastaSpec::new(
+                    PipelineKey::ShastaTdx,
+                    tdx_prover,
+                    NativeBackend,
+                    provider,
+                );
+                Engine::with_store_scheduler_config_and_observer(
+                    spec,
+                    context,
+                    store,
+                    scheduler_config,
+                    Some(Arc::clone(&observer)),
+                )
+            }
+
+            #[cfg(not(feature = "redis-queue"))]
+            {
+                anyhow::bail!(
+                    "queue backend redis requires building raiko2 with `--features redis-queue`"
+                );
+            }
+        }
+    };
+
+    Ok(engine)
+}
+
 async fn build_native_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,

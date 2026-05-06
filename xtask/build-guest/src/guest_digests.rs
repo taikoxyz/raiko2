@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::primitives::{B256, hex};
+use alloy_primitives::{B256, hex};
 use anyhow::{Context, Result};
 use clap::Args;
 use raiko2_guests::{
@@ -16,10 +16,10 @@ use sp1_sdk::{HashableKey, Prover as _, ProverClient};
 use crate::util;
 
 #[derive(Args)]
-pub(crate) struct GuestDigestsArgs {
+pub struct GuestDigestsArgs {
     /// Output path for the JSON summary.
     #[arg(long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -54,13 +54,13 @@ struct GuestDigestEntry {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct GuestDigestSummary {
+pub struct GuestDigestSummary {
     created_at_unix: u64,
     guest_elf_dir: String,
     digests: Vec<GuestDigestEntry>,
 }
 
-pub(crate) fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
+pub fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
     let summary = collect_guest_digests(root)?;
     let output_path = resolve_output_path(root, args.output.as_deref())?;
     if let Some(parent) = output_path.parent() {
@@ -72,7 +72,7 @@ pub(crate) fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
+pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
     let elf_dir = root.join(DEFAULT_GUEST_ELF_DIR);
     let risc0_elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load RISC0 guest ELFs from {}", elf_dir.display()))?;
@@ -86,7 +86,7 @@ pub(crate) fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
 
     Ok(GuestDigestSummary {
         created_at_unix: unix_timestamp(),
-        guest_elf_dir: elf_dir.display().to_string(),
+        guest_elf_dir: DEFAULT_GUEST_ELF_DIR.to_string(),
         digests,
     })
 }
@@ -206,9 +206,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
 
+    use raiko2_guests::DEFAULT_GUEST_ELF_DIR;
+
     #[test]
     fn guest_digests_cover_expected_objects_and_sources() {
-        let root = crate::util::repo_root();
+        let root = crate::repo_root();
         let summary = super::collect_guest_digests(&root).expect("collect guest digests");
 
         let mut counts = BTreeMap::<(String, String), usize>::new();
@@ -262,7 +264,7 @@ mod tests {
 
     #[test]
     fn guest_digests_run_writes_json_summary() {
-        let root = crate::util::repo_root();
+        let root = crate::repo_root();
         let output = crate::util::target_root(&root)
             .join("guest-digests-test")
             .join("summary.json");
@@ -283,6 +285,7 @@ mod tests {
 
         let contents = fs::read_to_string(&output).expect("read output");
         assert!(contents.contains("\"guest_elf_dir\""));
+        assert!(contents.contains(DEFAULT_GUEST_ELF_DIR));
         assert!(contents.contains("risc0_shasta_proposal"));
         assert!(contents.contains("sp1_shasta_aggregation"));
     }

@@ -1,6 +1,6 @@
 # Guest ELF Consistency Check Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> Execute this plan task-by-task, completing and validating each step before moving to the next.
 
 **Goal:** Add a stable `guest-elf-consistency` CI job that always rebuilds checked-in guest ELF
 artifacts on the self-hosted `raiko2` runner and fails when the repository copy drifts from a clean

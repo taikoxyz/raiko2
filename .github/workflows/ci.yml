@@ -257,7 +257,7 @@ jobs:
           just build-guest sp1
 
       - name: export guest digests
-        run: cargo run -p xtask -- guest-digests --output target/guest-digests/summary.json
+        run: cargo run -p xtask-build-guest --bin guest-digests -- --output target/guest-digests/summary.json
 
       - name: upload guest digest summary
         uses: actions/upload-artifact@v4

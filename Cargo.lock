@@ -18575,13 +18575,17 @@ dependencies = [
 name = "xtask-build-guest"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "clap",
+ "raiko2-guests",
  "risc0-binfmt",
  "risc0-zkos-v1compat",
+ "risc0-zkvm",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sp1-sdk",
  "toml 0.9.12+spec-1.1.0",
 ]
 

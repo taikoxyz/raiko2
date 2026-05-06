@@ -1,20 +1,21 @@
 # Guest Digests Export Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> Implement this plan task-by-task, validating each step before moving to the next.
 
-**Goal:** Add a local `xtask guest-digests` command and wire it into `guest-elf-consistency` so GitHub Actions exposes the current Shasta guest registration digests as a summary artifact.
+**Goal:** Add a local `xtask-build-guest` `guest-digests` command and wire it into `guest-elf-consistency` so GitHub Actions exposes the current Shasta guest registration digests as a summary artifact.
 
-**Architecture:** Introduce a small offline digest-export module in `xtask` that loads the current checked-in guest ELFs and computes the same Shasta registration digests needed by verifier contracts. Then call it from the existing self-hosted `guest-elf-consistency` job after the rebuild step, upload the JSON artifact, render a short Markdown summary, and keep the existing ELF drift gate unchanged.
+**Architecture:** Introduce a small offline digest-export module in `xtask-build-guest` that loads the current checked-in guest ELFs and computes the same Shasta registration digests needed by verifier contracts. Then call it from the existing self-hosted `guest-elf-consistency` job after the rebuild step, upload the JSON artifact, render a short Markdown summary, and keep the existing ELF drift gate unchanged.
 
-**Tech Stack:** Rust (`xtask`, `serde_json`, `risc0-zkvm`, `sp1-sdk`), GitHub Actions, existing guest ELF loaders from `raiko2-guests`
+**Tech Stack:** Rust (`xtask-build-guest`, `serde_json`, `risc0-zkvm`, `sp1-sdk`), GitHub Actions, existing guest ELF loaders from `raiko2-guests`
 
 ---
 
 ### Task 1: Add failing digest-export tests
 
 **Files:**
-- Create: `xtask/src/guest_digests.rs`
-- Modify: `xtask/src/main.rs`
+- Create: `xtask/build-guest/src/guest_digests.rs`
+- Create: `xtask/build-guest/src/bin/guest-digests.rs`
+- Modify: `xtask/build-guest/Cargo.toml`
 
 **Step 1: Write the failing tests**
 
@@ -33,19 +34,22 @@ Add tests that expect:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p xtask guest_digests`
+Run: `cargo test -p xtask-build-guest guest_digests`
 
-Expected: compile failure because `guest_digests` command/module does not exist yet.
+Expected: compile failure because the lightweight `guest-digests` command/module does not exist yet.
 
 ### Task 2: Implement the offline digest exporter
 
 **Files:**
-- Create: `xtask/src/guest_digests.rs`
+- Create: `xtask/build-guest/src/guest_digests.rs`
+- Create: `xtask/build-guest/src/bin/guest-digests.rs`
+- Modify: `xtask/build-guest/Cargo.toml`
 - Modify: `xtask/src/main.rs`
 
 **Step 1: Add CLI entrypoint**
 
-Add a new `GuestDigests` subcommand in `xtask/src/main.rs`.
+Add a new lightweight `guest-digests` binary in `xtask-build-guest`, and keep the `xtask`
+subcommand as a thin delegate if the human-facing CLI should remain available.
 
 **Step 2: Implement minimal data model**
 
@@ -71,7 +75,7 @@ Write a stable pretty-printed JSON summary file to the requested output path.
 
 **Step 5: Re-run focused tests**
 
-Run: `cargo test -p xtask guest_digests`
+Run: `cargo test -p xtask-build-guest guest_digests`
 
 Expected: PASS
 
@@ -84,7 +88,7 @@ Expected: PASS
 
 Run:
 
-`cargo run -p xtask -- guest-digests --output target/guest-digests/summary.json`
+`cargo run -p xtask-build-guest --bin guest-digests -- --output target/guest-digests/summary.json`
 
 **Step 2: Upload artifact**
 
@@ -106,7 +110,7 @@ the audit artifact visible.
 
 **Step 1: Run focused Rust tests**
 
-Run: `cargo test -p xtask guest_digests`
+Run: `cargo test -p xtask-build-guest guest_digests`
 
 Expected: PASS
 
@@ -125,6 +129,6 @@ Expected: PASS
 **Step 4: Commit**
 
 ```bash
-git add xtask/src/main.rs xtask/src/guest_digests.rs .github/workflows/ci.yml docs/plans/2026-05-06-guest-digests-design.md docs/plans/2026-05-06-guest-digests-implementation-plan.md
+git add xtask/build-guest/Cargo.toml xtask/build-guest/src/guest_digests.rs xtask/build-guest/src/bin/guest-digests.rs xtask/src/main.rs .github/workflows/ci.yml docs/plans/2026-05-06-guest-digests-design.md docs/plans/2026-05-06-guest-digests-implementation-plan.md
 git commit -m "ci: publish guest digest summaries"
 ```

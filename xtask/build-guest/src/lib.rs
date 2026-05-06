@@ -10,6 +10,7 @@ use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod guest_digests;
 mod util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
@@ -884,7 +885,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
 
-    let target_root = util::target_root(root);
+    let target_root = util::target_root(root).join("sp1");
     let export_dir = target_root.join("sp1-export");
     let output_dir = root.join("crates/guests/elf");
     fs::create_dir_all(&export_dir)?;

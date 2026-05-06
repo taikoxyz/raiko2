@@ -39,8 +39,8 @@ It does **not** add:
 
 ## Approach
 
-Add a new `xtask guest-digests` subcommand that computes digests from the checked-in guest ELF
-directory and writes a JSON summary file.
+Add a new lightweight `xtask-build-guest` `guest-digests` command that computes digests from the
+checked-in guest ELF directory and writes a JSON summary file.
 
 The subcommand should stay separate from `register-image` because:
 
@@ -52,7 +52,7 @@ The subcommand should stay separate from `register-image` because:
 `guest-elf-consistency` will then:
 
 1. rebuild the guest ELFs
-2. run `cargo run -r -p xtask -- guest-digests --output <path>`
+2. run `cargo run -r -p xtask-build-guest --bin guest-digests -- --output <path>`
 3. publish the JSON as an artifact
 4. render a short Markdown summary into `GITHUB_STEP_SUMMARY`
 5. fail if the rebuilt ELF tree is dirty
@@ -77,7 +77,7 @@ Each digest entry should include:
 
 ## Testing Strategy
 
-- Add `xtask` unit tests that validate the exported digest set shape:
+- Add `xtask-build-guest` unit tests that validate the exported digest set shape:
   - all expected object names are present
   - `risc0` exports exactly three `image_id` entries
   - `sp1` exports exactly four verification-key-derived entries

@@ -18718,6 +18718,7 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "clap",
+ "dirs 6.0.0",
  "raiko2-guests",
  "raiko2-pipeline",
  "raiko2-primitives",

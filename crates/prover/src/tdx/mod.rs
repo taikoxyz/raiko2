@@ -87,24 +87,37 @@ impl TdxProver {
     /// Returns an error if bootstrap or disk access fails.
     pub async fn get_guest_data(&self) -> RaikoResult<serde_json::Value> {
         self.ensure_bootstrapped().await?;
-
-        let bootstrap = config::read_bootstrap()
-            .map_err(|e| RaikoError::Guest(format!("Failed to read TDX bootstrap data: {e}")))?;
-
-        let issuer_type = config::issuer_proof_type()
-            .map_err(|e| RaikoError::Guest(format!("Failed to resolve TDX issuer type: {e}")))?
-            .to_string();
-
-        Ok(serde_json::json!({
-            issuer_type: {
-                "issuer_type": bootstrap.issuer_type,
-                "public_key": bootstrap.public_key,
-                "quote": bootstrap.quote,
-                "nonce": bootstrap.nonce,
-                "metadata": bootstrap.metadata,
-            }
-        }))
+        guest_data_from_bootstrap()
     }
+}
+
+/// Read on-disk TDX bootstrap data and return it shaped for `/guest_data`.
+///
+/// The bootstrap file is written by [`TdxProver::ensure_bootstrapped`]; if the
+/// server has started successfully with the `tdx` feature enabled the file will
+/// exist on disk. The returned JSON has one top-level key (the issuer type, e.g.
+/// `"tdx"`) whose value is the bootstrap record.
+///
+/// # Errors
+///
+/// Returns an error if the bootstrap file is missing or malformed.
+pub fn guest_data_from_bootstrap() -> RaikoResult<serde_json::Value> {
+    let bootstrap = config::read_bootstrap()
+        .map_err(|e| RaikoError::Guest(format!("Failed to read TDX bootstrap data: {e}")))?;
+
+    let issuer_type = config::issuer_proof_type()
+        .map_err(|e| RaikoError::Guest(format!("Failed to resolve TDX issuer type: {e}")))?
+        .to_string();
+
+    Ok(serde_json::json!({
+        issuer_type: {
+            "issuer_type": bootstrap.issuer_type,
+            "public_key": bootstrap.public_key,
+            "quote": bootstrap.quote,
+            "nonce": bootstrap.nonce,
+            "metadata": bootstrap.metadata,
+        }
+    }))
 }
 
 impl GuestInputCodec<GuestInput> for TdxProver {

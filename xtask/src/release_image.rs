@@ -103,6 +103,7 @@ const fn backend_name(backend: Backend) -> &'static str {
     match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
+        Backend::Tdx => "tdx",
         Backend::All => "all",
     }
 }

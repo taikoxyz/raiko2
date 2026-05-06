@@ -24,6 +24,7 @@ const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unk
 pub enum Backend {
     Risc0,
     Sp1,
+    Tdx,
     All,
 }
 
@@ -62,6 +63,11 @@ pub fn build(
         }
         Backend::Sp1 => {
             build_sp1(root, bench, sp1_docker_tag)?;
+        }
+        Backend::Tdx => {
+            println!(
+                "[INFO] Backend `tdx` has no guest ELF to build (the prover runs natively in a TDX VM)."
+            );
         }
         Backend::All => {
             build_risc0(root, bench)?;
@@ -126,6 +132,7 @@ pub fn ensure_release_guest_elves(
     match backend {
         Backend::Risc0 => ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag),
         Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag),
+        Backend::Tdx => Ok(()),
         Backend::All => {
             ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
             ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
@@ -182,6 +189,7 @@ fn ensure_release_backend(
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
+        Backend::Tdx => unreachable!("tdx has no guest ELF"),
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
     let outputs_exist = guest_outputs_exist(root, backend)?;
@@ -264,6 +272,7 @@ fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>>
     match backend {
         Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0")?),
         Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1")?),
+        Backend::Tdx => {}
         Backend::All => {
             outputs.extend(expected_backend_outputs(root, "risc0")?);
             outputs.extend(expected_backend_outputs(root, "sp1")?);
@@ -305,6 +314,7 @@ fn compute_guest_fingerprint(
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
             include_outputs,
         )?,
+        Backend::Tdx => unreachable!("tdx has no guest fingerprint"),
         Backend::All => unreachable!("fingerprints are computed per concrete backend"),
     }
 

@@ -291,7 +291,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("sp1_verifier_address must be set")
+                .contains("taiko_hoodi/hoodi: sp1_verifier_address must be set")
         );
     }
 
@@ -339,10 +339,9 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("sp1_verifier_address must not be the zero address")
+            result.unwrap_err().to_string().contains(
+                "taiko_mainnet/ethereum: sp1_verifier_address must not be the zero address"
+            )
         );
     }
 

@@ -356,7 +356,7 @@ while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
 settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
 Succinct verifier contract used after a network proof is fulfilled. This is separate from the Taiko
-Shasta verifier address used for proof registration and chain-spec carry data.
+Shasta verifier address used for proof registration and chain-spec data carried in proofs.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.

@@ -275,18 +275,27 @@ impl RpcConfig {
                         );
                     }
                     let verifier_address = Address::from_str(address).map_err(|_| {
-                        anyhow::anyhow!("invalid sp1_verifier_address = '{address}'")
+                        anyhow::anyhow!("{}: invalid sp1_verifier_address = '{address}'", pair.key)
                     })?;
                     if verifier_address == Address::ZERO {
-                        bail!("sp1_verifier_address must not be the zero address");
+                        bail!(
+                            "{}: sp1_verifier_address must not be the zero address",
+                            pair.key
+                        );
                     }
                 }
                 (None, None) => {}
                 (Some(_), None) => {
-                    bail!("sp1_verifier_address must be set when sp1_verifier_rpc_url is set");
+                    bail!(
+                        "{}: sp1_verifier_address must be set when sp1_verifier_rpc_url is set",
+                        pair.key
+                    );
                 }
                 (None, Some(_)) => {
-                    bail!("sp1_verifier_rpc_url must be set when sp1_verifier_address is set");
+                    bail!(
+                        "{}: sp1_verifier_rpc_url must be set when sp1_verifier_address is set",
+                        pair.key
+                    );
                 }
             }
             if !pair.l2_spec.is_taiko() {

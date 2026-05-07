@@ -61,8 +61,10 @@ Accept:
 - `--version`
 - `--tag`
 - `--git-sha`
-- `--risc0-image`
-- `--sp1-image`
+- `--risc0-tag`
+- `--risc0-digest-ref`
+- `--sp1-tag`
+- `--sp1-digest-ref`
 - `--guest-digests`
 - `--output`
 

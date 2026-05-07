@@ -24,6 +24,7 @@ pairs = [
   # Set l2_provider = "geth_local_witness" for a regular geth endpoint with locally assembled witnesses.
   # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth", l2_witness_rpc = "https://rpc.hoodi.taiko.xyz" },
   # Optional: enable hosted SP1 network verification for a specific pair.
+  # sp1_verifier_address is the Succinct SP1 PLONK gateway on L1, not the Taiko Shasta verifier.
   # Leave these fields unset to keep that line closed.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x3B6041173B80E77f038f3F2C0f9744f04837185e" },
   # Optional: override Boundless quote and offer params per pair.

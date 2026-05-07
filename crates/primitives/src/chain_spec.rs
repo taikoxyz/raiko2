@@ -757,6 +757,8 @@ mod tests {
             l1_spec.beacon_rpc.as_deref(),
             Some("https://l1beacon.internal.taiko.xyz")
         );
+        assert_eq!(l1_spec.genesis_time, 1_777_785_000);
+        assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
         assert_eq!(

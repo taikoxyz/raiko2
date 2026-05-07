@@ -739,6 +739,27 @@ mod tests {
     }
 
     #[test]
+    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_dev")
+            .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
+        let unzen_timestamp = 1_777_787_739;
+
+        assert_eq!(spec.chain_id, 167_001);
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(unzen_timestamp))
+        );
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
+            address!("b432bbe475e569b2adef4830ae43d587932f139c")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_taiko_hoodi_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_hoodi".to_string(),

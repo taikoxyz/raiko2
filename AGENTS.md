@@ -55,7 +55,7 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Direct xtask fallback: `cargo run -r -p xtask -- build-guest <backend>`
 - Image release:
   - `just release-image <backend> <tag>`
-  - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository registry.example.com/raiko2`
+  - `cargo run -r -p xtask -- release-image <backend> --tag <tag> --repository us-docker.pkg.dev/evmchain/images/raiko2`
 - Do not invent `make` targets or use outdated `TARGET=... make test` workflows in this repo.
 
 ## Project Skill Rule

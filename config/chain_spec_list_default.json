@@ -61,7 +61,7 @@
         },
         "l1_contract": {},
         "l2_contract": null,
-        "rpc": "https://ethereum-hoodi-rpc.publicnode.com",
+        "rpc": "https://rpc.hoodi.taiko.xyz",
         "beacon_rpc": "https://ethereum-hoodi-beacon-api.publicnode.com",
         "verifier_address_forks": {
             "FRONTIER": {
@@ -147,7 +147,7 @@
             "CANCUN": "0x12100faa7b157e9947340b44409fc7e27ec0abef"
         },
         "l2_contract": "0x1670010000000000000000000000000000010001",
-        "rpc": "https://taiko-dev-rpc.example.com",
+        "rpc": "https://rpc.dev.taiko.xyz",
         "beacon_rpc": null,
         "verifier_address_forks": {
             "CANCUN": {
@@ -192,7 +192,7 @@
             "SHASTA": "0x3477f9e8a890c2286c5e62150ad6593eef4590b9"
         },
         "l2_contract": "0x1670110000000000000000000000000000010001",
-        "rpc": "https://taiko-masaya-rpc.example.com",
+        "rpc": "https://rpc.masaya.taiko.xyz",
         "beacon_rpc": null,
         "verifier_address_forks": {
             "SHASTA": {

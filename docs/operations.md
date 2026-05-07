@@ -99,7 +99,7 @@ Direct `xtask` entrypoint:
 ```bash
 cargo run -r -p xtask -- release-image risc0 \
   --tag release-20260507-1013 \
-  --repository registry.example.com/raiko2
+  --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing

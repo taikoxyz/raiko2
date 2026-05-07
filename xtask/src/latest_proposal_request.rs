@@ -17,7 +17,7 @@ use serde::Serialize;
 
 const BLOCK_BATCH_SIZE: usize = 32;
 const DEFAULT_ETHEREUM_RPC_URL: &str = "https://ethereum-rpc.publicnode.com";
-const DEFAULT_HOODI_RPC_URL: &str = "https://ethereum-hoodi-rpc.publicnode.com";
+const DEFAULT_HOODI_RPC_URL: &str = "https://rpc.hoodi.taiko.xyz";
 const DEFAULT_HOODI_TAIKO_RPC_URL: &str = "https://rpc.hoodi.taiko.xyz";
 const DEFAULT_L1_SCAN_PAGE_SIZE: u64 = 2_048;
 const DEFAULT_L1_MAX_LOOKBACK: u64 = 100_000;

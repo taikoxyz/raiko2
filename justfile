@@ -22,7 +22,7 @@ build-sp1-toolchain-image tag="raiko2-sp1-toolchain:local" *args:
 bench-guest backend="sp1" *args:
     cargo run -r -p xtask -- bench-guest {{backend}} {{args}}
 
-release-image backend tag repository="registry.example.com/raiko2" *args:
+release-image backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2" *args:
     cargo run -r -p xtask -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}
 
 update-alethia-reth:

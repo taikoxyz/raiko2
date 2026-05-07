@@ -104,7 +104,7 @@ timeout_ms = 3600000
 deployment_type = "base"
 
 [prover.boundless.deployment.overrides]
-order_stream_url = "https://order-stream.example.boundless.network"
+order_stream_url = "https://base-mainnet.boundless.network"
 
 [prover.boundless.offer_params.batch]
 ramp_up_start_sec = 20

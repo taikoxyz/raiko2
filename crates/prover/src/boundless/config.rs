@@ -93,7 +93,7 @@ impl Default for BoundlessConfig {
             deployment: Some(DeploymentConfig {
                 deployment_type: Some(DeploymentType::Base),
                 overrides: Some(serde_json::json!({
-                    "order_stream_url": "https://order-stream.example.boundless.network"
+                    "order_stream_url": "https://base-mainnet.boundless.network"
                 })),
             }),
             batch_quoted_mcycles: None,

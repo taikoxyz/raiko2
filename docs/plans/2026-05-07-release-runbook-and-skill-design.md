@@ -68,9 +68,9 @@ The release manifest should contain:
 - `tag`
 - `git_sha`
 - `images`
-  - backend
-  - pushed image reference
-  - immutable digest reference
+  - `backend`
+  - `tag`
+  - `digest_ref`
 - `guest_digests`
   - exported directly from the existing `guest-digests` summary
 

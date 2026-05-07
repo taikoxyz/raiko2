@@ -108,19 +108,35 @@ where
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
-        let witnesses = fetch_preflight_witnesses(
-            provider,
-            &chain_spec,
-            ctx.request.proposal_id,
-            &block_numbers,
-        )
-        .await?;
+        let witnesses = if proof_type == ProofType::Tdx {
+            info!(
+                proposal_id = ctx.request.proposal_id,
+                block_count = block_numbers.len(),
+                "skipping witness fetching for TDX proof"
+            );
+            fetch_preflight_blocks_only(provider, &chain_spec, &block_numbers).await?
+        } else {
+            fetch_preflight_witnesses(
+                provider,
+                &chain_spec,
+                ctx.request.proposal_id,
+                &block_numbers,
+            )
+            .await?
+        };
         let blocks = witnesses
             .iter()
             .map(|witness| witness.block.clone())
             .collect::<Vec<_>>();
-        let manifest =
-            build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        let manifest = build_preflight_manifest(
+            ctx,
+            provider,
+            &chain_spec,
+            &blocks,
+            proposal_event,
+            proof_type,
+        )
+        .await?;
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
 
@@ -158,6 +174,29 @@ async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
         chain_spec,
     )?;
     Ok((block_numbers, expected_proposal_id, proposal_event))
+}
+
+/// Fetch only the block headers for TDX proofs, skipping the expensive witness and account
+/// lookups. The TDX prover only needs `proof_carry_data` (derived from block metadata), not the
+/// execution witness.
+async fn fetch_preflight_blocks_only<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    block_numbers: &[u64],
+) -> RaikoResult<Vec<StatelessInput>> {
+    let blocks = retry_shasta_preflight_operation("fetch blocks for TDX preflight", || async {
+        provider.batch_blocks(block_numbers).await
+    })
+    .await?;
+    validate_fetched_block_numbers(block_numbers, &blocks)?;
+    Ok(blocks
+        .into_iter()
+        .map(|block| StatelessInput {
+            block,
+            chain_spec: chain_spec.clone(),
+            ..StatelessInput::default()
+        })
+        .collect())
 }
 
 async fn fetch_preflight_witnesses<P: Provider>(
@@ -218,10 +257,18 @@ async fn build_preflight_manifest<P: Provider>(
     chain_spec: &ChainSpec,
     blocks: &[reth_ethereum_primitives::Block],
     proposal_event: ShastaEventData,
+    proof_type: ProofType,
 ) -> RaikoResult<raiko2_protocol_shasta::TaikoManifest> {
     let mut manifest =
         ShastaManifestBuilder::taiko_manifest_with_event(ctx, blocks, proposal_event)?;
-    hydrate_shasta_l1_headers(provider, chain_spec.chain_id, blocks, &mut manifest).await?;
+    hydrate_shasta_l1_headers(
+        provider,
+        chain_spec.chain_id,
+        blocks,
+        &mut manifest,
+        proof_type == ProofType::Tdx,
+    )
+    .await?;
     if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
         let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
         manifest.data_sources =
@@ -567,6 +614,7 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
     chain_id: u64,
     blocks: &[reth_ethereum_primitives::Block],
     manifest: &mut raiko2_protocol_shasta::TaikoManifest,
+    origin_only: bool,
 ) -> RaikoResult<()> {
     let proposal = &manifest.proposal_event.proposal;
     let origin_block_number = proposal.originBlockNumber.to::<u64>();
@@ -574,6 +622,20 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         return Err(RaikoError::InvalidRequestConfig(
             "shasta_proposal_event.proposal.originBlockHash is required".to_string(),
         ));
+    }
+
+    if origin_only {
+        let l1_headers =
+            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
+                provider.batch_l1_headers(&[origin_block_number]).await
+            })
+            .await?;
+        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
+            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
+        })?;
+        manifest.l1_header = origin_header;
+        manifest.l1_ancestor_headers.clear();
+        return Ok(());
     }
 
     let anchor_checkpoints = blocks
@@ -942,7 +1004,12 @@ where
 {
     type Input = GuestInput;
 
-    fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
+    fn validate(&self, ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
+        if proof_type_from_context(ctx) == ProofType::Tdx {
+            // TDX runs inside a TEE that re-executes blocks itself; stateless
+            // re-execution against an empty witness would always fail.
+            return Ok(());
+        }
         validate_shasta_guest_input(input)
     }
 }

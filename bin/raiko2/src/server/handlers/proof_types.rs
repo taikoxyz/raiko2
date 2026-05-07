@@ -36,7 +36,7 @@ impl BatchProofType {
     }
 
     pub(super) const fn is_public_batch_request_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::ZkAny)
+        matches!(self, Self::Sp1 | Self::Risc0 | Self::Tdx | Self::ZkAny)
     }
 
     pub(super) const fn is_concrete_public_proof_type(self) -> bool {

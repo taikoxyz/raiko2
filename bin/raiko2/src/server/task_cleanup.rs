@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::MissedTickBehavior;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
 
@@ -323,7 +323,7 @@ pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskI
 fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
     match result {
         Ok(stats) => {
-            info!(
+            debug!(
                 scanned = stats.scanned,
                 expired = stats.expired,
                 removed_roots = stats.removed_roots,

@@ -12,10 +12,8 @@ def parse_args():
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--git-sha", required=True)
-    parser.add_argument("--risc0-tag", required=True)
-    parser.add_argument("--risc0-digest-ref", required=True)
-    parser.add_argument("--sp1-tag", required=True)
-    parser.add_argument("--sp1-digest-ref", required=True)
+    parser.add_argument("--image-tag", required=True)
+    parser.add_argument("--image-digest-ref", required=True)
     parser.add_argument("--guest-digests", required=True)
     parser.add_argument("--output", required=True)
     return parser.parse_args()
@@ -38,18 +36,11 @@ def main():
         "version": args.version,
         "tag": args.tag,
         "git_sha": args.git_sha,
-        "images": [
-            {
-                "backend": "risc0",
-                "tag": args.risc0_tag,
-                "digest_ref": args.risc0_digest_ref,
-            },
-            {
-                "backend": "sp1",
-                "tag": args.sp1_tag,
-                "digest_ref": args.sp1_digest_ref,
-            },
-        ],
+        "runtime_image": {
+            "tag": args.image_tag,
+            "digest_ref": args.image_digest_ref,
+            "guest_backends": ["risc0", "sp1"],
+        },
         "guest_digests": guest_digests,
     }
 

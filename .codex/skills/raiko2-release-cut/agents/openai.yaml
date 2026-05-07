@@ -1,4 +1,4 @@
 interface:
   display_name: "Raiko2 Release Cut"
   short_description: "Cut source releases with digests"
-  default_prompt: "Use $raiko2-release-cut to publish a raiko2 source release with both runtime images, guest digests, and a GitHub Release."
+  default_prompt: "Use $raiko2-release-cut to publish a raiko2 source release with one runtime image, guest digests, and a GitHub Release."

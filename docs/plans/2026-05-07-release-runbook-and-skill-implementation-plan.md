@@ -2,8 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a public source-release runbook plus a thin `raiko2` release skill that records image
-digests and guest digests for each release.
+**Goal:** Add a public source-release runbook plus a thin `raiko2` release skill that records the
+runtime image digest and guest digests for each release.
 
 **Architecture:** Keep `docs/operations.md` as the public source of truth for the release flow, add a
 small manifest helper script for deterministic machine-readable output, and add a thin agent skill
@@ -24,7 +24,7 @@ Document the stable release sequence:
 
 - verify clean `main`
 - identify release commit SHA
-- publish `risc0` and `sp1` runtime images
+- publish the runtime image
 - export guest digests
 - build release manifest
 - create git tag and GitHub Release
@@ -33,8 +33,7 @@ Document the stable release sequence:
 
 Use concrete commands for:
 
-- `just release-image risc0 <tag>`
-- `just release-image sp1 <tag>`
+- `just release-image all <tag>`
 - `cargo run -p xtask-build-guest --bin guest-digests -- --output <path>`
 - manifest helper invocation
 - `gh release create ...`
@@ -44,8 +43,7 @@ Use concrete commands for:
 List the expected release outputs:
 
 - `vX.Y.Z`
-- `vX.Y.Z-risc0`
-- `vX.Y.Z-sp1`
+- runtime image tag: `vX.Y.Z`
 - `release-manifest-vX.Y.Z.json`
 - `release-notes-vX.Y.Z.md`
 
@@ -61,10 +59,8 @@ Accept:
 - `--version`
 - `--tag`
 - `--git-sha`
-- `--risc0-tag`
-- `--risc0-digest-ref`
-- `--sp1-tag`
-- `--sp1-digest-ref`
+- `--image-tag`
+- `--image-digest-ref`
 - `--guest-digests`
 - `--output`
 
@@ -110,7 +106,7 @@ The skill should emphasize:
 
 - no rollout
 - no `register-image --apply` by default
-- both backends are required
+- the runtime image must include both guest backends
 
 **Step 3: Add deterministic UI metadata**
 
@@ -167,7 +163,7 @@ Check that:
 
 Ensure the runbook, script, and skill all agree on:
 
-- both backends required
+- one runtime image with both guest backends included
 - release artifact names
 - no rollout/apply semantics
 

@@ -6,7 +6,7 @@ Define a repeatable `raiko2` release process that humans and agents can both fol
 releases. The process must cover:
 
 - tagging a release from a clean `main` commit
-- publishing both runtime image backends (`risc0` and `sp1`)
+- publishing a runtime image that includes both guest backends (`risc0` and `sp1`)
 - recording immutable image digests
 - recording guest digests / image IDs
 - creating a GitHub Release with both human-readable notes and machine-readable metadata
@@ -28,7 +28,7 @@ The runbook should define:
 
 1. release prerequisites
 2. how to choose the release commit
-3. how to build and publish `risc0` and `sp1` runtime images
+3. how to build and publish the runtime image
 4. how to export guest digests
 5. how to assemble a release manifest
 6. how to create the git tag and GitHub Release
@@ -43,7 +43,7 @@ Add a dedicated release skill that references the runbook instead of duplicating
 The skill should enforce these guardrails:
 
 - start from a clean checkout and explicit release commit
-- publish both backends
+- publish one runtime image that includes both guest backends
 - record image digests and guest digests
 - avoid rollout steps, cluster changes, and `register-image --apply` by default
 
@@ -54,9 +54,8 @@ This keeps the skill short and lets the docs remain the canonical flow.
 Each release should produce:
 
 - git tag: `vX.Y.Z`
-- two image tags:
-  - `vX.Y.Z-risc0`
-  - `vX.Y.Z-sp1`
+- one image tag:
+  - `vX.Y.Z`
 - one machine-readable manifest:
   - `release-manifest-vX.Y.Z.json`
 - one human-readable notes document:
@@ -67,10 +66,10 @@ The release manifest should contain:
 - `version`
 - `tag`
 - `git_sha`
-- `images`
-  - `backend`
-  - `tag`
-  - `digest_ref`
+- `runtime_image`
+  - tag
+  - immutable digest reference
+  - guest backends included in the image
 - `guest_digests`
   - exported directly from the existing `guest-digests` summary
 
@@ -82,8 +81,7 @@ Extend `docs/operations.md` with:
 
 - a `Source Releases` section
 - explicit commands for:
-  - `just release-image risc0 <tag>`
-  - `just release-image sp1 <tag>`
+  - `just release-image all <tag>`
   - `cargo run -p xtask-build-guest --bin guest-digests -- --output <path>`
   - `gh release create ...`
 
@@ -92,7 +90,7 @@ Extend `docs/operations.md` with:
 Add a small deterministic helper script under `scripts/` that builds the final release manifest from:
 
 - version/tag/SHA
-- two image refs + digests
+- runtime image ref + digest
 - guest digest summary JSON
 
 This removes error-prone manual JSON editing during the release cut.

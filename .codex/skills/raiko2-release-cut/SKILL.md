@@ -1,6 +1,6 @@
 ---
 name: raiko2-release-cut
-description: Use when cutting a versioned raiko2 source release from this repository, including git tag creation, publishing both runtime image backends, exporting guest digests, and creating a GitHub Release with release notes and manifest artifacts. Use when the workflow must stop before deployment or register-image apply.
+description: Use when cutting a versioned raiko2 source release from this repository, including git tag creation, publishing the runtime image, exporting guest digests, and creating a GitHub Release with release notes and manifest artifacts. Use when the workflow must stop before deployment or register-image apply.
 ---
 
 # Raiko2 Release Cut
@@ -20,7 +20,7 @@ Follow that runbook instead of reconstructing an ad-hoc release process.
 Use this skill when the user asks to:
 
 - cut a release tag from `main`
-- publish both `risc0` and `sp1` runtime images for a versioned release
+- publish a versioned runtime image that includes both `risc0` and `sp1` guest ELFs
 - collect image digests and guest digests
 - create release notes and a GitHub Release
 
@@ -37,8 +37,7 @@ For image-only publication, use `$raiko2-image-release`.
 Every release cut must produce:
 
 - git tag: `vX.Y.Z`
-- image tag: `vX.Y.Z-risc0`
-- image tag: `vX.Y.Z-sp1`
+- image tag: `vX.Y.Z`
 - release notes markdown
 - release manifest JSON
 
@@ -47,13 +46,13 @@ The release manifest must include:
 - version
 - tag
 - git SHA
-- both image digest references
+- runtime image digest reference
 - exported guest digests
 
 ## Guardrails
 
 - Start from a clean checkout of `main` or an explicit release commit.
-- Publish both backends; do not release only one backend by accident.
+- Publish one runtime image that includes both guest backends.
 - Record immutable digest references, not just mutable image tags.
 - Use the manifest helper in `scripts/release/write_release_manifest.py`.
 - Stop before rollout or `register-image --apply` unless the user explicitly asks for that as a
@@ -65,7 +64,6 @@ The user does not see raw command output. Always summarize:
 
 - release tag
 - release commit SHA
-- `risc0` image tag and digest
-- `sp1` image tag and digest
+- runtime image tag and digest
 - manifest location
 - whether the GitHub Release was created successfully

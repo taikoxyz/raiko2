@@ -93,7 +93,7 @@ Release prerequisites:
 
 - start from a clean checkout of `main`
 - choose a concrete release commit SHA
-- publish both runtime image backends:
+- publish one runtime image that includes both guest backends:
   - `risc0`
   - `sp1`
 - export guest digests from the checked-in ELFs
@@ -122,17 +122,15 @@ Recommended sequence:
    git rev-parse HEAD
    ```
 
-2. Publish both runtime images:
+2. Publish the runtime image:
 
    ```bash
-   just release-image risc0 ${TAG}-risc0
-   just release-image sp1 ${TAG}-sp1
+   just release-image all ${TAG}
    ```
 
    Record the immutable digest references printed by `release-image`:
 
-   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...` for `risc0`
-   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...` for `sp1`
+   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
 
 3. Export guest digests:
 
@@ -148,10 +146,8 @@ Recommended sequence:
      --version "${VERSION}" \
      --tag "${TAG}" \
      --git-sha "${RELEASE_SHA}" \
-     --risc0-tag "${TAG}-risc0" \
-     --risc0-digest-ref "us-docker.pkg.dev/evmchain/images/raiko2@sha256:..." \
-     --sp1-tag "${TAG}-sp1" \
-     --sp1-digest-ref "us-docker.pkg.dev/evmchain/images/raiko2@sha256:..." \
+     --image-tag "${TAG}" \
+     --image-digest-ref "us-docker.pkg.dev/evmchain/images/raiko2@sha256:..." \
      --guest-digests "${RELEASE_DIR}/guest-digests-summary.json" \
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
@@ -166,8 +162,8 @@ Recommended sequence:
 
    ## Runtime Images
 
-   - risc0: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
-   - sp1: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
+   - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
+   - includes both `risc0` and `sp1` guest ELFs
 
    ## Guest Digests
 
@@ -191,9 +187,7 @@ Recommended sequence:
 Expected release outputs:
 
 - git tag: `vX.Y.Z`
-- image tags:
-  - `vX.Y.Z-risc0`
-  - `vX.Y.Z-sp1`
+- runtime image tag: `vX.Y.Z`
 - release notes file: `release-notes-vX.Y.Z.md`
 - release manifest file: `release-manifest-vX.Y.Z.json`
 

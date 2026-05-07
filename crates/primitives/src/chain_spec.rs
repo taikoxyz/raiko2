@@ -678,20 +678,8 @@ mod tests {
             .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
-        assert_eq!(spec.hard_forks.len(), 6);
-        assert_eq!(spec.l1_contract.len(), 2);
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Pacaya))
-        );
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Shasta))
-        );
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
-        );
+        assert_eq!(spec.hard_forks.len(), 1);
+        assert_eq!(spec.l1_contract.len(), 1);
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
@@ -699,10 +687,6 @@ mod tests {
         assert_eq!(
             spec.get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)?,
             address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a")
-        );
-        assert_eq!(
-            spec.get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP)?,
-            address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f")
         );
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sgx)?,

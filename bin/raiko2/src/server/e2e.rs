@@ -27,7 +27,8 @@ use tower::ServiceExt;
 use super::app;
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
-    app_with_engine, app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
+    app_with_engine, app_with_observed_native_fixture_engine,
+    app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
     app_with_risc0_fixture_engine, base_config, risc0_fixture_engine, sp1_fixture_engine,
     spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
@@ -775,7 +776,7 @@ async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_rejects_native_public_proof_type() {
+async fn e2e_shasta_rejects_native_public_proof_type_without_native_route() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
@@ -801,8 +802,45 @@ async fn e2e_shasta_rejects_native_public_proof_type() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
     assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=native is not supported");
+    assert_eq!(
+        res["message"],
+        "proof_type=native is only supported when the server prover route is native/local"
+    );
     assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_proposal_proof_native_registers_when_server_route_is_native_local() {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Native;
+    config.prover.runner = RunnerKind::Local;
+    let (app, _engine) = app_with_observed_native_fixture_engine(config);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [{
+                "proposal_id": 3,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 0
+            }],
+            "aggregate": false,
+            "proof_type": "native",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["data"]["route"], "native/local");
 }
 
 #[tokio::test]

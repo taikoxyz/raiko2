@@ -57,10 +57,8 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Native
-        | BatchProofType::Boundless
-        | BatchProofType::Sgx
-        | BatchProofType::SgxGeth => {
+        BatchProofType::Native => native_route_for_request(state)?,
+        BatchProofType::Boundless | BatchProofType::Sgx | BatchProofType::SgxGeth => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()
@@ -74,6 +72,23 @@ pub(super) fn route_for_proof_type(
     };
 
     CanonicalProofRoute::new(route)
+}
+
+fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
+    let route = state.config.prover.route();
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Native,
+            runner: RunnerKind::Local,
+        }
+    ) {
+        Ok(route)
+    } else {
+        Err(ApiError::bad_request(
+            "proof_type=native is only supported when the server prover route is native/local",
+        ))
+    }
 }
 
 fn sp1_runner_for_request(

@@ -1000,6 +1000,7 @@ mod tests {
     use raiko2_primitives::{
         ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
         RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
+        chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
@@ -1352,8 +1353,25 @@ mod tests {
 
         ctx.request.l2_chain_id = 167_001;
         let devnet = super::chain_spec_from_context(&ctx);
+        let Some(ForkCondition::Timestamp(devnet_unzen_timestamp)) =
+            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
+        else {
+            panic!("taiko_dev should configure a timestamp-based Unzen fork");
+        };
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &devnet,
+                1,
+                devnet_unzen_timestamp.saturating_sub(1),
+            ),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &devnet,
+                1,
+                *devnet_unzen_timestamp,
+            ),
             super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
 

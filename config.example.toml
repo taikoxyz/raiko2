@@ -18,18 +18,18 @@ port = 8080
 # Explicitly allowed (network, l1_network) combinations for the hoodi-compatible API.
 # Canonical configs should declare RPC endpoints here.
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://rpc.hoodi.taiko.xyz", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth_local_witness" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth_local_witness" },
   # Optional: route witness/debug traffic to a dedicated L2 endpoint.
   # l2_provider defaults to "reth". Set l2_provider = "geth" for geth native debug_executionWitness.
   # Set l2_provider = "geth_local_witness" for a regular geth endpoint with locally assembled witnesses.
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://rpc.hoodi.taiko.xyz", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth", l2_witness_rpc = "https://rpc.hoodi.taiko.xyz" },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth", l2_witness_rpc = "https://rpc.hoodi.taiko.xyz" },
   # Optional: enable hosted SP1 network verification for a specific pair.
   # Leave these fields unset to keep that line closed.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x0000000000000000000000000000000000000000" },
   # Optional: override Boundless quote and offer params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200 } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://rpc.hoodi.taiko.xyz", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200, offer_params = { batch = { ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, max_price_per_mcycle = "0.000000085", min_price_per_mcycle = "0.000000010", lock_collateral = "20" } } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200, offer_params = { batch = { ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, max_price_per_mcycle = "0.000000085", min_price_per_mcycle = "0.000000010", lock_collateral = "20" } } } },
 ]
 
 [rpc.client]

@@ -61,7 +61,7 @@
         },
         "l1_contract": {},
         "l2_contract": null,
-        "rpc": "https://rpc.hoodi.taiko.xyz",
+        "rpc": "https://ethereum-hoodi-rpc.publicnode.com",
         "beacon_rpc": "https://ethereum-hoodi-beacon-api.publicnode.com",
         "verifier_address_forks": {
             "FRONTIER": {

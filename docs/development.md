@@ -107,7 +107,7 @@ Write a Hoodi request to a file with explicit RPC overrides:
 ```bash
 cargo run -r -p xtask -- latest-proposal-request \
   --profile taiko-hoodi \
-  --l1-rpc-url https://rpc.hoodi.taiko.xyz \
+  --l1-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
   --l2-rpc-url http://<l2-rpc-host>:8545 \
   -o target/latest-proposal/hoodi.json
 ```
@@ -194,7 +194,7 @@ was skipped because public RPC witness fetching was unstable during capture.
 ```bash
 cargo run -r -p preflight -- \
   --rpc-url http://<l2-rpc-host>:8545 \
-  --l1-rpc-url https://rpc.hoodi.taiko.xyz \
+  --l1-rpc-url https://ethereum-hoodi-rpc.publicnode.com \
   --l2-chain-id 167013 \
   --l1-chain-id 560048 \
   --proposal-id 17460 \

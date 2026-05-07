@@ -626,6 +626,8 @@ mod tests {
     };
     use alloy_primitives::address;
 
+    const MAINNET_SHASTA_TIMESTAMP: u64 = 1_775_135_700;
+
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
         // Parse the shipped default config list (JSON), then ensure the resulting ChainSpec is
@@ -691,12 +693,43 @@ mod tests {
                 .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
         );
         assert_eq!(
-            spec.get_fork_l1_contract_address_at(5_412_478, 1_775_988_339)?,
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
+        );
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)?,
+            address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a")
+        );
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP)?,
             address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f")
         );
         assert_eq!(
-            spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::Sp1)?,
-            address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sgx)?,
+            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Risc0)?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sp1)?,
+            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_mainnet_raw_spec_keeps_sgx_geth_shasta_verifier() -> Result<()> {
+        let list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .iter()
+            .find(|spec| spec["name"] == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+
+        assert_eq!(
+            spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
+            Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
         );
         Ok(())
     }

@@ -167,7 +167,7 @@ Recommended sequence:
 
    ## Guest Digests
 
-   See attached `release-manifest-vX.Y.Z.json`.
+   See attached `release-manifest-${TAG}.json`.
    EOF
    ```
 
@@ -186,10 +186,10 @@ Recommended sequence:
 
 Expected release outputs:
 
-- git tag: `vX.Y.Z`
-- runtime image tag: `vX.Y.Z`
-- release notes file: `release-notes-vX.Y.Z.md`
-- release manifest file: `release-manifest-vX.Y.Z.json`
+- git tag: `${TAG}`
+- runtime image tag: `${TAG}`
+- release notes file: `release-notes-${TAG}.md`
+- release manifest file: `release-manifest-${TAG}.json`
 
 Do not:
 

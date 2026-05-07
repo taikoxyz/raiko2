@@ -45,7 +45,7 @@ The release manifest must include:
 
 - version
 - tag
-- git SHA
+- git_sha
 - runtime image digest reference
 - exported guest digests
 

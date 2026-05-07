@@ -331,13 +331,12 @@ fn compute_backend_fingerprint(
         root.join("xtask/build-guest/src/lib.rs"),
         root.join("xtask/build-guest/src/main.rs"),
         root.join("xtask/build-guest/src/util.rs"),
-        root.join("guests/common/Cargo.toml"),
-        root.join("guests/common/Cargo.lock"),
+        root.join("crates/guest-common/Cargo.toml"),
         root.join(format!("guests/{backend_key}/Cargo.toml")),
         root.join(format!("guests/{backend_key}/Cargo.lock")),
         root.join(format!("docker/{backend_key}-toolchain/Dockerfile")),
     ];
-    collect_files_recursively(&root.join("guests/common/src"), &mut paths)?;
+    collect_files_recursively(&root.join("crates/guest-common/src"), &mut paths)?;
     collect_files_recursively(&root.join(format!("guests/{backend_key}/src")), &mut paths)?;
     paths.sort();
 

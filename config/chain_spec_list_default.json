@@ -75,6 +75,42 @@
         "is_taiko": false
     },
     {
+        "name": "taiko_dev_l1",
+        "chain_id": 32382,
+        "max_spec_id": "CANCUN",
+        "hard_forks": {
+            "FRONTIER": {
+                "Block": 0
+            },
+            "SHANGHAI": {
+                "Timestamp": 0
+            },
+            "CANCUN": {
+                "Timestamp": 0
+            }
+        },
+        "eip_1559_constants": {
+            "base_fee_change_denominator": "0x8",
+            "base_fee_max_increase_denominator": "0x8",
+            "base_fee_max_decrease_denominator": "0x8",
+            "elasticity_multiplier": "0x2"
+        },
+        "l1_contract": {},
+        "l2_contract": null,
+        "rpc": "https://l1rpc.internal.taiko.xyz",
+        "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
+        "verifier_address_forks": {
+            "FRONTIER": {
+                "SGX": "0x532efbf6d62720d0b2a2bb9d11066e8588cae6d9",
+                "SP1": null,
+                "RISC0": "0x0000000000000000000000000000000000000000"
+            }
+        },
+        "genesis_time": 0,
+        "seconds_per_slot": 12,
+        "is_taiko": false
+    },
+    {
         "name": "taiko_mainnet",
         "chain_id": 167000,
         "max_spec_id": "UNZEN",
@@ -131,7 +167,7 @@
         "max_spec_id": "UNZEN",
         "hard_forks": {
             "UNZEN": {
-                "Timestamp": 0
+                "Timestamp": 1777787739
             },
             "CANCUN": {
                 "Timestamp": 0
@@ -144,7 +180,7 @@
             "elasticity_multiplier": "0x2"
         },
         "l1_contract": {
-            "CANCUN": "0x12100faa7b157e9947340b44409fc7e27ec0abef"
+            "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
         },
         "l2_contract": "0x1670010000000000000000000000000000010001",
         "rpc": "https://rpc.dev.taiko.xyz",

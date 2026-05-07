@@ -85,6 +85,118 @@ Operational notes:
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.
 
+## Source Releases
+
+Use this flow when cutting a versioned source release such as `v0.1.0`.
+
+Release prerequisites:
+
+- start from a clean checkout of `main`
+- choose a concrete release commit SHA
+- publish one runtime image that includes both guest backends:
+  - `risc0`
+  - `sp1`
+- export guest digests from the checked-in ELFs
+- create both:
+  - a human-readable release notes file
+  - a machine-readable release manifest
+
+Suggested local variables:
+
+```bash
+export VERSION=0.1.0
+export TAG=v0.1.0
+export RELEASE_SHA=$(git rev-parse HEAD)
+export RELEASE_DIR=/tmp/raiko2-release-${TAG}
+mkdir -p "${RELEASE_DIR}"
+```
+
+Recommended sequence:
+
+1. Confirm the release commit:
+
+   ```bash
+   git checkout main
+   git pull --ff-only origin main
+   git status --short
+   git rev-parse HEAD
+   ```
+
+2. Publish the runtime image:
+
+   ```bash
+   just release-image all ${TAG}
+   ```
+
+   Record the immutable digest references printed by `release-image`:
+
+   - `us-docker.pkg.dev/evmchain/images/raiko2@sha256:...`
+
+3. Export guest digests:
+
+   ```bash
+   cargo run -p xtask-build-guest --bin guest-digests -- \
+     --output "${RELEASE_DIR}/guest-digests-summary.json"
+   ```
+
+4. Build the release manifest:
+
+   ```bash
+   python3 scripts/release/write_release_manifest.py \
+     --version "${VERSION}" \
+     --tag "${TAG}" \
+     --git-sha "${RELEASE_SHA}" \
+     --image-tag "${TAG}" \
+     --image-digest-ref "us-docker.pkg.dev/evmchain/images/raiko2@sha256:..." \
+     --guest-digests "${RELEASE_DIR}/guest-digests-summary.json" \
+     --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
+   ```
+
+5. Write release notes:
+
+   ```bash
+   cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
+   ## Summary
+
+   - release summary here
+
+   ## Runtime Images
+
+   - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
+   - includes both `risc0` and `sp1` guest ELFs
+
+   ## Guest Digests
+
+   See attached `release-manifest-${TAG}.json`.
+   EOF
+   ```
+
+6. Create the tag and GitHub Release:
+
+   ```bash
+   git tag "${TAG}" "${RELEASE_SHA}"
+   git push origin "${TAG}"
+
+   gh release create "${TAG}" \
+     --target "${RELEASE_SHA}" \
+     --title "${TAG}" \
+     --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
+     "${RELEASE_DIR}/release-manifest-${TAG}.json"
+   ```
+
+Expected release outputs:
+
+- git tag: `${TAG}`
+- runtime image tag: `${TAG}`
+- release notes file: `release-notes-${TAG}.md`
+- release manifest file: `release-manifest-${TAG}.json`
+
+Do not:
+
+- apply `register-image` automatically as part of the release cut
+- mix rollout or deployment steps into the release flow
+- write release-only metadata back into the source tree
+
 ## Release Images
 
 Use the `xtask` release entrypoint for runtime images. It ensures the checked-in guest ELFs are

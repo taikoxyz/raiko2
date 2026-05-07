@@ -19,9 +19,9 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use serde::Deserialize;
 use sp1_sdk::{
-    CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
-    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
-    network::Error as Sp1NetworkError,
+    CpuProver, HashableKey, NetworkProver, NetworkSigner, Prover as _, ProverClient, SP1Proof,
+    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
+    network::{Error as Sp1NetworkError, NetworkMode as Sp1SdkNetworkMode},
 };
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -37,6 +37,8 @@ use crate::{
 
 const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
 const SP1_NETWORK_REQUEST_RETRY_DELAY: Duration = Duration::from_secs(15);
+const SP1_MAINNET_RPC_URL: &str = "https://rpc.mainnet.succinct.xyz";
+const SP1_RESERVED_RPC_URL: &str = "https://rpc.production.succinct.xyz";
 
 sol!(
     #[sol(rpc)]
@@ -968,13 +970,43 @@ fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
                 "NETWORK_PRIVATE_KEY must be set for sp1.prover=network".to_string(),
             )
         })?;
-    let builder = ProverClient::builder().network().private_key(&private_key);
-    let builder = if let Some(rpc_url) = config.rpc_url.as_deref() {
-        builder.rpc_url(rpc_url)
-    } else {
-        builder
-    };
-    Ok(builder.build())
+    let signer = NetworkSigner::local(&private_key).map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!(
+            "NETWORK_PRIVATE_KEY is not a valid SP1 network signer: {err}"
+        ))
+    })?;
+    let rpc_url = sp1_network_rpc_url(config);
+    Ok(NetworkProver::new(
+        signer,
+        &rpc_url,
+        sp1_sdk_network_mode(config.network_mode),
+    ))
+}
+
+fn sp1_network_rpc_url(config: &Sp1Config) -> String {
+    config
+        .rpc_url
+        .clone()
+        .or_else(|| {
+            std::env::var("NETWORK_RPC_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode).to_string())
+}
+
+const fn default_sp1_network_rpc_url(mode: Sp1NetworkMode) -> &'static str {
+    match mode {
+        Sp1NetworkMode::Mainnet => SP1_MAINNET_RPC_URL,
+        Sp1NetworkMode::Reserved => SP1_RESERVED_RPC_URL,
+    }
+}
+
+const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
+    match mode {
+        Sp1NetworkMode::Mainnet => Sp1SdkNetworkMode::Mainnet,
+        Sp1NetworkMode::Reserved => Sp1SdkNetworkMode::Reserved,
+    }
 }
 
 async fn request_network_proof(
@@ -987,6 +1019,7 @@ async fn request_network_proof(
     stage: &str,
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
+    let auction_timeout = config.auction_timeout_secs.map(Duration::from_secs);
     let mut stored_request_id = if let Some(observer) = observer.as_ref() {
         observer.load_sp1_network_request_id().await
     } else {
@@ -1006,6 +1039,8 @@ async fn request_network_proof(
                             skip_simulation: config.skip_simulation,
                             cycle_limit: config.cycle_limit,
                             timeout_secs: config.timeout_secs,
+                            max_price_per_pgu: config.max_price_per_pgu,
+                            auction_timeout_secs: config.auction_timeout_secs,
                         },
                     ))
                     .await;
@@ -1019,19 +1054,35 @@ async fn request_network_proof(
             );
             request_id_string
         } else {
-            let request_id = client
+            tracing::info!(
+                stage,
+                proof_mode = ?proof_mode,
+                network_mode = %config.network_mode.as_str(),
+                fulfillment_strategy = %config.fulfillment_strategy.as_str(),
+                skip_simulation = config.skip_simulation,
+                cycle_limit = config.cycle_limit,
+                timeout_secs = config.timeout_secs,
+                max_price_per_pgu = ?config.max_price_per_pgu,
+                auction_timeout_secs = ?config.auction_timeout_secs,
+                request_attempt,
+                "Submitting SP1 network proof request"
+            );
+
+            let mut request = client
                 .prove(pk, &stdin)
                 .mode(proof_mode)
                 .strategy(config.fulfillment_strategy.into())
                 .skip_simulation(config.skip_simulation)
                 .cycle_limit(config.cycle_limit)
-                .timeout(timeout)
-                .request_async()
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
-                    RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
-                })?;
+                .timeout(timeout);
+            if let Some(max_price_per_pgu) = config.max_price_per_pgu {
+                request = request.max_price_per_pgu(max_price_per_pgu);
+            }
+
+            let request_id = request.request_async().await.map_err(|e| {
+                tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
+                RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
+            })?;
 
             let request_id_string = request_id.to_string();
             if let Some(observer) = observer.as_ref() {
@@ -1044,6 +1095,8 @@ async fn request_network_proof(
                             skip_simulation: config.skip_simulation,
                             cycle_limit: config.cycle_limit,
                             timeout_secs: config.timeout_secs,
+                            max_price_per_pgu: config.max_price_per_pgu,
+                            auction_timeout_secs: config.auction_timeout_secs,
                         },
                     ))
                     .await;
@@ -1062,7 +1115,15 @@ async fn request_network_proof(
         let request_id = B256::from_str(&request_id_string).map_err(|e| {
             RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
         })?;
-        match wait_sp1_network_proof(client, request_id, timeout, stage, &request_id_string).await?
+        match wait_sp1_network_proof(
+            client,
+            request_id,
+            timeout,
+            auction_timeout,
+            stage,
+            &request_id_string,
+        )
+        .await?
         {
             Sp1NetworkWaitOutcome::Fulfilled(proof) => {
                 return Ok(NetworkProofRequestResult {
@@ -1094,13 +1155,17 @@ async fn wait_sp1_network_proof(
     client: &NetworkProver,
     request_id: B256,
     timeout: Duration,
+    auction_timeout: Option<Duration>,
     stage: &str,
     request_id_string: &str,
 ) -> RaikoResult<Sp1NetworkWaitOutcome> {
     let mut attempt = 1_u64;
     loop {
         let wait_started = std::time::Instant::now();
-        match client.wait_proof(request_id, Some(timeout), None).await {
+        match client
+            .wait_proof(request_id, Some(timeout), auction_timeout)
+            .await
+        {
             Ok(proof) => {
                 tracing::info!(
                     stage,
@@ -1160,8 +1225,9 @@ fn insert_sp1_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
-        remote_verifier_program_vkey, remote_verifier_proof_bytes, sp1_vk_uuid,
+        default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
+        remote_verifier_program_vkey, remote_verifier_proof_bytes, sp1_sdk_network_mode,
+        sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1171,7 +1237,7 @@ mod tests {
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use sp1_sdk::{
         HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues,
-        SP1VerifyingKey,
+        SP1VerifyingKey, network::NetworkMode as Sp1SdkNetworkMode,
     };
     use std::str::FromStr;
 
@@ -1215,6 +1281,30 @@ mod tests {
             prover
                 .cached_setup_for_stage(ProofStage::Aggregation)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn sp1_network_mode_maps_to_sdk_mode_explicitly() {
+        assert_eq!(
+            sp1_sdk_network_mode(super::Sp1NetworkMode::Mainnet),
+            Sp1SdkNetworkMode::Mainnet
+        );
+        assert_eq!(
+            sp1_sdk_network_mode(super::Sp1NetworkMode::Reserved),
+            Sp1SdkNetworkMode::Reserved
+        );
+    }
+
+    #[test]
+    fn default_sp1_network_rpc_url_follows_configured_mode() {
+        assert_eq!(
+            default_sp1_network_rpc_url(super::Sp1NetworkMode::Mainnet),
+            super::SP1_MAINNET_RPC_URL
+        );
+        assert_eq!(
+            default_sp1_network_rpc_url(super::Sp1NetworkMode::Reserved),
+            super::SP1_RESERVED_RPC_URL
         );
     }
 

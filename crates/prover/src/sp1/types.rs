@@ -24,6 +24,8 @@ pub enum Sp1ConfigError {
     ProposalCycleLimitMustBePositive,
     AggregationCycleLimitMustBePositive,
     TimeoutSecsMustBePositive,
+    MaxPricePerPguMustBePositive,
+    AuctionTimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
     RemoteVerifyRpcUrlMustNotBeEmpty,
     RemoteVerifyRpcUrlInvalid(String),
@@ -55,6 +57,12 @@ impl std::fmt::Display for Sp1ConfigError {
             }
             Self::TimeoutSecsMustBePositive => {
                 f.write_str("sp1.timeout_secs must be greater than 0")
+            }
+            Self::MaxPricePerPguMustBePositive => {
+                f.write_str("sp1.max_price_per_pgu must be greater than 0")
+            }
+            Self::AuctionTimeoutSecsMustBePositive => {
+                f.write_str("sp1.auction_timeout_secs must be greater than 0")
             }
             Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
             Self::RemoteVerifyRpcUrlMustNotBeEmpty => {
@@ -126,6 +134,12 @@ pub struct Sp1Config {
     /// Timeout to use when waiting for network proofs.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Optional max price per PGU for Succinct mainnet auction requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price_per_pgu: Option<u64>,
+    /// Optional time to wait for an auction request to be assigned before retrying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auction_timeout_secs: Option<u64>,
     /// Optional override for the Succinct network RPC URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
@@ -164,6 +178,8 @@ impl Default for Sp1Config {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: default_timeout_secs(),
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
         }
@@ -206,6 +222,10 @@ pub struct Sp1ConfigOverrides {
     pub cycle_limit: Option<u64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub max_price_per_pgu: Option<u64>,
+    #[serde(default)]
+    pub auction_timeout_secs: Option<u64>,
 }
 
 impl Sp1Config {
@@ -225,6 +245,8 @@ impl Sp1Config {
             proposal_cycle_limit: self.proposal_cycle_limit,
             aggregation_cycle_limit: self.aggregation_cycle_limit,
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
+            max_price_per_pgu: overrides.max_price_per_pgu.or(self.max_price_per_pgu),
+            auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
         }
@@ -288,6 +310,12 @@ impl Sp1Config {
         }
         if self.timeout_secs == 0 {
             return Err(Sp1ConfigError::TimeoutSecsMustBePositive);
+        }
+        if self.max_price_per_pgu == Some(0) {
+            return Err(Sp1ConfigError::MaxPricePerPguMustBePositive);
+        }
+        if self.auction_timeout_secs == Some(0) {
+            return Err(Sp1ConfigError::AuctionTimeoutSecsMustBePositive);
         }
         if self
             .rpc_url
@@ -353,6 +381,8 @@ impl Sp1ConfigOverrides {
             || self.fulfillment_strategy.is_some()
             || self.skip_simulation.is_some()
             || self.timeout_secs.is_some()
+            || self.max_price_per_pgu.is_some()
+            || self.auction_timeout_secs.is_some()
     }
 }
 
@@ -498,6 +528,8 @@ pub struct Sp1NetworkSubmissionProgress {
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub max_price_per_pgu: Option<u64>,
+    pub auction_timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -508,6 +540,8 @@ pub struct Sp1NetworkMetadata {
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub max_price_per_pgu: Option<u64>,
+    pub auction_timeout_secs: Option<u64>,
 }
 
 impl Sp1NetworkMetadata {
@@ -520,6 +554,8 @@ impl Sp1NetworkMetadata {
             skip_simulation: config.skip_simulation,
             cycle_limit: config.cycle_limit,
             timeout_secs: config.timeout_secs,
+            max_price_per_pgu: config.max_price_per_pgu,
+            auction_timeout_secs: config.auction_timeout_secs,
         }
     }
 }
@@ -834,6 +870,52 @@ mod tests {
             aggregation.validate().expect_err("zero aggregation limit"),
             Sp1ConfigError::AggregationCycleLimitMustBePositive
         );
+    }
+
+    #[test]
+    fn sp1_config_rejects_zero_auction_overrides() {
+        let price = Sp1Config {
+            max_price_per_pgu: Some(0),
+            ..Sp1Config::default()
+        };
+        let timeout = Sp1Config {
+            auction_timeout_secs: Some(0),
+            ..Sp1Config::default()
+        };
+
+        assert_eq!(
+            price.validate().expect_err("zero max price"),
+            Sp1ConfigError::MaxPricePerPguMustBePositive
+        );
+        assert_eq!(
+            timeout.validate().expect_err("zero auction timeout"),
+            Sp1ConfigError::AuctionTimeoutSecsMustBePositive
+        );
+    }
+
+    #[test]
+    fn resolve_request_config_applies_auction_overrides() {
+        let config = Sp1Config {
+            max_price_per_pgu: Some(1),
+            auction_timeout_secs: Some(30),
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            max_price_per_pgu: Some(2),
+            auction_timeout_secs: Some(60),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("auction overrides should resolve");
+
+        assert_eq!(resolved.max_price_per_pgu, Some(2));
+        assert_eq!(resolved.auction_timeout_secs, Some(60));
+        assert!(overrides.has_network_overrides());
     }
 
     #[test]

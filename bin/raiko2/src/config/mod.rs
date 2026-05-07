@@ -318,6 +318,35 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_config_rejects_zero_sp1_verifier_address() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_mainnet".to_string(),
+                l1_network: "ethereum".to_string(),
+                l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
+                sp1_verifier_address: Some(
+                    "0x0000000000000000000000000000000000000000".to_string(),
+                ),
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sp1_verifier_address must not be the zero address")
+        );
+    }
+
+    #[test]
     fn test_rpc_config_requires_pairs() {
         let config = RpcConfig {
             pairs: Vec::new(),

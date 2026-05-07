@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_mainnet_keeps_distinct_fork_entries() -> Result<()> {
+    fn taiko_mainnet_uses_shasta_only_config() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -684,10 +684,10 @@ mod tests {
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
         );
-        assert_eq!(
-            spec.get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)?,
-            address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a")
-        );
+        let err = spec
+            .get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)
+            .expect_err("mainnet config should only activate at Shasta");
+        assert!(err.to_string().contains("fork l1 contract is not active"));
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sgx)?,
             address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")

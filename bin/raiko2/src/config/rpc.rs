@@ -274,8 +274,11 @@ impl RpcConfig {
                             rpc_url
                         );
                     }
-                    if Address::from_str(address).is_err() {
-                        bail!("invalid sp1_verifier_address = '{address}'");
+                    let verifier_address = Address::from_str(address).map_err(|_| {
+                        anyhow::anyhow!("invalid sp1_verifier_address = '{address}'")
+                    })?;
+                    if verifier_address == Address::ZERO {
+                        bail!("sp1_verifier_address must not be the zero address");
                     }
                 }
                 (None, None) => {}

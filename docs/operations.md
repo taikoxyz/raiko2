@@ -234,6 +234,8 @@ When a checked-in guest ELF changes, register the new digests explicitly with `x
 # that match the target verifier network.
 cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
 Current behavior:

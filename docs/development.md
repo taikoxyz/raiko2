@@ -160,6 +160,8 @@ register the new digests explicitly:
 ```bash
 cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
 ## Guest Benchmarking

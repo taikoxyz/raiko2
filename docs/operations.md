@@ -91,15 +91,15 @@ Use the `xtask` release entrypoint for runtime images. It ensures the checked-in
 current, then builds and pushes the runtime image.
 
 ```bash
-just release-image risc0 tolba-20260310-1013
+just release-image risc0 release-20260507-1013
 ```
 
 Direct `xtask` entrypoint:
 
 ```bash
 cargo run -r -p xtask -- release-image risc0 \
-  --tag tolba-20260310-1013 \
-  --repository us-docker.pkg.dev/evmchain/images/raiko2
+  --tag release-20260507-1013 \
+  --repository registry.example.com/raiko2
 ```
 
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
@@ -118,6 +118,8 @@ Guest builds and image releases do not update verifier trust lists automatically
 When a checked-in guest ELF changes, register the new digests explicitly with `xtask`:
 
 ```bash
+# Built-in profiles are environment-specific. Pick the profile or explicit RPC/verifier overrides
+# that match the target verifier network.
 cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
 ```

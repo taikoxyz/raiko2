@@ -93,7 +93,7 @@ impl Default for BoundlessConfig {
             deployment: Some(DeploymentConfig {
                 deployment_type: Some(DeploymentType::Base),
                 overrides: Some(serde_json::json!({
-                    "order_stream_url": "https://base-mainnet.boundless.network"
+                    "order_stream_url": "https://order-stream.example.boundless.network"
                 })),
             }),
             batch_quoted_mcycles: None,
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn default_batch_offer_matches_tolba_deployment() {
+    fn default_batch_offer_matches_documented_defaults() {
         let batch = BoundlessConfig::default().offer_params.batch;
         assert_eq!(batch.ramp_up_start_sec, 20);
         assert_eq!(batch.ramp_up_period_blocks, 60);
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn default_aggregation_offer_matches_tolba_deployment() {
+    fn default_aggregation_offer_matches_documented_defaults() {
         let aggregation = BoundlessConfig::default().offer_params.aggregation;
         assert_eq!(aggregation.ramp_up_start_sec, 20);
         assert_eq!(aggregation.ramp_up_period_blocks, 60);

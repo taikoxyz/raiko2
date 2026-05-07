@@ -21,7 +21,7 @@ use xtask_build_guest::Backend;
 
 use crate::util;
 
-const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "http://34.46.244.179:8545";
+const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "https://ethereum-hoodi-rpc.publicnode.com";
 const DEFAULT_PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";
 const TX_TIMEOUT: Duration = Duration::from_secs(180);
 const HOODI_NETWORK: &str = "hoodi";

@@ -723,7 +723,7 @@ port = 8080
 
 [rpc]
 pairs = [
-  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://34.46.244.179:8545", l2_rpc = "http://34.172.70.130:8545", l2_provider = "geth_local_witness" },
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://hoodi-rpc.example.com", l2_rpc = "https://taiko-hoodi-rpc.example.com", l2_provider = "geth_local_witness" },
 ]
 
 [prover]

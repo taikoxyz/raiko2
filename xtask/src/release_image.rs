@@ -9,7 +9,7 @@ use xtask_build_guest::Backend;
 
 use crate::util;
 
-const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
+const DEFAULT_IMAGE_REPOSITORY: &str = "registry.example.com/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 
 #[derive(Args, Debug)]
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
-        let digest_ref = "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let digest_ref = "registry.example.com/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let lines = release_summary_lines(digest_ref);
         let mut output = Vec::new();
 

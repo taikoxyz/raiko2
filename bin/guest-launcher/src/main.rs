@@ -233,6 +233,8 @@ impl Args {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: self.sp1_timeout_secs,
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
         };

@@ -175,6 +175,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires the selected `(network, l1_network)` pair
   to declare `sp1_verifier_rpc_url` and `sp1_verifier_address` in server config.
+  `sp1_verifier_address` is the Succinct SP1 verifier gateway used for `ISP1Verifier.verifyProof`,
+  not the Taiko Shasta verifier registered in the chain spec.
 - `sp1` network-only settings require `sp1.prover=network`.
 - `sp1.network_mode=mainnet` requires `sp1.fulfillment_strategy=auction`.
 - `sp1.network_mode=reserved` requires `sp1.fulfillment_strategy=reserved` or `hosted`.
@@ -498,7 +500,8 @@ All API errors use the Hoodi-style envelope:
   still fail fast. The queue task timeout remains the outer deadline for the whole stage.
 - `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional
   pair-level settings that enable hosted `sp1.prover=network` verification through a remote
-  verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network proving.
+  Succinct verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network
+  proving. This verifier is separate from the Taiko Shasta verifier address in the chain spec.
 - `queue.task_timeout_secs` defaults to `14400` and is the total deadline for each queue task,
   independent of proof type. Queue-level retry is disabled; each stage owns its own retry/resume
   behavior within this timeout, so remote proof submissions are not blindly replayed by the

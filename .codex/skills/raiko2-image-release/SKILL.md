@@ -77,7 +77,7 @@ artifacts.
 After building an image, you may check whether verifier trust-list registration is needed:
 
 ```bash
-cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend <backend>
+cargo run -r -p xtask -- register-image --profile <hoodi-shasta|mainnet-shasta> --backend <backend>
 ```
 
 Default behavior is check-only. Do not broadcast registration transactions unless the user

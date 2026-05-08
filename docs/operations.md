@@ -234,6 +234,8 @@ When a checked-in guest ELF changes, register the new digests explicitly with `x
 # that match the target verifier network.
 cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
 Current behavior:
@@ -353,7 +355,8 @@ while canonical chain data still comes from `rpc.pairs[*].l2_rpc`.
 
 `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional pair
 settings for hosted SP1 network verification. They point to the verifier-chain RPC and deployed
-verifier contract used after a network proof is fulfilled.
+Succinct verifier contract used after a network proof is fulfilled. This is separate from the Taiko
+Shasta verifier address used for proof registration and chain-spec data carried in proofs.
 
 For supported Taiko chain specs, `raiko2` can fall back to on-the-spot witness construction when
 the endpoint does not expose `debug_executionWitness`, but that path is materially slower.

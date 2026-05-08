@@ -975,7 +975,7 @@ fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
             "NETWORK_PRIVATE_KEY is not a valid SP1 network signer: {err}"
         ))
     })?;
-    let rpc_url = sp1_network_rpc_url(config);
+    let rpc_url = sp1_network_rpc_url(config)?;
     Ok(NetworkProver::new(
         signer,
         &rpc_url,
@@ -983,16 +983,25 @@ fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
     ))
 }
 
-fn sp1_network_rpc_url(config: &Sp1Config) -> String {
-    config
+fn sp1_network_rpc_url(config: &Sp1Config) -> RaikoResult<String> {
+    let env_rpc_url = std::env::var("NETWORK_RPC_URL").ok();
+    resolve_sp1_network_rpc_url(config, env_rpc_url.as_deref())
+}
+
+fn resolve_sp1_network_rpc_url(
+    config: &Sp1Config,
+    env_rpc_url: Option<&str>,
+) -> RaikoResult<String> {
+    let rpc_url = config
         .rpc_url
-        .clone()
-        .or_else(|| {
-            std::env::var("NETWORK_RPC_URL")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode).to_string())
+        .as_deref()
+        .or_else(|| env_rpc_url.filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode))
+        .trim();
+    Url::parse(rpc_url).map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("SP1 network RPC URL is invalid: {err}"))
+    })?;
+    Ok(rpc_url.to_string())
 }
 
 const fn default_sp1_network_rpc_url(mode: Sp1NetworkMode) -> &'static str {
@@ -1006,6 +1015,36 @@ const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
     match mode {
         Sp1NetworkMode::Mainnet => Sp1SdkNetworkMode::Mainnet,
         Sp1NetworkMode::Reserved => Sp1SdkNetworkMode::Reserved,
+    }
+}
+
+const fn sp1_network_submission_progress(
+    provider_request_id: String,
+    config: &Sp1Config,
+) -> Sp1NetworkSubmissionProgress {
+    Sp1NetworkSubmissionProgress {
+        provider_request_id,
+        network_mode: config.network_mode,
+        fulfillment_strategy: config.fulfillment_strategy,
+        skip_simulation: config.skip_simulation,
+        cycle_limit: config.cycle_limit,
+        timeout_secs: config.timeout_secs,
+        max_price_per_pgu: config.max_price_per_pgu,
+        auction_timeout_secs: config.auction_timeout_secs,
+    }
+}
+
+async fn notify_sp1_network_submission(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    provider_request_id: String,
+    config: &Sp1Config,
+) {
+    if let Some(observer) = observer {
+        observer
+            .on_progress(&ProverProgress::Sp1NetworkSubmission(
+                sp1_network_submission_progress(provider_request_id, config),
+            ))
+            .await;
     }
 }
 
@@ -1029,22 +1068,8 @@ async fn request_network_proof(
 
     loop {
         let request_id_string = if let Some(request_id_string) = stored_request_id.take() {
-            if let Some(observer) = observer.as_ref() {
-                observer
-                    .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                        Sp1NetworkSubmissionProgress {
-                            provider_request_id: request_id_string.clone(),
-                            network_mode: config.network_mode,
-                            fulfillment_strategy: config.fulfillment_strategy,
-                            skip_simulation: config.skip_simulation,
-                            cycle_limit: config.cycle_limit,
-                            timeout_secs: config.timeout_secs,
-                            max_price_per_pgu: config.max_price_per_pgu,
-                            auction_timeout_secs: config.auction_timeout_secs,
-                        },
-                    ))
-                    .await;
-            }
+            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
+                .await;
 
             tracing::info!(
                 stage,
@@ -1085,22 +1110,8 @@ async fn request_network_proof(
             })?;
 
             let request_id_string = request_id.to_string();
-            if let Some(observer) = observer.as_ref() {
-                observer
-                    .on_progress(&ProverProgress::Sp1NetworkSubmission(
-                        Sp1NetworkSubmissionProgress {
-                            provider_request_id: request_id_string.clone(),
-                            network_mode: config.network_mode,
-                            fulfillment_strategy: config.fulfillment_strategy,
-                            skip_simulation: config.skip_simulation,
-                            cycle_limit: config.cycle_limit,
-                            timeout_secs: config.timeout_secs,
-                            max_price_per_pgu: config.max_price_per_pgu,
-                            auction_timeout_secs: config.auction_timeout_secs,
-                        },
-                    ))
-                    .await;
-            }
+            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
+                .await;
 
             tracing::info!(
                 stage,
@@ -1226,8 +1237,8 @@ fn insert_sp1_metadata(
 mod tests {
     use super::{
         default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
-        remote_verifier_program_vkey, remote_verifier_proof_bytes, sp1_sdk_network_mode,
-        sp1_vk_uuid,
+        remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
+        sp1_sdk_network_mode, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1262,9 +1273,8 @@ mod tests {
     fn sp1_setup_cache_requires_preload_before_use() {
         let prover = super::Sp1Prover::new(super::Sp1Config::default());
 
-        let err = match prover.cached_setup_for_stage(ProofStage::Proposal) {
-            Ok(_) => panic!("setup should not be initialized"),
-            Err(err) => err,
+        let Err(err) = prover.cached_setup_for_stage(ProofStage::Proposal) else {
+            panic!("setup should not be initialized");
         };
 
         assert!(err.to_string().contains("setup is not initialized"));
@@ -1306,6 +1316,39 @@ mod tests {
             default_sp1_network_rpc_url(super::Sp1NetworkMode::Reserved),
             super::SP1_RESERVED_RPC_URL
         );
+    }
+
+    #[test]
+    fn sp1_network_rpc_url_trims_and_validates_env_override() {
+        let config = super::Sp1Config::default();
+
+        let rpc_url = resolve_sp1_network_rpc_url(&config, Some(" https://example.invalid/rpc "))
+            .expect("valid env rpc url");
+
+        assert_eq!(rpc_url, "https://example.invalid/rpc");
+    }
+
+    #[test]
+    fn sp1_network_rpc_url_prefers_config_over_env() {
+        let config = super::Sp1Config {
+            rpc_url: Some(" https://config.example.invalid/rpc ".to_string()),
+            ..super::Sp1Config::default()
+        };
+
+        let rpc_url = resolve_sp1_network_rpc_url(&config, Some("https://env.example.invalid/rpc"))
+            .expect("valid config rpc url");
+
+        assert_eq!(rpc_url, "https://config.example.invalid/rpc");
+    }
+
+    #[test]
+    fn sp1_network_rpc_url_rejects_invalid_env_override() {
+        let config = super::Sp1Config::default();
+
+        let err = resolve_sp1_network_rpc_url(&config, Some("not a url"))
+            .expect_err("invalid env rpc url");
+
+        assert!(err.to_string().contains("SP1 network RPC URL is invalid"));
     }
 
     #[test]

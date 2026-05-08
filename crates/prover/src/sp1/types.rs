@@ -27,6 +27,7 @@ pub enum Sp1ConfigError {
     MaxPricePerPguMustBePositive,
     AuctionTimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
+    RpcUrlInvalid(String),
     RemoteVerifyRpcUrlMustNotBeEmpty,
     RemoteVerifyRpcUrlInvalid(String),
     RemoteVerifyAddressMustNotBeEmpty,
@@ -65,6 +66,7 @@ impl std::fmt::Display for Sp1ConfigError {
                 f.write_str("sp1.auction_timeout_secs must be greater than 0")
             }
             Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
+            Self::RpcUrlInvalid(url) => write!(f, "sp1.rpc_url is invalid: {url}"),
             Self::RemoteVerifyRpcUrlMustNotBeEmpty => {
                 f.write_str("sp1.remote_verify.rpc_url must not be empty")
             }
@@ -134,10 +136,10 @@ pub struct Sp1Config {
     /// Timeout to use when waiting for network proofs.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// Optional max price per PGU for Succinct mainnet auction requests.
+    /// Optional max price per PGU to attach to SP1 network proof requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price_per_pgu: Option<u64>,
-    /// Optional time to wait for an auction request to be assigned before retrying.
+    /// Optional assignment wait timeout before retrying an SP1 network proof request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auction_timeout_secs: Option<u64>,
     /// Optional override for the Succinct network RPC URL.
@@ -323,6 +325,10 @@ impl Sp1Config {
             .is_some_and(|rpc_url| rpc_url.trim().is_empty())
         {
             return Err(Sp1ConfigError::RpcUrlMustNotBeEmpty);
+        }
+        if let Some(rpc_url) = self.rpc_url.as_deref() {
+            Url::parse(rpc_url.trim())
+                .map_err(|_| Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()))?;
         }
         if let Some(remote_verify) = &self.remote_verify {
             if remote_verify.rpc_url.trim().is_empty() {
@@ -873,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn sp1_config_rejects_zero_auction_overrides() {
+    fn sp1_config_rejects_zero_auction_fields() {
         let price = Sp1Config {
             max_price_per_pgu: Some(0),
             ..Sp1Config::default()

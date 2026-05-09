@@ -786,7 +786,7 @@ class BatchMonitor:
         try:
             # Get events in the range
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=search_start, to_block=search_end
+                fromBlock=search_start, toBlock=search_end
             )
 
             for log in logs:
@@ -829,8 +829,8 @@ class BatchMonitor:
 
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=0,
-                to_block="latest",
+                fromBlock=0,
+                toBlock="latest",
                 argument_filters={"id": proposal_id},
             )
         except Exception as e:
@@ -902,7 +902,7 @@ class BatchMonitor:
         
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=search_start, to_block=search_end
+                fromBlock=search_start, toBlock=search_end
             )
             
             # Build a map of proposal_id -> block_number from all logs
@@ -989,7 +989,7 @@ class BatchMonitor:
     def get_batch_events_in_block(self, block_number) -> list[int]:
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=block_number, to_block=block_number
+                fromBlock=block_number, toBlock=block_number
             )
 
             batch_ids = []
@@ -1136,7 +1136,7 @@ class BatchMonitor:
     async def get_latest_block_batchs(self) -> Optional[tuple[int, list[int]]]:
         """get latest block number"""
         logs = self.evt_contract.events.Proposed().get_logs(
-            from_block="latest", to_block="latest"
+            fromBlock="latest", toBlock="latest"
         )
         if len(logs) == 0:
             return None

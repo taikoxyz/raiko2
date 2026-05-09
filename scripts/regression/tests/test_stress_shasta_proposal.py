@@ -33,7 +33,19 @@ class _FakeProposedEvent:
         self._logs = logs
         self.calls = []
 
-    def get_logs(self, *, from_block, to_block, argument_filters=None):
+    def get_logs(
+        self,
+        *,
+        from_block=None,
+        to_block=None,
+        fromBlock=None,
+        toBlock=None,
+        argument_filters=None,
+    ):
+        if fromBlock is not None:
+            from_block = fromBlock
+        if toBlock is not None:
+            to_block = toBlock
         if argument_filters is None:
             self.calls.append((from_block, to_block))
         else:

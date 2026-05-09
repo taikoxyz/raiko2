@@ -232,6 +232,11 @@ Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
 }
 ```
 
+Masaya also carries a checked-in `shasta_unzen_transition` suite with proposals `25125`,
+`25126`, and `25127`. Use it as the fixed fork-transition regression case around the
+`SHASTA -> UNZEN` boundary: `25125` and `25126` are pre-fork controls, while `25127`
+spans the transition window itself.
+
 ## Regression Harness
 
 The file-based Shasta regression flow lives in

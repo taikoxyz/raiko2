@@ -101,6 +101,11 @@ SGX checks still require the SGX prover stack or a remote SGX prover. `preflight
 optionally validates the `GuestInput`; it does not launch SGX by itself. For `sgxgeth`, point the
 same request at the gaiko2 SGXGETH service instead of `raiko2-sgx-prover`.
 
+For a fixed Masaya fork-boundary replay case, use the checked-in
+`taiko_masaya/shasta_unzen_transition` fixture suite. It captures proposals `25125`, `25126`,
+and `25127`, with `25127` spanning the `SHASTA -> UNZEN` transition and the first two proposals
+serving as pre-fork controls.
+
 ## Outputs
 
 Artifacts are written under `test/regression/shasta/`.

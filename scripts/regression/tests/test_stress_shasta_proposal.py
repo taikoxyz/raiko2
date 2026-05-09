@@ -19,6 +19,7 @@ from stress_shasta_proposal import (
     DEFAULT_CHAIN_SPEC_LIST,
     DEFAULT_SHASTA_ANCHOR_ABI,
     DEFAULT_SHASTA_IINBOX_ABI,
+    MAX_BLOCKS_PER_PROPOSAL,
     ProposalGroup,
     build_discovered_proposal_record,
     parse_proposal_ids,
@@ -114,6 +115,9 @@ class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
 
 
 class TestStressProposalIdParsing(unittest.TestCase):
+    def test_max_blocks_per_proposal_matches_uzen_cap(self):
+        self.assertEqual(MAX_BLOCKS_PER_PROPOSAL, 768)
+
     def test_parse_proposal_ids_accepts_comma_separated_values(self):
         self.assertEqual(parse_proposal_ids("22733, 22734"), [22733, 22734])
 

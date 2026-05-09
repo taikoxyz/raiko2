@@ -20,7 +20,9 @@ import sys
 import os
 from shasta_event_decoder import ShastaEventDecoder
 
-MAX_BLOCKS_PER_PROPOSAL = 192
+# UZEN-era proposal spans can grow far beyond the old 192-block SHASTA limit.
+# Keep the regression harness aligned with the widest supported proposal window.
+MAX_BLOCKS_PER_PROPOSAL = 768
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_CHAIN_SPEC_LIST = REPO_ROOT / "config" / "chain_spec_list_default.json"
@@ -691,8 +693,8 @@ class BatchMonitor:
     ) -> int:
         """
         Find the end of the current proposal within a bounded window.
-        The protocol caps a proposal to 192 blocks, so we only need to search
-        [start_block, start_block + 191] and verify the next block boundary.
+        Search within the widest supported proposal window and verify the next
+        block boundary before falling back to a forward scan.
         """
         window_end = min(search_end, start_block + MAX_BLOCKS_PER_PROPOSAL - 1)
         window_end_info = await self.get_anchor_info(window_end)

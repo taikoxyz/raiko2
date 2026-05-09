@@ -17,7 +17,7 @@ hex.workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
-raiko2-prover.workspace = true
+raiko2-prover = { path = "../prover", default-features = false }
 reth-ethereum-primitives.workspace = true
 secp256k1.workspace = true
 serde = { workspace = true, features = ["derive"] }

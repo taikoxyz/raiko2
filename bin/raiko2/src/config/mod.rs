@@ -577,48 +577,6 @@ maintenance_interval_ms = 200
     }
 
     #[test]
-    fn test_sgx_remote_route_accepts_legacy_gaiko2_config_table() {
-        let config_toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[rpc]
-pairs = [
-  { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
-]
-
-[prover]
-guest_system = "sgx"
-runner = "remote"
-
-[prover.gaiko2]
-base_url = "http://127.0.0.1:8080"
-sgxgeth_base_url = "http://127.0.0.1:8090"
-timeout_ms = 300000
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
-
-        let config = Config::load(&cli).expect("config load");
-        assert_eq!(config.prover.remote_sgx.base_url, "http://127.0.0.1:8080");
-        assert_eq!(
-            config.prover.remote_sgx.sgxgeth_base_url,
-            "http://127.0.0.1:8090"
-        );
-        assert_eq!(config.prover.remote_sgx.timeout_ms, 300_000);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn test_risc0_execution_po2_must_be_non_zero() {
         let mut config = Config::default();
         config.prover.risc0.execution_po2 = 0;

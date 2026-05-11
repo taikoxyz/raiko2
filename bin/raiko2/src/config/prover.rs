@@ -31,7 +31,7 @@ pub struct ProverConfig {
     #[serde(default)]
     pub zk_any: ZkAnyConfig,
     /// Remote SGX prover configuration.
-    #[serde(default, alias = "gaiko2")]
+    #[serde(default)]
     pub remote_sgx: RemoteSgxConfig,
 }
 

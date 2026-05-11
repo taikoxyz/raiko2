@@ -198,7 +198,13 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let plan = build_plan(args.backend, &config, root)?;
+    let plan_backend = args.backend;
+    let plan_config = config.clone();
+    let plan_root = root.to_path_buf();
+    let plan =
+        tokio::task::spawn_blocking(move || build_plan(plan_backend, &plan_config, &plan_root))
+            .await
+            .context("register-image plan task panicked")??;
     let summary_path = output_dir.join("summary.json");
     let read_provider = ProviderBuilder::new().connect_http(
         config

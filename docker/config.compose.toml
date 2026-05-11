@@ -31,7 +31,7 @@ execution_po2 = 20
 
 [prover.sp1]
 mode = "prove"
-prover = "network"
+prover = "local"
 recursion = "plonk"
 verify = true
 network_mode = "reserved"
@@ -71,7 +71,7 @@ max_price_per_mcycle = "0.00000006"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"
 
-[prover.gaiko2]
+[prover.remote_sgx]
 base_url = "http://raiko2-sgx:8080"
 sgxgeth_base_url = "http://gaiko2-sgxgeth:8080"
 timeout_ms = 300000

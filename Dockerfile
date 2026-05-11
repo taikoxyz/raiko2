@@ -33,6 +33,7 @@ COPY xtask ./xtask
 COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
+COPY tests/fixtures ./tests/fixtures
 
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -49,6 +50,7 @@ COPY xtask ./xtask
 COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
+COPY tests/fixtures ./tests/fixtures
 
 RUN cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
 

@@ -2301,6 +2301,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
     let payload = serde_json::json!({
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
+        "proof_type": submission.route.proof_type().to_string(),
         "prover_type": submission.prover_type.map(ProverType::as_str),
         "aggregate_requested": submission.aggregate_requested,
         "execution_mode": submission
@@ -2917,6 +2918,22 @@ mod tests {
         )
     }
 
+    fn sgx_remote_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgx,
+            ProofType::Sgx,
+        )
+    }
+
+    fn sgxgeth_remote_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgxGeth,
+            ProofType::SgxGeth,
+        )
+    }
+
     fn valid_native_proof() -> Proof {
         Proof {
             proof: Some("0xproof".to_string()),
@@ -3474,6 +3491,18 @@ mod tests {
             first_aggregate.request.request_id,
             first_submission.public_task_id
         );
+    }
+
+    #[test]
+    fn sgx_and_sgxgeth_batch_fingerprints_do_not_collide() {
+        let sgx_submission = canonical_submission(sgx_remote_route(), false);
+        let sgxgeth_submission = canonical_submission(sgxgeth_remote_route(), false);
+
+        let sgx_fingerprint = batch_request_fingerprint(&sgx_submission).expect("sgx fingerprint");
+        let sgxgeth_fingerprint =
+            batch_request_fingerprint(&sgxgeth_submission).expect("sgxgeth fingerprint");
+
+        assert_ne!(sgx_fingerprint, sgxgeth_fingerprint);
     }
 
     #[tokio::test]

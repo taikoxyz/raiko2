@@ -643,9 +643,8 @@ impl Sp1ExecutionMetadata {
             zkvm: "sp1".to_string(),
             mode: ExecutionMode::Execute.as_str().to_string(),
             public_values,
-            // SP1 5.x does not expose an explicit exit code on successful execution.
-            exit_code: 0,
-            gas: execution_report.gas,
+            exit_code: execution_report.exit_code,
+            gas: execution_report.gas(),
             total_instruction_count: execution_report.total_instruction_count(),
             total_syscall_count: execution_report.total_syscall_count(),
             touched_memory_addresses: execution_report.touched_memory_addresses,

@@ -16,7 +16,10 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, Prover as _, ProverClient};
+use sp1_sdk::{
+    HashableKey, ProvingKey as _,
+    blocking::{Prover as _, ProverClient},
+};
 use xtask_build_guest::Backend;
 
 use crate::util;
@@ -428,8 +431,14 @@ fn build_sp1_calls(
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
     let client = ProverClient::builder().cpu().build();
-    let proposal_vk = client.setup(elves.proposal.as_ref()).1;
-    let aggregation_vk = client.setup(elves.aggregation.as_ref()).1;
+    let proposal_pk = client
+        .setup(elves.proposal.as_ref().into())
+        .context("failed to setup SP1 proposal ELF")?;
+    let aggregation_pk = client
+        .setup(elves.aggregation.as_ref().into())
+        .context("failed to setup SP1 aggregation ELF")?;
+    let proposal_vk = proposal_pk.verifying_key();
+    let aggregation_vk = aggregation_pk.verifying_key();
 
     Ok(vec![
         sp1_call(

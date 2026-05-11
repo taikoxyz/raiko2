@@ -20,6 +20,13 @@ const DEFAULT_SP1_TOOLCHAIN_IMAGE: &str = "raiko2-sp1-toolchain:local";
 const DEFAULT_RISC0_CC: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-gcc";
 const DEFAULT_RISC0_CXX: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-g++";
 const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-ar";
+const SP1_TARGET_RUSTFLAGS_ENV: &str = "CARGO_TARGET_RISCV64IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS";
+const DEFAULT_SP1_CC_ENV: &str = "CC_riscv64im_succinct_zkvm_elf";
+const DEFAULT_SP1_CXX_ENV: &str = "CXX_riscv64im_succinct_zkvm_elf";
+const DEFAULT_SP1_AR_ENV: &str = "AR_riscv64im_succinct_zkvm_elf";
+const DEFAULT_SP1_CC: &str = "riscv64-unknown-elf-gcc -specs=picolibc.specs";
+const DEFAULT_SP1_CXX: &str = "riscv64-unknown-elf-g++ -specs=picolibcpp.specs";
+const DEFAULT_SP1_AR: &str = "riscv64-unknown-elf-ar";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -833,10 +840,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
 
     let rustflags =
         env::var("SP1_GUEST_RUSTFLAGS").unwrap_or_else(|_| DEFAULT_SP1_RUSTFLAGS.to_string());
-    cmd.env(
-        "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS",
-        rustflags,
-    );
+    cmd.env(SP1_TARGET_RUSTFLAGS_ENV, rustflags);
 
     if let Ok(cc) = env::var("SP1_GUEST_CC")
         && !cc.is_empty()
@@ -932,16 +936,14 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
             container_target_dir.display()
         ))
         .arg("-e")
-        .arg(format!(
-            "CARGO_TARGET_RISCV32IM_SUCCINCT_ZKVM_ELF_RUSTFLAGS={rustflags}"
-        ));
+        .arg(format!("{SP1_TARGET_RUSTFLAGS_ENV}={rustflags}"));
 
     cmd.arg("-e")
-        .arg("CC_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-gcc -specs=picolibc.specs");
+        .arg(format!("{DEFAULT_SP1_CC_ENV}={DEFAULT_SP1_CC}"));
     cmd.arg("-e")
-        .arg("CXX_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-g++ -specs=picolibcpp.specs");
+        .arg(format!("{DEFAULT_SP1_CXX_ENV}={DEFAULT_SP1_CXX}"));
     cmd.arg("-e")
-        .arg("AR_riscv32im_succinct_zkvm_elf=riscv64-unknown-elf-ar");
+        .arg(format!("{DEFAULT_SP1_AR_ENV}={DEFAULT_SP1_AR}"));
 
     if let Ok(cc) = env::var("SP1_GUEST_CC")
         && !cc.is_empty()

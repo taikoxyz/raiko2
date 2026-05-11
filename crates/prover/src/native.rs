@@ -1,17 +1,15 @@
 //! Native prover implementation (no zk proof).
 
 use alloy_primitives::{Address, B256, Bytes, address, keccak256};
+use raiko2_guest_common::{
+    aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
+};
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{Proof, ProofType, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
-    instance::{
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_public_input_from_proof_carry_data_vec, words_to_bytes_be,
-        words_to_bytes_le,
-    },
+    instance::{words_to_bytes_be, words_to_bytes_le},
 };
-use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 
 use crate::{GuestInputCodec, build_shasta_aggregation_input};
 
@@ -59,10 +57,11 @@ where
             ));
         }
 
-        let proof_carry_data = input.proof_carry_data;
+        let proof_carry_data = input.proof_carry_data.clone();
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let input_hash = hash_shasta_subproof_input(&proof_carry_data);
+        let input_hash = prove_shasta_proposal_for_proof_type(&input, ProofType::Native)
+            .map_err(|e| RaikoError::Guest(format!("Native proposal execute failed: {e}")))?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
         let proof =
@@ -98,34 +97,20 @@ where
             }
         };
         let sub_image_id = B256::from(image_id_bytes);
-
-        if shasta_zk_aggregation_public_input_from_proof_carry_data_vec(
+        let aggregation_hash = aggregate_shasta_zk_with_verifier(
+            &aggregation_input,
             sub_image_id,
-            &aggregation_input.proof_carry_data_vec,
-            aggregation_input.prover_address,
+            |index, block_input| {
+                let proof = input.proofs.get(index).ok_or_else(|| {
+                    anyhow::anyhow!("missing native child proof at index {index}")
+                })?;
+                verify_native_proof_envelope(proof, *block_input)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))
+            },
         )
-        .is_none()
-        {
-            return Err(RaikoError::InvalidRequestConfig(
-                "Invalid proof_carry_data_vec".to_string(),
-            ));
-        }
+        .map_err(|e| RaikoError::Guest(format!("Native aggregation execute failed: {e}")))?;
 
-        let commitment = build_shasta_commitment_from_proof_carry_data_vec(
-            &aggregation_input.proof_carry_data_vec,
-        )
-        .ok_or_else(|| {
-            RaikoError::InvalidRequestConfig("Invalid proof_carry_data_vec".to_string())
-        })?;
-        let first = aggregation_input
-            .proof_carry_data_vec
-            .first()
-            .ok_or_else(|| {
-                RaikoError::InvalidRequestConfig("Missing proof_carry_data_vec".to_string())
-            })?;
         let sgx_instance = signer_address();
-        let aggregation_hash =
-            shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
         let signature = mock_signature(aggregation_hash);
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
@@ -162,6 +147,62 @@ const fn signer_address() -> Address {
     SHASTA_NATIVE_MOCK_INSTANCE
 }
 
+fn verify_native_proof_envelope(proof: &Proof, expected_input: B256) -> RaikoResult<()> {
+    let proof_hex = proof.proof.as_deref().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig("native proof is missing proof bytes".to_string())
+    })?;
+    let bytes = decode_native_proof_bytes(proof_hex)?;
+
+    let instance_id = u32::from_be_bytes(
+        bytes[..4]
+            .try_into()
+            .expect("native proof instance id prefix length"),
+    );
+    if instance_id != SHASTA_NATIVE_MOCK_INSTANCE_ID {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "native proof has unexpected instance id: expected {SHASTA_NATIVE_MOCK_INSTANCE_ID:#x}, got {instance_id:#x}"
+        )));
+    }
+
+    let instance = Address::from_slice(&bytes[4..24]);
+    if instance != SHASTA_NATIVE_MOCK_INSTANCE {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "native proof has unexpected instance address: expected {SHASTA_NATIVE_MOCK_INSTANCE}, got {instance}"
+        )));
+    }
+
+    if let Some(input_hash) = proof.input
+        && input_hash != expected_input
+    {
+        return Err(RaikoError::InvalidRequestConfig(
+            "native proof input hash does not match expected child input".to_string(),
+        ));
+    }
+
+    let sig: [u8; 65] = bytes[24..]
+        .try_into()
+        .expect("native proof signature length");
+    if sig != mock_signature(expected_input) {
+        return Err(RaikoError::InvalidRequestConfig(
+            "native proof signature does not match expected child input".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn decode_native_proof_bytes(proof_hex: &str) -> RaikoResult<[u8; SHASTA_SGX_PROOF_LEN]> {
+    let bytes = hex::decode(proof_hex.trim_start_matches("0x"))
+        .map_err(|e| RaikoError::InvalidRequestConfig(format!("invalid native proof hex: {e}")))?;
+    let len = bytes.len();
+    bytes.try_into().map_err(|_| {
+        RaikoError::InvalidRequestConfig(format!(
+            "native proof has invalid length: expected {SHASTA_SGX_PROOF_LEN} bytes, got {}",
+            len
+        ))
+    })
+}
+
 fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) -> Vec<u8> {
     let mut proof = Vec::with_capacity(SHASTA_SGX_PROOF_LEN);
     proof.extend(instance_id.to_be_bytes());
@@ -173,14 +214,19 @@ fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) 
 #[cfg(test)]
 mod tests {
     use super::NativeProver;
-    use crate::{Prover, hash_shasta_subproof_input};
-    use alloy_primitives::Address;
-    use raiko2_pipeline::NativeBackend;
-    use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
-    use raiko2_primitives_shasta::{
-        GuestInput, encode_proof_carry_data,
-        instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+    use crate::Prover;
+    use alloy_primitives::{Address, B256};
+    use raiko2_guest_common::{
+        aggregate_shasta_zk_with_verifier, prove_shasta_proposal_for_proof_type,
     };
+    use raiko2_pipeline::NativeBackend;
+    use raiko2_primitives::{
+        AggregationGuestInput, Proof, ProofType, ProverConfig, SupportedChainSpecs,
+    };
+    use raiko2_primitives_shasta::{
+        GuestInput, build_proof_carry_data, encode_proof_carry_data, instance::words_to_bytes_be,
+    };
+    use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use std::str::FromStr;
 
@@ -188,16 +234,55 @@ mod tests {
     const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
 
     fn decode_proof_bytes(proof_hex: &str) -> [u8; 89] {
-        let bytes = hex::decode(proof_hex.trim_start_matches("0x")).expect("hex");
-        bytes.try_into().expect("proof length")
+        super::decode_native_proof_bytes(proof_hex).expect("proof bytes")
     }
 
-    fn minimal_guest_input() -> GuestInput {
-        let mut input = GuestInput::default();
-        input
-            .witnesses
-            .push(raiko2_primitives::StatelessInput::default());
-        input
+    fn fixture_guest_input() -> GuestInput {
+        let raw = include_str!(
+            "../../../test/guest_inputs/shasta/taiko_hoodi/proposals/proposal_17460.json"
+        );
+        let mut guest_input: GuestInput =
+            serde_json::from_str(raw).expect("parse fixture GuestInput");
+        if guest_input.taiko.l1_ancestor_headers.is_empty()
+            && guest_input.taiko.l1_header.number != 0
+        {
+            guest_input.taiko.l1_ancestor_headers = vec![guest_input.taiko.l1_header.clone()];
+        }
+        if let Some(chain_spec) = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(guest_input.taiko.chain_spec.chain_id)
+        {
+            guest_input.taiko.chain_spec.name = chain_spec.name.clone();
+            guest_input.taiko.chain_spec.chain_id = chain_spec.chain_id;
+            guest_input.taiko.chain_spec.is_taiko = chain_spec.is_taiko;
+            for witness in &mut guest_input.witnesses {
+                witness.chain_spec = chain_spec.clone();
+            }
+            guest_input.proof_carry_data =
+                build_proof_carry_data(&guest_input, ProofType::Native).expect("rebuild carry");
+        }
+        guest_input
+    }
+
+    fn native_proof_with_input(input_hash: B256) -> Proof {
+        Proof {
+            proof: Some(format!(
+                "0x{}",
+                hex::encode(super::build_shasta_proof_bytes(
+                    EXPECTED_INSTANCE_ID,
+                    Address::from_str(EXPECTED_ADDR).expect("expected addr"),
+                    super::mock_signature(input_hash),
+                ))
+            )),
+            input: Some(input_hash),
+            extra_data: Some(
+                serde_json::to_value(ProofCarryData {
+                    chain_id: 1,
+                    ..ProofCarryData::default()
+                })
+                .unwrap_or_default(),
+            ),
+            ..Proof::default()
+        }
     }
 
     #[test]
@@ -211,25 +296,25 @@ mod tests {
     async fn native_proposal_proof_matches_shasta_format() {
         let prover = NativeProver;
         let config = ProverConfig::default();
-        let input = minimal_guest_input();
+        let input = fixture_guest_input();
+        let expected_hash =
+            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).expect("proposal");
         let proof = prover
             .prove(input, &config, &NativeBackend)
             .await
             .expect("prove");
 
-        let proof_hex = proof.proof.expect("missing proof");
+        let proof_hex = proof.proof.clone().expect("missing proof");
         let bytes = decode_proof_bytes(&proof_hex);
         assert_eq!(&bytes[..4], EXPECTED_INSTANCE_ID.to_be_bytes());
 
         let instance = Address::from_slice(&bytes[4..24]);
         let expected_addr = Address::from_str(EXPECTED_ADDR).unwrap();
         assert_eq!(instance, expected_addr);
+        assert_eq!(proof.input.expect("missing input"), expected_hash);
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
-        assert_eq!(
-            sig,
-            super::mock_signature(proof.input.expect("missing input"))
-        );
+        assert_eq!(sig, super::mock_signature(expected_hash));
     }
 
     #[tokio::test]
@@ -240,36 +325,70 @@ mod tests {
             chain_id: 1,
             ..ProofCarryData::default()
         };
+        let child_input = hash_shasta_subproof_input(&proof_carry);
         let proofs = vec![Proof {
-            input: Some(hash_shasta_subproof_input(&proof_carry)),
+            proof: Some(format!(
+                "0x{}",
+                hex::encode(super::build_shasta_proof_bytes(
+                    EXPECTED_INSTANCE_ID,
+                    Address::from_str(EXPECTED_ADDR).unwrap(),
+                    super::mock_signature(child_input),
+                ))
+            )),
+            input: Some(child_input),
             extra_data: Some(encode_proof_carry_data(&proof_carry).expect("encode carry data")),
             ..Proof::default()
         }];
 
         let proof = prover
             .aggregate(
-                AggregationGuestInput { proofs },
+                AggregationGuestInput {
+                    proofs: proofs.clone(),
+                },
                 &serde_json::json!({}),
                 &NativeBackend,
             )
             .await
             .expect("aggregate");
+        let aggregation_input =
+            crate::build_shasta_aggregation_input(&proofs).expect("aggregation input");
+        let image_id_b256 = B256::from(words_to_bytes_be(&aggregation_input.image_id));
+        let expected_hash = aggregate_shasta_zk_with_verifier(
+            &aggregation_input,
+            image_id_b256,
+            |index, block_input| {
+                let child = proofs.get(index).expect("child proof");
+                super::verify_native_proof_envelope(child, *block_input)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))
+            },
+        )
+        .expect("expected aggregation");
 
-        let commitment =
-            build_shasta_commitment_from_proof_carry_data_vec(&[proof_carry]).expect("commitment");
-        let expected_hash = shasta_aggregation_output(
-            &commitment,
-            1,
-            Address::ZERO,
-            Address::from_str(EXPECTED_ADDR).unwrap(),
-        );
-
-        let proof_hex = proof.proof.expect("missing proof");
+        let proof_hex = proof.proof.clone().expect("missing proof");
         let bytes = decode_proof_bytes(&proof_hex);
         assert_eq!(&bytes[..4], EXPECTED_INSTANCE_ID.to_be_bytes());
         assert_eq!(proof.input.expect("missing input"), expected_hash);
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
         assert_eq!(sig, super::mock_signature(expected_hash));
+    }
+
+    #[test]
+    fn native_proof_envelope_verifier_accepts_matching_child_proof() {
+        let input_hash = B256::repeat_byte(0x55);
+        let proof = native_proof_with_input(input_hash);
+        super::verify_native_proof_envelope(&proof, input_hash).expect("valid native proof");
+    }
+
+    #[test]
+    fn native_proof_envelope_verifier_rejects_signature_mismatch() {
+        let mut proof = native_proof_with_input(B256::repeat_byte(0x55));
+        proof.input = None;
+        let err = super::verify_native_proof_envelope(&proof, B256::repeat_byte(0x77))
+            .expect_err("signature mismatch");
+        assert!(
+            err.to_string()
+                .contains("native proof signature does not match expected child input")
+        );
     }
 }

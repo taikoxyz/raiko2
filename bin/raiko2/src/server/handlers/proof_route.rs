@@ -67,7 +67,8 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
-        BatchProofType::Native | BatchProofType::Boundless => {
+        BatchProofType::Native => native_route_for_request(state)?,
+        BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()
@@ -93,18 +94,20 @@ pub(super) fn route_for_proof_type(
             } => PipelineKey::ShastaRisc0Network,
             _ => return Err(ApiError::bad_request("unsupported risc0 proving route")),
         },
+        BatchProofType::Native => PipelineKey::ShastaNative,
         BatchProofType::Sgx => PipelineKey::ShastaSgx,
         BatchProofType::SgxGeth => PipelineKey::ShastaSgxGeth,
-        BatchProofType::Native | BatchProofType::Boundless | BatchProofType::ZkAny => {
+        BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
     };
     let canonical_proof_type = match proof_type {
         BatchProofType::Sp1 => ProofType::Sp1,
         BatchProofType::Risc0 => ProofType::Risc0,
+        BatchProofType::Native => ProofType::Native,
         BatchProofType::Sgx => ProofType::Sgx,
         BatchProofType::SgxGeth => ProofType::SgxGeth,
-        BatchProofType::Native | BatchProofType::Boundless | BatchProofType::ZkAny => {
+        BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
     };
@@ -114,6 +117,23 @@ pub(super) fn route_for_proof_type(
         pipeline_key,
         canonical_proof_type,
     ))
+}
+
+fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
+    let route = state.config.prover.route();
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Native,
+            runner: RunnerKind::Local,
+        }
+    ) {
+        Ok(route)
+    } else {
+        Err(ApiError::bad_request(
+            "proof_type=native is only supported when the server prover route is native/local",
+        ))
+    }
 }
 
 fn sp1_runner_for_request(

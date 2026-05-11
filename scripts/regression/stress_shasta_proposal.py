@@ -20,7 +20,7 @@ import sys
 import os
 from shasta_event_decoder import ShastaEventDecoder
 
-# UZEN-era proposal spans can grow far beyond the old 192-block SHASTA limit.
+# UNZEN-era proposal spans can grow far beyond the old 192-block SHASTA limit.
 # Keep the regression harness aligned with the widest supported proposal window.
 MAX_BLOCKS_PER_PROPOSAL = 768
 SCRIPT_DIR = Path(__file__).resolve().parent

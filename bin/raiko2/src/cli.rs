@@ -36,16 +36,19 @@ pub struct Cli {
     pub prover: Option<String>,
 
     /// Remote SGX prover base URL used by the `sgx/remote` route
-    #[arg(long, env = "RAIKO2_GAIKO2_BASE_URL")]
-    pub gaiko2_base_url: Option<String>,
+    #[arg(long = "remote-sgx-base-url", env = "RAIKO2_REMOTE_SGX_BASE_URL")]
+    pub remote_sgx_base_url: Option<String>,
 
     /// Remote SGXGETH prover base URL used by the `sgxgeth` lane
-    #[arg(long, env = "RAIKO2_GAIKO2_SGXGETH_BASE_URL")]
-    pub gaiko2_sgxgeth_base_url: Option<String>,
+    #[arg(
+        long = "remote-sgx-sgxgeth-base-url",
+        env = "RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL"
+    )]
+    pub remote_sgx_sgxgeth_base_url: Option<String>,
 
     /// Remote SGX prover timeout in milliseconds used by the `sgx/remote` route
-    #[arg(long, env = "RAIKO2_GAIKO2_TIMEOUT_MS")]
-    pub gaiko2_timeout_ms: Option<u64>,
+    #[arg(long = "remote-sgx-timeout-ms", env = "RAIKO2_REMOTE_SGX_TIMEOUT_MS")]
+    pub remote_sgx_timeout_ms: Option<u64>,
 
     /// Enable verbose logging
     #[arg(short, long)]

@@ -30,9 +30,9 @@ pub struct ProverConfig {
     /// Request sampling policy for `proof_type=zk_any`.
     #[serde(default)]
     pub zk_any: ZkAnyConfig,
-    /// Gaiko2 remote prover configuration.
-    #[serde(default)]
-    pub gaiko2: Gaiko2Config,
+    /// Remote SGX prover configuration.
+    #[serde(default, alias = "gaiko2")]
+    pub remote_sgx: RemoteSgxConfig,
 }
 
 impl ProverConfig {
@@ -91,15 +91,15 @@ impl ProverConfig {
                 runner: RunnerKind::Remote
             }
         ) {
-            if self.gaiko2.base_url.trim().is_empty()
-                && self.gaiko2.sgxgeth_base_url.trim().is_empty()
+            if self.remote_sgx.base_url.trim().is_empty()
+                && self.remote_sgx.sgxgeth_base_url.trim().is_empty()
             {
                 bail!(
-                    "either prover.gaiko2.base_url or prover.gaiko2.sgxgeth_base_url must not be empty"
+                    "either prover.remote_sgx.base_url or prover.remote_sgx.sgxgeth_base_url must not be empty"
                 );
             }
-            if self.gaiko2.timeout_ms == 0 {
-                bail!("prover.gaiko2.timeout_ms must be greater than zero");
+            if self.remote_sgx.timeout_ms == 0 {
+                bail!("prover.remote_sgx.timeout_ms must be greater than zero");
             }
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
@@ -182,16 +182,16 @@ impl Default for ZkAnyTargetConfig {
     }
 }
 
-/// Gaiko2 remote prover configuration.
+/// Remote SGX prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Gaiko2Config {
+pub struct RemoteSgxConfig {
     pub base_url: String,
     pub sgxgeth_base_url: String,
     pub timeout_ms: u64,
 }
 
-impl Default for Gaiko2Config {
+impl Default for RemoteSgxConfig {
     fn default() -> Self {
         let defaults = Gaiko2ProverConfig::default();
         Self {

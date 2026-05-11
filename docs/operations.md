@@ -196,8 +196,8 @@ Operator notes:
   on a host without SGX devices, run the binary directly or trim the device mounts locally.
 - Either set `RAIKO2_SGX_INSTANCE_ID` directly or provide a `registered.json` mapping under the
   mounted config directory and select it with `RAIKO2_SGX_FORK`.
-- This compose file only covers the `sgx` lane. `sgxgeth` is served by external `gaiko2`
-  infrastructure and is not built in this repository.
+- This compose file only covers the `sgx` lane. `sgxgeth` is served by external geth-backed
+  remote SGX infrastructure and is not built in this repository.
 
 ## SGX Regression Stack
 
@@ -209,7 +209,7 @@ For SGX regression work, use the unified compose stack:
 This stack is intentionally SGX-focused:
 
 - it starts `raiko2-sgx-prover` for the `sgx` lane
-- it starts an external `gaiko2` tee image for the `sgxgeth` lane
+- it starts an external geth-backed remote SGX tee image for the `sgxgeth` lane
 - it can optionally start the `raiko2` main service under the `raiko2` profile
 - it does not build `../gaiko2` automatically; operators should pre-build or pull the
   `GAIKO2_SGXGETH_IMAGE`
@@ -233,10 +233,10 @@ Add the optional dockerized `raiko2` main service:
 docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
 ```
 
-The optional dockerized `raiko2` service is prewired with both remote URLs:
+The optional dockerized `raiko2` service is prewired with both remote SGX URLs:
 
-- `proof_type=sgx` uses `RAIKO2_GAIKO2_BASE_URL`
-- `proof_type=sgxgeth` uses `RAIKO2_GAIKO2_SGXGETH_BASE_URL`
+- `proof_type=sgx` uses `RAIKO2_REMOTE_SGX_BASE_URL`
+- `proof_type=sgxgeth` uses `RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL`
 
 The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
 both SGX lanes can boot and prove without an onchain registration step. Replace them with the real
@@ -250,15 +250,15 @@ RAIKO2_CONFIG=docker/config.compose.toml \
 RAIKO2_PROVER=sgx/remote \
 RAIKO2_L1_RPC=http://127.0.0.1:8545 \
 RAIKO2_L2_RPC=http://127.0.0.1:9545 \
-RAIKO2_GAIKO2_BASE_URL=http://127.0.0.1:9090 \
-RAIKO2_GAIKO2_SGXGETH_BASE_URL=http://127.0.0.1:8090 \
+RAIKO2_REMOTE_SGX_BASE_URL=http://127.0.0.1:9090 \
+RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL=http://127.0.0.1:8090 \
 cargo run -r -p raiko2 -- --config docker/config.compose.toml
 ```
 
 Then choose the lane per request:
 
 - `proof_type=sgx` targets `raiko2-sgx-prover`
-- `proof_type=sgxgeth` targets the external `gaiko2` SGX server
+- `proof_type=sgxgeth` targets the external geth-backed remote SGX server
 
 ### Main-Service Wiring
 

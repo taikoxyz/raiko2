@@ -134,7 +134,7 @@ pub(crate) fn boundless_prover_config(
     }
 }
 
-pub(crate) fn gaiko2_prover_config(
+pub(crate) fn remote_sgx_prover_config(
     base_url: String,
     timeout_ms: u64,
 ) -> raiko2_prover::gaiko2::Gaiko2Config {

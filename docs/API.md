@@ -89,7 +89,8 @@ Content-Type: application/json
 ```
 
 Registers a Shasta batch root task. The server expands it into proposal prove tasks and, when
-`aggregate=true`, an aggregation task.
+`aggregate=true`, an aggregation task. For remote SGX lanes, configure `[prover.remote_sgx]`:
+`base_url` backs `proof_type=sgx`, while `sgxgeth_base_url` backs `proof_type=sgxgeth`.
 
 ### Request
 
@@ -144,7 +145,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
-  - `sgxgeth -> sgx/remote` backed by the external `gaiko2` SGX server
+  - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
   - `native -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.

@@ -149,43 +149,43 @@ impl AppState {
                 Arc::new(native_engine),
             );
 
-            if !config.prover.gaiko2.base_url.trim().is_empty() {
-                let gaiko2_engine = build_gaiko2_engine(
+            if !config.prover.remote_sgx.base_url.trim().is_empty() {
+                let remote_sgx_engine = build_remote_sgx_engine(
                     &config,
                     pair,
                     scheduler_config.clone(),
                     Arc::clone(&runtime_observer),
                     PipelineKey::ShastaSgx,
                     ProofType::Sgx,
-                    config.prover.gaiko2.base_url.clone(),
+                    config.prover.remote_sgx.base_url.clone(),
                 )
                 .await?;
-                gaiko2_engine
+                remote_sgx_engine
                     .start_workers_with_maintenance_interval(workers, maintenance_interval);
                 factory.insert(
                     pair.key.clone(),
                     PipelineKey::ShastaSgx,
-                    Arc::new(gaiko2_engine),
+                    Arc::new(remote_sgx_engine),
                 );
             }
 
-            if !config.prover.gaiko2.sgxgeth_base_url.trim().is_empty() {
-                let gaiko2_engine = build_gaiko2_engine(
+            if !config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty() {
+                let remote_sgx_engine = build_remote_sgx_engine(
                     &config,
                     pair,
                     scheduler_config.clone(),
                     Arc::clone(&runtime_observer),
                     PipelineKey::ShastaSgxGeth,
                     ProofType::SgxGeth,
-                    config.prover.gaiko2.sgxgeth_base_url.clone(),
+                    config.prover.remote_sgx.sgxgeth_base_url.clone(),
                 )
                 .await?;
-                gaiko2_engine
+                remote_sgx_engine
                     .start_workers_with_maintenance_interval(workers, maintenance_interval);
                 factory.insert(
                     pair.key.clone(),
                     PipelineKey::ShastaSgxGeth,
-                    Arc::new(gaiko2_engine),
+                    Arc::new(remote_sgx_engine),
                 );
             }
         }
@@ -674,7 +674,7 @@ async fn build_boundless_engine(
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
-async fn build_gaiko2_engine(
+async fn build_remote_sgx_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
@@ -683,7 +683,8 @@ async fn build_gaiko2_engine(
     proof_type: ProofType,
     base_url: String,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let gaiko2_config = setup::gaiko2_prover_config(base_url, config.prover.gaiko2.timeout_ms);
+    let gaiko2_config =
+        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

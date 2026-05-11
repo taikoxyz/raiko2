@@ -305,12 +305,18 @@ pub fn validate_external_aggregate_proofs(
 
     for (index, proof) in proofs.iter().enumerate() {
         match pipeline_key {
-            raiko2_pipeline::PipelineKey::ShastaNative
-            | raiko2_pipeline::PipelineKey::ShastaSgx
-            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
+            raiko2_pipeline::PipelineKey::ShastaNative => {
                 if proof.input.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing sgx/native aggregation metadata"
+                        "proof {index} is missing native aggregation metadata"
+                    )));
+                }
+            }
+            raiko2_pipeline::PipelineKey::ShastaSgx
+            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
+                if proof.input.is_none() || proof.extra_data.is_none() || proof.proof.is_none() {
+                    return Err(RaikoError::InvalidRequestConfig(format!(
+                        "proof {index} is missing SGX aggregation metadata"
                     )));
                 }
             }
@@ -495,6 +501,20 @@ mod tests {
     fn aggregate_validator_accepts_sgx_remote_proof() {
         let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
         assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+    }
+
+    #[test]
+    fn aggregate_validator_rejects_missing_sgx_remote_proof_bytes() {
+        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
+        let mut proof = aggregate_proof_fixture();
+        proof.proof = None;
+
+        let err =
+            validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof bytes");
+        assert!(
+            err.to_string()
+                .contains("proof 0 is missing SGX aggregation metadata")
+        );
     }
 
     #[test]

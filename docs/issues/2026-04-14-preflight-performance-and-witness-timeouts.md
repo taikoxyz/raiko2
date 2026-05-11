@@ -43,7 +43,7 @@ Command:
 
 ```bash
 /usr/bin/time -p cargo run -q -p preflight -- \
-  --rpc-url http://34.121.5.35:8545 \
+  --rpc-url http://l2-rpc.example.com:8545 \
   --l1-rpc-url https://ethereum-rpc.publicnode.com \
   --l2-chain-id 167000 \
   --l1-chain-id 1 \
@@ -89,7 +89,7 @@ Standalone `preflight` for the same tuple eventually failed after a much longer 
 
 ```bash
 /usr/bin/time -p cargo run -q -p preflight -- \
-  --rpc-url http://34.121.5.35:8545 \
+  --rpc-url http://l2-rpc.example.com:8545 \
   --l1-rpc-url https://ethereum-rpc.publicnode.com \
   --l2-chain-id 167000 \
   --l1-chain-id 1 \
@@ -107,7 +107,7 @@ Observed result:
 - failed with:
 
 ```text
-There was an error with the RPC provider: error sending eth_getProof batch for parent of block 5442464: error sending request for url (http://34.121.5.35:8545/)
+There was an error with the RPC provider: error sending eth_getProof batch for parent of block 5442464: error sending request for url (http://l2-rpc.example.com:8545/)
 ```
 
 ### Historical-Block Bias

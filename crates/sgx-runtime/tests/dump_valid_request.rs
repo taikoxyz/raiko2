@@ -7,9 +7,12 @@ use raiko2_prover::gaiko2::protocol::{
     GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ShastaPayload, Gaiko2ShastaRequest,
 };
 use reth_ethereum_primitives::Block;
+use std::path::PathBuf;
 
-const FIXTURE_PATH: &str =
-    "../../tests/fixtures/shasta_remote_request_fixture_chain_167013_block_42.json";
+fn fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/shasta_remote_request_fixture_chain_167013_block_42.json")
+}
 
 fn u48(value: u64) -> alloy_primitives::Uint<48, 1> {
     alloy_primitives::Uint::from_limbs([value])
@@ -60,7 +63,7 @@ fn dump_valid_request_json() {
 
 #[test]
 fn checked_in_request_fixture_matches_generated_shape() {
-    let fixture = std::fs::read_to_string(FIXTURE_PATH).expect("read fixture");
+    let fixture = std::fs::read_to_string(fixture_path()).expect("read fixture");
     let fixture_value: serde_json::Value =
         serde_json::from_str(&fixture).expect("decode checked-in fixture");
     let generated_value =

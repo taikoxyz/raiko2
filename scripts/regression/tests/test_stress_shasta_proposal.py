@@ -127,7 +127,7 @@ class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
 
 
 class TestStressProposalIdParsing(unittest.TestCase):
-    def test_max_blocks_per_proposal_matches_uzen_cap(self):
+    def test_max_blocks_per_proposal_matches_unzen_cap(self):
         self.assertEqual(MAX_BLOCKS_PER_PROPOSAL, 768)
 
     def test_parse_proposal_ids_accepts_comma_separated_values(self):

@@ -78,6 +78,13 @@ fn validate_request(request: &Gaiko2ShastaRequest) -> Result<(), RequestFailure>
             last.state_root, carry.transition_input.checkpoint.stateRoot
         )));
     }
+    if last.hash_slow() != carry.transition_input.checkpoint.blockHash {
+        return Err(RequestFailure::invalid_request(format!(
+            "checkpoint block hash mismatch: block={:#x} checkpoint={:#x}",
+            last.hash_slow(),
+            carry.transition_input.checkpoint.blockHash
+        )));
+    }
 
     Ok(())
 }
@@ -187,5 +194,23 @@ mod tests {
 
         let err = prove_request(&provider, 9, &request).expect_err("chain id mismatch");
         assert!(err.to_string().contains("chain_id mismatch"));
+    }
+
+    #[test]
+    fn prove_request_rejects_checkpoint_block_hash_mismatch() {
+        let provider = FakeProvider {
+            secret_key: SecretKey::from_slice(&[7u8; 32]).expect("secret key"),
+            quote: vec![],
+        };
+        let mut request = request_fixture();
+        request
+            .payload
+            .proof_carry_data
+            .transition_input
+            .checkpoint
+            .blockHash = B256::from([0x44; 32]);
+
+        let err = prove_request(&provider, 9, &request).expect_err("checkpoint hash mismatch");
+        assert!(err.to_string().contains("checkpoint block hash mismatch"));
     }
 }

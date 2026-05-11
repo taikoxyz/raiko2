@@ -762,12 +762,14 @@ pub struct RuntimeTaskRecord {
 }
 
 fn task_registration_pipeline_key(registration: &TaskRegistration) -> Result<PipelineKey> {
-    let pipeline_key = registration.pipeline_key.unwrap_or(
+    let pipeline_key = if let Some(pipeline_key) = registration.pipeline_key {
+        pipeline_key
+    } else {
         registration
             .route
             .pipeline_key()
-            .map_err(anyhow::Error::msg)?,
-    );
+            .map_err(anyhow::Error::msg)?
+    };
     if !pipeline_key_matches_route(pipeline_key, registration.route) {
         anyhow::bail!(
             "pipeline_key '{}' does not match route '{}'",

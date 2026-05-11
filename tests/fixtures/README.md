@@ -31,7 +31,7 @@ This fixture was generated on 2026-04-13 from a real Taiko mainnet preflight usi
 
 ```bash
 target/debug/preflight \
-  --rpc-url http://34.121.5.35:8545 \
+  --rpc-url http://l2-rpc.example.com:8545 \
   --l1-rpc-url https://ethereum-rpc.publicnode.com \
   --l2-chain-id 167000 \
   --l1-chain-id 1 \

@@ -28,8 +28,9 @@ use super::app;
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
-    app_with_risc0_fixture_engine, base_config, risc0_fixture_engine, sp1_fixture_engine,
-    spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine, unique_runtime_root,
+    app_with_risc0_fixture_engine, base_config, native_fixture_engine, risc0_fixture_engine,
+    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine,
+    unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};

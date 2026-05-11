@@ -580,6 +580,11 @@ fn native_fixture_engine_with_observer(
 }
 
 #[cfg(test)]
+pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
+    native_fixture_engine_with_observer(None)
+}
+
+#[cfg(test)]
 pub(crate) fn risc0_fixture_engine(context_config: serde_json::Value) -> Risc0FixtureEngine {
     risc0_fixture_engine_with_observer(context_config, None)
 }

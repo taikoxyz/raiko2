@@ -194,7 +194,7 @@ impl BatchProofType {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_risc0_runner_for_route, route_for_proof_type};
+    use super::{BatchProofType, default_risc0_runner_for_route, route_for_proof_type};
     use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
     use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{AppState, StaticPipelineFactory};

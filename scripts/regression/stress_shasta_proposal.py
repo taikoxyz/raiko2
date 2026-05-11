@@ -1162,28 +1162,21 @@ class BatchMonitor:
         aggregate: bool = False
     ) -> Dict[str, Any]:
         """generate post data"""
-        return {
+        payload = {
             "proposals": proposals,
             "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
             "proof_type": self.prove_type,
             "blob_proof_type": "proof_of_equivalence",
             "aggregate": aggregate,
-            "native": {},
-            "sgx": {
-                "instance_id": 1234,
-                "setup": False,
-                "bootstrap": False,
-                "prove": True,
-            },
-            "risc0": {
-                "bonsai": False,
-                "snark": True,
-                "profile": True,
-                "execution_po2": 20,
-            },
-            "sp1": {"recursion": "plonk", "prover": "network", "verify": True},
         }
+        if self.prove_type == "sp1":
+            payload["sp1"] = {
+                "recursion": "plonk",
+                "prover": "network",
+                "verify": True,
+            }
+        return payload
 
     async def submit_to_raiko(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int

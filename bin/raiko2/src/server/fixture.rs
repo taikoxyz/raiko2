@@ -608,7 +608,7 @@ fn risc0_fixture_engine_for_pipeline_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Risc0ShastaBackend,
 ) -> Risc0FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(pipeline_key, FixtureRisc0Prover, backend, provider);
     let ctx = ProofContext::new(
         ProofRequest {
@@ -646,7 +646,7 @@ fn sp1_fixture_engine_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Sp1ShastaBackend,
 ) -> Sp1FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaSp1,
         FixtureSp1Prover::new(Sp1Config {

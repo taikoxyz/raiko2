@@ -318,6 +318,52 @@ class TestBatchMonitorRequestHeaders(unittest.TestCase):
         )
 
 
+class TestBatchMonitorRequestPayload(unittest.TestCase):
+    def test_generate_post_data_omits_legacy_public_prover_args_for_sgx(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.prove_type = "sgx"
+
+        payload = monitor.generate_post_data(
+            [
+                {
+                    "proposal_id": 25127,
+                    "l1_inclusion_block_number": 2766898,
+                    "l2_block_numbers": [4140789, 4140790],
+                    "checkpoint": None,
+                    "last_anchor_block_number": 2766861,
+                }
+            ],
+            aggregate=False,
+        )
+
+        self.assertEqual(payload["proof_type"], "sgx")
+        self.assertNotIn("native", payload)
+        self.assertNotIn("sgx", payload)
+        self.assertNotIn("sgxgeth", payload)
+        self.assertNotIn("risc0", payload)
+        self.assertNotIn("sp1", payload)
+
+    def test_generate_post_data_keeps_sp1_public_prover_args_for_sp1(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.prove_type = "sp1"
+
+        payload = monitor.generate_post_data(
+            [
+                {
+                    "proposal_id": 25127,
+                    "l1_inclusion_block_number": 2766898,
+                    "l2_block_numbers": [4140789, 4140790],
+                    "checkpoint": None,
+                    "last_anchor_block_number": 2766861,
+                }
+            ],
+            aggregate=False,
+        )
+
+        self.assertEqual(payload["proof_type"], "sp1")
+        self.assertIn("sp1", payload)
+
+
 class TestStressDiscoveryOutput(unittest.TestCase):
     def test_builds_preflight_ready_proposal_record(self):
         record = build_discovered_proposal_record(

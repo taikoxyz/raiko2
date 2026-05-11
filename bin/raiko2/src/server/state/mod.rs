@@ -691,7 +691,7 @@ async fn build_gaiko2_engine(
             let context = setup::build_context(config, pair, proof_type)?;
             let spec = ShastaSpec::new(
                 pipeline_key,
-                Gaiko2Prover::new(gaiko2_config)?,
+                Gaiko2Prover::new(&gaiko2_config)?,
                 NativeBackend,
                 provider,
             );
@@ -721,7 +721,7 @@ async fn build_gaiko2_engine(
                     .await?;
                 let spec = ShastaSpec::new(
                     pipeline_key,
-                    Gaiko2Prover::new(gaiko2_config)?,
+                    Gaiko2Prover::new(&gaiko2_config)?,
                     NativeBackend,
                     provider,
                 );

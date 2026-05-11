@@ -48,7 +48,11 @@ pub struct Gaiko2Prover {
 }
 
 impl Gaiko2Prover {
-    pub fn new(config: Gaiko2Config) -> RaikoResult<Self> {
+    /// # Errors
+    ///
+    /// Returns an error when the gaiko2 base URL is empty, malformed, or the HTTP client
+    /// cannot be constructed.
+    pub fn new(config: &Gaiko2Config) -> RaikoResult<Self> {
         if config.base_url.trim().is_empty() {
             return Err(RaikoError::InvalidRequestConfig(
                 "gaiko2.base_url must not be empty".to_string(),
@@ -200,8 +204,7 @@ impl Gaiko2Prover {
             .map_err(|err| RaikoError::Guest(format!("gaiko2 read failed: {err}")))?;
         let envelope: Gaiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
             RaikoError::Guest(format!(
-                "gaiko2 response decode failed (status {}): {err}",
-                status
+                "gaiko2 response decode failed (status {status}): {err}"
             ))
         })?;
 
@@ -215,8 +218,7 @@ impl Gaiko2Prover {
         if !status.is_success() || envelope.status == Gaiko2ProofStatus::Error {
             let error = envelope.error.as_ref().ok_or_else(|| {
                 RaikoError::Guest(format!(
-                    "gaiko2 request failed with status {} and no error payload",
-                    status
+                    "gaiko2 request failed with status {status} and no error payload"
                 ))
             })?;
             return Err(RaikoError::Guest(format!(

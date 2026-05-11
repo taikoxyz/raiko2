@@ -63,6 +63,9 @@ pub struct Gaiko2AggregateProof {
 }
 
 impl Gaiko2AggregateProof {
+    /// # Errors
+    ///
+    /// Returns an error when the proof is missing gaiko2 aggregate fields or shasta carry data.
     pub fn from_proof(proof: &Proof) -> Result<Self, raiko2_primitives::RaikoError> {
         let input = proof.input.ok_or_else(|| {
             raiko2_primitives::RaikoError::InvalidRequestConfig(

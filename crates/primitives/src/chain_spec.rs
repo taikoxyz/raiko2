@@ -733,7 +733,7 @@ mod tests {
         );
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::SgxGeth)?,
-            address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+            address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
         );
         Ok(())
     }

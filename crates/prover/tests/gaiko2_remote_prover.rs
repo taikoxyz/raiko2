@@ -63,7 +63,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
             }));
     });
 
-    let prover = Gaiko2Prover::new(Gaiko2Config {
+    let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
     })
@@ -108,7 +108,7 @@ async fn gaiko2_prover_surfaces_remote_error_envelope() {
             }));
     });
 
-    let prover = Gaiko2Prover::new(Gaiko2Config {
+    let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
     })

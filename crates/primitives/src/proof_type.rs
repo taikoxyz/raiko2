@@ -26,7 +26,7 @@ pub enum ProofType {
     /// Uses the RISC0 prover to build the block.
     #[serde(alias = "RISC0")]
     Risc0 = 3u8,
-    /// # SgxGeth
+    /// # `SgxGeth`
     ///
     /// Uses the external gaiko2 SGX service lane for Shasta proving.
     #[serde(alias = "SGXGETH")]

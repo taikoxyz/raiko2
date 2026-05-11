@@ -267,7 +267,7 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
 fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
     #[cfg(feature = "sp1")]
     {
-        return crate::sp1::sp1_image_id_words_from_uuid(raw);
+        crate::sp1::sp1_image_id_words_from_uuid(raw)
     }
 
     #[cfg(not(feature = "sp1"))]
@@ -311,14 +311,6 @@ pub fn validate_external_aggregate_proofs(
                 if proof.input.is_none() || proof.extra_data.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
                         "proof {index} is missing sgx/native aggregation metadata"
-                    )));
-                }
-            }
-            raiko2_pipeline::PipelineKey::ShastaSgx
-            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
-                if proof.input.is_none() || proof.extra_data.is_none() {
-                    return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing SGX aggregation metadata"
                     )));
                 }
             }

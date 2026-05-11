@@ -63,8 +63,9 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaSgx => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
-            Self::ShastaSgxGeth => PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote),
+            Self::ShastaSgx | Self::ShastaSgxGeth => {
+                PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
+            }
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }

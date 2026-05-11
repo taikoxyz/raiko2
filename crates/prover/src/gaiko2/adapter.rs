@@ -7,6 +7,10 @@ use crate::gaiko2::protocol::{
     Gaiko2ShastaRequest,
 };
 
+/// # Errors
+///
+/// Returns an error when the guest input has no witnesses or the replay packet cannot be
+/// assembled from the witness state.
 pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Gaiko2ShastaRequest> {
     let first_witness = input.witnesses.first().ok_or_else(|| {
         RaikoError::InvalidRequestConfig(
@@ -47,6 +51,10 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Gaiko2ShastaReques
     })
 }
 
+/// # Errors
+///
+/// Returns an error when the proof list is empty or a proof cannot be converted into the
+/// gaiko2 aggregate proof envelope.
 pub fn build_shasta_aggregate_request(
     proofs: &[Proof],
 ) -> RaikoResult<Gaiko2ShastaAggregateRequest> {

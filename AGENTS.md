@@ -45,7 +45,9 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Workspace checks:
   - `cargo fmt --all`
   - `cargo clippy --workspace -- -D warnings`
-  - `cargo nextest run --workspace`
+  - `cargo test -p raiko2-primitives -p raiko2-primitives-shasta -p raiko2-protocol -p raiko2-protocol-shasta`
+  - `cargo test -p raiko2-provider -p raiko2-pipeline -p preflight`
+  - `cargo test -p raiko2-queue -p raiko2-runtime`
 - Guest builds:
   - `just build-guest risc0`
   - `just build-guest sp1`
@@ -74,7 +76,7 @@ Run the smallest set of checks that proves the change safely, then scale up when
   - Run focused tests for the touched package when practical, plus any relevant targeted command.
 - Shared types, config, workspace wiring, or cross-crate behavior changes:
   - Run `cargo clippy --workspace -- -D warnings`
-  - Run `cargo nextest run --workspace`
+  - Run the targeted `cargo test` lanes from `.github/workflows/ci.yml`
 - Formatting-sensitive Rust changes:
   - Run `cargo fmt --all`
 - Guest, prover backend, `xtask`, or ELF contract changes:
@@ -92,8 +94,8 @@ Run the smallest set of checks that proves the change safely, then scale up when
 
 ## Alethia Reth Integration
 
-- Use `~/code/github.com/taikoxyz/alethia-reth` branch `feat/raiko2` as the canonical base for all
-  raiko2-specific alethia-reth patches.
+- Use the `feat/raiko2` branch from `https://github.com/taikoxyz/alethia-reth` as the canonical
+  base for all raiko2-specific alethia-reth patches, regardless of local checkout path.
 - Put every alethia-reth fix required by raiko2 on `feat/raiko2`; do not keep those fixes only in
   one-off PR branches, local worktrees, or raiko2-side workaround layers.
 - Rebase `feat/raiko2` onto alethia-reth `origin/main` when upstream alethia-reth or reth changes are

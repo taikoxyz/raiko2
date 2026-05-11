@@ -21,7 +21,6 @@ async-trait.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 hex.workspace = true
-secp256k1.workspace = true
 url.workspace = true
 
 # Alloy types

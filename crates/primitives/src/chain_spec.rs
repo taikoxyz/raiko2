@@ -627,6 +627,8 @@ mod tests {
     };
     use alloy_primitives::address;
 
+    const MAINNET_SHASTA_TIMESTAMP: u64 = 1_775_135_700;
+
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
         // Parse the shipped default config list (JSON), then ensure the resulting ChainSpec is
@@ -670,34 +672,49 @@ mod tests {
     }
 
     #[test]
-    fn taiko_mainnet_keeps_distinct_fork_entries() -> Result<()> {
+    fn taiko_mainnet_uses_shasta_only_config() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
             .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
-        assert_eq!(spec.hard_forks.len(), 6);
-        assert_eq!(spec.l1_contract.len(), 2);
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Pacaya))
+        assert_eq!(spec.hard_forks.len(), 1);
+        assert_eq!(spec.l1_contract.len(), 1);
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
         );
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Shasta))
-        );
-        assert!(
-            spec.hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        let err = spec
+            .get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)
+            .expect_err("mainnet config should only activate at Shasta");
+        assert!(err.to_string().contains("fork l1 contract is not active"));
+        assert_eq!(
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sgx)?,
+            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
         );
         assert_eq!(
-            spec.get_fork_l1_contract_address_at(5_412_478, 1_775_988_339)?,
-            address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f")
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Risc0)?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
         );
         assert_eq!(
-            spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::Sp1)?,
-            address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sp1)?,
+            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_mainnet_raw_spec_keeps_sgx_geth_shasta_verifier() -> Result<()> {
+        let list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .iter()
+            .find(|spec| spec["name"] == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+
+        assert_eq!(
+            spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
+            Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
         );
         Ok(())
     }
@@ -736,6 +753,27 @@ mod tests {
         let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_DEVNET_GENESIS_HASH);
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_dev")
+            .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
+        let unzen_timestamp = 1_777_787_739;
+
+        assert_eq!(spec.chain_id, 167_001);
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(unzen_timestamp))
+        );
+        assert_eq!(
+            spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
+            address!("b432bbe475e569b2adef4830ae43d587932f139c")
+        );
         Ok(())
     }
 

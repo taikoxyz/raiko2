@@ -1,6 +1,6 @@
 //! Native prover implementation (no zk proof).
 
-use alloy_primitives::{Address, B256, Bytes, keccak256};
+use alloy_primitives::{Address, B256, Bytes, address, keccak256};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
@@ -12,7 +12,6 @@ use raiko2_primitives_shasta::{
     },
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{GuestInputCodec, build_shasta_aggregation_input};
 
@@ -20,10 +19,12 @@ use crate::{GuestInputCodec, build_shasta_aggregation_input};
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeProver;
 
-const NATIVE_PROOF_PRIVATE_KEY: &str =
-    "92954368afd3caa1f3ce3ead0069c1af414054aefe1ef9aeacc1bf426222ce38";
 const SHASTA_SGX_PROOF_LEN: usize = 89;
 const SHASTA_NATIVE_MOCK_INSTANCE_ID: u32 = 0xDEAD_C0DE;
+// Native proofs are explicit host-local mocks. Keep the instance stable so downstream
+// fixture/tests can identify the mock path without embedding key material in the repo.
+const SHASTA_NATIVE_MOCK_INSTANCE: Address = address!("0000777735367b36bc9b61c50022d9d0700db4ec");
+const NATIVE_MOCK_SIGNATURE_DOMAIN: &[u8] = b"raiko2-native-mock-signature";
 
 impl GuestInputCodec<GuestInput> for NativeProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
@@ -62,7 +63,7 @@ where
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
         let input_hash = hash_shasta_subproof_input(&proof_carry_data);
-        let signature = sign_hash(input_hash)?;
+        let signature = mock_signature(input_hash);
         let sgx_instance = signer_address()?;
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
@@ -125,7 +126,7 @@ where
         let sgx_instance = signer_address()?;
         let aggregation_hash =
             shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
-        let signature = sign_hash(aggregation_hash)?;
+        let signature = mock_signature(aggregation_hash);
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
@@ -137,41 +138,28 @@ where
     }
 }
 
-fn sign_hash(hash: B256) -> RaikoResult<[u8; 65]> {
-    let key_bytes = hex::decode(NATIVE_PROOF_PRIVATE_KEY).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Invalid native proof private key: {e}"))
-    })?;
-    let secret_key = SecretKey::from_slice(&key_bytes).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Invalid native proof private key: {e}"))
-    })?;
-    let message = Message::from_digest_slice(hash.as_slice())
-        .map_err(|e| RaikoError::InvalidRequestConfig(format!("Invalid hash: {e}")))?;
-    let secp = Secp256k1::new();
-    let sig = secp.sign_ecdsa_recoverable(&message, &secret_key);
-    let (rec_id, data) = sig.serialize_compact();
+fn mock_signature(hash: B256) -> [u8; 65] {
+    let mut left_seed = Vec::with_capacity(NATIVE_MOCK_SIGNATURE_DOMAIN.len() + 5 + 32);
+    left_seed.extend_from_slice(NATIVE_MOCK_SIGNATURE_DOMAIN);
+    left_seed.extend_from_slice(b":left");
+    left_seed.extend_from_slice(hash.as_slice());
+
+    let mut right_seed = Vec::with_capacity(NATIVE_MOCK_SIGNATURE_DOMAIN.len() + 6 + 32);
+    right_seed.extend_from_slice(NATIVE_MOCK_SIGNATURE_DOMAIN);
+    right_seed.extend_from_slice(b":right");
+    right_seed.extend_from_slice(hash.as_slice());
+
+    let left = keccak256(left_seed);
+    let right = keccak256(right_seed);
     let mut sig_bytes = [0u8; 65];
-    sig_bytes[..64].copy_from_slice(&data);
-    let recovery_byte = i32::from(rec_id) + 27;
-    sig_bytes[64] = u8::try_from(recovery_byte)
-        .map_err(|_| RaikoError::InvalidRequestConfig("Invalid recovery id value".to_string()))?;
-    Ok(sig_bytes)
+    sig_bytes[..32].copy_from_slice(left.as_slice());
+    sig_bytes[32..64].copy_from_slice(right.as_slice());
+    sig_bytes[64] = 27;
+    sig_bytes
 }
 
 fn signer_address() -> RaikoResult<Address> {
-    let key_bytes = hex::decode(NATIVE_PROOF_PRIVATE_KEY).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Invalid native proof private key: {e}"))
-    })?;
-    let secret_key = SecretKey::from_slice(&key_bytes).map_err(|e| {
-        RaikoError::InvalidRequestConfig(format!("Invalid native proof private key: {e}"))
-    })?;
-    let secp = Secp256k1::new();
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    Ok(public_key_to_address(&public_key))
-}
-
-fn public_key_to_address(public_key: &PublicKey) -> Address {
-    let hash = keccak256(&public_key.serialize_uncompressed()[1..]);
-    Address::from_slice(&hash[12..])
+    Ok(SHASTA_NATIVE_MOCK_INSTANCE)
 }
 
 fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) -> Vec<u8> {
@@ -186,7 +174,7 @@ fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) 
 mod tests {
     use super::NativeProver;
     use crate::{Prover, hash_shasta_subproof_input};
-    use alloy_primitives::{Address, B256, keccak256};
+    use alloy_primitives::Address;
     use raiko2_pipeline::NativeBackend;
     use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
     use raiko2_primitives_shasta::{
@@ -194,31 +182,10 @@ mod tests {
         instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
     };
     use raiko2_protocol_shasta::shasta::ProofCarryData;
-    use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::RecoverableSignature};
     use std::str::FromStr;
 
     const EXPECTED_ADDR: &str = "0x0000777735367b36bC9B61C50022d9D0700dB4Ec";
     const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
-
-    fn recover_address(sig_bytes: &[u8; 65], message: B256) -> Address {
-        let rec_id = secp256k1::ecdsa::RecoveryId::try_from(i32::from(sig_bytes[64] - 27))
-            .expect("recovery id");
-        let sig = RecoverableSignature::from_compact(&sig_bytes[..64], rec_id)
-            .expect("recoverable signature");
-        let secp = Secp256k1::new();
-        let public_key = secp
-            .recover_ecdsa(
-                &Message::from_digest_slice(message.as_slice()).unwrap(),
-                &sig,
-            )
-            .expect("recover public key");
-        public_key_to_address(&public_key)
-    }
-
-    fn public_key_to_address(public_key: &PublicKey) -> Address {
-        let hash = keccak256(&public_key.serialize_uncompressed()[1..]);
-        Address::from_slice(&hash[12..])
-    }
 
     fn decode_proof_bytes(proof_hex: &str) -> [u8; 89] {
         let bytes = hex::decode(proof_hex.trim_start_matches("0x")).expect("hex");
@@ -234,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn signer_address_matches_golden_touch_account() {
+    fn native_signer_address_matches_mock_instance_address() {
         let address = super::signer_address().expect("signer address");
         let expected = Address::from_str(EXPECTED_ADDR).expect("expected address");
         assert_eq!(address, expected);
@@ -259,8 +226,10 @@ mod tests {
         assert_eq!(instance, expected_addr);
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
-        let recovered = recover_address(&sig, proof.input.expect("missing input"));
-        assert_eq!(recovered, expected_addr);
+        assert_eq!(
+            sig,
+            super::mock_signature(proof.input.expect("missing input"))
+        );
     }
 
     #[tokio::test]
@@ -301,8 +270,6 @@ mod tests {
         assert_eq!(proof.input.expect("missing input"), expected_hash);
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
-        let recovered = recover_address(&sig, expected_hash);
-        let expected_addr = Address::from_str(EXPECTED_ADDR).unwrap();
-        assert_eq!(recovered, expected_addr);
+        assert_eq!(sig, super::mock_signature(expected_hash));
     }
 }

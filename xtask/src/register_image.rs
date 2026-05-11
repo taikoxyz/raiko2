@@ -21,11 +21,14 @@ use xtask_build_guest::Backend;
 
 use crate::util;
 
-const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "http://34.46.244.179:8545";
+const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "https://ethereum-hoodi-rpc.publicnode.com";
+const DEFAULT_RPC_URL_MAINNET_SHASTA: &str = "https://ethereum-rpc.publicnode.com";
 const DEFAULT_PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";
 const TX_TIMEOUT: Duration = Duration::from_secs(180);
 const HOODI_NETWORK: &str = "hoodi";
 const HOODI_CHAIN_ID: u64 = 560_048;
+const MAINNET_NETWORK: &str = "ethereum";
+const MAINNET_CHAIN_ID: u64 = 1;
 
 sol! {
     #[sol(rpc)]
@@ -72,6 +75,7 @@ pub(crate) struct RegisterImageArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RegisterImageProfile {
     HoodiShasta,
+    MainnetShasta,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -315,12 +319,22 @@ fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
             address!("fa0e7dAFe9785627df034c123A9B87497EB06b41"),
             address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7"),
         ),
+        RegisterImageProfile::MainnetShasta => (
+            DEFAULT_RPC_URL_MAINNET_SHASTA.to_string(),
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"),
+            address!("96337327648dcFA22b014009cf10A2D5E2F305f6"),
+        ),
+    };
+
+    let (network, expected_chain_id) = match args.profile {
+        RegisterImageProfile::HoodiShasta => (HOODI_NETWORK, HOODI_CHAIN_ID),
+        RegisterImageProfile::MainnetShasta => (MAINNET_NETWORK, MAINNET_CHAIN_ID),
     };
 
     ResolvedProfile {
         profile: args.profile,
-        network: HOODI_NETWORK,
-        expected_chain_id: HOODI_CHAIN_ID,
+        network,
+        expected_chain_id,
         rpc_url: args.rpc_url.clone().unwrap_or(rpc_url),
         risc0_verifier: args.risc0_verifier.unwrap_or(risc0_verifier),
         sp1_verifier: args.sp1_verifier.unwrap_or(sp1_verifier),
@@ -684,6 +698,7 @@ fn b256_hex(value: B256) -> String {
 fn profile_name(profile: RegisterImageProfile) -> &'static str {
     match profile {
         RegisterImageProfile::HoodiShasta => "hoodi-shasta",
+        RegisterImageProfile::MainnetShasta => "mainnet-shasta",
     }
 }
 
@@ -716,9 +731,9 @@ impl RegistrationCall {
 mod tests {
     use super::{
         CheckedRegistration, ContractKind, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK,
-        PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall, Stage,
-        backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
-        materialize_checked_plan, resolve_profile,
+        MAINNET_CHAIN_ID, MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile,
+        RegistrationCall, Stage, backend_name, build_risc0_calls, digest_source_suffix,
+        ensure_profile_chain_id, materialize_checked_plan, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
     use raiko2_guests::load_risc0_shasta_guest_elves;
@@ -756,6 +771,55 @@ mod tests {
         assert_eq!(
             resolved.sp1_verifier,
             address!("2222222222222222222222222222222222222222")
+        );
+    }
+
+    #[test]
+    fn hoodi_profile_uses_l1_rpc_by_default() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::HoodiShasta,
+            backend: Backend::All,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+
+        let resolved = resolve_profile(&args);
+        assert_eq!(resolved.network, HOODI_NETWORK);
+        assert_eq!(resolved.expected_chain_id, HOODI_CHAIN_ID);
+        assert_eq!(
+            resolved.rpc_url,
+            "https://ethereum-hoodi-rpc.publicnode.com"
+        );
+    }
+
+    #[test]
+    fn mainnet_profile_uses_shasta_verifiers() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::MainnetShasta,
+            backend: Backend::All,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+
+        let resolved = resolve_profile(&args);
+        assert_eq!(resolved.network, MAINNET_NETWORK);
+        assert_eq!(resolved.expected_chain_id, MAINNET_CHAIN_ID);
+        assert_eq!(resolved.rpc_url, "https://ethereum-rpc.publicnode.com");
+        assert_eq!(
+            resolved.risc0_verifier,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            resolved.sp1_verifier,
+            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
         );
     }
 
@@ -815,6 +879,28 @@ mod tests {
             .expect_err("wrong chain id should be rejected");
 
         assert!(err.to_string().contains("expects hoodi chain id"));
+    }
+
+    #[test]
+    fn mainnet_profile_rejects_wrong_chain_id() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::MainnetShasta,
+            backend: Backend::All,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+        let resolved = resolve_profile(&args);
+
+        ensure_profile_chain_id(&resolved, MAINNET_CHAIN_ID)
+            .expect("mainnet chain id should match");
+        let err = ensure_profile_chain_id(&resolved, HOODI_CHAIN_ID)
+            .expect_err("wrong chain id should be rejected");
+
+        assert!(err.to_string().contains("expects ethereum chain id"));
     }
 
     #[test]

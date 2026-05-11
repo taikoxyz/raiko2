@@ -22,14 +22,16 @@ Recommended checks before opening a PR:
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
-cargo nextest run --workspace
+cargo test -p raiko2-primitives -p raiko2-primitives-shasta -p raiko2-protocol -p raiko2-protocol-shasta
+cargo test -p raiko2-provider -p raiko2-pipeline -p preflight
+cargo test -p raiko2-queue -p raiko2-runtime
 ```
 
 ## Alethia Reth Integration Workflow
 
-Raiko2 consumes alethia-reth through the `feat/raiko2` branch in
-`~/code/github.com/taikoxyz/alethia-reth`. That branch is the single integration baseline for
-raiko2-specific alethia-reth patches.
+Raiko2 consumes [taikoxyz/alethia-reth](https://github.com/taikoxyz/alethia-reth) through the
+`feat/raiko2` branch. That branch is the single integration baseline for raiko2-specific
+alethia-reth patches, regardless of where you keep your local checkout.
 
 Development rules:
 
@@ -158,6 +160,8 @@ register the new digests explicitly:
 ```bash
 cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile hoodi-shasta --backend all --apply
+cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
+PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
 ## Guest Benchmarking

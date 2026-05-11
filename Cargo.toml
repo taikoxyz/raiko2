@@ -211,4 +211,4 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "portable",
     "std",
 ] }
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "cd9c40b38b82558baa92e4cc4da6e6e007d9d704", default-features = false }
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "3810673278a51f46d08187f1ddb4ad045c8c0cc6", default-features = false }

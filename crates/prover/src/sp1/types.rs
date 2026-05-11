@@ -327,8 +327,10 @@ impl Sp1Config {
             return Err(Sp1ConfigError::RpcUrlMustNotBeEmpty);
         }
         if let Some(rpc_url) = self.rpc_url.as_deref() {
-            Url::parse(rpc_url.trim())
-                .map_err(|_| Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()))?;
+            if rpc_url != rpc_url.trim() {
+                return Err(Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()));
+            }
+            Url::parse(rpc_url).map_err(|_| Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()))?;
         }
         if let Some(remote_verify) = &self.remote_verify {
             if remote_verify.rpc_url.trim().is_empty() {
@@ -896,6 +898,19 @@ mod tests {
         assert_eq!(
             timeout.validate().expect_err("zero auction timeout"),
             Sp1ConfigError::AuctionTimeoutSecsMustBePositive
+        );
+    }
+
+    #[test]
+    fn sp1_config_rejects_untrimmed_rpc_url() {
+        let config = Sp1Config {
+            rpc_url: Some(" https://example.invalid/rpc ".to_string()),
+            ..Sp1Config::default()
+        };
+
+        assert_eq!(
+            config.validate().expect_err("untrimmed rpc url"),
+            Sp1ConfigError::RpcUrlInvalid(" https://example.invalid/rpc ".to_string())
         );
     }
 

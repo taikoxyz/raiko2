@@ -992,16 +992,22 @@ fn resolve_sp1_network_rpc_url(
     config: &Sp1Config,
     env_rpc_url: Option<&str>,
 ) -> RaikoResult<String> {
-    let rpc_url = config
-        .rpc_url
-        .as_deref()
-        .or_else(|| env_rpc_url.filter(|value| !value.trim().is_empty()))
-        .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode))
-        .trim();
-    Url::parse(rpc_url).map_err(|err| {
+    let rpc_url = config.rpc_url.clone().unwrap_or_else(|| {
+        env_rpc_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode))
+            .to_string()
+    });
+    if rpc_url != rpc_url.trim() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "SP1 network RPC URL must not include leading or trailing whitespace".to_string(),
+        ));
+    }
+    Url::parse(&rpc_url).map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("SP1 network RPC URL is invalid: {err}"))
     })?;
-    Ok(rpc_url.to_string())
+    Ok(rpc_url)
 }
 
 const fn default_sp1_network_rpc_url(mode: Sp1NetworkMode) -> &'static str {
@@ -1331,7 +1337,7 @@ mod tests {
     #[test]
     fn sp1_network_rpc_url_prefers_config_over_env() {
         let config = super::Sp1Config {
-            rpc_url: Some(" https://config.example.invalid/rpc ".to_string()),
+            rpc_url: Some("https://config.example.invalid/rpc".to_string()),
             ..super::Sp1Config::default()
         };
 
@@ -1339,6 +1345,22 @@ mod tests {
             .expect("valid config rpc url");
 
         assert_eq!(rpc_url, "https://config.example.invalid/rpc");
+    }
+
+    #[test]
+    fn sp1_network_rpc_url_rejects_untrimmed_config_override() {
+        let config = super::Sp1Config {
+            rpc_url: Some(" https://config.example.invalid/rpc ".to_string()),
+            ..super::Sp1Config::default()
+        };
+
+        let err = resolve_sp1_network_rpc_url(&config, Some("https://env.example.invalid/rpc"))
+            .expect_err("untrimmed config rpc url");
+
+        assert!(
+            err.to_string()
+                .contains("SP1 network RPC URL must not include leading or trailing whitespace")
+        );
     }
 
     #[test]

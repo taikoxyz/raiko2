@@ -952,6 +952,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
+                pipeline_key: Some(pipeline),
                 route: "native/local"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -994,6 +995,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1135,6 +1137,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_aggregate_pending".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1383,6 +1386,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_multi_proposal".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
@@ -1481,6 +1485,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1594,6 +1599,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_load".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1701,6 +1707,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_aggregate".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
@@ -1815,6 +1822,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_restart".to_string(),
+                pipeline_key: None,
                 route: "native/local"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),

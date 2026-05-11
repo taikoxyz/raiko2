@@ -17,7 +17,11 @@ pub(super) struct CanonicalProofRoute {
 }
 
 impl CanonicalProofRoute {
-    fn new(route: PipelineRoute, pipeline_key: PipelineKey, proof_type: ProofType) -> Self {
+    pub(super) fn new(
+        route: PipelineRoute,
+        pipeline_key: PipelineKey,
+        proof_type: ProofType,
+    ) -> Self {
         Self {
             route,
             pipeline_key,

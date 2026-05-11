@@ -1120,6 +1120,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_orphan_registered".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
@@ -2899,6 +2900,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
@@ -3029,6 +3031,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_persisted_proof".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),

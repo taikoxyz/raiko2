@@ -926,6 +926,7 @@ async fn register_batch_task(
         .runtime
         .register_task_if_absent(TaskRegistration {
             task_id: submission.public_task_id.clone(),
+            pipeline_key: Some(submission.route.pipeline_key()),
             route: submission.route.route,
             task_kind: "hoodi_batch".to_string(),
             proposal_id: submission
@@ -975,6 +976,7 @@ async fn register_external_aggregate_task(
         .runtime
         .register_task_if_absent(TaskRegistration {
             task_id: submission.public_task_id.clone(),
+            pipeline_key: Some(submission.route.pipeline_key()),
             route: submission.route.route,
             task_kind: "hoodi_aggregate".to_string(),
             proposal_id: None,
@@ -1251,9 +1253,11 @@ async fn existing_batch_aggregate_inputs(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<Vec<AggregateProofInput>, ApiError> {
-    let route = CanonicalProofRoute {
-        route: existing.route,
-    };
+    let route = CanonicalProofRoute::new(
+        existing.route,
+        existing.pipeline_key,
+        existing_metadata.proof_type,
+    );
     let mut inputs = Vec::with_capacity(existing_metadata.proposals.len());
 
     for proposal in &existing_metadata.proposals {

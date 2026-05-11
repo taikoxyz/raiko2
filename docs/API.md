@@ -141,13 +141,13 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
 - `proof_type` mapping:
+  - `native -> native/local` only when the server route is `native/local`; otherwise rejected
   - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
   - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
-  - `native -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the

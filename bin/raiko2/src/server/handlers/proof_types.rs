@@ -315,4 +315,9 @@ mod tests {
 
         assert!(matches!(req.proof_type, BatchProofType::SgxGeth));
     }
+
+    #[test]
+    fn native_is_accepted_for_internal_batch_requests() {
+        assert!(BatchProofType::Native.is_public_batch_request_type());
+    }
 }

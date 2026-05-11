@@ -28,12 +28,13 @@ RUN cargo +1.94.0 build --release -p raiko2-sgx-prover
 
 FROM gramineproject/gramine:1.8-jammy AS runtime
 
+ARG GRAMINE_LOG_LEVEL=error
+
 ENV DEBIAN_FRONTEND=noninteractive \
     RAIKO2_SGX_CONFIG_DIR=/var/lib/raiko2/sgx/config \
     RAIKO2_SGX_SECRET_DIR=/var/lib/raiko2/sgx/secrets \
     RAIKO2_SGX_LISTEN_ADDR=0.0.0.0:8080 \
     RAIKO2_SGX_FORK=shasta \
-    GRAMINE_ENCLAVE_KEY=/root/.config/gramine/enclave-key.pem \
     GRAMINE_LOG_LEVEL=error \
     RUST_LOG=info
 
@@ -47,6 +48,7 @@ RUN apt-get update && \
     libsgx-dcap-default-qpl \
     libsgx-dcap-ql \
     libsgx-urts \
+    python3 \
     sgx-pck-id-retrieval-tool && \
     apt-get clean all && \
     rm -rf /var/lib/apt/lists/*
@@ -54,14 +56,34 @@ RUN apt-get update && \
 RUN sed -i 's/#default quoting type = ecdsa_256/default quoting type = ecdsa_256/' /etc/aesmd.conf && \
     sed -i 's/,"use_secure_cert": true/,"use_secure_cert": false/' /etc/sgx_default_qcnl.conf
 
-RUN mkdir -p /opt/raiko2-sgx/bin /opt/raiko2-sgx/docker /var/lib/raiko2/sgx/config /var/lib/raiko2/sgx/secrets
+RUN mkdir -p /opt/raiko2-sgx/bin /opt/raiko2-sgx/docker /opt/raiko2-sgx/etc /var/lib/raiko2/sgx/config /var/lib/raiko2/sgx/secrets
 
 COPY --from=builder /app/target/release/raiko2-sgx-prover /opt/raiko2-sgx/bin/raiko2-sgx-prover
 COPY docker/raiko2-sgx-prover.manifest.template /opt/raiko2-sgx/docker/raiko2-sgx-prover.manifest.template
 COPY docker/sgx-entrypoint.sh /opt/raiko2-sgx/bin/entrypoint.sh
 COPY docker/sgx-bootstrap.sh /opt/raiko2-sgx/bin/sgx-bootstrap.sh
+COPY docker/write-attestation-metadata.sh /opt/raiko2-sgx/bin/write-attestation-metadata.sh
 
-RUN chmod +x /opt/raiko2-sgx/bin/raiko2-sgx-prover /opt/raiko2-sgx/bin/entrypoint.sh /opt/raiko2-sgx/bin/sgx-bootstrap.sh
+RUN chmod +x /opt/raiko2-sgx/bin/raiko2-sgx-prover /opt/raiko2-sgx/bin/entrypoint.sh /opt/raiko2-sgx/bin/sgx-bootstrap.sh /opt/raiko2-sgx/bin/write-attestation-metadata.sh
+
+RUN --mount=type=secret,id=gramine_enclave_key \
+    test -s /run/secrets/gramine_enclave_key && \
+    cd /opt/raiko2-sgx/bin && \
+    gramine-manifest \
+        -Dlog_level="${GRAMINE_LOG_LEVEL}" \
+        -Darch_libdir=/lib/x86_64-linux-gnu \
+        /opt/raiko2-sgx/docker/raiko2-sgx-prover.manifest.template \
+        raiko2-sgx-prover.manifest && \
+    gramine-sgx-sign \
+        --key /run/secrets/gramine_enclave_key \
+        --manifest raiko2-sgx-prover.manifest \
+        --output raiko2-sgx-prover.manifest.sgx \
+        --sigfile raiko2-sgx-prover.sig && \
+    gramine-sgx-sigstruct-view --output-format=json raiko2-sgx-prover.sig > /tmp/raiko2-sgx-sigstruct.json && \
+    /opt/raiko2-sgx/bin/write-attestation-metadata.sh \
+        /tmp/raiko2-sgx-sigstruct.json \
+        /opt/raiko2-sgx/etc/attestation.raiko2.json && \
+    rm -f /tmp/raiko2-sgx-sigstruct.json
 
 EXPOSE 8080
 

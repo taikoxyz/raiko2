@@ -186,10 +186,11 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 
 Operator notes:
 
-- The compose stack mounts SGX devices and a host Gramine key directory.
+- The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
-- The container entrypoint signs the Gramine manifest on startup using the mounted enclave key.
+- The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
+  manifest/signature artifacts.
 - Set `RAIKO2_SGX_MODE=native` to bypass Gramine for operator/link testing while keeping the same
   `/prove/shasta*` server behavior.
 - This compose file is still SGX-oriented and mounts SGX devices by default. For native-mode runs
@@ -198,6 +199,18 @@ Operator notes:
   mounted config directory and select it with `RAIKO2_SGX_FORK`.
 - This compose file only covers the `sgx` lane. `sgxgeth` is served by external geth-backed
   remote SGX infrastructure and is not built in this repository.
+
+Read the baked SGX measurement from:
+
+```bash
+docker run --rm --entrypoint cat \
+  raiko2-sgx:local \
+  /opt/raiko2-sgx/etc/attestation.raiko2.json
+```
+
+`attestation.raiko2.json` is the operator-facing source for `mr_enclave` on the `raiko2-sgx`
+image. Use that value with your external SGX verifier registration flow; this repository does not
+apply SGX attester registration onchain.
 
 ## SGX Regression Stack
 

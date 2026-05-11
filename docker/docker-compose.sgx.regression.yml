@@ -4,13 +4,16 @@ x-raiko2-sgx-common: &raiko2-sgx-common
   build:
     context: ..
     dockerfile: Dockerfile.sgx
+    args:
+      GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
+    secrets:
+      - source: gramine_enclave_key
+        target: gramine_enclave_key
   image: ${RAIKO2_SGX_IMAGE:-raiko2-sgx:local}
   restart: unless-stopped
   environment:
     RUST_LOG: ${RUST_LOG:-info}
     PCCS_HOST: ${PCCS_HOST:-host.docker.internal:8081}
-    GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
-    GRAMINE_ENCLAVE_KEY: /root/.config/gramine/enclave-key.pem
     RAIKO2_SGX_CONFIG_DIR: /var/lib/raiko2/sgx/config
     RAIKO2_SGX_SECRET_DIR: /var/lib/raiko2/sgx/secrets
     RAIKO2_SGX_LISTEN_ADDR: 0.0.0.0:8080
@@ -23,7 +26,6 @@ x-raiko2-sgx-common: &raiko2-sgx-common
   volumes:
     - ${RAIKO2_SGX_CONFIG_DIR_HOST:-./var/raiko2-sgx/config}:/var/lib/raiko2/sgx/config
     - ${RAIKO2_SGX_SECRET_DIR_HOST:-./var/raiko2-sgx/secrets}:/var/lib/raiko2/sgx/secrets
-    - ${RAIKO2_SGX_GRAMINE_DIR_HOST:-${HOME}/.config/gramine}:/root/.config/gramine:ro
   extra_hosts:
     - host.docker.internal:host-gateway
 
@@ -129,3 +131,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+secrets:
+  gramine_enclave_key:
+    file: ${RAIKO2_SGX_ENCLAVE_KEY_HOST:-${HOME}/.config/gramine/enclave-key.pem}

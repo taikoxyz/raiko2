@@ -164,6 +164,11 @@ cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
+This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
+digests). SGX registration is separate: read `mr_enclave` from the baked
+`/opt/raiko2-sgx/etc/attestation.raiko2.json` file in the built `raiko2-sgx` image and use your
+external SGX verifier tooling, such as the `taiko-mono` SGX verifier scripts, to register it.
+
 ## Guest Benchmarking
 
 `bench-guest` measures execution metadata, cycles, and wall time for guest runs.

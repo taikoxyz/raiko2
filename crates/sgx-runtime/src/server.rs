@@ -12,7 +12,7 @@ use crate::{
     protocol::RequestFailure, tee::TeeProvider,
 };
 
-const MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 10_000 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct SgxProver<P> {

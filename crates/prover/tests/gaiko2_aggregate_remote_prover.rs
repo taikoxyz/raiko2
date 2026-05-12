@@ -8,9 +8,9 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{
     Prover,
-    gaiko2::{
-        Gaiko2Config, Gaiko2Prover,
-        protocol::{GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA},
+    gaiko2::{Gaiko2Config, Gaiko2Prover},
+    remote_prover::protocol::{
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
     },
 };
 use serde_json::json;
@@ -53,12 +53,12 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta-aggregate")
-            .body_contains(GAIKO2_SHASTA_REQUEST_SCHEMA)
+            .body_contains(RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA)
             .body_contains("proof_carry_data");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({
-                "schema": GAIKO2_PROOF_RESPONSE_SCHEMA,
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
                     "proof": "0xaggproof",
@@ -92,6 +92,6 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
         extra["gaiko2"]["schema"].as_str(),
-        Some(GAIKO2_PROOF_RESPONSE_SCHEMA)
+        Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
 }

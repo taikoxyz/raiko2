@@ -4,9 +4,9 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_prover::gaiko2::{
+use raiko2_prover::remote_prover::{
     adapter::build_shasta_packet,
-    protocol::{GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ReplayBlock},
+    protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
 };
 
 fn fixture_guest_input() -> GuestInput {
@@ -39,7 +39,7 @@ fn adapter_projects_guest_input_into_execution_packet() {
     let input = fixture_guest_input();
     let packet = build_shasta_packet(&input).expect("build packet");
 
-    assert_eq!(packet.schema, GAIKO2_SHASTA_REQUEST_SCHEMA);
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(packet.payload.blocks.len(), input.witnesses.len());
     assert_eq!(packet.payload.chain_id, input.proof_carry_data.chain_id);
     assert_eq!(
@@ -91,7 +91,7 @@ fn adapter_rejects_guest_input_without_witnesses() {
     let err = build_shasta_packet(&GuestInput::default()).expect_err("reject empty witness list");
     assert!(
         err.to_string()
-            .contains("cannot build gaiko2 shasta packet without witnesses")
+            .contains("cannot build remote prover shasta packet without witnesses")
     );
 }
 
@@ -101,7 +101,7 @@ fn replay_block_wraps_stateless_input_fields() {
     input.block.header.number = 9;
     input.chain_spec.chain_id = 1234;
 
-    let replay = Gaiko2ReplayBlock::from(input);
+    let replay = Raiko2ReplayBlock::from(input);
 
     assert_eq!(replay.block.header.number, 9);
     assert_eq!(replay.chain_spec.chain_id, 1234);

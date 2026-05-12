@@ -5,6 +5,7 @@ use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::NativeBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
+use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::{
     Prover,
@@ -38,7 +39,7 @@ fn fixture_aggregate_proof() -> Proof {
 
     Proof {
         proof: Some(format!("0x{}", "11".repeat(89))),
-        input: Some(B256::from([0x66; 32])),
+        input: Some(hash_shasta_subproof_input(&carry)),
         extra_data: Some(
             raiko2_primitives_shasta::encode_proof_carry_data(&carry).expect("encode carry data"),
         ),

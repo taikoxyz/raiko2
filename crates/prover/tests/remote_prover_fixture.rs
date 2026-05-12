@@ -5,6 +5,7 @@ use std::{fs, path::PathBuf, str::FromStr};
 use alloy_primitives::{Address, B256, Uint};
 use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::remote_prover::adapter::{build_shasta_aggregate_request, build_shasta_packet};
 
@@ -75,7 +76,7 @@ fn fixture_aggregate_proof() -> Proof {
 
     Proof {
         proof: Some(format!("0x{}", "11".repeat(89))),
-        input: Some(B256::from([0x66; 32])),
+        input: Some(hash_shasta_subproof_input(&carry)),
         extra_data: Some(
             raiko2_primitives_shasta::encode_proof_carry_data(&carry).expect("encode carry data"),
         ),

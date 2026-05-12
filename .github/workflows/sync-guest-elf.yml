@@ -44,7 +44,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          target_ref="$(printf '%s' "${TARGET_REF_INPUT}" | tr -d '[:space:]')"
+          # Trim only leading/trailing whitespace. We deliberately do NOT collapse
+          # interior whitespace: any interior whitespace makes this an invalid
+          # branch name, and the validation below must reject it loudly instead
+          # of silently mutating "feat ure" into "feature".
+          target_ref="${TARGET_REF_INPUT}"
+          target_ref="${target_ref#"${target_ref%%[![:space:]]*}"}"
+          target_ref="${target_ref%"${target_ref##*[![:space:]]}"}"
           if [ -z "${target_ref}" ]; then
             target_ref="${DISPATCH_REF}"
           fi
@@ -132,7 +138,9 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- crates/guests/elf
+          # -A stages additions, modifications, AND deletions inside the
+          # path - required so the commit reflects rebuilt-away ELFs too.
+          git add -A -- crates/guests/elf
           git commit -m "chore: sync guest elf outputs"
 
       - name: push synced guest elfs

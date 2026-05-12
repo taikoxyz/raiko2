@@ -62,7 +62,8 @@ LABEL org.opencontainers.image.revision=$VCS_REF
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl && \
+    curl \
+    python3 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -40,9 +40,10 @@ sp1-sdk.workspace = true
 dirs = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+secp256k1 = { workspace = true, optional = true }
 
 [features]
-tdx = ["dep:dirs", "dep:rand", "dep:anyhow"]
+tdx = ["dep:dirs", "dep:rand", "dep:anyhow", "dep:secp256k1"]
 
 [dev-dependencies]
 httpmock = "0.7"

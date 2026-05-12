@@ -10544,6 +10544,7 @@ dependencies = [
  "risc0-ethereum-contracts",
  "risc0-zkos-v1compat",
  "risc0-zkvm",
+ "secp256k1 0.30.0",
  "serde",
  "serde_json",
  "sp1-sdk",

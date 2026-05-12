@@ -456,6 +456,9 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+
+[prover.boundless.deployment]
+deployment_type = "base"
 ```
 
 Full deployment and offer parameter examples live in
@@ -471,6 +474,8 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
+  values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
   `aggregation_quoted_mcycles`, and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.

@@ -1478,10 +1478,12 @@ mod tests {
     fn sp1_aggregation_public_input_matches_contract_payload_program_id() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let block_pk = setup_sp1_pk(&client, elves.proposal.as_ref());
-        let aggregation_pk = setup_sp1_pk(&client, elves.aggregation.as_ref());
-        let block_vk = block_pk.verifying_key().clone();
-        let aggregation_vk = aggregation_pk.verifying_key().clone();
+        let block_vk = setup_sp1_pk(&client, elves.proposal.as_ref())
+            .verifying_key()
+            .clone();
+        let aggregation_vk = setup_sp1_pk(&client, elves.aggregation.as_ref())
+            .verifying_key()
+            .clone();
         let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&block_vk)).expect("image id");
         let proof_bytes = [0xaa, 0xbb, 0xcc];
 
@@ -1534,10 +1536,12 @@ mod tests {
     fn sp1_aggregation_payload_layout_matches_legacy_raiko() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let block_pk = setup_sp1_pk(&client, elves.proposal.as_ref());
-        let aggregation_pk = setup_sp1_pk(&client, elves.aggregation.as_ref());
-        let block_vk = block_pk.verifying_key().clone();
-        let aggregation_vk = aggregation_pk.verifying_key().clone();
+        let block_vk = setup_sp1_pk(&client, elves.proposal.as_ref())
+            .verifying_key()
+            .clone();
+        let aggregation_vk = setup_sp1_pk(&client, elves.aggregation.as_ref())
+            .verifying_key()
+            .clone();
         let proof_bytes = [0xaa, 0xbb, 0xcc];
 
         let payload = encode_sp1_onchain_payload(

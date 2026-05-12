@@ -1,0 +1,19 @@
+version: 2
+
+# All third-party GitHub Actions are SHA-pinned in `.github/workflows/`.
+# Dependabot keeps the pinned SHAs current and opens PRs when upstream
+# releases new versions, so we never have to choose between "secure" (pin
+# to SHA) and "up to date" (auto-bump tags).
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ci)
+      include: scope
+    labels:
+      - dependencies
+      - github-actions

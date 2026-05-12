@@ -29,9 +29,9 @@ The desired semantics are:
   - `guests/risc0/src/shasta_proposal.rs`
   - `guests/sp1/src/shasta_proposal.rs`
 - Shared proposal helper:
-  - `guests/common/src/lib.rs:prove_shasta_proposal_for_proof_type`
+  - `crates/guest-common/src/lib.rs:prove_shasta_proposal_for_proof_type`
 - Shared aggregation helper:
-  - `guests/common/src/lib.rs:aggregate_shasta_zk_with_verifier`
+  - `crates/guest-common/src/lib.rs:aggregate_shasta_zk_with_verifier`
 - Current native prover:
   - `crates/prover/src/native.rs`
 
@@ -84,21 +84,24 @@ This mirrors the zk aggregation structure:
 - The `native/local` route remains host-local and non-zk.
 - The native proof envelope shape remains compatible with the current Shasta SGX-format mock
   output.
-- Public HTTP API behavior does not change: `proof_type=native` is still not a public proof type.
+- Public HTTP API behavior changes only for the explicit `native/local` regression route:
+  `proof_type=native` is accepted there for internal/local regression. Normal zk routes still reject
+  native proofs, and external aggregation still validates native child proofs only for
+  `native/local`.
 
 ## Design Details
 
-### Extract a Shared Workspace Crate
+### Shared Workspace Crate
 
-The current `guests/common` crate is a nested workspace root, so `crates/prover` cannot depend on
-it directly as a path dependency. The clean fix is to move the shared logic into a normal workspace
-crate, then make both host and guest code depend on that crate.
+Previously, shared guest logic lived under `guests/common` as a nested workspace root, so
+`crates/prover` could not depend on it directly as a path dependency. The clean fix was to move the
+shared logic into a normal workspace crate, then make both host and guest code depend on that crate.
 
-Recommended shape:
+Current shape:
 
-- move `raiko2-guest-common` from `guests/common` to a workspace crate under `crates/`
-- let `guests/risc0` and `guests/sp1` depend on the new path
-- let `crates/prover` depend on the same crate
+- `raiko2-guest-common` lives at `crates/guest-common`
+- `guests/risc0` and `guests/sp1` depend on the workspace crate
+- `crates/prover` depends on the same crate
 
 This is preferable to:
 
@@ -150,4 +153,4 @@ The change is correct when:
   proof-carry data
 - `native/local` aggregation executes guest-common aggregation logic with a native verifier closure
 - proof output envelope format remains stable
-- focused native prover tests pass without changing public API semantics
+- focused native prover tests pass while keeping `proof_type=native` gated to `native/local`

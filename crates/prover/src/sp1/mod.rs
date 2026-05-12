@@ -1199,7 +1199,7 @@ async fn request_network_proof(
             Sp1NetworkWaitOutcome::Fulfilled(proof) => {
                 return Ok(NetworkProofRequestResult {
                     request_id: request_id_string,
-                    proof,
+                    proof: *proof,
                 });
             }
             Sp1NetworkWaitOutcome::RetryRequest(reason) => {
@@ -1218,7 +1218,7 @@ async fn request_network_proof(
 }
 
 enum Sp1NetworkWaitOutcome {
-    Fulfilled(SP1ProofWithPublicValues),
+    Fulfilled(Box<SP1ProofWithPublicValues>),
     RetryRequest(String),
 }
 
@@ -1246,7 +1246,7 @@ async fn wait_sp1_network_proof(
                     elapsed_ms = wait_started.elapsed().as_millis(),
                     "SP1 network proof received"
                 );
-                return Ok(Sp1NetworkWaitOutcome::Fulfilled(proof));
+                return Ok(Sp1NetworkWaitOutcome::Fulfilled(Box::new(proof)));
             }
             Err(error) => {
                 if let Some(network_error) = error.downcast_ref::<Sp1NetworkError>() {

@@ -52,7 +52,7 @@ where
         let input: GuestInput = bincode::deserialize(input.as_ref())
             .map_err(|e| RaikoError::Guest(format!("Failed to deserialize input: {e}")))?;
         if input.witnesses.is_empty() {
-            return Err(RaikoError::Guest(
+            return Err(RaikoError::InvalidRequestConfig(
                 "GuestInput must contain at least one witness".to_string(),
             ));
         }
@@ -60,8 +60,10 @@ where
         let proof_carry_data = input.proof_carry_data.clone();
 
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
-        let input_hash = prove_shasta_proposal_for_proof_type(&input, ProofType::Native)
-            .map_err(|e| RaikoError::Guest(format!("Native proposal execute failed: {e}")))?;
+        let input_hash =
+            prove_shasta_proposal_for_proof_type(&input, ProofType::Native).map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
+            })?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
         let proof =
@@ -108,7 +110,9 @@ where
                     .map_err(|err| anyhow::anyhow!(err.to_string()))
             },
         )
-        .map_err(|e| RaikoError::Guest(format!("Native aggregation execute failed: {e}")))?;
+        .map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Invalid native aggregation input: {e}"))
+        })?;
 
         let sgx_instance = signer_address();
         let signature = mock_signature(aggregation_hash);
@@ -197,8 +201,7 @@ fn decode_native_proof_bytes(proof_hex: &str) -> RaikoResult<[u8; SHASTA_SGX_PRO
     let len = bytes.len();
     bytes.try_into().map_err(|_| {
         RaikoError::InvalidRequestConfig(format!(
-            "native proof has invalid length: expected {SHASTA_SGX_PROOF_LEN} bytes, got {}",
-            len
+            "native proof has invalid length: expected {SHASTA_SGX_PROOF_LEN} bytes, got {len}"
         ))
     })
 }
@@ -221,14 +224,14 @@ mod tests {
     };
     use raiko2_pipeline::NativeBackend;
     use raiko2_primitives::{
-        AggregationGuestInput, Proof, ProofType, ProverConfig, SupportedChainSpecs,
+        AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, SupportedChainSpecs,
     };
     use raiko2_primitives_shasta::{
         GuestInput, build_proof_carry_data, encode_proof_carry_data, instance::words_to_bytes_be,
     };
     use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
-    use std::str::FromStr;
+    use std::{fs, path::Path, str::FromStr};
 
     const EXPECTED_ADDR: &str = "0x0000777735367b36bC9B61C50022d9D0700dB4Ec";
     const EXPECTED_INSTANCE_ID: u32 = super::SHASTA_NATIVE_MOCK_INSTANCE_ID;
@@ -238,11 +241,12 @@ mod tests {
     }
 
     fn fixture_guest_input() -> GuestInput {
-        let raw = include_str!(
-            "../../../test/guest_inputs/shasta/taiko_hoodi/proposals/proposal_17460.json"
-        );
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test/guest_inputs/shasta/taiko_hoodi/proposals/proposal_17460.json");
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read fixture {}: {err}", path.display()));
         let mut guest_input: GuestInput =
-            serde_json::from_str(raw).expect("parse fixture GuestInput");
+            serde_json::from_str(&raw).expect("parse fixture GuestInput");
         if guest_input.taiko.l1_ancestor_headers.is_empty()
             && guest_input.taiko.l1_header.number != 0
         {
@@ -318,6 +322,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_proposal_rejects_invalid_input_as_request_error() {
+        let prover = NativeProver;
+        let config = ProverConfig::default();
+        let mut input = fixture_guest_input();
+        input.witnesses.clear();
+
+        let err = prover
+            .prove(input, &config, &NativeBackend)
+            .await
+            .expect_err("invalid native input should fail");
+
+        assert!(matches!(
+            err,
+            RaikoError::InvalidRequestConfig(message)
+                if message.contains("at least one witness")
+        ));
+    }
+
+    #[tokio::test]
     async fn native_aggregation_proof_signs_pcd_hash() {
         let prover = NativeProver;
 
@@ -371,6 +394,35 @@ mod tests {
 
         let sig: [u8; 65] = bytes[24..].try_into().expect("sig bytes");
         assert_eq!(sig, super::mock_signature(expected_hash));
+    }
+
+    #[tokio::test]
+    async fn native_aggregation_rejects_invalid_child_proof_as_request_error() {
+        let prover = NativeProver;
+        let proof_carry = ProofCarryData {
+            chain_id: 1,
+            ..ProofCarryData::default()
+        };
+        let child_input = hash_shasta_subproof_input(&proof_carry);
+        let mut proof = native_proof_with_input(child_input);
+        proof.proof = Some("0x00".to_string());
+
+        let err = prover
+            .aggregate(
+                AggregationGuestInput {
+                    proofs: vec![proof],
+                },
+                &serde_json::json!({}),
+                &NativeBackend,
+            )
+            .await
+            .expect_err("invalid child proof should fail");
+
+        assert!(matches!(
+            err,
+            RaikoError::InvalidRequestConfig(message)
+                if message.contains("Invalid native aggregation input")
+        ));
     }
 
     #[test]

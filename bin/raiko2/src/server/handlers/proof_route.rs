@@ -17,7 +17,7 @@ pub(super) struct CanonicalProofRoute {
 }
 
 impl CanonicalProofRoute {
-    pub(super) fn new(
+    pub(super) const fn new(
         route: PipelineRoute,
         pipeline_key: PipelineKey,
         proof_type: ProofType,

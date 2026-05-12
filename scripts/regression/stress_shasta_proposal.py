@@ -20,7 +20,9 @@ import sys
 import os
 from shasta_event_decoder import ShastaEventDecoder
 
-MAX_BLOCKS_PER_PROPOSAL = 192
+# UNZEN-era proposal spans can grow far beyond the old 192-block SHASTA limit.
+# Keep the regression harness aligned with the widest supported proposal window.
+MAX_BLOCKS_PER_PROPOSAL = 768
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_CHAIN_SPEC_LIST = REPO_ROOT / "config" / "chain_spec_list_default.json"
@@ -691,8 +693,8 @@ class BatchMonitor:
     ) -> int:
         """
         Find the end of the current proposal within a bounded window.
-        The protocol caps a proposal to 192 blocks, so we only need to search
-        [start_block, start_block + 191] and verify the next block boundary.
+        Search within the widest supported proposal window and verify the next
+        block boundary before falling back to a forward scan.
         """
         window_end = min(search_end, start_block + MAX_BLOCKS_PER_PROPOSAL - 1)
         window_end_info = await self.get_anchor_info(window_end)
@@ -776,7 +778,6 @@ class BatchMonitor:
             )
             self.proposal_block_cache[proposal_id] = None
             return None
-
         search_start, search_end = search_range
         self.logger.info(
             f"Searching L1 blocks {search_start} to {search_end} for proposal_id {proposal_id} (not in cache)"
@@ -785,7 +786,7 @@ class BatchMonitor:
         try:
             # Get events in the range
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=search_start, to_block=search_end
+                fromBlock=search_start, toBlock=search_end
             )
 
             for log in logs:
@@ -828,8 +829,8 @@ class BatchMonitor:
 
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=0,
-                to_block="latest",
+                fromBlock=0,
+                toBlock="latest",
                 argument_filters={"id": proposal_id},
             )
         except Exception as e:
@@ -901,7 +902,7 @@ class BatchMonitor:
         
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=search_start, to_block=search_end
+                fromBlock=search_start, toBlock=search_end
             )
             
             # Build a map of proposal_id -> block_number from all logs
@@ -951,7 +952,6 @@ class BatchMonitor:
     def get_latest_l2_block_number(self) -> int:
         """Get the latest L2 block number."""
         return int(self.l2_w3.eth.block_number)
-
     def _clamp_l1_search_range(
         self, search_start: int, search_end: int
     ) -> Optional[Tuple[int, int]]:
@@ -989,7 +989,7 @@ class BatchMonitor:
     def get_batch_events_in_block(self, block_number) -> list[int]:
         try:
             logs = self.evt_contract.events.Proposed.get_logs(
-                from_block=block_number, to_block=block_number
+                fromBlock=block_number, toBlock=block_number
             )
 
             batch_ids = []
@@ -1136,7 +1136,7 @@ class BatchMonitor:
     async def get_latest_block_batchs(self) -> Optional[tuple[int, list[int]]]:
         """get latest block number"""
         logs = self.evt_contract.events.Proposed().get_logs(
-            from_block="latest", to_block="latest"
+            fromBlock="latest", toBlock="latest"
         )
         if len(logs) == 0:
             return None
@@ -1162,28 +1162,21 @@ class BatchMonitor:
         aggregate: bool = False
     ) -> Dict[str, Any]:
         """generate post data"""
-        return {
+        payload = {
             "proposals": proposals,
             "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
             "proof_type": self.prove_type,
             "blob_proof_type": "proof_of_equivalence",
             "aggregate": aggregate,
-            "native": {},
-            "sgx": {
-                "instance_id": 1234,
-                "setup": False,
-                "bootstrap": False,
-                "prove": True,
-            },
-            "risc0": {
-                "bonsai": False,
-                "snark": True,
-                "profile": True,
-                "execution_po2": 20,
-            },
-            "sp1": {"recursion": "plonk", "prover": "network", "verify": True},
         }
+        if self.prove_type == "sp1":
+            payload["sp1"] = {
+                "recursion": "plonk",
+                "prover": "network",
+                "verify": True,
+            }
+        return payload
 
     async def submit_to_raiko(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int

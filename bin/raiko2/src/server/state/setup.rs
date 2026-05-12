@@ -134,6 +134,16 @@ pub(crate) fn boundless_prover_config(
     }
 }
 
+pub(crate) fn remote_sgx_prover_config(
+    base_url: String,
+    timeout_ms: u64,
+) -> raiko2_prover::gaiko2::Gaiko2Config {
+    raiko2_prover::gaiko2::Gaiko2Config {
+        base_url,
+        timeout_ms,
+    }
+}
+
 #[cfg(feature = "redis-queue")]
 use raiko2_pipeline::PipelineKey;
 

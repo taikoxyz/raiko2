@@ -1,3 +1,4 @@
+#![cfg(feature = "boundless")]
 #![allow(missing_docs)]
 
 use alloy_primitives::{Address, B256, Uint, address, b256};

@@ -15,7 +15,7 @@ pub(super) enum BatchProofType {
     #[serde(rename = "boundless", alias = "BOUNDLESS")]
     Boundless,
     Sgx,
-    #[serde(rename = "sgxgeth", alias = "SGXGETH")]
+    #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
     SgxGeth,
     ZkAny,
 }
@@ -34,11 +34,14 @@ impl BatchProofType {
     }
 
     pub(super) const fn is_public_batch_request_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::ZkAny)
+        matches!(
+            self,
+            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
+        )
     }
 
     pub(super) const fn is_concrete_public_proof_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0)
+        matches!(self, Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth)
     }
 }
 
@@ -288,4 +291,28 @@ pub(super) struct RootTaskState {
     pub(super) proof: Option<String>,
     pub(super) error: Option<String>,
     pub(super) current_index: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BatchProofType, BatchShastaRequest};
+
+    #[test]
+    fn shasta_batch_request_accepts_sgxgeth_json_variant() {
+        let req: BatchShastaRequest = serde_json::from_value(serde_json::json!({
+            "proposals": [{
+                "proposal_id": 1,
+                "l1_inclusion_block_number": 2,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 1
+            }],
+            "aggregate": false,
+            "proof_type": "sgxgeth",
+            "network": "taiko_mainnet",
+            "l1_network": "ethereum"
+        }))
+        .expect("deserialize request");
+
+        assert!(matches!(req.proof_type, BatchProofType::SgxGeth));
+    }
 }

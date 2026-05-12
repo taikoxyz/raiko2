@@ -89,7 +89,8 @@ Content-Type: application/json
 ```
 
 Registers a Shasta batch root task. The server expands it into proposal prove tasks and, when
-`aggregate=true`, an aggregation task.
+`aggregate=true`, an aggregation task. For remote SGX lanes, configure `[prover.remote_sgx]`:
+`base_url` backs `proof_type=sgx`, while `sgxgeth_base_url` backs `proof_type=sgxgeth`.
 
 ### Request
 
@@ -143,16 +144,16 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
+  - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
+  - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
   - `native -> unsupported legacy error response`
-  - `sgx -> unsupported legacy error response`
-  - `sgxgeth -> unsupported legacy error response`
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the
   canonical route, task key, and proof artifact key.
-- `aggregate=true` requires a concrete `proof_type` such as `sp1` or `risc0`. Aggregate requests
-  may reuse existing proposal proof artifacts for that concrete proof type.
+- `aggregate=true` requires a concrete `proof_type` such as `sp1`, `risc0`, `sgx`, or `sgxgeth`.
+  Aggregate requests may reuse existing proposal proof artifacts for that concrete proof type.
 - Boundless is the current network provider for `proof_type=risc0`; the canonical HTTP task
   field is `prover_type = "network"`.
 - Hosted `proof_type=sp1` batch proposal proving always emits Compressed proofs.
@@ -294,7 +295,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
-- `proof_type` must be a concrete proof type: `risc0` or `sp1`.
+- `proof_type` must be a concrete proof type: `risc0`, `sp1`, `sgx`, or `sgxgeth`.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.
@@ -306,6 +307,12 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `sp1.mode=prove` requires `sp1.verify=true` on the hosted API.
 - `sp1.prover=network` with `sp1.verify=true` requires pair-level SP1 verifier config on the
   selected `(network, l1_network)`.
+- Required metadata depends on the selected route:
+  - `native`: `input` + `extra_data`
+  - `sgx` / `sgxgeth`: `input` + `extra_data`
+  - `sp1`: `proof` + `input` + `uuid` + `extra_data`
+  - `risc0/local`: `input` + `uuid` + `quote` + `extra_data`
+  - `risc0/network`: `quote`
 
 ### Response
 

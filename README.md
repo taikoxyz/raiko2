@@ -15,6 +15,7 @@ Hoodi-compatible v3 API.
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
+- Optional SGX route: `sgx/remote` for a configured Gaiko2 remote prover
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
@@ -68,8 +69,8 @@ flowchart LR
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
-- Public proof types are `risc0`, `sp1`, and admission-time `zk_any` for batch proposal sampling.
-  `native` is a host-local pipeline route, not an accepted public proof type.
+- Public proof types are `risc0`, `sp1`, `sgx`, `sgxgeth`, and admission-time `zk_any` for batch
+  proposal sampling. `native` is a host-local pipeline route, not an accepted public proof type.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
@@ -85,6 +86,12 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
+- `sgx/remote` submits Shasta proving to the dedicated remote SGX runtime. This repo now ships
+  `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode
+  without changing the remote API. `proof_type=sgxgeth` is served by an external `gaiko2`
+  service over the same remote protocol.
+- `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
+  add a dockerized `raiko2` for regression work.
 
 ## Repository Map
 

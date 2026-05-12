@@ -10543,6 +10543,7 @@ dependencies = [
  "risc0-zkvm",
  "serde",
  "serde_json",
+ "serde_with",
  "sp1-sdk",
  "tokio",
  "tracing",
@@ -10615,6 +10616,39 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "tracing",
+]
+
+[[package]]
+name = "raiko2-sgx-prover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "raiko2-sgx-runtime",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "raiko2-sgx-runtime"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "axum 0.8.9",
+ "clap",
+ "getrandom 0.3.4",
+ "hex",
+ "raiko2-primitives",
+ "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
+ "raiko2-prover",
+ "reth-ethereum-primitives 2.0.0",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
 ]
 
 [[package]]

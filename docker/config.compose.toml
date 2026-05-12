@@ -3,10 +3,9 @@ host = "0.0.0.0"
 port = 8080
 
 [rpc]
-l1_rpc = "http://host.docker.internal:8545"
-l2_rpc = "http://host.docker.internal:9545"
-l1_chain_id = 1
-l2_chain_id = 167000
+pairs = [
+  { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://host.docker.internal:8545", l2_rpc = "http://host.docker.internal:9545" },
+]
 
 [rpc.client]
 timeout_ms = 10000
@@ -17,16 +16,65 @@ max_attempts = 3
 initial_backoff_ms = 500
 compute_units_per_second = 1000
 
+[runtime]
+root = "./data/runtime"
+
 [prover]
-prover_type = "risc0"
+guest_system = "sgx"
+runner = "remote"
 
 [prover.risc0]
 bonsai = true
 snark = true
+mock = false
+execution_po2 = 20
 
 [prover.sp1]
-network = true
-plonk = true
+mode = "prove"
+prover = "local"
+recursion = "plonk"
+verify = true
+network_mode = "reserved"
+fulfillment_strategy = "reserved"
+skip_simulation = true
+cycle_limit = 1000000000000
+timeout_secs = 7200
+
+[prover.boundless]
+offchain = false
+rpc_url = "https://base-rpc.publicnode.com"
+signer_key = "0xYOUR_PRIVATE_KEY"
+poll_interval_ms = 10000
+timeout_ms = 3600000
+
+[prover.boundless.deployment]
+deployment_type = "base"
+
+[prover.boundless.deployment.overrides]
+order_stream_url = "https://base-mainnet.boundless.network"
+
+[prover.boundless.offer_params.batch]
+ramp_up_start_sec = 20
+ramp_up_period_blocks = 60
+lock_timeout_ms_per_mcycle = 200
+timeout_ms_per_mcycle = 410
+max_price_per_mcycle = "0.000000085"
+min_price_per_mcycle = "0.000000010"
+lock_collateral = "20"
+
+[prover.boundless.offer_params.aggregation]
+ramp_up_start_sec = 20
+ramp_up_period_blocks = 60
+lock_timeout_ms_per_mcycle = 3000
+timeout_ms_per_mcycle = 6000
+max_price_per_mcycle = "0.00000006"
+min_price_per_mcycle = "0.000000006"
+lock_collateral = "20"
+
+[prover.remote_sgx]
+base_url = "http://raiko2-sgx:8080"
+sgxgeth_base_url = "http://gaiko2-sgxgeth:8080"
+timeout_ms = 300000
 
 [queue]
 backend = "memory"

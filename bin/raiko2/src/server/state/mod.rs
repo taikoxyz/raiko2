@@ -19,9 +19,11 @@ use raiko2_pipeline::{
     forks::shasta::{ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
-use raiko2_prover::boundless::BoundlessProver;
 use raiko2_prover::validate_external_aggregate_proofs;
-use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
+use raiko2_prover::{
+    boundless::BoundlessProver, gaiko2::Gaiko2Prover, native::NativeProver, risc0::Risc0Prover,
+    sp1::Sp1Prover,
+};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -42,6 +44,7 @@ type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
+type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
@@ -145,6 +148,46 @@ impl AppState {
                 PipelineKey::ShastaNative,
                 Arc::new(native_engine),
             );
+
+            if !config.prover.remote_sgx.base_url.trim().is_empty() {
+                let remote_sgx_engine = build_remote_sgx_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    PipelineKey::ShastaSgx,
+                    ProofType::Sgx,
+                    config.prover.remote_sgx.base_url.clone(),
+                )
+                .await?;
+                remote_sgx_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(
+                    pair.key.clone(),
+                    PipelineKey::ShastaSgx,
+                    Arc::new(remote_sgx_engine),
+                );
+            }
+
+            if !config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty() {
+                let remote_sgx_engine = build_remote_sgx_engine(
+                    &config,
+                    pair,
+                    scheduler_config.clone(),
+                    Arc::clone(&runtime_observer),
+                    PipelineKey::ShastaSgxGeth,
+                    ProofType::SgxGeth,
+                    config.prover.remote_sgx.sgxgeth_base_url.clone(),
+                )
+                .await?;
+                remote_sgx_engine
+                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                factory.insert(
+                    pair.key.clone(),
+                    PipelineKey::ShastaSgxGeth,
+                    Arc::new(remote_sgx_engine),
+                );
+            }
         }
 
         let config = Arc::new(config);
@@ -607,6 +650,80 @@ async fn build_boundless_engine(
                     PipelineKey::ShastaRisc0Network,
                     BoundlessProver::new(agent_config),
                     backend,
+                    provider,
+                );
+                Engine::with_store_scheduler_config_and_observer(
+                    spec,
+                    context,
+                    store,
+                    scheduler_config,
+                    Some(observer),
+                )
+            }
+
+            #[cfg(not(feature = "redis-queue"))]
+            {
+                anyhow::bail!(
+                    "queue backend redis requires building raiko2 with `--features redis-queue`"
+                );
+            }
+        }
+    };
+
+    Ok(engine)
+}
+
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
+async fn build_remote_sgx_engine(
+    config: &Config,
+    pair: &ResolvedNetworkPair,
+    scheduler_config: SchedulerConfig,
+    observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
+    proof_type: ProofType,
+    base_url: String,
+) -> Result<Engine<Gaiko2Spec>> {
+    let gaiko2_config =
+        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
+
+    let engine = match config.queue.backend {
+        QueueBackend::Memory => {
+            let provider = setup::build_provider(config, pair)?;
+            let context = setup::build_context(config, pair, proof_type)?;
+            let spec = ShastaSpec::new(
+                pipeline_key,
+                Gaiko2Prover::new(&gaiko2_config)?,
+                NativeBackend,
+                provider,
+            );
+            Engine::with_store_scheduler_config_and_observer(
+                spec,
+                context,
+                MemoryStore::with_lease(scheduler_config.lease_duration),
+                scheduler_config,
+                Some(Arc::clone(&observer)),
+            )
+        }
+        QueueBackend::Redis => {
+            #[cfg(feature = "redis-queue")]
+            {
+                type Gaiko2Output =
+                    EngineOutput<<Gaiko2Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
+                let provider = setup::build_provider(config, pair)?;
+                let context = setup::build_context(config, pair, proof_type)?;
+                let url = config.queue.redis_url.clone().unwrap_or_default();
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
+                let store =
+                    raiko2_queue::RedisStore::<EngineTask, Gaiko2Output, EngineTaskKey>::connect(
+                        &url,
+                        &namespace,
+                        scheduler_config.lease_duration,
+                    )
+                    .await?;
+                let spec = ShastaSpec::new(
+                    pipeline_key,
+                    Gaiko2Prover::new(&gaiko2_config)?,
+                    NativeBackend,
                     provider,
                 );
                 Engine::with_store_scheduler_config_and_observer(

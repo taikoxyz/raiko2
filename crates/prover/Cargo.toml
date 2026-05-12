@@ -27,15 +27,23 @@ url.workspace = true
 alloy.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
+alloy-consensus.workspace = true
+reth-ethereum-primitives.workspace = true
+serde_with.workspace = true
 
-# RISC0 dependencies
-risc0-zkvm.workspace = true
-risc0-ethereum-contracts-boundless.workspace = true
-boundless-market.workspace = true
+# RISC0 dependencies (optional)
+risc0-zkvm = { workspace = true, optional = true }
+risc0-ethereum-contracts-boundless = { workspace = true, optional = true }
+boundless-market = { workspace = true, optional = true }
 
-# SP1 dependencies
-sp1-sdk.workspace = true
+# SP1 dependencies (optional)
+sp1-sdk = { workspace = true, optional = true }
 
+[features]
+default = ["risc0", "sp1", "boundless"]
+risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts-boundless"]
+sp1 = ["dep:sp1-sdk"]
+boundless = ["risc0", "dep:boundless-market"]
 [dev-dependencies]
 httpmock = "0.7"
 alloy-sol-types.workspace = true

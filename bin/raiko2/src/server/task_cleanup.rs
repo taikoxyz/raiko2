@@ -749,6 +749,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
+                pipeline_key: None,
                 route: "risc0/local".parse().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(1),

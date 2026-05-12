@@ -117,8 +117,8 @@ impl ShastaManifestBuilder {
             })?;
 
         Ok(match ctx.request.proof_type {
-            ProofType::Native => hint.unwrap_or_default(),
-            ProofType::Sgx | ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
+            ProofType::Native | ProofType::Sgx | ProofType::SgxGeth => hint.unwrap_or_default(),
+            ProofType::Sp1 | ProofType::Risc0 => BlobProofType::ProofOfEquivalence,
         })
     }
 

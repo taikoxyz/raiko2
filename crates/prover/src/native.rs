@@ -64,7 +64,7 @@ where
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
         let input_hash = hash_shasta_subproof_input(&proof_carry_data);
         let signature = mock_signature(input_hash);
-        let sgx_instance = signer_address()?;
+        let sgx_instance = signer_address();
         let proof =
             build_shasta_proof_bytes(SHASTA_NATIVE_MOCK_INSTANCE_ID, sgx_instance, signature);
 
@@ -123,7 +123,7 @@ where
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig("Missing proof_carry_data_vec".to_string())
             })?;
-        let sgx_instance = signer_address()?;
+        let sgx_instance = signer_address();
         let aggregation_hash =
             shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
         let signature = mock_signature(aggregation_hash);
@@ -158,8 +158,8 @@ fn mock_signature(hash: B256) -> [u8; 65] {
     sig_bytes
 }
 
-fn signer_address() -> RaikoResult<Address> {
-    Ok(SHASTA_NATIVE_MOCK_INSTANCE)
+const fn signer_address() -> Address {
+    SHASTA_NATIVE_MOCK_INSTANCE
 }
 
 fn build_shasta_proof_bytes(instance_id: u32, instance: Address, sig: [u8; 65]) -> Vec<u8> {
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn native_signer_address_matches_mock_instance_address() {
-        let address = super::signer_address().expect("signer address");
+        let address = super::signer_address();
         let expected = Address::from_str(EXPECTED_ADDR).expect("expected address");
         assert_eq!(address, expected);
     }

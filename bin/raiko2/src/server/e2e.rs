@@ -28,8 +28,9 @@ use super::app;
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
-    app_with_risc0_fixture_engine, base_config, risc0_fixture_engine, sp1_fixture_engine,
-    spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine, unique_runtime_root,
+    app_with_risc0_fixture_engine, base_config, native_fixture_engine, risc0_fixture_engine,
+    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine,
+    unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
@@ -266,6 +267,19 @@ fn risc0_boundless_external_proof() -> Value {
         "quote": "0xfixture-boundless-receipt",
         "extra_data": extra_data
     })
+}
+
+fn fixture_external_aggregate_proof() -> Proof {
+    Proof {
+        proof: Some(format!("0x{}", "11".repeat(89))),
+        input: Some(alloy_primitives::B256::ZERO),
+        extra_data: Some(json!({
+            "shasta": {
+                "proof_carry_data": {}
+            }
+        })),
+        ..Proof::default()
+    }
 }
 
 async fn drive_engine_to_idle<S>(engine: &Engine<S>)
@@ -1107,6 +1121,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_orphan_registered".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
@@ -2587,6 +2602,75 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
 }
 
 #[tokio::test]
+async fn e2e_sgx_batch_accepts_aggregate_requests() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/batch/shasta",
+        json!({
+            "proposals": [
+                {
+                    "proposal_id": 3,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [3],
+                    "last_anchor_block_number": 0
+                },
+                {
+                    "proposal_id": 4,
+                    "l1_inclusion_block_number": 1,
+                    "l2_block_numbers": [4],
+                    "last_anchor_block_number": 0
+                }
+            ],
+            "aggregate": true,
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(
+        res["data"]["task_id"].as_str().is_some(),
+        "missing task id: {res}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sgx_accepts_aggregate_proof_requests() {
+    let config = base_config();
+    let engine = native_fixture_engine();
+    let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
+    let app = app::build_router(state);
+
+    let (status, res) = post_json(
+        &app,
+        "/v3/proof/aggregate",
+        json!({
+            "proofs": [
+                fixture_external_aggregate_proof(),
+                fixture_external_aggregate_proof()
+            ],
+            "proof_type": "sgx",
+            "network": "taiko_dev",
+            "l1_network": "ethereum"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(
+        res["data"]["task_id"].as_str().is_some(),
+        "missing task id: {res}"
+    );
+}
+
+#[tokio::test]
 async fn e2e_sp1_network_settings_require_network_prover() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
@@ -2817,6 +2901,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_runtime_fallback".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),
@@ -2947,6 +3032,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         .runtime
         .register_task(TaskRegistration {
             task_id: "task_persisted_proof".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "hoodi_batch".to_string(),
             proposal_id: Some(3),

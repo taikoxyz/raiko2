@@ -51,7 +51,7 @@ inactive_ttl_secs = 7200
 # Supported routes:
 # Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
 # Routes supported by server config:
-#   risc0/local | risc0/network | sp1/local | sp1/network | native/local
+#   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
 guest_system = "risc0"
 runner = "local"
 
@@ -100,6 +100,14 @@ timeout_ms = 3600000
 # [prover.zk_any.risc0]
 # probability = 0.05
 # per_day = 8
+
+[prover.remote_sgx]
+# For `proof_type=sgx`, point this at the dedicated SGX runtime (`raiko2-sgx-prover`). That
+# runtime may run in `tee` or `native` mode.
+base_url = "http://127.0.0.1:8081"
+# For `proof_type=sgxgeth`, point this at the external geth-backed remote SGX server.
+sgxgeth_base_url = "http://127.0.0.1:8090"
+timeout_ms = 300000
 
 [prover.boundless.deployment]
 deployment_type = "base"

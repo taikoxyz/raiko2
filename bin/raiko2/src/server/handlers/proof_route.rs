@@ -1,6 +1,6 @@
 use alloy_primitives::keccak256;
 use raiko2_engine::ProverTaskConfig;
-use raiko2_pipeline::{PipelineRoute, RunnerKind};
+use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::sp1::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 
@@ -12,22 +12,29 @@ use crate::server::state::AppState;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CanonicalProofRoute {
     pub(super) route: PipelineRoute,
+    pipeline_key: PipelineKey,
+    proof_type: ProofType,
 }
 
 impl CanonicalProofRoute {
-    fn new(route: PipelineRoute) -> Result<Self, ApiError> {
-        route.pipeline_key().map_err(ApiError::bad_request)?;
-        Ok(Self { route })
+    pub(super) fn new(
+        route: PipelineRoute,
+        pipeline_key: PipelineKey,
+        proof_type: ProofType,
+    ) -> Self {
+        Self {
+            route,
+            pipeline_key,
+            proof_type,
+        }
     }
 
-    pub(super) fn pipeline_key(self) -> raiko2_pipeline::PipelineKey {
-        self.route
-            .pipeline_key()
-            .expect("canonical proof route should always be supported")
+    pub(super) const fn pipeline_key(self) -> PipelineKey {
+        self.pipeline_key
     }
 
     pub(super) const fn proof_type(self) -> ProofType {
-        self.route.proof_type()
+        self.proof_type
     }
 }
 
@@ -57,10 +64,10 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Native
-        | BatchProofType::Boundless
-        | BatchProofType::Sgx
-        | BatchProofType::SgxGeth => {
+        BatchProofType::Sgx | BatchProofType::SgxGeth => {
+            PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
+        }
+        BatchProofType::Native | BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
                 proof_type.as_str()
@@ -73,7 +80,40 @@ pub(super) fn route_for_proof_type(
         }
     };
 
-    CanonicalProofRoute::new(route)
+    let pipeline_key = match proof_type {
+        BatchProofType::Sp1 => PipelineKey::ShastaSp1,
+        BatchProofType::Risc0 => match route {
+            PipelineRoute {
+                guest_system: GuestSystem::Risc0,
+                runner: RunnerKind::Local,
+            } => PipelineKey::ShastaRisc0,
+            PipelineRoute {
+                guest_system: GuestSystem::Risc0,
+                runner: RunnerKind::Network,
+            } => PipelineKey::ShastaRisc0Network,
+            _ => return Err(ApiError::bad_request("unsupported risc0 proving route")),
+        },
+        BatchProofType::Sgx => PipelineKey::ShastaSgx,
+        BatchProofType::SgxGeth => PipelineKey::ShastaSgxGeth,
+        BatchProofType::Native | BatchProofType::Boundless | BatchProofType::ZkAny => {
+            unreachable!("unsupported proof type is filtered before canonical route build")
+        }
+    };
+    let canonical_proof_type = match proof_type {
+        BatchProofType::Sp1 => ProofType::Sp1,
+        BatchProofType::Risc0 => ProofType::Risc0,
+        BatchProofType::Sgx => ProofType::Sgx,
+        BatchProofType::SgxGeth => ProofType::SgxGeth,
+        BatchProofType::Native | BatchProofType::Boundless | BatchProofType::ZkAny => {
+            unreachable!("unsupported proof type is filtered before canonical route build")
+        }
+    };
+
+    Ok(CanonicalProofRoute::new(
+        route,
+        pipeline_key,
+        canonical_proof_type,
+    ))
 }
 
 fn sp1_runner_for_request(
@@ -146,6 +186,7 @@ impl BatchProofType {
             ProofType::Native => Self::Native,
             ProofType::Sp1 => Self::Sp1,
             ProofType::Sgx => Self::Sgx,
+            ProofType::SgxGeth => Self::SgxGeth,
             ProofType::Risc0 => Self::Risc0,
         }
     }
@@ -153,8 +194,35 @@ impl BatchProofType {
 
 #[cfg(test)]
 mod tests {
-    use super::default_risc0_runner_for_route;
-    use crate::config::{GuestSystem, PipelineRoute, RunnerKind};
+    use super::{BatchProofType, default_risc0_runner_for_route, route_for_proof_type};
+    use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
+    use crate::server::sampling::ZkAnySampler;
+    use crate::server::state::{AppState, StaticPipelineFactory};
+    use raiko2_engine::ProverTaskConfig;
+    use raiko2_pipeline::PipelineKey;
+    use raiko2_prover::sp1::Sp1RequestContext;
+    use raiko2_runtime::RuntimeManager;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_state() -> AppState {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let config = Arc::new(Config::default());
+        AppState {
+            pipelines: Arc::new(StaticPipelineFactory::default()),
+            runtime: Arc::new(
+                RuntimeManager::new(
+                    std::env::temp_dir().join(format!("raiko2-proof-route-tests-{nanos}")),
+                )
+                .expect("runtime manager"),
+            ),
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config,
+        }
+    }
 
     #[test]
     fn default_risc0_runner_keeps_local_routes_local() {
@@ -175,6 +243,25 @@ mod tests {
                 RunnerKind::Network,
             )),
             RunnerKind::Network
+        );
+    }
+
+    #[test]
+    fn route_for_proof_type_selects_sgxgeth_remote_pipeline() {
+        let state = test_state();
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::SgxGeth,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .unwrap();
+
+        assert_eq!(selection.route.to_string(), "sgx/remote");
+        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaSgxGeth);
+        assert_eq!(
+            selection.proof_type(),
+            raiko2_primitives::ProofType::SgxGeth
         );
     }
 }

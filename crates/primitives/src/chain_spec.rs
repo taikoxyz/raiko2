@@ -339,6 +339,7 @@ fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
         "NATIVE" | "Native" => Ok(ProofType::Native),
         "SP1" | "Sp1" => Ok(ProofType::Sp1),
         "SGX" | "Sgx" => Ok(ProofType::Sgx),
+        "SGXGETH" | "SgxGeth" => Ok(ProofType::SgxGeth),
         "RISC0" | "Risc0" => Ok(ProofType::Risc0),
         _ => Err(format!("unknown ProofType variant: {value}")),
     }
@@ -366,15 +367,9 @@ where
     for (key, inner_map) in string_map {
         let spec_id = ForkId::from_str(&key).map_err(serde::de::Error::custom)?;
 
-        // Convert inner map: skip SGXGETH, convert other keys to ProofType
+        // Convert inner map string proof types to the canonical enum.
         let mut proof_type_map = BTreeMap::new();
         for (proof_key, address) in inner_map {
-            // Skip SGXGETH
-            if proof_key == "SGXGETH" {
-                continue;
-            }
-
-            // Convert proof type string to ProofType enum
             let proof_type = parse_proof_type_str(&proof_key).map_err(serde::de::Error::custom)?;
             proof_type_map.insert(proof_type, address);
         }
@@ -734,6 +729,10 @@ mod tests {
         );
         assert_eq!(
             spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::Risc0)?,
+            address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::SgxGeth)?,
             address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
         );
         Ok(())

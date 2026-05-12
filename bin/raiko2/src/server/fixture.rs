@@ -72,10 +72,12 @@ pub(crate) struct FixtureProvider {
 
 impl FixtureProvider {
     #[must_use]
-    pub(crate) fn from_repo_test_json() -> Self {
-        let raw =
-            include_str!("../../../../test/guest_inputs/shasta/fixture/proposals/proposal_3.json");
-        let mut input: GuestInput = serde_json::from_str(raw).expect("parse fixture GuestInput");
+    pub(crate) fn from_repo_shared_fixture() -> Self {
+        let raw = include_str!(
+            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+        );
+        let mut input: GuestInput =
+            serde_json::from_str(raw).expect("parse shared fixture json as GuestInput");
         if input.taiko.l1_ancestor_headers.is_empty() && input.taiko.l1_header.number != 0 {
             input.taiko.l1_ancestor_headers = vec![input.taiko.l1_header.clone()];
         }
@@ -553,7 +555,7 @@ where
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaNative,
         NativeProver,
@@ -575,6 +577,11 @@ fn native_fixture_engine_with_observer(
         raiko2_primitives::ProverConfig::default(),
     );
     build_engine_with_observer(spec, ctx, observer)
+}
+
+#[cfg(test)]
+pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
+    native_fixture_engine_with_observer(None)
 }
 
 #[cfg(test)]
@@ -606,7 +613,7 @@ fn risc0_fixture_engine_for_pipeline_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Risc0ShastaBackend,
 ) -> Risc0FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(pipeline_key, FixtureRisc0Prover, backend, provider);
     let ctx = ProofContext::new(
         ProofRequest {
@@ -644,7 +651,7 @@ fn sp1_fixture_engine_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Sp1ShastaBackend,
 ) -> Sp1FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaSp1,
         FixtureSp1Prover::new(Sp1Config {

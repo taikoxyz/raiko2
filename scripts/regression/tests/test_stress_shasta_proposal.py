@@ -19,6 +19,7 @@ from stress_shasta_proposal import (
     DEFAULT_CHAIN_SPEC_LIST,
     DEFAULT_SHASTA_ANCHOR_ABI,
     DEFAULT_SHASTA_IINBOX_ABI,
+    MAX_BLOCKS_PER_PROPOSAL,
     ProposalGroup,
     build_discovered_proposal_record,
     parse_proposal_ids,
@@ -32,7 +33,19 @@ class _FakeProposedEvent:
         self._logs = logs
         self.calls = []
 
-    def get_logs(self, *, from_block, to_block, argument_filters=None):
+    def get_logs(
+        self,
+        *,
+        from_block=None,
+        to_block=None,
+        fromBlock=None,
+        toBlock=None,
+        argument_filters=None,
+    ):
+        if fromBlock is not None:
+            from_block = fromBlock
+        if toBlock is not None:
+            to_block = toBlock
         if argument_filters is None:
             self.calls.append((from_block, to_block))
         else:
@@ -114,6 +127,9 @@ class TestBatchMonitorL1SearchWindow(unittest.IsolatedAsyncioTestCase):
 
 
 class TestStressProposalIdParsing(unittest.TestCase):
+    def test_max_blocks_per_proposal_matches_unzen_cap(self):
+        self.assertEqual(MAX_BLOCKS_PER_PROPOSAL, 768)
+
     def test_parse_proposal_ids_accepts_comma_separated_values(self):
         self.assertEqual(parse_proposal_ids("22733, 22734"), [22733, 22734])
 
@@ -302,6 +318,52 @@ class TestBatchMonitorRequestHeaders(unittest.TestCase):
         )
 
 
+class TestBatchMonitorRequestPayload(unittest.TestCase):
+    def test_generate_post_data_omits_legacy_public_prover_args_for_sgx(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.prove_type = "sgx"
+
+        payload = monitor.generate_post_data(
+            [
+                {
+                    "proposal_id": 25127,
+                    "l1_inclusion_block_number": 2766898,
+                    "l2_block_numbers": [4140789, 4140790],
+                    "checkpoint": None,
+                    "last_anchor_block_number": 2766861,
+                }
+            ],
+            aggregate=False,
+        )
+
+        self.assertEqual(payload["proof_type"], "sgx")
+        self.assertNotIn("native", payload)
+        self.assertNotIn("sgx", payload)
+        self.assertNotIn("sgxgeth", payload)
+        self.assertNotIn("risc0", payload)
+        self.assertNotIn("sp1", payload)
+
+    def test_generate_post_data_keeps_sp1_public_prover_args_for_sp1(self):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.prove_type = "sp1"
+
+        payload = monitor.generate_post_data(
+            [
+                {
+                    "proposal_id": 25127,
+                    "l1_inclusion_block_number": 2766898,
+                    "l2_block_numbers": [4140789, 4140790],
+                    "checkpoint": None,
+                    "last_anchor_block_number": 2766861,
+                }
+            ],
+            aggregate=False,
+        )
+
+        self.assertEqual(payload["proof_type"], "sp1")
+        self.assertIn("sp1", payload)
+
+
 class TestStressDiscoveryOutput(unittest.TestCase):
     def test_builds_preflight_ready_proposal_record(self):
         record = build_discovered_proposal_record(
@@ -349,7 +411,6 @@ class TestStressDiscoveryOutput(unittest.TestCase):
             payload = json.loads(output.read_text())
 
         self.assertEqual(payload, {"proposals": [record]})
-
 
 if __name__ == "__main__":
     unittest.main()

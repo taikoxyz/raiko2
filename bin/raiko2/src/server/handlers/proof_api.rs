@@ -908,6 +908,20 @@ async fn register_batch_task(
     plan: &SubmissionPlan,
     request_fingerprint: &str,
 ) -> Result<TaskRegistrationOutcome, ApiError> {
+    let registration = build_batch_task_registration(submission, plan, request_fingerprint)?;
+
+    state
+        .runtime
+        .register_task_if_absent(registration)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+}
+
+fn build_batch_task_registration(
+    submission: &CanonicalBatchSubmission,
+    plan: &SubmissionPlan,
+    request_fingerprint: &str,
+) -> Result<TaskRegistration, ApiError> {
     let metadata = build_task_metadata(
         &submission.pair,
         BuildTaskMetadataParams {
@@ -922,33 +936,29 @@ async fn register_batch_task(
         plan.aggregate.as_ref(),
     );
 
-    state
-        .runtime
-        .register_task_if_absent(TaskRegistration {
-            task_id: submission.public_task_id.clone(),
-            route: submission.route.route,
-            task_kind: "hoodi_batch".to_string(),
-            proposal_id: submission
-                .proposals
-                .first()
-                .map(|proposal| proposal.proposal_id),
-            proof_ids: plan
-                .proposals
-                .iter()
-                .map(|proposal| proposal.task_ref.clone())
-                .chain(
-                    plan.aggregate
-                        .iter()
-                        .map(|aggregate| aggregate.task_ref.clone()),
-                )
-                .collect(),
-            metadata: serde_json::to_value(metadata).map_err(|err| {
-                ApiError::internal(format!("failed to serialize metadata: {err}"))
-            })?,
-            request_fingerprint: Some(request_fingerprint.to_string()),
-        })
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to register runtime task: {err}")))
+    Ok(TaskRegistration {
+        task_id: submission.public_task_id.clone(),
+        pipeline_key: Some(submission.route.pipeline_key()),
+        route: submission.route.route,
+        task_kind: "hoodi_batch".to_string(),
+        proposal_id: submission
+            .proposals
+            .first()
+            .map(|proposal| proposal.proposal_id),
+        proof_ids: plan
+            .proposals
+            .iter()
+            .map(|proposal| proposal.task_ref.clone())
+            .chain(
+                plan.aggregate
+                    .iter()
+                    .map(|aggregate| aggregate.task_ref.clone()),
+            )
+            .collect(),
+        metadata: serde_json::to_value(metadata)
+            .map_err(|err| ApiError::internal(format!("failed to serialize metadata: {err}")))?,
+        request_fingerprint: Some(request_fingerprint.to_string()),
+    })
 }
 
 async fn register_external_aggregate_task(
@@ -975,6 +985,7 @@ async fn register_external_aggregate_task(
         .runtime
         .register_task_if_absent(TaskRegistration {
             task_id: submission.public_task_id.clone(),
+            pipeline_key: Some(submission.route.pipeline_key()),
             route: submission.route.route,
             task_kind: "hoodi_aggregate".to_string(),
             proposal_id: None,
@@ -1157,12 +1168,49 @@ async fn handle_existing_batch_task(
         if response_is_completed(&response) {
             return Ok(response);
         }
-        recover_existing_task(state, &existing, || {
+        if existing.pipeline_key != submission.route.pipeline_key() {
+            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
+                .await;
+        }
+        if let Err(err) = recover_existing_task(state, &existing, || {
             reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata)
         })
-        .await?;
+        .await
+        {
+            warn!(
+                task_id = existing.task_id,
+                existing_pipeline = %existing.pipeline_key,
+                requested_pipeline = %submission.route.pipeline_key(),
+                error = %err.message,
+                "failed to recover reenqueueable task; replacing from scratch"
+            );
+            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
+                .await;
+        }
     }
     compatibility_response_for_task(state, &existing.task_id).await
+}
+
+async fn replace_existing_batch_task(
+    state: &AppState,
+    submission: &CanonicalBatchSubmission,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    existing_metadata: &TaskMetadata,
+) -> Result<Response, ApiError> {
+    let request_fingerprint = batch_request_fingerprint(submission)?;
+    let plan =
+        build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
+    cleanup_stale_root_before_replacement(state, existing, existing_metadata).await;
+
+    let registration = build_batch_task_registration(submission, &plan, &request_fingerprint)?;
+    let replaced = state
+        .runtime
+        .register_task(registration)
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to replace runtime task: {err}")))?;
+    remove_stale_task_workspace_if_relocated(existing, &replaced).await;
+
+    handle_created_batch_task(state, submission, &plan).await
 }
 
 async fn reenqueue_existing_batch_task(
@@ -1251,9 +1299,11 @@ async fn existing_batch_aggregate_inputs(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<Vec<AggregateProofInput>, ApiError> {
-    let route = CanonicalProofRoute {
-        route: existing.route,
-    };
+    let route = CanonicalProofRoute::new(
+        existing.route,
+        existing.pipeline_key,
+        existing_metadata.proof_type,
+    );
     let mut inputs = Vec::with_capacity(existing_metadata.proposals.len());
 
     for proposal in &existing_metadata.proposals {
@@ -1425,6 +1475,60 @@ async fn restore_runtime_task_status(
             enqueue_error = %enqueue_error.message,
             restore_error = %err,
             "failed to restore runtime status after recovery enqueue failure"
+        );
+    }
+}
+
+async fn cleanup_stale_root_before_replacement(
+    state: &AppState,
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    existing_metadata: &TaskMetadata,
+) {
+    let Ok(engine) = resolve_engine(
+        state,
+        &existing_metadata.network_pair,
+        existing.pipeline_key,
+    ) else {
+        warn!(
+            task_id = existing.task_id,
+            pipeline_key = %existing.pipeline_key,
+            "failed to resolve stale pipeline for root replacement cleanup"
+        );
+        return;
+    };
+
+    let _ = cancel_registered_tasks(
+        &state.runtime,
+        &engine,
+        &existing.task_id,
+        existing.pipeline_key,
+        existing_metadata,
+    )
+    .await;
+    let _ = remove_task_children(
+        &engine,
+        existing.pipeline_key,
+        existing_metadata,
+        &mut HashSet::new(),
+    )
+    .await;
+}
+
+async fn remove_stale_task_workspace_if_relocated(
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    replaced: &raiko2_runtime::RuntimeTaskRecord,
+) {
+    if existing.task_dir == replaced.task_dir {
+        return;
+    }
+
+    if let Err(err) = fs::remove_dir_all(&existing.task_dir).await {
+        warn!(
+            task_id = existing.task_id,
+            stale_task_dir = existing.task_dir,
+            replacement_task_dir = replaced.task_dir,
+            error = %err,
+            "failed to remove stale runtime task workspace after replacement"
         );
     }
 }
@@ -2197,6 +2301,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
     let payload = serde_json::json!({
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
+        "proof_type": submission.route.proof_type().to_string(),
         "prover_type": submission.prover_type.map(ProverType::as_str),
         "aggregate_requested": submission.aggregate_requested,
         "execution_mode": submission
@@ -2281,6 +2386,7 @@ const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> Bat
         ProofType::Native => BatchProofType::Native,
         ProofType::Sp1 => BatchProofType::Sp1,
         ProofType::Sgx => BatchProofType::Sgx,
+        ProofType::SgxGeth => BatchProofType::SgxGeth,
         ProofType::Risc0 => BatchProofType::Risc0,
     }
 }
@@ -2614,6 +2720,7 @@ mod tests {
     use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
+    use http_body_util::BodyExt;
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
     use raiko2_primitives::SupportedChainSpecs;
@@ -2803,6 +2910,30 @@ mod tests {
         submission
     }
 
+    fn native_local_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
+            PipelineKey::ShastaNative,
+            ProofType::Native,
+        )
+    }
+
+    fn sgx_remote_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgx,
+            ProofType::Sgx,
+        )
+    }
+
+    fn sgxgeth_remote_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgxGeth,
+            ProofType::SgxGeth,
+        )
+    }
+
     fn valid_native_proof() -> Proof {
         Proof {
             proof: Some("0xproof".to_string()),
@@ -2833,10 +2964,37 @@ mod tests {
         Ok(())
     }
 
+    async fn read_json_response(response: Response) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("parse JSON response")
+    }
+
     fn test_state(runtime: Arc<RuntimeManager>, engine: Arc<dyn EngineHandle>) -> AppState {
         let config = Config::default();
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaNative, engine);
+        AppState {
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config: Arc::new(config),
+            pipelines: Arc::new(factory),
+            runtime,
+        }
+    }
+
+    fn test_state_with_engines(
+        runtime: Arc<RuntimeManager>,
+        engines: impl IntoIterator<Item = (PipelineKey, Arc<dyn EngineHandle>)>,
+    ) -> AppState {
+        let config = Config::default();
+        let mut factory = StaticPipelineFactory::default();
+        for (pipeline_key, engine) in engines {
+            factory.insert("taiko_dev/ethereum", pipeline_key, engine);
+        }
         AppState {
             zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
             config: Arc::new(config),
@@ -3052,9 +3210,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_recovery_returns_cached_artifact_before_reenqueue() -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "stale-cache-before-reenqueue",
         ))?);
@@ -3117,6 +3273,87 @@ mod tests {
             .expect("runtime task");
         assert_eq!(stored.runner_status, RuntimeRunnerStatus::Failed);
         assert_eq!(stored.error.as_deref(), Some("old failure"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_failed_sgx_record_is_recreated_under_sgxgeth_pipeline() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "stale-sgx-to-sgxgeth-retry",
+        ))?);
+        let sgx_engine = Arc::new(RecordingEngine::new(PipelineKey::ShastaSgx));
+        let sgxgeth_engine = Arc::new(RecordingEngine::new(PipelineKey::ShastaSgxGeth));
+        let state = test_state_with_engines(
+            Arc::clone(&runtime),
+            [
+                (
+                    PipelineKey::ShastaSgx,
+                    Arc::clone(&sgx_engine) as Arc<dyn EngineHandle>,
+                ),
+                (
+                    PipelineKey::ShastaSgxGeth,
+                    Arc::clone(&sgxgeth_engine) as Arc<dyn EngineHandle>,
+                ),
+            ],
+        );
+        let route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
+            PipelineKey::ShastaSgxGeth,
+            ProofType::SgxGeth,
+        );
+        let submission = canonical_submission(route, false);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        let metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: false,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaSgx;
+        record.route = PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote);
+        record.request_fingerprint = Some(request_fingerprint);
+        runtime.upsert_task(&record).await?;
+
+        let response = handle_existing_batch_task(&state, &submission, record)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+        let response = read_json_response(response).await;
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["proof_type"], "sgxgeth");
+        assert_eq!(response["data"]["status"], "registered");
+
+        let stored = runtime
+            .get_task(&submission.public_task_id)
+            .await?
+            .expect("runtime task exists");
+        assert_eq!(stored.pipeline_key, PipelineKey::ShastaSgxGeth);
+
+        let sgx_submissions = sgx_engine.proposals.lock().expect("sgx submissions");
+        assert!(
+            sgx_submissions.is_empty(),
+            "stale sgx engine should not be used"
+        );
+        drop(sgx_submissions);
+
+        let sgxgeth_submissions = sgxgeth_engine
+            .proposals
+            .lock()
+            .expect("sgxgeth submissions");
+        assert_eq!(sgxgeth_submissions.len(), 1);
+        assert_eq!(sgxgeth_submissions[0].0.proposal_id, 7);
         Ok(())
     }
 
@@ -3197,9 +3434,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_proposal_task_id_is_reused_across_aggregate_flags() {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime =
             RuntimeManager::new(unique_test_runtime_root("plan-task-id")).expect("runtime manager");
         let single_submission = canonical_submission(route, false);
@@ -3223,9 +3458,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_plan_uses_request_fingerprint_as_idempotent_key() {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-idempotent-key"))
             .expect("runtime manager");
         let mut first_submission = canonical_submission(route, true);
@@ -3260,12 +3493,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sgx_and_sgxgeth_batch_fingerprints_do_not_collide() {
+        let sgx_submission = canonical_submission(sgx_remote_route(), false);
+        let sgxgeth_submission = canonical_submission(sgxgeth_remote_route(), false);
+
+        let sgx_fingerprint = batch_request_fingerprint(&sgx_submission).expect("sgx fingerprint");
+        let sgxgeth_fingerprint =
+            batch_request_fingerprint(&sgxgeth_submission).expect("sgxgeth fingerprint");
+
+        assert_ne!(sgx_fingerprint, sgxgeth_fingerprint);
+    }
+
     #[tokio::test]
     async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals()
     -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("mixed-cache-plan"))
             .expect("runtime manager");
         let submission = canonical_multi_submission(route);
@@ -3341,9 +3584,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_recovery_only_reenqueues_aggregate_from_artifacts() -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
             .expect("runtime manager");
         let submission = canonical_multi_submission(route);
@@ -3404,9 +3645,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_recovery_does_not_resubmit_missing_proposal_artifacts() -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-missing"))
             .expect("runtime manager");
         let submission = canonical_multi_submission(route);
@@ -3453,9 +3692,7 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_proof_artifact_is_treated_as_cache_miss() -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("corrupt-cache-plan"))
             .expect("runtime manager");
         let submission = canonical_submission(route, true);
@@ -3510,9 +3747,7 @@ mod tests {
 
     #[tokio::test]
     async fn external_aggregate_inputs_are_persisted_as_artifacts() -> Result<()> {
-        let route = CanonicalProofRoute {
-            route: PipelineRoute::new(crate::config::GuestSystem::Native, RunnerKind::Local),
-        };
+        let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("external-agg-inputs"))
             .expect("runtime manager");
         let proof = valid_native_proof();

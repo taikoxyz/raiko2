@@ -17,8 +17,9 @@ on:
         required: false
         type: string
 
-# Default to read-only at the workflow level. The sync job upgrades to
-# contents: write only for the steps that push the rebuilt ELFs.
+# Default to read-only at the workflow level. Only the dedicated `push` job
+# below upgrades to `contents: write`, and that job never executes any code
+# from the user-selected branch.
 permissions:
   contents: read
 
@@ -27,16 +28,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync:
+  # Build job: runs the user-selected branch's `just build-guest` recipe on
+  # the self-hosted runner. Holds NO write credentials so that compromised
+  # or malicious branch code cannot push back to the repository even if it
+  # escapes the build sandbox.
+  build:
+    name: build guest elfs
     runs-on: [self-hosted, linux, x64, raiko2]
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      target_ref: ${{ steps.target.outputs.ref }}
+      backend: ${{ steps.backend.outputs.value }}
     env:
       CARGO_TERM_COLOR: always
       TARGET_REF_INPUT: ${{ inputs.ref }}
       DISPATCH_REF: ${{ github.ref_name }}
-      # Inputs.backend is constrained to a choice list but we still pass it
-      # via env to avoid templating user-controlled strings into shell.
       BACKEND_INPUT: ${{ inputs.backend }}
     steps:
       - name: resolve and validate target ref
@@ -44,36 +51,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Trim only leading/trailing whitespace. We deliberately do NOT collapse
-          # interior whitespace: any interior whitespace makes this an invalid
-          # branch name, and the validation below must reject it loudly instead
-          # of silently mutating "feat ure" into "feature".
+          # Trim only leading/trailing whitespace - any interior whitespace
+          # is invalid for a branch name and must be rejected loudly below
+          # rather than silently collapsed.
           target_ref="${TARGET_REF_INPUT}"
           target_ref="${target_ref#"${target_ref%%[![:space:]]*}"}"
           target_ref="${target_ref%"${target_ref##*[![:space:]]}"}"
           if [ -z "${target_ref}" ]; then
             target_ref="${DISPATCH_REF}"
           fi
-          # Reject anything that is not a well-formed branch name. This protects
-          # the downstream `git push origin HEAD:<ref>` step from injection or
-          # surprising refspecs (refs containing ':', '..', leading '-', etc.).
-          if ! git check-ref-format --branch "${target_ref}" >/dev/null 2>&1; then
-            echo "::error title=Invalid ref::Refusing to operate on malformed branch name: ${target_ref}"
-            exit 1
-          fi
-          # Defense-in-depth: re-validate against an explicit allowlist character
-          # class. git check-ref-format already rejects spaces, '..', '~', '^',
-          # ':', '?', '*', '[', '\', control chars, and leading '-'.
+          # Reject fully-qualified refs, remote-tracking refs, and special
+          # tokens. Without this, `refs/heads/main` would pass validation
+          # but the push step's `refs/heads/<ref>` refspec would resolve to
+          # `refs/heads/refs/heads/main`, silently pushing to the wrong
+          # branch.
+          case "${target_ref}" in
+            refs/*|origin/*|upstream/*|HEAD|@*)
+              echo "::error title=Invalid ref::Use a short branch name (e.g. 'main', 'feature/foo'), not '${target_ref}'"
+              exit 1
+              ;;
+          esac
+          # Allowlist character class. git check-ref-format already rejects
+          # spaces, '..', '~', '^', ':', '?', '*', '[', '\\', control chars,
+          # and leading '-', but we double-gate against anything outside
+          # [A-Za-z0-9._/-] to keep the push refspec unambiguous.
           case "${target_ref}" in
             *[!A-Za-z0-9._/-]*)
               echo "::error title=Invalid ref::Branch name contains disallowed characters: ${target_ref}"
               exit 1
               ;;
           esac
+          if ! git check-ref-format --branch "${target_ref}" >/dev/null 2>&1; then
+            echo "::error title=Invalid ref::Refusing to operate on malformed branch name: ${target_ref}"
+            exit 1
+          fi
           echo "ref=${target_ref}" >> "${GITHUB_OUTPUT}"
           echo "Resolved target ref: ${target_ref}"
 
       - name: validate backend input
+        id: backend
         shell: bash
         run: |
           set -euo pipefail
@@ -84,14 +100,15 @@ jobs:
               exit 1
               ;;
           esac
+          echo "value=${BACKEND_INPUT}" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ steps.target.outputs.ref }}
           fetch-depth: 0
-          # Push step below uses an explicit refspec; default GITHUB_TOKEN
-          # credentials remain configured so `git push` works.
-          persist-credentials: true
+          # Build job is read-only; no token must survive into branch-
+          # controlled steps like `just build-guest`.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
         with:
@@ -107,23 +124,70 @@ jobs:
 
       - name: build guest elfs
         shell: bash
+        env:
+          BACKEND: ${{ steps.backend.outputs.value }}
         run: |
           set -euo pipefail
-          just build-guest "${BACKEND_INPUT}"
+          just build-guest "${BACKEND}"
 
       - name: upload guest elf outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: guest-elf-sync-${{ inputs.backend }}
+          name: guest-elf-sync-${{ steps.backend.outputs.value }}
           path: crates/guests/elf/*.elf
+          if-no-files-found: error
           retention-days: 7
+
+  # Push job: minimal surface area. Runs on a clean GitHub-hosted runner,
+  # downloads the artifact from the build job, and only executes git
+  # plumbing (add/commit/push). It never invokes `just`, `cargo`, or any
+  # other code from the target branch, so the `contents: write` permission
+  # cannot be hijacked by branch-controlled scripts.
+  push:
+    name: commit and push guest elfs
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TARGET_REF: ${{ needs.build.outputs.target_ref }}
+      BACKEND: ${{ needs.build.outputs.backend }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.build.outputs.target_ref }}
+          fetch-depth: 0
+          # Persist credentials so `git push` works. This job runs only git
+          # plumbing on a clean runner, never repo-supplied scripts; .git
+          # hooks are not checked out from the repo, and we set
+          # `core.attributesFile=/dev/null` below to neutralize any clean
+          # filter that a malicious .gitattributes could request.
+          persist-credentials: true
+
+      - name: neutralize repo-supplied git attributes and hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Belt-and-braces: ignore in-tree .gitattributes (so a branch
+          # cannot trigger clean/smudge filters during `git add`) and point
+          # core.hooksPath at an empty directory (so no hook installed in
+          # the working tree can ever fire).
+          git config core.attributesFile /dev/null
+          mkdir -p "${RUNNER_TEMP}/empty-hooks"
+          git config core.hooksPath "${RUNNER_TEMP}/empty-hooks"
+
+      - name: download rebuilt guest elfs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: guest-elf-sync-${{ needs.build.outputs.backend }}
+          path: crates/guests/elf/
 
       - name: detect elf changes
         id: changes
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- crates/guests/elf; then
+          if [ -z "$(git status --porcelain -- crates/guests/elf)" ]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
             echo "No ELF changes detected."
           else
@@ -138,18 +202,17 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # -A stages additions, modifications, AND deletions inside the
-          # path - required so the commit reflects rebuilt-away ELFs too.
+          # -A captures additions, modifications, AND deletions/renames
+          # within the ELF directory.
           git add -A -- crates/guests/elf
           git commit -m "chore: sync guest elf outputs"
 
       - name: push synced guest elfs
         if: steps.changes.outputs.changed == 'true'
         shell: bash
-        env:
-          TARGET_REF: ${{ steps.target.outputs.ref }}
         run: |
           set -euo pipefail
-          # TARGET_REF is validated above; quote it to keep shell injection
-          # impossible even if validation regressed.
+          # TARGET_REF is validated in the build job to be a short branch
+          # name (no `refs/...`, `origin/...`, etc.), so the explicit
+          # `refs/heads/` prefix here is unambiguous.
           git push origin "HEAD:refs/heads/${TARGET_REF}"

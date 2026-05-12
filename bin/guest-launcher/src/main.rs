@@ -311,7 +311,7 @@ fn record_memory_snapshot(report: &mut BenchReport, label: &'static str) {
 }
 
 fn apply_execution_metadata(report: &mut BenchReport, execution_report: &ExecutionReport) {
-    report.exit_code = Some(0);
+    report.exit_code = Some(execution_report.exit_code);
     report.gas = execution_report.gas();
     report.total_instruction_count = Some(execution_report.total_instruction_count());
     report.total_syscall_count = Some(execution_report.total_syscall_count());

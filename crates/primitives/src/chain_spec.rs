@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let l1_spec = list
             .iter()
@@ -768,10 +768,10 @@ mod tests {
         let unzen_timestamp = 1_777_787_739;
 
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
+        assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://l1beacon.internal.taiko.xyz")
+            Some("https://example.com/taiko-dev-l1-beacon")
         );
         assert_eq!(l1_spec.genesis_time, 1_777_785_000);
         assert_eq!(l1_spec.seconds_per_slot, 12);

@@ -13,6 +13,36 @@ use raiko2_prover::remote_prover::protocol::{
 };
 use reqwest::{Client, Url};
 
+#[test]
+fn live_aggregate_request_reuses_proposal_proof_from_same_provider() {
+    let request_body = fs::read_to_string(proposal_fixture_path()).expect("read proposal fixture");
+    let request: Raiko2ShastaRequest =
+        serde_json::from_str(&request_body).expect("parse proposal fixture");
+    let response = Raiko2ProofResponse {
+        schema: RAIKO2_PROOF_RESPONSE_SCHEMA.to_string(),
+        status: raiko2_prover::remote_prover::protocol::Raiko2ProofStatus::Ok,
+        result: Some(raiko2_prover::remote_prover::protocol::Raiko2ProofResult {
+            proof: Some("0xdeadbeef".to_string()),
+            quote: None,
+            public_key: Some("0xpub".to_string()),
+            instance_address: Some("0xaddr".to_string()),
+            input: "0x1234".to_string(),
+        }),
+        error: None,
+    };
+
+    let aggregate = build_live_aggregate_request(&request, &response);
+
+    assert_eq!(aggregate.schema, "raiko2-shasta-aggregate-request-v1");
+    assert_eq!(aggregate.payload.proofs.len(), 1);
+    assert_eq!(aggregate.payload.proofs[0].proof, "0xdeadbeef");
+    assert_eq!(aggregate.payload.proofs[0].input, "0x1234");
+    assert_eq!(
+        aggregate.payload.proofs[0].proof_carry_data,
+        request.payload.proof_carry_data
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires RAIKO2_REMOTE_PROVER_BASE_URL"]
 async fn remote_prover_conformance_proposal() {
@@ -53,10 +83,12 @@ async fn remote_prover_conformance_proposal() {
 #[ignore = "requires RAIKO2_REMOTE_PROVER_BASE_URL"]
 async fn remote_prover_conformance_aggregate() {
     let base_url = remote_prover_base_url();
-    let request_body =
-        fs::read_to_string(aggregate_fixture_path()).expect("read aggregate fixture");
-    let request: Raiko2ShastaAggregateRequest =
-        serde_json::from_str(&request_body).expect("parse aggregate fixture");
+    let proposal_body = fs::read_to_string(proposal_fixture_path()).expect("read proposal fixture");
+    let proposal_request: Raiko2ShastaRequest =
+        serde_json::from_str(&proposal_body).expect("parse proposal fixture");
+    let proposal_response = post_fixture(&base_url, "/prove/shasta", &proposal_body).await;
+    let request = build_live_aggregate_request(&proposal_request, &proposal_response);
+    let request_body = serde_json::to_string(&request).expect("serialize live aggregate request");
 
     let response = post_fixture(&base_url, "/prove/shasta-aggregate", &request_body).await;
 
@@ -131,8 +163,24 @@ fn proposal_fixture_path() -> PathBuf {
     )
 }
 
-fn aggregate_fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json",
-    )
+fn build_live_aggregate_request(
+    proposal_request: &Raiko2ShastaRequest,
+    proposal_response: &Raiko2ProofResponse,
+) -> Raiko2ShastaAggregateRequest {
+    let result = proposal_response
+        .result
+        .as_ref()
+        .expect("proposal response result");
+    let proof = result.proof.as_ref().expect("proposal response proof");
+
+    Raiko2ShastaAggregateRequest {
+        schema: "raiko2-shasta-aggregate-request-v1".to_string(),
+        payload: raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregatePayload {
+            proofs: vec![raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
+                input: result.input.clone(),
+                proof: proof.clone(),
+                proof_carry_data: proposal_request.payload.proof_carry_data.clone(),
+            }],
+        },
+    }
 }

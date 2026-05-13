@@ -117,10 +117,20 @@ cargo test -p raiko2-prover --no-default-features \
 The harness posts the vendored proposal and aggregate fixtures to:
 
 - `POST /prove/shasta`
+
+It then builds a live aggregate request from the returned proposal proof and posts that derived
+request to:
+
 - `POST /prove/shasta-aggregate`
 
-and verifies the provider returns a `raiko2-proof-v1` envelope with an `input` value that is
-self-consistent with the submitted proof carry data.
+This keeps aggregate conformance provider-agnostic while preserving provider identity continuity
+for implementations that require aggregate subproofs to come from the current prover instance.
+
+The harness verifies the provider returns a `raiko2-proof-v1` envelope with an `input` value that
+is self-consistent with the submitted proof carry data.
+
+For the first external provider migration, see
+[`docs/gaiko2-remote-prover-integration.md`](docs/gaiko2-remote-prover-integration.md).
 
 ## Repository Map
 

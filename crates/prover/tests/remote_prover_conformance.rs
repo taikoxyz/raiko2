@@ -176,11 +176,13 @@ fn build_live_aggregate_request(
     Raiko2ShastaAggregateRequest {
         schema: "raiko2-shasta-aggregate-request-v1".to_string(),
         payload: raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregatePayload {
-            proofs: vec![raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
-                input: result.input.clone(),
-                proof: proof.clone(),
-                proof_carry_data: proposal_request.payload.proof_carry_data.clone(),
-            }],
+            proofs: vec![
+                raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
+                    input: result.input.clone(),
+                    proof: proof.clone(),
+                    proof_carry_data: proposal_request.payload.proof_carry_data.clone(),
+                },
+            ],
         },
     }
 }

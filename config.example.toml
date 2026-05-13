@@ -50,6 +50,7 @@ inactive_ttl_secs = 7200
 # Server default route.
 # Supported routes:
 # Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
+# Internal regression environments may use proof_type = "native" with route native/local.
 # Routes supported by server config:
 #   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
 guest_system = "risc0"
@@ -110,6 +111,8 @@ sgxgeth_base_url = "http://127.0.0.1:8090"
 timeout_ms = 300000
 
 [prover.boundless.deployment]
+# Supported deployments: base, sepolia, taiko.
+# Use taiko when submitting Boundless requests to the Taiko mainnet market.
 deployment_type = "base"
 
 [prover.boundless.deployment.overrides]

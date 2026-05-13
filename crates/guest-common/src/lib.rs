@@ -354,7 +354,8 @@ fn derive_expected_shasta_blocks(
     };
 
     let mut blocks = Vec::new();
-    let max_blocks = derivation_source_max_blocks(runtime.chain_spec.as_ref(), meta.proposal_timestamp);
+    let max_blocks =
+        derivation_source_max_blocks(runtime.chain_spec.as_ref(), meta.proposal_timestamp);
     for (source_index, source) in proposal.sources.iter().enumerate() {
         let manifest = prepare_source_manifest_with_max_blocks(
             source,

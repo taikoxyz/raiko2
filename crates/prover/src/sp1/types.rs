@@ -24,7 +24,10 @@ pub enum Sp1ConfigError {
     ProposalCycleLimitMustBePositive,
     AggregationCycleLimitMustBePositive,
     TimeoutSecsMustBePositive,
+    MaxPricePerPguMustBePositive,
+    AuctionTimeoutSecsMustBePositive,
     RpcUrlMustNotBeEmpty,
+    RpcUrlInvalid(String),
     RemoteVerifyRpcUrlMustNotBeEmpty,
     RemoteVerifyRpcUrlInvalid(String),
     RemoteVerifyAddressMustNotBeEmpty,
@@ -56,7 +59,14 @@ impl std::fmt::Display for Sp1ConfigError {
             Self::TimeoutSecsMustBePositive => {
                 f.write_str("sp1.timeout_secs must be greater than 0")
             }
+            Self::MaxPricePerPguMustBePositive => {
+                f.write_str("sp1.max_price_per_pgu must be greater than 0")
+            }
+            Self::AuctionTimeoutSecsMustBePositive => {
+                f.write_str("sp1.auction_timeout_secs must be greater than 0")
+            }
             Self::RpcUrlMustNotBeEmpty => f.write_str("sp1.rpc_url must not be empty"),
+            Self::RpcUrlInvalid(url) => write!(f, "sp1.rpc_url is invalid: {url}"),
             Self::RemoteVerifyRpcUrlMustNotBeEmpty => {
                 f.write_str("sp1.remote_verify.rpc_url must not be empty")
             }
@@ -126,6 +136,12 @@ pub struct Sp1Config {
     /// Timeout to use when waiting for network proofs.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Optional max price per PGU to attach to SP1 network proof requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_price_per_pgu: Option<u64>,
+    /// Optional assignment wait timeout before retrying an SP1 network proof request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auction_timeout_secs: Option<u64>,
     /// Optional override for the Succinct network RPC URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_url: Option<String>,
@@ -164,6 +180,8 @@ impl Default for Sp1Config {
             proposal_cycle_limit: None,
             aggregation_cycle_limit: None,
             timeout_secs: default_timeout_secs(),
+            max_price_per_pgu: None,
+            auction_timeout_secs: None,
             rpc_url: None,
             remote_verify: None,
         }
@@ -206,6 +224,10 @@ pub struct Sp1ConfigOverrides {
     pub cycle_limit: Option<u64>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub max_price_per_pgu: Option<u64>,
+    #[serde(default)]
+    pub auction_timeout_secs: Option<u64>,
 }
 
 impl Sp1Config {
@@ -225,6 +247,8 @@ impl Sp1Config {
             proposal_cycle_limit: self.proposal_cycle_limit,
             aggregation_cycle_limit: self.aggregation_cycle_limit,
             timeout_secs: overrides.timeout_secs.unwrap_or(self.timeout_secs),
+            max_price_per_pgu: overrides.max_price_per_pgu.or(self.max_price_per_pgu),
+            auction_timeout_secs: overrides.auction_timeout_secs.or(self.auction_timeout_secs),
             rpc_url: self.rpc_url.clone(),
             remote_verify: self.remote_verify.clone(),
         }
@@ -289,12 +313,24 @@ impl Sp1Config {
         if self.timeout_secs == 0 {
             return Err(Sp1ConfigError::TimeoutSecsMustBePositive);
         }
+        if self.max_price_per_pgu == Some(0) {
+            return Err(Sp1ConfigError::MaxPricePerPguMustBePositive);
+        }
+        if self.auction_timeout_secs == Some(0) {
+            return Err(Sp1ConfigError::AuctionTimeoutSecsMustBePositive);
+        }
         if self
             .rpc_url
             .as_deref()
             .is_some_and(|rpc_url| rpc_url.trim().is_empty())
         {
             return Err(Sp1ConfigError::RpcUrlMustNotBeEmpty);
+        }
+        if let Some(rpc_url) = self.rpc_url.as_deref() {
+            if rpc_url != rpc_url.trim() {
+                return Err(Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()));
+            }
+            Url::parse(rpc_url).map_err(|_| Sp1ConfigError::RpcUrlInvalid(rpc_url.to_string()))?;
         }
         if let Some(remote_verify) = &self.remote_verify {
             if remote_verify.rpc_url.trim().is_empty() {
@@ -353,6 +389,8 @@ impl Sp1ConfigOverrides {
             || self.fulfillment_strategy.is_some()
             || self.skip_simulation.is_some()
             || self.timeout_secs.is_some()
+            || self.max_price_per_pgu.is_some()
+            || self.auction_timeout_secs.is_some()
     }
 }
 
@@ -498,6 +536,8 @@ pub struct Sp1NetworkSubmissionProgress {
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub max_price_per_pgu: Option<u64>,
+    pub auction_timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -508,6 +548,8 @@ pub struct Sp1NetworkMetadata {
     pub skip_simulation: bool,
     pub cycle_limit: u64,
     pub timeout_secs: u64,
+    pub max_price_per_pgu: Option<u64>,
+    pub auction_timeout_secs: Option<u64>,
 }
 
 impl Sp1NetworkMetadata {
@@ -520,6 +562,8 @@ impl Sp1NetworkMetadata {
             skip_simulation: config.skip_simulation,
             cycle_limit: config.cycle_limit,
             timeout_secs: config.timeout_secs,
+            max_price_per_pgu: config.max_price_per_pgu,
+            auction_timeout_secs: config.auction_timeout_secs,
         }
     }
 }
@@ -599,9 +643,8 @@ impl Sp1ExecutionMetadata {
             zkvm: "sp1".to_string(),
             mode: ExecutionMode::Execute.as_str().to_string(),
             public_values,
-            // SP1 5.x does not expose an explicit exit code on successful execution.
-            exit_code: 0,
-            gas: execution_report.gas,
+            exit_code: execution_report.exit_code,
+            gas: execution_report.gas(),
             total_instruction_count: execution_report.total_instruction_count(),
             total_syscall_count: execution_report.total_syscall_count(),
             touched_memory_addresses: execution_report.touched_memory_addresses,
@@ -834,6 +877,65 @@ mod tests {
             aggregation.validate().expect_err("zero aggregation limit"),
             Sp1ConfigError::AggregationCycleLimitMustBePositive
         );
+    }
+
+    #[test]
+    fn sp1_config_rejects_zero_auction_fields() {
+        let price = Sp1Config {
+            max_price_per_pgu: Some(0),
+            ..Sp1Config::default()
+        };
+        let timeout = Sp1Config {
+            auction_timeout_secs: Some(0),
+            ..Sp1Config::default()
+        };
+
+        assert_eq!(
+            price.validate().expect_err("zero max price"),
+            Sp1ConfigError::MaxPricePerPguMustBePositive
+        );
+        assert_eq!(
+            timeout.validate().expect_err("zero auction timeout"),
+            Sp1ConfigError::AuctionTimeoutSecsMustBePositive
+        );
+    }
+
+    #[test]
+    fn sp1_config_rejects_untrimmed_rpc_url() {
+        let config = Sp1Config {
+            rpc_url: Some(" https://example.invalid/rpc ".to_string()),
+            ..Sp1Config::default()
+        };
+
+        assert_eq!(
+            config.validate().expect_err("untrimmed rpc url"),
+            Sp1ConfigError::RpcUrlInvalid(" https://example.invalid/rpc ".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_request_config_applies_auction_overrides() {
+        let config = Sp1Config {
+            max_price_per_pgu: Some(1),
+            auction_timeout_secs: Some(30),
+            ..Sp1Config::default()
+        };
+        let overrides = Sp1ConfigOverrides {
+            max_price_per_pgu: Some(2),
+            auction_timeout_secs: Some(60),
+            ..Sp1ConfigOverrides::default()
+        };
+
+        let resolved = config
+            .resolve_request_config(
+                Some(&overrides),
+                Sp1RequestContext::ProposalBatch { aggregate: false },
+            )
+            .expect("auction overrides should resolve");
+
+        assert_eq!(resolved.max_price_per_pgu, Some(2));
+        assert_eq!(resolved.auction_timeout_secs, Some(60));
+        assert!(overrides.has_network_overrides());
     }
 
     #[test]

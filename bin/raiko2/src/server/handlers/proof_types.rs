@@ -36,7 +36,7 @@ impl BatchProofType {
     pub(super) const fn is_public_batch_request_type(self) -> bool {
         matches!(
             self,
-            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
+            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
         )
     }
 
@@ -314,5 +314,10 @@ mod tests {
         .expect("deserialize request");
 
         assert!(matches!(req.proof_type, BatchProofType::SgxGeth));
+    }
+
+    #[test]
+    fn native_is_accepted_for_internal_batch_requests() {
+        assert!(BatchProofType::Native.is_public_batch_request_type());
     }
 }

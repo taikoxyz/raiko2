@@ -69,14 +69,15 @@ flowchart LR
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
-- Public proof types are `risc0`, `sp1`, `sgx`, `sgxgeth`, and admission-time `zk_any` for batch
-  proposal sampling. `native` is a host-local pipeline route, not an accepted public proof type.
+- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
+  admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
+  regression when the server route is `native/local`.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
   is not a separate proof type.
-- `proof_type=native` and `proof_type=boundless` are not accepted; use `proof_type=risc0` with the
-  server configured for `risc0/network` when targeting Boundless.
+- `proof_type=boundless` is not accepted; use `proof_type=risc0` with the server configured for
+  `risc0/network` when targeting Boundless.
 
 ## Routes
 

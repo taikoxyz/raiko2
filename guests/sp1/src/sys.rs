@@ -2,7 +2,7 @@
 //! This implementation is designed to be used in ZkVM where we cross-compile Rust code with C
 //! due to the dependency of c-kzg. This modification also requires env var:
 //!     $ CC="gcc"
-//!     $ CC_riscv32im-risc0-zkvm-elf="/opt/riscv/bin/riscv32-unknown-elf-gcc"
+//!     $ CC_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-gcc"
 //! which is set in the build pipeline
 
 use std::{

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "xtask",
     "xtask/build-guest",
+    "crates/guest-common",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",
@@ -55,6 +56,7 @@ lto = true
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
+raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
@@ -73,7 +75,7 @@ taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", packag
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
-sp1-sdk = { version = "=5.2.4", features = ["network"] }
+sp1-sdk = { version = "=6.1.0", features = ["blocking", "network"] }
 
 # Alethia reth (raiko2 integration branch)
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false, features = [
@@ -209,4 +211,4 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "portable",
     "std",
 ] }
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "cd9c40b38b82558baa92e4cc4da6e6e007d9d704", default-features = false }
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false }

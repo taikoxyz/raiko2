@@ -158,6 +158,29 @@ class TestBatchMonitorInitialization(unittest.TestCase):
         self.assertIsNone(monitor.log_file)
 
 
+class TestBatchMonitorPayload(unittest.TestCase):
+    def make_monitor(self, prove_type):
+        monitor = BatchMonitor.__new__(BatchMonitor)
+        monitor.prove_type = prove_type
+        return monitor
+
+    def test_native_payload_omits_legacy_prover_args(self):
+        payload = self.make_monitor("native").generate_post_data([], aggregate=False)
+
+        self.assertEqual(payload["proof_type"], "native")
+        self.assertNotIn("native", payload)
+        self.assertNotIn("risc0", payload)
+        self.assertNotIn("sgx", payload)
+        self.assertNotIn("sgxgeth", payload)
+        self.assertNotIn("sp1", payload)
+
+    def test_sp1_payload_keeps_supported_sp1_overrides(self):
+        payload = self.make_monitor("sp1").generate_post_data([], aggregate=False)
+
+        self.assertEqual(payload["proof_type"], "sp1")
+        self.assertIn("sp1", payload)
+
+
 class TestBatchMonitorProposalIdSearch(unittest.IsolatedAsyncioTestCase):
     async def test_find_l2_block_for_proposal_id_skips_pre_shasta_blocks(self):
         monitor = BatchMonitor.__new__(BatchMonitor)

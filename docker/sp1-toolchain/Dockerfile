@@ -2,8 +2,8 @@
 ARG RUST_VERSION=1.94.0
 
 # Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
-# For example, sp1-zkvm 6.0.2 in Cargo.lock corresponds to Docker tag v6.0.2 here.
-ARG SP1_DOCKER_TAG=v6.0.2
+# For example, sp1-zkvm 6.1.0 in Cargo.lock corresponds to Docker tag v6.1.0 here.
+ARG SP1_DOCKER_TAG=v6.1.0
 FROM ghcr.io/succinctlabs/sp1:${SP1_DOCKER_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -23,19 +23,19 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Default cross compiler for the guest target. This avoids relying on host toolchains and enables
-# building crates with C/C++ sources (e.g. `c-kzg`) under `riscv32im-succinct-zkvm-elf`.
-ENV CC_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-gcc -specs=picolibc.specs"
-ENV CXX_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.specs"
-ENV AR_riscv32im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
+# building crates with C/C++ sources (e.g. `c-kzg`) under `riscv64im-succinct-zkvm-elf`.
+ENV CC_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-gcc -specs=picolibc.specs"
+ENV CXX_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-g++ -specs=picolibcpp.specs"
+ENV AR_riscv64im_succinct_zkvm_elf="riscv64-unknown-elf-ar"
 
 # Install cargo-prove to enable running `cargo prove build` inside this image.
-# By default, it matches the SP1 docker tag (e.g. v6.0.2).
+# By default, it matches the SP1 docker tag (e.g. v6.1.0).
 ARG CARGO_PROVE_VERSION
 #
 # Security note: verify the downloaded release artifact checksum to mitigate supply-chain attacks.
 # Keep these checksums in sync with the cargo-prove release assets for the default SP1 docker tag.
-ARG CARGO_PROVE_SHA256_AMD64=c13ec3316a1f0ee1c768e2d85231a043e589d80265a385c83cd57f5cbc0a7eec
-ARG CARGO_PROVE_SHA256_ARM64=1d750abe88d837ef3d7427fdf17cb2935f9655670d5616c0732c0e415ea28202
+ARG CARGO_PROVE_SHA256_AMD64=99f0087f581798ec510573baedcd51b97a32c6f6a1f5942612ed252e5285954b
+ARG CARGO_PROVE_SHA256_ARM64=8262b0ab26004795c162e8c5bd013265f7cc145aed8d109cd935a3f6b9cd789b
 ARG TARGETARCH
 RUN set -eux; \
     version="${CARGO_PROVE_VERSION:-${SP1_DOCKER_TAG}}"; \

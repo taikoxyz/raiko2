@@ -67,7 +67,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
-        BatchProofType::Native => native_route_for_request(state)?,
+        BatchProofType::Native => native_local_route(),
         BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
@@ -119,21 +119,8 @@ pub(super) fn route_for_proof_type(
     ))
 }
 
-fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
-    let route = state.config.prover.route();
-    if matches!(
-        route,
-        PipelineRoute {
-            guest_system: GuestSystem::Native,
-            runner: RunnerKind::Local,
-        }
-    ) {
-        Ok(route)
-    } else {
-        Err(ApiError::bad_request(
-            "proof_type=native is only supported when the server prover route is native/local",
-        ))
-    }
+const fn native_local_route() -> PipelineRoute {
+    PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
 }
 
 fn sp1_runner_for_request(
@@ -226,11 +213,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_state() -> AppState {
+        test_state_with_config(Config::default())
+    }
+
+    fn test_state_with_config(config: Config) -> AppState {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let config = Arc::new(Config::default());
+        let config = Arc::new(config);
         AppState {
             pipelines: Arc::new(StaticPipelineFactory::default()),
             runtime: Arc::new(
@@ -283,5 +274,25 @@ mod tests {
             selection.proof_type(),
             raiko2_primitives::ProofType::SgxGeth
         );
+    }
+
+    #[test]
+    fn route_for_proof_type_keeps_native_on_native_local_with_risc0_network_default() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Network;
+        let state = test_state_with_config(config);
+
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::Native,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .unwrap();
+
+        assert_eq!(selection.route.to_string(), "native/local");
+        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaNative);
+        assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Native);
     }
 }

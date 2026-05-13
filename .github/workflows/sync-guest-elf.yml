@@ -52,6 +52,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # GitHub Actions parses every stdout/stderr line for workflow
+          # commands (`::error::...`, `::set-output...`, etc.). Echoing raw
+          # user input into one of those commands lets a dispatcher with
+          # `%0A` (newline) in their input inject extra commands. Escape
+          # `%`, `\r`, `\n` per GitHub's command-value escaping rules
+          # before printing anything user-controlled.
+          gha_escape() {
+            local v="$1"
+            v="${v//%/%25}"
+            v="${v//$'\r'/%0D}"
+            v="${v//$'\n'/%0A}"
+            printf '%s' "$v"
+          }
           # Trim only leading/trailing whitespace - any interior whitespace
           # is invalid for a branch name and must be rejected loudly below
           # rather than silently collapsed.
@@ -68,22 +81,24 @@ jobs:
           # branch.
           case "${target_ref}" in
             refs/*|origin/*|upstream/*|HEAD|@*)
-              echo "::error title=Invalid ref::Use a short branch name (e.g. 'main', 'feature/foo'), not '${target_ref}'"
+              echo "::error title=Invalid ref::Use a short branch name (e.g. 'main', 'feature/foo'), not '$(gha_escape "${target_ref}")'"
               exit 1
               ;;
           esac
           # Allowlist character class. git check-ref-format already rejects
           # spaces, '..', '~', '^', ':', '?', '*', '[', '\\', control chars,
           # and leading '-', but we double-gate against anything outside
-          # [A-Za-z0-9._/-] to keep the push refspec unambiguous.
+          # [A-Za-z0-9._/-] to keep the push refspec unambiguous. This is
+          # intentionally stricter than git's own check; if you need a new
+          # character class in a branch name, extend it here on purpose.
           case "${target_ref}" in
             *[!A-Za-z0-9._/-]*)
-              echo "::error title=Invalid ref::Branch name contains disallowed characters: ${target_ref}"
+              echo "::error title=Invalid ref::Branch name contains disallowed characters: '$(gha_escape "${target_ref}")'"
               exit 1
               ;;
           esac
           if ! git check-ref-format --branch "${target_ref}" >/dev/null 2>&1; then
-            echo "::error title=Invalid ref::Refusing to operate on malformed branch name: ${target_ref}"
+            echo "::error title=Invalid ref::Refusing to operate on malformed branch name: '$(gha_escape "${target_ref}")'"
             exit 1
           fi
           echo "ref=${target_ref}" >> "${GITHUB_OUTPUT}"
@@ -94,10 +109,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          gha_escape() {
+            local v="$1"
+            v="${v//%/%25}"
+            v="${v//$'\r'/%0D}"
+            v="${v//$'\n'/%0A}"
+            printf '%s' "$v"
+          }
           case "${BACKEND_INPUT}" in
             risc0|sp1|all) ;;
             *)
-              echo "::error title=Invalid backend::backend must be one of risc0|sp1|all (got: ${BACKEND_INPUT})"
+              echo "::error title=Invalid backend::backend must be one of risc0|sp1|all (got: '$(gha_escape "${BACKEND_INPUT}")')"
               exit 1
               ;;
           esac
@@ -105,7 +127,12 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ steps.target.outputs.ref }}
+          # Force-resolve as a branch ref. If the input is a tag or raw
+          # SHA, `refs/heads/<value>` does not exist on the remote and
+          # actions/checkout fails fast, instead of silently checking out
+          # a non-branch ref that the push step would later resurrect as
+          # a brand-new branch via `refs/heads/<value>`.
+          ref: refs/heads/${{ steps.target.outputs.ref }}
           fetch-depth: 0
           # Build job is read-only; no token must survive into branch-
           # controlled steps like `just build-guest`.
@@ -117,9 +144,9 @@ jobs:
         run: |
           set -euo pipefail
           # Pin the build to an exact commit. The push job will commit on
-          # top of this SHA and rely on git's non-fast-forward protection
-          # to fail loudly if the branch advances during the build (rather
-          # than silently overlaying stale ELFs on top of newer source).
+          # top of this SHA and use --force-with-lease scoped to BUILT_SHA
+          # so the push fails loudly if the branch advanced OR was
+          # deleted/recreated during the build.
           sha="$(git rev-parse HEAD)"
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "Build pinned to ${sha}"
@@ -149,12 +176,21 @@ jobs:
           # since been renamed or removed in source. ELFs owned by the
           # other backend stay intact so they survive the artifact round
           # trip into the push job.
+          #
+          # `rm -rf` (driven by a shell glob) removes regular files,
+          # symlinks, and empty directories alike - find -type f would
+          # leave a branch-supplied symlink (or a directory masquerading
+          # as an .elf) in place to disrupt later steps.
           mkdir -p crates/guests/elf
+          shopt -s nullglob
           case "${BACKEND}" in
-            risc0) find crates/guests/elf -maxdepth 1 -type f -name 'risc0_*.elf' -delete ;;
-            sp1)   find crates/guests/elf -maxdepth 1 -type f -name 'sp1_*.elf'   -delete ;;
-            all)   find crates/guests/elf -maxdepth 1 -type f -name '*.elf'        -delete ;;
+            risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf) ;;
+            all)   entries=(crates/guests/elf/*.elf) ;;
           esac
+          if [ "${#entries[@]}" -gt 0 ]; then
+            rm -rf -- "${entries[@]}"
+          fi
 
       - name: build guest elfs
         shell: bash
@@ -174,17 +210,17 @@ jobs:
           # this, the workflow would happily upload an empty artifact and
           # the push job would commit a wholesale deletion of every
           # backend-owned ELF.
+          shopt -s nullglob
           case "${BACKEND}" in
-            risc0) pattern='risc0_*.elf' ;;
-            sp1)   pattern='sp1_*.elf' ;;
-            all)   pattern='*.elf' ;;
+            risc0) produced=(crates/guests/elf/risc0_*.elf) ;;
+            sp1)   produced=(crates/guests/elf/sp1_*.elf) ;;
+            all)   produced=(crates/guests/elf/*.elf) ;;
           esac
-          count=$(find crates/guests/elf -maxdepth 1 -type f -name "${pattern}" | wc -l)
-          if [ "${count}" -eq 0 ]; then
-            echo "::error title=Empty build::expected ${pattern} files in crates/guests/elf after build, found none"
+          if [ "${#produced[@]}" -eq 0 ]; then
+            echo "::error title=Empty build::no ELFs produced for backend=${BACKEND}"
             exit 1
           fi
-          echo "Build produced ${count} ELF(s) for backend=${BACKEND}"
+          echo "Build produced ${#produced[@]} ELF(s) for backend=${BACKEND}"
 
       - name: upload guest elf outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -213,28 +249,42 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           # Check out the exact commit the build was pinned to, NOT the
-          # mutable branch tip. The push at the end uses a regular
-          # (non-force) refspec so git's non-fast-forward protection
-          # blocks any silent overlay of stale ELFs onto a branch that
-          # advanced while the guest build was running.
+          # mutable branch tip. The push at the end uses
+          # --force-with-lease scoped to BUILT_SHA so we cannot silently
+          # overlay stale ELFs onto a branch that advanced (or was
+          # deleted/recreated) while the guest build was running.
           ref: ${{ needs.build.outputs.built_sha }}
           fetch-depth: 0
           # Persist credentials so `git push` works. This job runs only git
-          # plumbing on a clean runner, never repo-supplied scripts; .git
-          # hooks are not checked out from the repo, and we set
-          # `core.attributesFile=/dev/null` below to neutralize any clean
-          # filter that a malicious .gitattributes could request.
+          # plumbing on a clean runner, never repo-supplied scripts.
           persist-credentials: true
 
-      - name: neutralize repo-supplied git attributes and hooks
+      - name: disarm clean/smudge filters and working-tree hooks
         shell: bash
         run: |
           set -euo pipefail
-          # Belt-and-braces: ignore in-tree .gitattributes (so a branch
-          # cannot trigger clean/smudge filters during `git add`) and point
-          # core.hooksPath at an empty directory (so no hook installed in
-          # the working tree can ever fire).
-          git config core.attributesFile /dev/null
+          # In-tree `.gitattributes` is always honored by `git add` - we
+          # cannot turn that off via config. The actual safety guarantee
+          # is that ubuntu-latest's git installation has no
+          # `filter.<name>.clean` / `.smudge` / `.process` configured, so
+          # a branch-supplied attribute like `*.elf filter=lfs` is inert.
+          # As defense in depth, strip any filter sections that may have
+          # been added by the runner image (e.g. if LFS ever ships
+          # pre-configured) so attribute matches still cannot invoke
+          # arbitrary processes during `git add`.
+          while IFS= read -r section; do
+            git config --global --remove-section "${section}" 2>/dev/null || true
+          done < <(
+            git config --global --list --name-only 2>/dev/null \
+              | grep -E '^filter\.' \
+              | sed -E 's/\.[^.]+$//' \
+              | sort -u
+          )
+          # Point core.hooksPath at an empty directory so anything a
+          # branch shipped under `hooks/` cannot fire. (Hooks live in
+          # `.git/hooks`, which is not checked out from the repo, but
+          # this also covers branches that set core.hooksPath via
+          # `.git/config` template tricks.)
           mkdir -p "${RUNNER_TEMP}/empty-hooks"
           git config core.hooksPath "${RUNNER_TEMP}/empty-hooks"
 
@@ -247,12 +297,20 @@ jobs:
           # other backend's prefix must be preserved from the target
           # branch's tip - otherwise a backend=risc0 sync would
           # accidentally delete every sp1 ELF (and vice versa).
+          #
+          # `rm -rf` over a shell glob catches symlinks and directories
+          # disguised as `.elf` entries that a branch might have shipped;
+          # `find -type f` would leave them behind.
           mkdir -p crates/guests/elf
+          shopt -s nullglob
           case "${BACKEND}" in
-            risc0) find crates/guests/elf -maxdepth 1 -type f -name 'risc0_*.elf' -delete ;;
-            sp1)   find crates/guests/elf -maxdepth 1 -type f -name 'sp1_*.elf'   -delete ;;
-            all)   find crates/guests/elf -maxdepth 1 -type f -name '*.elf'        -delete ;;
+            risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf) ;;
+            all)   entries=(crates/guests/elf/*.elf) ;;
           esac
+          if [ "${#entries[@]}" -gt 0 ]; then
+            rm -rf -- "${entries[@]}"
+          fi
 
       - name: download rebuilt guest elfs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -304,15 +362,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # TARGET_REF is validated in the build job to be a short branch
-          # name (no `refs/...`, `origin/...`, etc.), so the explicit
-          # `refs/heads/` prefix here is unambiguous.
-          #
-          # NO --force / --force-with-lease: the new commit's parent is
-          # BUILT_SHA, so this push is fast-forward iff the remote branch
-          # is still at BUILT_SHA. If the branch advanced during the
-          # build, the push fails with non-fast-forward and the operator
-          # must re-run sync against the new tip. That is the desired
-          # behaviour - silently overlaying stale ELFs onto newer source
-          # would be far worse than a failed push.
-          git push origin "HEAD:refs/heads/${TARGET_REF}"
+          # --force-with-lease scoped to BUILT_SHA: the push succeeds iff
+          # the remote ref `refs/heads/${TARGET_REF}` is currently at
+          # BUILT_SHA. Three failure modes are blocked:
+          #   1. Branch advanced during build  -> remote != BUILT_SHA
+          #   2. Branch was deleted             -> remote does not exist
+          #   3. Branch was deleted & recreated -> remote != BUILT_SHA
+          # All three correctly fail loudly instead of silently
+          # resurrecting the branch from stale ELFs. The new commit's
+          # parent is BUILT_SHA, so when the lease passes the actual
+          # update is a normal fast-forward.
+          git push \
+            --force-with-lease="refs/heads/${TARGET_REF}:${BUILT_SHA}" \
+            origin "HEAD:refs/heads/${TARGET_REF}"

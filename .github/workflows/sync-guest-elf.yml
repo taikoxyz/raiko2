@@ -136,6 +136,26 @@ jobs:
         with:
           tool: just
 
+      - name: clear backend-owned guest elfs before rebuild
+        shell: bash
+        env:
+          BACKEND: ${{ steps.backend.outputs.value }}
+        run: |
+          set -euo pipefail
+          # Drop every ELF this run is responsible for BEFORE running the
+          # build. This guarantees the upload artifact contains exactly
+          # what `just build-guest` produced - never a stale ELF left
+          # behind from a prior run whose corresponding guest [[bin]] has
+          # since been renamed or removed in source. ELFs owned by the
+          # other backend stay intact so they survive the artifact round
+          # trip into the push job.
+          mkdir -p crates/guests/elf
+          case "${BACKEND}" in
+            risc0) find crates/guests/elf -maxdepth 1 -type f -name 'risc0_*.elf' -delete ;;
+            sp1)   find crates/guests/elf -maxdepth 1 -type f -name 'sp1_*.elf'   -delete ;;
+            all)   find crates/guests/elf -maxdepth 1 -type f -name '*.elf'        -delete ;;
+          esac
+
       - name: build guest elfs
         shell: bash
         env:
@@ -143,6 +163,28 @@ jobs:
         run: |
           set -euo pipefail
           just build-guest "${BACKEND}"
+
+      - name: verify build produced expected elfs
+        shell: bash
+        env:
+          BACKEND: ${{ steps.backend.outputs.value }}
+        run: |
+          set -euo pipefail
+          # Guard against the build silently producing nothing - without
+          # this, the workflow would happily upload an empty artifact and
+          # the push job would commit a wholesale deletion of every
+          # backend-owned ELF.
+          case "${BACKEND}" in
+            risc0) pattern='risc0_*.elf' ;;
+            sp1)   pattern='sp1_*.elf' ;;
+            all)   pattern='*.elf' ;;
+          esac
+          count=$(find crates/guests/elf -maxdepth 1 -type f -name "${pattern}" | wc -l)
+          if [ "${count}" -eq 0 ]; then
+            echo "::error title=Empty build::expected ${pattern} files in crates/guests/elf after build, found none"
+            exit 1
+          fi
+          echo "Build produced ${count} ELF(s) for backend=${BACKEND}"
 
       - name: upload guest elf outputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -196,18 +238,21 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/empty-hooks"
           git config core.hooksPath "${RUNNER_TEMP}/empty-hooks"
 
-      - name: clear elf directory before artifact extraction
+      - name: clear backend-owned elfs before artifact extraction
         shell: bash
         run: |
           set -euo pipefail
-          # Remove every tracked ELF so the directory state after extraction
-          # exactly mirrors the build job's working tree at upload time.
-          # Without this, an ELF removed/renamed during the build would
-          # remain in the working tree (because download-artifact never
-          # deletes) and `git add -A` would silently leave the orphan
-          # checked in.
+          # Drop only the ELFs this run owns. The artifact contains only
+          # outputs for the requested backend, so anything matching the
+          # other backend's prefix must be preserved from the target
+          # branch's tip - otherwise a backend=risc0 sync would
+          # accidentally delete every sp1 ELF (and vice versa).
           mkdir -p crates/guests/elf
-          find crates/guests/elf -maxdepth 1 -type f -name '*.elf' -delete
+          case "${BACKEND}" in
+            risc0) find crates/guests/elf -maxdepth 1 -type f -name 'risc0_*.elf' -delete ;;
+            sp1)   find crates/guests/elf -maxdepth 1 -type f -name 'sp1_*.elf'   -delete ;;
+            all)   find crates/guests/elf -maxdepth 1 -type f -name '*.elf'        -delete ;;
+          esac
 
       - name: download rebuilt guest elfs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+zero_oid="0000000000000000000000000000000000000000"
+scan_args=()
+
+while read -r _local_ref local_oid _remote_ref remote_oid; do
+  if [[ "${local_oid}" == "${zero_oid}" ]]; then
+    continue
+  fi
+
+  if [[ "${remote_oid}" == "${zero_oid}" ]]; then
+    mapfile -t commits < <(git rev-list "${local_oid}" --not --remotes)
+  else
+    mapfile -t commits < <(git rev-list "${remote_oid}..${local_oid}")
+  fi
+
+  for commit in "${commits[@]}"; do
+    scan_args+=(--git-commit "${commit}")
+  done
+done
+
+if [[ "${#scan_args[@]}" -eq 0 ]]; then
+  exit 0
+fi
+
+exec uv run \
+  --with cryptography \
+  --with eth-utils \
+  python scripts/security/check_evm_private_keys.py \
+  "${scan_args[@]}"

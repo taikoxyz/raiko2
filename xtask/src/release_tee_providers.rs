@@ -3,6 +3,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use sha2::{Digest, Sha256};
 
 use crate::release_tee_manifest::{
     TeeAttestationManifest, TeeProviderAttestation, TeeProviderImage, TeeProviderManifestEntry,
@@ -263,9 +264,12 @@ fn docker_build(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()
 
 fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
     let secret_src = default_gramine_enclave_key_path(context)?;
+    let key_sha256 = file_sha256_hex(&secret_src)?;
     let mut cmd = Command::new("docker");
     cmd.env("DOCKER_BUILDKIT", "1");
     cmd.arg("build")
+        .arg("--build-arg")
+        .arg(format!("GRAMINE_ENCLAVE_KEY_SHA256={key_sha256}"))
         .arg("--secret")
         .arg(format!(
             "id=gramine_enclave_key,src={}",
@@ -334,6 +338,13 @@ fn default_gramine_enclave_key_path(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn file_sha256_hex(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read signing key {}", path.display()))?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn parse_attestation_json(raw: &str) -> Result<TeeProviderAttestation> {
     let value: serde_json::Value = serde_json::from_str(raw).context("parse attestation json")?;
     let mr_enclave = string_field(&value, &["mr_enclave", "unique_id"])?;
@@ -376,8 +387,8 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_gramine_enclave_key_path, external_source_checkout_dir, local_provider_image_ref,
-        parse_attestation_json, validate_attestation_path,
+        default_gramine_enclave_key_path, external_source_checkout_dir, file_sha256_hex,
+        local_provider_image_ref, parse_attestation_json, validate_attestation_path,
     };
 
     #[test]
@@ -411,6 +422,16 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "missing Gramine enclave signing key at /tmp/raiko2/docker/enclave-key.pem"
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_hashes_signing_key_contents() {
+        let temp = tempfile::NamedTempFile::new().expect("temp signing key");
+        std::fs::write(temp.path(), b"abc").expect("write temp signing key");
+        assert_eq!(
+            file_sha256_hex(temp.path()).expect("hash signing key"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

@@ -474,6 +474,9 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+  `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
+  `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,

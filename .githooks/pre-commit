@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "${repo_root}"
+
+exec uv run \
+  --with cryptography \
+  --with eth-utils \
+  python scripts/security/check_evm_private_keys.py

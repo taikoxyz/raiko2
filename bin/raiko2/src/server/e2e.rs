@@ -223,6 +223,10 @@ fn duplicate_request_fingerprint(
     )
 }
 
+fn deterministic_test_private_key(label: &str) -> String {
+    hex::encode_prefixed(keccak256(label.as_bytes()).as_slice())
+}
+
 fn sp1_fixture_app() -> (
     Router,
     raiko2_engine::Engine<super::fixture::Sp1FixtureSpec>,
@@ -551,7 +555,7 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
     config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key =
-        "0x45f40b61ccb3a68af7eca7d54035df42ec3786c940387d3a14dea058ac68ef3b".to_string();
+        deterministic_test_private_key("raiko2:e2e-ready-boundless");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
     let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));

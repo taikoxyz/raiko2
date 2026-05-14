@@ -1,0 +1,31 @@
+name: security
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evm-private-key-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: scan EVM private keys
+        run: >
+          uv run
+          --with cryptography
+          --with eth-utils
+          python scripts/security/check_evm_private_keys.py
+          --deny-address 0x382bba7d7bc9ae86c5de3e16c4ca96bcc0a3478e

@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
 };
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, keccak256};
 use anyhow::{Context, Result};
 use secp256k1::SecretKey;
 
@@ -15,8 +15,6 @@ use crate::config::PRIV_KEY_FILENAME;
 
 const ATTESTATION_QUOTE_DEVICE_FILE: &str = "/dev/attestation/quote";
 const ATTESTATION_USER_REPORT_DATA_DEVICE_FILE: &str = "/dev/attestation/user_report_data";
-const NATIVE_PROOF_PRIVATE_KEY: &str =
-    "92954368afd3caa1f3ce3ead0069c1af414054aefe1ef9aeacc1bf426222ce38";
 
 pub trait TeeProvider {
     fn save_private_key(&self, key: &SecretKey) -> Result<()>;
@@ -96,8 +94,7 @@ pub(crate) struct NativeProvider;
 impl NativeProvider {
     fn private_key() -> Result<SecretKey> {
         let mut bytes = [0u8; 32];
-        hex::decode_to_slice(NATIVE_PROOF_PRIVATE_KEY, &mut bytes)
-            .context("decode native proof private key")?;
+        bytes.copy_from_slice(keccak256(b"raiko2:native-sgx-provider").as_slice());
         SecretKey::from_byte_array(&bytes).context("decode native proof private key")
     }
 }

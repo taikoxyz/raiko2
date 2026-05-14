@@ -385,7 +385,10 @@ def response_status(response: Any) -> str:
 def task_summary(task: Any) -> dict[str, Any]:
     if not isinstance(task, dict):
         return {"status": "unknown"}
+    if isinstance(task.get("data"), dict):
+        task = task["data"]
     proposal = ((task.get("proposals") or [{}])[0] or {}) if isinstance(task.get("proposals"), list) else {}
+    runtime = proposal.get("runtime") if isinstance(proposal.get("runtime"), dict) else {}
     stages = task.get("stages") if isinstance(task.get("stages"), list) else []
     latest_stage = stages[-1] if stages and isinstance(stages[-1], dict) else {}
     proof = latest_stage.get("proof") if isinstance(latest_stage, dict) else {}
@@ -395,8 +398,8 @@ def task_summary(task: Any) -> dict[str, Any]:
         "status": task.get("status"),
         "route": task.get("route"),
         "proposal_id": proposal.get("proposal_id"),
-        "last_event": latest_stage.get("last_event"),
-        "provider_request_id": provider.get("request_id"),
+        "last_event": latest_stage.get("last_event") or (task.get("runtime") or {}).get("last_event"),
+        "provider_request_id": provider.get("request_id") or runtime.get("provider_request_id"),
         "remote_tx_hash": provider.get("remote_tx_hash"),
     }
 

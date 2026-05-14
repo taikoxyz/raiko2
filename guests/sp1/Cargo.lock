@@ -1531,6 +1531,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7575182f7272186991736b70173b0ea045398f984bf5ebbb3804736ce1330c9d"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3686,7 +3706,7 @@ dependencies = [
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
- "revm-precompile 32.1.0",
+ "revm-precompile",
  "sha2 0.10.8",
  "sp1-zkvm",
 ]
@@ -4161,7 +4181,7 @@ dependencies = [
  "once_cell",
  "reth-codecs",
  "revm-bytecode",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
  "secp256k1",
  "serde",
@@ -4293,8 +4313,8 @@ dependencies = [
  "revm-handler",
  "revm-inspector",
  "revm-interpreter",
- "revm-precompile 34.0.0",
- "revm-primitives 23.0.0",
+ "revm-precompile",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4306,7 +4326,7 @@ checksum = "bdbb3a3d735efa94c91f2ef6bf20a35f99a77bc78f3e25bd758336901bdf9661"
 dependencies = [
  "bitvec",
  "phf",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "serde",
 ]
 
@@ -4322,7 +4342,7 @@ dependencies = [
  "revm-bytecode",
  "revm-context-interface",
  "revm-database-interface",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4337,7 +4357,7 @@ dependencies = [
  "auto_impl",
  "either",
  "revm-database-interface",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4349,7 +4369,7 @@ checksum = "c281a1f11d3bcb8c0bba1199ed6bcb001d1aeb3d4fb366819e14f88723989a4e"
 dependencies = [
  "revm-bytecode",
  "revm-database-interface",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4361,7 +4381,7 @@ checksum = "d89efb9832a4e3742bb4ded5f7fe5bf905e8860e69427d4dfec153484fc6d304"
 dependencies = [
  "auto_impl",
  "either",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
  "thiserror",
 ]
@@ -4379,8 +4399,8 @@ dependencies = [
  "revm-context-interface",
  "revm-database-interface",
  "revm-interpreter",
- "revm-precompile 34.0.0",
- "revm-primitives 23.0.0",
+ "revm-precompile",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4396,7 +4416,7 @@ dependencies = [
  "revm-database-interface",
  "revm-handler",
  "revm-interpreter",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
 ]
 
@@ -4408,29 +4428,8 @@ checksum = "1ece9f41b69658c15d748288a4dbdfc06a63f3ce93d983af440de3f1631dce6a"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "revm-state",
-]
-
-[[package]]
-name = "revm-precompile"
-version = "32.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2ec11f45deec71e4945e1809736bb20d454285f9167ab53c5159dae1deb603f"
-dependencies = [
- "ark-bls12-381",
- "ark-bn254",
- "ark-ec",
- "ark-ff 0.5.0",
- "ark-serialize 0.5.0",
- "arrayref",
- "aurora-engine-modexp",
- "cfg-if",
- "k256",
- "p256",
- "revm-primitives 22.1.0",
- "ripemd",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4450,20 +4449,10 @@ dependencies = [
  "k256",
  "p256",
  "revm-context-interface",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "ripemd",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "revm-primitives"
-version = "22.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bcfb5ce6cf18b118932bcdb7da05cd9c250f2cb9f64131396b55f3fe3537c35"
-dependencies = [
- "alloy-primitives",
- "num_enum",
- "once_cell",
+ "substrate-bn",
 ]
 
 [[package]]
@@ -4487,7 +4476,7 @@ dependencies = [
  "alloy-eip7928",
  "bitflags",
  "revm-bytecode",
- "revm-primitives 23.0.0",
+ "revm-primitives",
  "serde",
 ]
 
@@ -4846,8 +4835,7 @@ dependencies = [
 [[package]]
 name = "sha2"
 version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+source = "git+https://github.com/sp1-patches/RustCrypto-hashes?tag=patch-sha2-0.10.9-sp1-6.0.0#e48b656ebc806117554bb33c2f8687e4637e37ff"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
@@ -5107,6 +5095,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "substrate-bn"
+version = "0.6.0"
+source = "git+https://github.com/sp1-patches/bn?tag=patch-0.6.0-sp1-6.0.0-substrate-bn#13747d255e00c158afbb6d4a4a94275edd804bbf"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+ "cfg-if",
+ "crunchy",
+ "lazy_static",
+ "num-bigint 0.4.6",
+ "rand 0.8.6",
+ "rustc-hex",
+ "sp1-lib",
 ]
 
 [[package]]

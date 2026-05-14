@@ -30,7 +30,7 @@ x-raiko2-sgx-common: &raiko2-sgx-common
 
 secrets:
   gramine_enclave_key:
-    file: ${RAIKO2_SGX_ENCLAVE_KEY_HOST:-${HOME}/.config/gramine/enclave-key.pem}
+    file: ${RAIKO2_SGX_ENCLAVE_KEY_HOST:-./enclave-key.pem}
 
 services:
   raiko2-sgx-init:

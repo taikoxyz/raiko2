@@ -16,7 +16,7 @@ const DEFAULT_LOCAL_LANE: &str = "sgx";
 const DEFAULT_LOCAL_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2-sgx";
 const DEFAULT_LOCAL_DOCKERFILE: &str = "Dockerfile.sgx";
 const DEFAULT_LOCAL_ATTESTATION_PATH: &str = "/opt/raiko2-sgx/etc/attestation.raiko2.json";
-const DEFAULT_GRAMINE_ENCLAVE_KEY_PATH: &str = ".config/gramine/enclave-key.pem";
+const DEFAULT_GRAMINE_ENCLAVE_KEY_PATH: &str = "docker/enclave-key.pem";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 
 #[derive(Args, Debug)]
@@ -262,7 +262,7 @@ fn docker_build(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()
 }
 
 fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
-    let secret_src = default_gramine_enclave_key_path()?;
+    let secret_src = default_gramine_enclave_key_path(context)?;
     let mut cmd = Command::new("docker");
     cmd.env("DOCKER_BUILDKIT", "1");
     cmd.arg("build")
@@ -326,10 +326,8 @@ fn read_attestation_json(
     parse_attestation_json(std::str::from_utf8(&output.stdout).context("attestation is not utf-8")?)
 }
 
-fn default_gramine_enclave_key_path() -> Result<PathBuf> {
-    let home =
-        std::env::var("HOME").context("HOME is required to locate the Gramine signing key")?;
-    let path = Path::new(&home).join(DEFAULT_GRAMINE_ENCLAVE_KEY_PATH);
+fn default_gramine_enclave_key_path(root: &Path) -> Result<PathBuf> {
+    let path = root.join(DEFAULT_GRAMINE_ENCLAVE_KEY_PATH);
     if !path.exists() {
         bail!("missing Gramine enclave signing key at {}", path.display());
     }
@@ -378,8 +376,8 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        external_source_checkout_dir, local_provider_image_ref, parse_attestation_json,
-        validate_attestation_path,
+        default_gramine_enclave_key_path, external_source_checkout_dir, local_provider_image_ref,
+        parse_attestation_json, validate_attestation_path,
     };
 
     #[test]
@@ -403,6 +401,17 @@ mod tests {
     fn release_tee_providers_rejects_non_absolute_attestation_path() {
         let err = validate_attestation_path("attestation.json").expect_err("relative path fails");
         assert!(err.to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    fn release_tee_providers_defaults_to_repo_signing_key() {
+        let root = std::path::Path::new("/tmp/raiko2");
+        assert_eq!(
+            default_gramine_enclave_key_path(root)
+                .unwrap_err()
+                .to_string(),
+            "missing Gramine enclave signing key at /tmp/raiko2/docker/enclave-key.pem"
+        );
     }
 
     #[test]

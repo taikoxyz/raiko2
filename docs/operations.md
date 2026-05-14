@@ -187,6 +187,9 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
+  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
+  only when you intentionally need a different signer.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked

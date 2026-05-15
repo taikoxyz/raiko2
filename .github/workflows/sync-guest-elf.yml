@@ -125,6 +125,20 @@ jobs:
           esac
           echo "value=${BACKEND_INPUT}" >> "${GITHUB_OUTPUT}"
 
+      # Self-hosted runner workaround for actions/checkout#2008: when a
+      # previous job leaves stale files in the workspace without a `.git`
+      # directory, checkout's "Removing auth" step fails with
+      # `fatal: --local can only be used inside a git repository`.
+      # Wiping the workspace first forces the clean-clone path.
+      - name: ensure clean self-hosted workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+            cd /tmp
+            find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          fi
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           # Force-resolve as a branch ref. If the input is a tag or raw

@@ -273,6 +273,20 @@ jobs:
       RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
       SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
     steps:
+      # Self-hosted runner workaround for actions/checkout#2008: when a
+      # previous job leaves stale files in the workspace without a `.git`
+      # directory, checkout's "Removing auth" step fails with
+      # `fatal: --local can only be used inside a git repository`.
+      # Wiping the workspace first forces the clean-clone path.
+      - name: ensure clean self-hosted workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+            cd /tmp
+            find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          fi
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false

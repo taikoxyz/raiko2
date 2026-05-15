@@ -14,6 +14,7 @@ const STAKE_TOKEN_DECIMALS: u8 = 18;
 pub enum DeploymentType {
     Sepolia,
     Base,
+    Taiko,
 }
 
 impl FromStr for DeploymentType {
@@ -23,6 +24,7 @@ impl FromStr for DeploymentType {
         match value.to_lowercase().as_str() {
             "sepolia" => Ok(Self::Sepolia),
             "base" => Ok(Self::Base),
+            "taiko" => Ok(Self::Taiko),
             _ => Err(format!("Invalid boundless deployment_type: {value}")),
         }
     }
@@ -163,6 +165,7 @@ impl BoundlessConfig {
         match self.get_deployment_type() {
             DeploymentType::Base => 2,
             DeploymentType::Sepolia => 12,
+            DeploymentType::Taiko => 1,
         }
     }
 }
@@ -205,13 +208,39 @@ pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundlessConfig, DeploymentType, validate_offer_spec};
+    use super::{BoundlessConfig, DeploymentConfig, DeploymentType, validate_offer_spec};
 
     #[test]
     fn default_config_uses_base_deployment() {
         let config = BoundlessConfig::default();
         assert_eq!(config.get_deployment_type(), DeploymentType::Base);
         assert!(!config.offchain);
+    }
+
+    #[test]
+    fn taiko_deployment_type_parses_and_uses_taiko_block_time() {
+        let deployment_type = "taiko".parse::<DeploymentType>().expect("parse taiko");
+        assert_eq!(deployment_type, DeploymentType::Taiko);
+
+        let mut config = BoundlessConfig::default();
+        config
+            .deployment
+            .as_mut()
+            .expect("default deployment")
+            .deployment_type = Some(deployment_type);
+
+        assert_eq!(config.get_deployment_type(), DeploymentType::Taiko);
+        assert_eq!(config.block_time_sec(), 1);
+    }
+
+    #[test]
+    fn taiko_deployment_type_deserializes_from_config_value() {
+        let deployment: DeploymentConfig = serde_json::from_value(serde_json::json!({
+            "deployment_type": "taiko"
+        }))
+        .expect("deserialize taiko deployment");
+
+        assert_eq!(deployment.deployment_type, Some(DeploymentType::Taiko));
     }
 
     #[test]

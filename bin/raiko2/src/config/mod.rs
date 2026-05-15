@@ -484,8 +484,7 @@ mod tests {
         config.prover.guest_system = GuestSystem::Risc0;
         config.prover.runner = RunnerKind::Network;
         config.prover.boundless.rpc_url.clear();
-        config.prover.boundless.signer_key =
-            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string();
+        config.prover.boundless.signer_key = "dummy-test-signer-key".to_string();
 
         let err = config.prover.validate().expect_err("missing rpc url");
         assert!(err.to_string().contains("rpc_url"));

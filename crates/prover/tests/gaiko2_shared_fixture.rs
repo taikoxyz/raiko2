@@ -3,14 +3,14 @@
 use std::{fs, path::PathBuf};
 
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_prover::gaiko2::adapter::build_shasta_packet;
+use raiko2_prover::remote_prover::adapter::build_shasta_packet;
 use serde_json::Value;
 
 #[test]
-fn shared_shasta_fixture_adapts_into_stable_gaiko2_packet() {
+fn shared_shasta_fixture_adapts_into_stable_remote_prover_packet() {
     let raw = fs::read_to_string(shared_fixture_path()).expect("read shared shasta guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared fixture");
-    let packet = build_shasta_packet(&guest_input).expect("build gaiko2 packet");
+    let packet = build_shasta_packet(&guest_input).expect("build remote prover packet");
 
     assert_eq!(packet.payload.chain_id, 167_000);
     assert_eq!(packet.payload.blocks.len(), 192);
@@ -34,18 +34,11 @@ fn shared_shasta_fixture_adapts_into_stable_gaiko2_packet() {
     );
 
     let actual = canonical_json(&serde_json::to_value(&packet).expect("serialize packet to value"));
-    let expected_path = expected_packet_path();
-    if !expected_path.exists() {
-        eprintln!(
-            "skipping external gaiko2 golden fixture comparison; missing {}",
-            expected_path.display()
-        );
-        return;
-    }
-    let expected_raw =
-        fs::read_to_string(expected_path).expect("read checked-in gaiko2 packet fixture");
+    let expected_raw = fs::read_to_string(expected_packet_path())
+        .expect("read checked-in remote prover packet fixture");
     let expected = canonical_json(
-        &serde_json::from_str::<Value>(&expected_raw).expect("parse checked-in gaiko2 packet"),
+        &serde_json::from_str::<Value>(&expected_raw)
+            .expect("parse checked-in remote prover packet"),
     );
 
     assert_eq!(
@@ -61,7 +54,7 @@ fn shared_fixture_path() -> PathBuf {
 
 fn expected_packet_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../../gaiko2/testdata/shasta_request_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
+        "../../tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
     )
 }
 

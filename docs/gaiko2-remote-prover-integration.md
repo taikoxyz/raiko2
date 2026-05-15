@@ -1,0 +1,107 @@
+# Gaiko2 Remote Prover Integration
+
+This document describes the minimum `gaiko2` changes required to integrate it as a remote prover
+provider for `raiko2`.
+
+`raiko2` now owns the remote prover protocol. `gaiko2` is the first provider implementation of that
+protocol, not the owner of the protocol itself.
+
+## Stable Contract
+
+`gaiko2` should keep these HTTP endpoints:
+
+- `POST /prove/shasta`
+- `POST /prove/shasta-aggregate`
+- `GET /healthz`
+
+`gaiko2` should accept these request schemas:
+
+- `raiko2-shasta-request-v1`
+- `raiko2-shasta-aggregate-request-v1`
+
+`gaiko2` should return this response schema:
+
+- `raiko2-proof-v1`
+
+## Required Changes In Gaiko2
+
+Update the protocol constants in `internal/protocol/shasta_v1.go`:
+
+- request schema: `v1` -> `raiko2-shasta-request-v1`
+- aggregate request schema: `v1` -> `raiko2-shasta-aggregate-request-v1`
+- response schema: `gaiko2-proof-v1` -> `raiko2-proof-v1`
+
+Keep the existing request and response field layout. This integration only renames the protocol
+surface and reuses the current packet shape.
+
+Update request schema validation in:
+
+- `internal/prover/validate.go`
+- `internal/prover/aggregate_validate.go`
+
+Update checked-in testdata and tests that still assert the old schemas. Common touch points include:
+
+- `internal/protocol/shasta_v1_test.go`
+- `internal/prover/validate_test.go`
+- `internal/prover/aggregate_test.go`
+- `internal/api/server_test.go`
+- `testdata/shasta_request_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
+
+## Canonical Fixtures
+
+`raiko2` owns the canonical remote prover request fixtures:
+
+- `tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
+- `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
+
+These fixtures are the source of truth for request compatibility. A provider should match them
+byte-for-byte on the request side.
+
+The aggregate fixture is the canonical request-shape golden for adapter and serialization checks.
+Provider conformance does not post that static aggregate fixture directly.
+
+## Black-Box Acceptance
+
+`raiko2` provides an ignored black-box conformance harness. After updating `gaiko2`, build and run
+its service locally, then run:
+
+```bash
+RAIKO2_REMOTE_PROVER_BASE_URL=http://127.0.0.1:8080 \
+cargo test -p raiko2-prover --no-default-features \
+  --test remote_prover_conformance -- --ignored --nocapture
+```
+
+The harness posts the vendored fixtures to:
+
+- `POST /prove/shasta`
+
+It then derives a live aggregate request from the returned proposal proof and posts that derived
+request to:
+
+- `POST /prove/shasta-aggregate`
+
+The integration is accepted when both tests pass:
+
+- `remote_prover_conformance_proposal`
+- `remote_prover_conformance_aggregate`
+
+The response does not need to be byte-for-byte stable, but it must:
+
+- return `schema = "raiko2-proof-v1"`
+- include all required proof result fields
+- return an `input` value that is self-consistent with the submitted carry data
+
+This live aggregate step is intentional. Some providers require aggregate subproofs to come from
+the current prover instance, so a placeholder aggregate proof blob is not a valid black-box
+conformance input.
+
+## Non-Goals
+
+This integration does not require:
+
+- a git submodule
+- vendoring the `gaiko2` source into `raiko2`
+- verifier registration changes
+- SGX attestation or image-release changes
+
+Those are provider release concerns, not protocol-conformance requirements.

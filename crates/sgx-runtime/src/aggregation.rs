@@ -5,8 +5,8 @@ use raiko2_primitives_shasta::instance::{
     build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
 };
 use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
-use raiko2_prover::gaiko2::protocol::{
-    GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofResponse, Gaiko2ShastaAggregateRequest,
+use raiko2_prover::remote_prover::protocol::{
+    RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
 };
 
 use crate::{
@@ -19,8 +19,8 @@ const SHASTA_SGX_PROOF_LEN: usize = 89;
 pub(crate) fn aggregate_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
-    request: &Gaiko2ShastaAggregateRequest,
-) -> Result<Gaiko2ProofResponse, RequestFailure> {
+    request: &Raiko2ShastaAggregateRequest,
+) -> Result<Raiko2ProofResponse, RequestFailure> {
     let carries = validate_request(request)?;
     let identity = load_signer_identity(provider)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
@@ -37,13 +37,13 @@ pub(crate) fn aggregate_request<P: TeeProvider>(
     );
     let result = proof_result_from_input_hash(provider, instance_id, input_hash)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
-    Ok(Gaiko2ProofResponse::success(result))
+    Ok(Raiko2ProofResponse::success(result))
 }
 
 fn validate_request(
-    request: &Gaiko2ShastaAggregateRequest,
+    request: &Raiko2ShastaAggregateRequest,
 ) -> Result<Vec<ProofCarryData>, RequestFailure> {
-    if request.schema != GAIKO2_SHASTA_REQUEST_SCHEMA {
+    if request.schema != RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA {
         return Err(RequestFailure::invalid_request(format!(
             "unsupported schema {:?}",
             request.schema
@@ -150,9 +150,9 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::encode_proof_carry_data;
     use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
-    use raiko2_prover::gaiko2::protocol::{
-        GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2AggregateProof,
-        Gaiko2ProofStatus, Gaiko2ShastaAggregatePayload, Gaiko2ShastaAggregateRequest,
+    use raiko2_prover::remote_prover::protocol::{
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2AggregateProof,
+        Raiko2ProofStatus, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
     };
     use secp256k1::SecretKey;
     use std::str::FromStr;
@@ -214,7 +214,7 @@ mod tests {
         }
     }
 
-    fn aggregate_request_fixture() -> Gaiko2ShastaAggregateRequest {
+    fn aggregate_request_fixture() -> Raiko2ShastaAggregateRequest {
         let first = carry_fixture(7, B256::from([0xAA; 32]), B256::from([0xBB; 32]));
         let mut second = carry_fixture(
             8,
@@ -233,18 +233,18 @@ mod tests {
                     extra_data: Some(encode_proof_carry_data(&carry).expect("carry data")),
                     ..Proof::default()
                 };
-                Gaiko2AggregateProof::from_proof(&proof).expect("aggregate proof")
+                Raiko2AggregateProof::from_proof(&proof).expect("aggregate proof")
             })
             .collect();
 
-        Gaiko2ShastaAggregateRequest {
-            schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Gaiko2ShastaAggregatePayload { proofs },
+        Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload { proofs },
         }
     }
 
     #[test]
-    fn aggregate_request_returns_gaiko2_envelope() {
+    fn aggregate_request_returns_raiko2_envelope() {
         let provider = FakeProvider {
             secret_key: SecretKey::from_slice(&[10u8; 32]).expect("secret key"),
             quote: vec![0x12, 0x34],
@@ -253,8 +253,8 @@ mod tests {
 
         let response = aggregate_request(&provider, 19, &request).expect("aggregate request");
 
-        assert_eq!(response.schema, GAIKO2_PROOF_RESPONSE_SCHEMA);
-        assert_eq!(response.status, Gaiko2ProofStatus::Ok);
+        assert_eq!(response.schema, RAIKO2_PROOF_RESPONSE_SCHEMA);
+        assert_eq!(response.status, Raiko2ProofStatus::Ok);
         let result = response.result.expect("result");
         assert_eq!(result.quote.as_deref(), Some("0x1234"));
         assert!(result.proof.is_some());
@@ -267,9 +267,9 @@ mod tests {
             secret_key: SecretKey::from_slice(&[11u8; 32]).expect("secret key"),
             quote: vec![],
         };
-        let request = Gaiko2ShastaAggregateRequest {
-            schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Gaiko2ShastaAggregatePayload { proofs: vec![] },
+        let request = Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
         };
 
         let err = aggregate_request(&provider, 19, &request).expect_err("empty proofs");

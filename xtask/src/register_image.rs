@@ -16,7 +16,10 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, Prover as _, ProverClient};
+use sp1_sdk::{
+    HashableKey, ProvingKey as _,
+    blocking::{Prover as _, ProverClient},
+};
 use xtask_build_guest::Backend;
 
 use crate::util;
@@ -195,7 +198,13 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let plan = build_plan(args.backend, &config, root)?;
+    let plan_backend = args.backend;
+    let plan_config = config.clone();
+    let plan_root = root.to_path_buf();
+    let plan =
+        tokio::task::spawn_blocking(move || build_plan(plan_backend, &plan_config, &plan_root))
+            .await
+            .context("register-image plan task panicked")??;
     let summary_path = output_dir.join("summary.json");
     let read_provider = ProviderBuilder::new().connect_http(
         config
@@ -428,8 +437,14 @@ fn build_sp1_calls(
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
     let client = ProverClient::builder().cpu().build();
-    let proposal_vk = client.setup(elves.proposal.as_ref()).1;
-    let aggregation_vk = client.setup(elves.aggregation.as_ref()).1;
+    let proposal_pk = client
+        .setup(elves.proposal.as_ref().into())
+        .context("failed to setup SP1 proposal ELF")?;
+    let aggregation_pk = client
+        .setup(elves.aggregation.as_ref().into())
+        .context("failed to setup SP1 aggregation ELF")?;
+    let proposal_vk = proposal_pk.verifying_key();
+    let aggregation_vk = aggregation_pk.verifying_key();
 
     Ok(vec![
         sp1_call(

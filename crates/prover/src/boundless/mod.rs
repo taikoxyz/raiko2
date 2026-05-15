@@ -8,6 +8,7 @@ pub use config::{
     OfferParamsConfig, validate_offer_spec,
 };
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256, address};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
@@ -52,6 +53,7 @@ const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
 where
@@ -142,6 +144,7 @@ impl BoundlessConfig {
         let mut deployment = match self.get_deployment_type() {
             DeploymentType::Sepolia => SEPOLIA,
             DeploymentType::Base => BASE,
+            DeploymentType::Taiko => taiko_deployment(),
         };
 
         if let Some(overrides) = self
@@ -158,6 +161,20 @@ impl BoundlessConfig {
 
         deployment
     }
+}
+
+fn taiko_deployment() -> Deployment {
+    Deployment::builder()
+        .market_chain_id(167_000_u64)
+        .boundless_market_address(address!("0xb3f5c7b4379052eade8c7f3fa6da37fb871da28b"))
+        .verifier_router_address(address!("0x607d196b43abc5d9BE3c7Fb8e336Ca82fec18C45"))
+        .set_verifier_address(address!("0x6135DC08D14EF8a44496B009e2181426628B8ebd"))
+        .collateral_token_address(address!("0xC284A781072442cC1882a8Db4573990B7B49DaC4"))
+        .order_stream_url(Cow::Borrowed("https://taiko-mainnet.boundless.network"))
+        .indexer_url(Cow::Borrowed(TAIKO_MAINNET_INDEXER_URL))
+        .deployment_block(4_819_525_u64)
+        .build()
+        .expect("Taiko Boundless deployment constants should be valid")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1197,10 +1214,11 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, parse_env_bool,
-        parse_env_url, proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles,
-        validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, DeploymentConfig, DeploymentType,
+        ElfType, parse_env_bool, parse_env_url, proof_to_envelope, quote_batch_mcycles,
+        user_cycles_to_mcycles, validate_offer_params,
     };
+    use alloy_primitives::address;
     use boundless_market::price_oracle::Asset;
     use raiko2_primitives::Proof;
 
@@ -1250,6 +1268,41 @@ mod tests {
             prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
             320
         );
+    }
+
+    #[test]
+    fn taiko_deployment_resolves_boundless_mainnet_contracts() {
+        let config = BoundlessConfig {
+            deployment: Some(DeploymentConfig {
+                deployment_type: Some(DeploymentType::Taiko),
+                overrides: None,
+            }),
+            ..Default::default()
+        };
+        let deployment = config.get_effective_deployment();
+
+        assert_eq!(deployment.market_chain_id, Some(167_000));
+        assert_eq!(
+            deployment.boundless_market_address,
+            address!("0xb3f5c7b4379052eade8c7f3fa6da37fb871da28b")
+        );
+        assert_eq!(
+            deployment.verifier_router_address,
+            Some(address!("0x607d196b43abc5d9BE3c7Fb8e336Ca82fec18C45"))
+        );
+        assert_eq!(
+            deployment.set_verifier_address,
+            address!("0x6135DC08D14EF8a44496B009e2181426628B8ebd")
+        );
+        assert_eq!(
+            deployment.collateral_token_address,
+            Some(address!("0xC284A781072442cC1882a8Db4573990B7B49DaC4"))
+        );
+        assert_eq!(
+            deployment.order_stream_url.as_deref(),
+            Some("https://taiko-mainnet.boundless.network")
+        );
+        assert_eq!(deployment.deployment_block, Some(4_819_525));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 {
-  "schema": "v1",
+  "schema": "raiko2-shasta-request-v1",
   "payload": {
     "chain_id": 167013,
     "blocks": [
@@ -81,7 +81,7 @@
         },
         "checkpoint": {
           "blockNumber": "0x2a",
-          "blockHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+          "blockHash": "0x5c7c502779b3243cda3a4e87c0650be4b869a66e099f8d49b50d9b61287b009a",
           "stateRoot": "0x3333333333333333333333333333333333333333333333333333333333333333"
         }
       }

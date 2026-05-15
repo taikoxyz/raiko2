@@ -31,6 +31,7 @@
 pub mod boundless;
 pub mod gaiko2;
 pub mod native;
+pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
 #[cfg(feature = "sp1")]

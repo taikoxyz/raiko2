@@ -135,6 +135,10 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) sp1_cycle_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_max_price_per_pgu: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sp1_auction_timeout_secs: Option<u64>,
 }
 
 impl TaskMetadata {
@@ -537,6 +541,8 @@ impl TaskRuntimeMetadata {
         self.sp1_skip_simulation = Some(progress.skip_simulation);
         self.sp1_cycle_limit = Some(progress.cycle_limit);
         self.sp1_timeout_secs = Some(progress.timeout_secs);
+        self.sp1_max_price_per_pgu = progress.max_price_per_pgu;
+        self.sp1_auction_timeout_secs = progress.auction_timeout_secs;
     }
 }
 

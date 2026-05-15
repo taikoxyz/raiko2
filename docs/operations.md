@@ -187,6 +187,9 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
+  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
+  only when you intentionally need a different signer.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -441,6 +444,52 @@ Current behavior:
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
+## Release TEE Provider Metadata
+
+TEE-backed remote prover images have a separate pre-release metadata flow.
+
+Use:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
+```
+
+for local smoke verification, and:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
+```
+
+for a formal pre-release export.
+
+This flow:
+
+- reads exact external provider pins from `release/providers.toml`
+- builds the local `raiko2-sgx` provider image
+- clones and builds each pinned external TEE provider image
+- pushes provider images unless `--no-push` is set
+- records immutable image digests
+- reads baked attestation metadata from each image
+- emits one handoff artifact:
+  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+Use this manifest to hand off:
+
+- `mr_enclave`
+- `mr_signer`
+- source commit
+- pushed image digest
+
+to whoever configures the on-chain verifier allowlists.
+
+This command does not:
+
+- run bootstrap/init
+- register instance quotes
+- apply on-chain verifier changes
+
+Those steps remain part of later operator workflows.
+
 ## RISC0 Network Route
 
 To use the network-backed RISC0 route, configure:
@@ -456,6 +505,9 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+
+[prover.boundless.deployment]
+deployment_type = "base"
 ```
 
 Full deployment and offer parameter examples live in
@@ -471,6 +523,8 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
+  values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
   `aggregation_quoted_mcycles`, and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.

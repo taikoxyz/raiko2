@@ -25,6 +25,9 @@ pub(crate) struct ReleaseImageArgs {
 
     #[arg(long, default_value_t = false)]
     pub(crate) force_rebuild_guests: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub(crate) skip_guest_refresh: bool,
 }
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
@@ -33,6 +36,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
+    if args.skip_guest_refresh && args.force_rebuild_guests {
+        bail!("--skip-guest-refresh cannot be combined with --force-rebuild-guests");
+    }
     ensure_clean_source_tree(root, "before release-image starts")?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
@@ -47,16 +53,20 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
         "[INFO] Preparing guest ELFs for backend `{}` before image release...",
         backend_name(args.backend)
     );
-    if args.force_rebuild_guests {
+    if args.skip_guest_refresh {
+        println!("[INFO] Guest ELF refresh skipped by --skip-guest-refresh");
+    } else if args.force_rebuild_guests {
         println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
         xtask_build_guest::build(root, args.backend, false, None)?;
     } else {
         xtask_build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
     }
-    ensure_clean_source_tree(
-        root,
-        "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
-    )?;
+    if !args.skip_guest_refresh {
+        ensure_clean_source_tree(
+            root,
+            "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
+        )?;
+    }
 
     println!(
         "[INFO] Building runtime image `{image_ref}` with buildx local cache at {:?}...",

@@ -1,6 +1,12 @@
 default:
     @just --list
 
+install-git-hooks:
+    git config core.hooksPath .githooks
+
+check-secrets *args:
+    uv run --with cryptography --with eth-utils python scripts/security/check_evm_private_keys.py {{args}}
+
 build-guest backend="all" *args:
     cargo run -r -p xtask-build-guest --bin xtask-build-guest -- {{backend}} {{args}}
 

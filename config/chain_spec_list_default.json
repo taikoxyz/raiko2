@@ -75,6 +75,42 @@
         "is_taiko": false
     },
     {
+        "name": "taiko_dev_l1",
+        "chain_id": 32382,
+        "max_spec_id": "CANCUN",
+        "hard_forks": {
+            "FRONTIER": {
+                "Block": 0
+            },
+            "SHANGHAI": {
+                "Timestamp": 0
+            },
+            "CANCUN": {
+                "Timestamp": 0
+            }
+        },
+        "eip_1559_constants": {
+            "base_fee_change_denominator": "0x8",
+            "base_fee_max_increase_denominator": "0x8",
+            "base_fee_max_decrease_denominator": "0x8",
+            "elasticity_multiplier": "0x2"
+        },
+        "l1_contract": {},
+        "l2_contract": null,
+        "rpc": "https://example.com/taiko-dev-l1-rpc",
+        "beacon_rpc": "https://example.com/taiko-dev-l1-beacon",
+        "verifier_address_forks": {
+            "FRONTIER": {
+                "SGX": "0x532efbf6d62720d0b2a2bb9d11066e8588cae6d9",
+                "SP1": null,
+                "RISC0": "0x0000000000000000000000000000000000000000"
+            }
+        },
+        "genesis_time": 1777785000,
+        "seconds_per_slot": 12,
+        "is_taiko": false
+    },
+    {
         "name": "taiko_mainnet",
         "chain_id": 167000,
         "max_spec_id": "SHASTA",

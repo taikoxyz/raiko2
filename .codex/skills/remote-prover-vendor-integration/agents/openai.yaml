@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remote Prover Vendor Integration"
+  short_description: "Integrate and validate remote proving vendors"
+  default_prompt: "Use $remote-prover-vendor-integration to connect a third-party remote prover such as SGX, SGXGETH, or TDX to raiko2 and validate it with conformance, init, and API regression."

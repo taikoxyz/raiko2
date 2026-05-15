@@ -16,6 +16,21 @@ request fixture used by:
 - manual `curl` smoke tests against `raiko2-sgx-prover`
 - devops startup/link testing for the `sgx/remote` lane
 
+`tests/fixtures/remote_prover/` contains the canonical remote prover protocol goldens owned by
+`raiko2`:
+
+- `shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
+- `shasta_aggregate_request_v1_single_fixture_proof.json`
+
+These files define the strict `raiko2`-owned request contract for:
+
+- `raiko2-shasta-request-v1`
+- `raiko2-shasta-aggregate-request-v1`
+
+Remote prover implementations are expected to accept byte-for-byte equivalent payloads for these
+fixtures. Provider-specific repositories may keep their own copies, but `raiko2` owns the canonical
+request goldens and validates them in `crates/prover/tests/remote_prover_fixture.rs`.
+
 ## Provenance
 
 This fixture was generated on 2026-04-13 from a real Taiko mainnet preflight using:

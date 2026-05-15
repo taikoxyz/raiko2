@@ -1,8 +1,8 @@
 //! Proposal request validation and proof execution.
 
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use raiko2_prover::gaiko2::protocol::{
-    GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofResponse, Gaiko2ShastaRequest,
+use raiko2_prover::remote_prover::protocol::{
+    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaRequest,
 };
 
 use crate::{
@@ -13,17 +13,17 @@ use crate::{
 pub(crate) fn prove_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
-    request: &Gaiko2ShastaRequest,
-) -> Result<Gaiko2ProofResponse, RequestFailure> {
+    request: &Raiko2ShastaRequest,
+) -> Result<Raiko2ProofResponse, RequestFailure> {
     validate_request(request)?;
     let input_hash = hash_shasta_subproof_input(&request.payload.proof_carry_data);
     let result = proof_result_from_input_hash(provider, instance_id, input_hash)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
-    Ok(Gaiko2ProofResponse::success(result))
+    Ok(Raiko2ProofResponse::success(result))
 }
 
-fn validate_request(request: &Gaiko2ShastaRequest) -> Result<(), RequestFailure> {
-    if request.schema != GAIKO2_SHASTA_REQUEST_SCHEMA {
+fn validate_request(request: &Raiko2ShastaRequest) -> Result<(), RequestFailure> {
+    if request.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
         return Err(RequestFailure::invalid_request(format!(
             "unsupported schema {:?}",
             request.schema
@@ -97,9 +97,9 @@ mod tests {
         libhash::hash_shasta_subproof_input,
         shasta::{Checkpoint, ProofCarryData},
     };
-    use raiko2_prover::gaiko2::protocol::{
-        GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofStatus,
-        Gaiko2ReplayBlock, Gaiko2ShastaPayload, Gaiko2ShastaRequest,
+    use raiko2_prover::remote_prover::protocol::{
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofStatus,
+        Raiko2ReplayBlock, Raiko2ShastaPayload, Raiko2ShastaRequest,
     };
     use reth_ethereum_primitives::Block;
     use secp256k1::SecretKey;
@@ -131,18 +131,7 @@ mod tests {
         alloy_primitives::Uint::from_limbs([value])
     }
 
-    fn request_fixture() -> Gaiko2ShastaRequest {
-        let mut carry = ProofCarryData {
-            chain_id: 167_013,
-            ..ProofCarryData::default()
-        };
-        carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
-        carry.transition_input.checkpoint = Checkpoint {
-            blockNumber: u48(42),
-            blockHash: B256::from([0x22; 32]),
-            stateRoot: B256::from([0x33; 32]),
-        };
-
+    fn request_fixture() -> Raiko2ShastaRequest {
         let mut stateless = StatelessInput {
             block: Block::default(),
             chain_spec: ChainSpec::default(),
@@ -153,19 +142,31 @@ mod tests {
         stateless.block.header.parent_hash = B256::from([0x11; 32]);
         stateless.block.header.state_root = B256::from([0x33; 32]);
         stateless.chain_spec.chain_id = 167_013;
+        let block_hash = stateless.block.header.hash_slow();
 
-        Gaiko2ShastaRequest {
-            schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Gaiko2ShastaPayload {
+        let mut carry = ProofCarryData {
+            chain_id: 167_013,
+            ..ProofCarryData::default()
+        };
+        carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
+        carry.transition_input.checkpoint = Checkpoint {
+            blockNumber: u48(42),
+            blockHash: block_hash,
+            stateRoot: B256::from([0x33; 32]),
+        };
+
+        Raiko2ShastaRequest {
+            schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaPayload {
                 chain_id: 167_013,
-                blocks: vec![Gaiko2ReplayBlock::from(stateless)],
+                blocks: vec![Raiko2ReplayBlock::from(stateless)],
                 proof_carry_data: carry,
             },
         }
     }
 
     #[test]
-    fn prove_request_returns_gaiko2_envelope_with_expected_input_hash() {
+    fn prove_request_returns_raiko2_envelope_with_expected_input_hash() {
         let provider = FakeProvider {
             secret_key: SecretKey::from_slice(&[8u8; 32]).expect("secret key"),
             quote: vec![0xAA, 0xBB],
@@ -175,8 +176,8 @@ mod tests {
 
         let response = prove_request(&provider, 9, &request).expect("prove request");
 
-        assert_eq!(response.schema, GAIKO2_PROOF_RESPONSE_SCHEMA);
-        assert_eq!(response.status, Gaiko2ProofStatus::Ok);
+        assert_eq!(response.schema, RAIKO2_PROOF_RESPONSE_SCHEMA);
+        assert_eq!(response.status, Raiko2ProofStatus::Ok);
         let result = response.result.expect("result");
         assert_eq!(result.input, format!("{expected_input:#x}"));
         assert_eq!(result.quote.as_deref(), Some("0xaabb"));

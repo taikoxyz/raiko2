@@ -15,7 +15,7 @@ Hoodi-compatible v3 API.
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
-- Optional SGX route: `sgx/remote` for a configured Gaiko2 remote prover
+- Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
@@ -89,10 +89,48 @@ flowchart LR
   SP1 ran in `mock`, `local`, or `network` mode.
 - `sgx/remote` submits Shasta proving to the dedicated remote SGX runtime. This repo now ships
   `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode
-  without changing the remote API. `proof_type=sgxgeth` is served by an external `gaiko2`
-  service over the same remote protocol.
+  without changing the remote API. `proof_type=sgxgeth` is served by an external remote prover
+  implementation such as `gaiko2` over the same remote protocol.
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
+
+## Remote Prover Conformance
+
+`raiko2` owns the canonical remote prover request fixtures under:
+
+- `tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
+- `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
+
+The proposal and aggregate request fixtures are strict protocol goldens for:
+
+- `raiko2-shasta-request-v1`
+- `raiko2-shasta-aggregate-request-v1`
+
+Run the ignored black-box conformance harness against a provider endpoint with:
+
+```bash
+RAIKO2_REMOTE_PROVER_BASE_URL=http://127.0.0.1:8080 \
+cargo test -p raiko2-prover --no-default-features \
+  --test remote_prover_conformance -- --ignored --nocapture
+```
+
+The harness posts the vendored proposal and aggregate fixtures to:
+
+- `POST /prove/shasta`
+
+It then builds a live aggregate request from the returned proposal proof and posts that derived
+request to:
+
+- `POST /prove/shasta-aggregate`
+
+This keeps aggregate conformance provider-agnostic while preserving provider identity continuity
+for implementations that require aggregate subproofs to come from the current prover instance.
+
+The harness verifies the provider returns a `raiko2-proof-v1` envelope with an `input` value that
+is self-consistent with the submitted proof carry data.
+
+For the first external provider migration, see
+[`docs/gaiko2-remote-prover-integration.md`](docs/gaiko2-remote-prover-integration.md).
 
 ## Repository Map
 

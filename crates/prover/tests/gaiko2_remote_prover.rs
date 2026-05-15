@@ -9,9 +9,9 @@ use raiko2_primitives::{ProverConfig, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::{
     Prover,
-    gaiko2::{
-        Gaiko2Config, Gaiko2Prover,
-        protocol::{GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofError},
+    gaiko2::{Gaiko2Config, Gaiko2Prover},
+    remote_prover::protocol::{
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofError,
     },
 };
 use serde_json::json;
@@ -47,11 +47,11 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
-            .body_contains(GAIKO2_SHASTA_REQUEST_SCHEMA);
+            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({
-                "schema": GAIKO2_PROOF_RESPONSE_SCHEMA,
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
                     "proof": "0xproof",
@@ -85,7 +85,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
         extra["gaiko2"]["schema"].as_str(),
-        Some(GAIKO2_PROOF_RESPONSE_SCHEMA)
+        Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
     assert_eq!(extra["gaiko2"]["public_key"].as_str(), Some("0xpub"));
     assert_eq!(extra["gaiko2"]["instance_address"].as_str(), Some("0xaddr"));
@@ -99,9 +99,9 @@ async fn gaiko2_prover_surfaces_remote_error_envelope() {
         then.status(400)
             .header("content-type", "application/json")
             .json_body(json!({
-                "schema": GAIKO2_PROOF_RESPONSE_SCHEMA,
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
                 "status": "error",
-                "error": Gaiko2ProofError {
+                "error": Raiko2ProofError {
                     code: "INVALID_SCHEMA".to_string(),
                     message: "unsupported schema".to_string(),
                 }

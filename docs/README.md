@@ -10,6 +10,7 @@ This directory contains the contributor- and operator-facing documentation for `
 - [Development guide](development.md)
 - [Operations guide](operations.md)
 - [Regression harness](../scripts/regression/README.md)
+- [Gaiko2 remote prover integration](gaiko2-remote-prover-integration.md)
 - [Configuration example](../config.example.toml)
 
 ## How to Use These Docs
@@ -20,6 +21,8 @@ This directory contains the contributor- and operator-facing documentation for `
   activation and guest hook coverage.
 - Read [development.md](development.md) for local workflows, fixture testing, guest builds, and benchmarking.
 - Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
+- Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating
+  `gaiko2` to match the canonical remote prover protocol and conformance harness.
 
 ## Historical Notes
 

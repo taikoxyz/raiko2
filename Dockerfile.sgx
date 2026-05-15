@@ -29,6 +29,7 @@ RUN cargo +1.94.0 build --release -p raiko2-sgx-prover
 FROM gramineproject/gramine:1.8-jammy AS runtime
 
 ARG GRAMINE_LOG_LEVEL=error
+ARG GRAMINE_ENCLAVE_KEY_SHA256
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RAIKO2_SGX_CONFIG_DIR=/var/lib/raiko2/sgx/config \
@@ -68,6 +69,7 @@ RUN chmod +x /opt/raiko2-sgx/bin/raiko2-sgx-prover /opt/raiko2-sgx/bin/entrypoin
 
 RUN --mount=type=secret,id=gramine_enclave_key \
     test -s /run/secrets/gramine_enclave_key && \
+    test -n "${GRAMINE_ENCLAVE_KEY_SHA256}" && \
     cd /opt/raiko2-sgx/bin && \
     gramine-manifest \
         -Dlog_level="${GRAMINE_LOG_LEVEL}" \

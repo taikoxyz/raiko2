@@ -187,6 +187,9 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
+  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
+  only when you intentionally need a different signer.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -440,6 +443,52 @@ Current behavior:
   `setProgramTrusted(bytes32,bool)`.
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
+
+## Release TEE Provider Metadata
+
+TEE-backed remote prover images have a separate pre-release metadata flow.
+
+Use:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
+```
+
+for local smoke verification, and:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
+```
+
+for a formal pre-release export.
+
+This flow:
+
+- reads exact external provider pins from `release/providers.toml`
+- builds the local `raiko2-sgx` provider image
+- clones and builds each pinned external TEE provider image
+- pushes provider images unless `--no-push` is set
+- records immutable image digests
+- reads baked attestation metadata from each image
+- emits one handoff artifact:
+  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+Use this manifest to hand off:
+
+- `mr_enclave`
+- `mr_signer`
+- source commit
+- pushed image digest
+
+to whoever configures the on-chain verifier allowlists.
+
+This command does not:
+
+- run bootstrap/init
+- register instance quotes
+- apply on-chain verifier changes
+
+Those steps remain part of later operator workflows.
 
 ## RISC0 Network Route
 

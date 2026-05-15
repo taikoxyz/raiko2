@@ -3,14 +3,16 @@
 use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result};
 use axum::{Json, http::StatusCode};
-use raiko2_prover::gaiko2::protocol::{Gaiko2ProofError, Gaiko2ProofResponse, Gaiko2ProofResult};
+use raiko2_prover::remote_prover::protocol::{
+    Raiko2ProofError, Raiko2ProofResponse, Raiko2ProofResult,
+};
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{bootstrap::public_key_to_address, tee::TeeProvider};
 
 const SHASTA_SGX_PROOF_LEN: usize = 89;
 
-/// Structured request failure mapped to the gaiko-compatible response envelope.
+/// Structured request failure mapped to the remote prover response envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RequestFailure {
     pub(crate) status: StatusCode,
@@ -43,10 +45,10 @@ impl RequestFailure {
         }
     }
 
-    pub(crate) fn into_response(self) -> (StatusCode, Json<Gaiko2ProofResponse>) {
+    pub(crate) fn into_response(self) -> (StatusCode, Json<Raiko2ProofResponse>) {
         (
             self.status,
-            Json(Gaiko2ProofResponse::error(Gaiko2ProofError {
+            Json(Raiko2ProofResponse::error(Raiko2ProofError {
                 code: self.code.to_string(),
                 message: self.message,
             })),
@@ -81,7 +83,7 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
     input_hash: B256,
-) -> Result<Gaiko2ProofResult> {
+) -> Result<Raiko2ProofResult> {
     let secret_key = provider
         .load_private_key()
         .context("load SGX private key")?;
@@ -93,7 +95,7 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
     let signature = sign_hash(&secret_key, input_hash)?;
     let proof = build_shasta_proof_bytes(instance_id, instance_address, signature);
 
-    Ok(Gaiko2ProofResult {
+    Ok(Raiko2ProofResult {
         proof: Some(prefixed_hex(&proof)),
         quote: (!quote.is_empty()).then(|| prefixed_hex(&quote)),
         public_key: Some(prefixed_hex(public_key.serialize_uncompressed())),

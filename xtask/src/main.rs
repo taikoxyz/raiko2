@@ -2,7 +2,11 @@ mod bench_guest;
 mod latest_proposal_request;
 mod register_image;
 mod release_image;
+mod release_tee_manifest;
+mod release_tee_providers;
 mod replay_guest_input;
+mod tee_provider_lock;
+mod update_tee_provider_lock;
 mod util;
 
 use anyhow::Result;
@@ -36,8 +40,14 @@ enum Cmd {
     /// Register the current Shasta guest image ids on verifier contracts.
     RegisterImage(register_image::RegisterImageArgs),
 
+    /// Build, optionally push, and export TEE provider attestation metadata.
+    ReleaseTeeProviders(release_tee_providers::ReleaseTeeProvidersArgs),
+
     /// Replay repo-managed Shasta GuestInput fixtures.
     ReplayGuestInput(replay_guest_input::ReplayGuestInputArgs),
+
+    /// Update the checked-in TEE provider source pin.
+    UpdateTeeProviderLock(update_tee_provider_lock::UpdateTeeProviderLockArgs),
 }
 
 #[tokio::main]
@@ -52,6 +62,8 @@ async fn main() -> Result<()> {
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
         Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
+        Cmd::ReleaseTeeProviders(args) => release_tee_providers::run(&root, args),
         Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),
+        Cmd::UpdateTeeProviderLock(args) => update_tee_provider_lock::run(&root, args),
     }
 }

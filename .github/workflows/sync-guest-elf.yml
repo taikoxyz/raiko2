@@ -130,13 +130,27 @@ jobs:
       # directory, checkout's "Removing auth" step fails with
       # `fatal: --local can only be used inside a git repository`.
       # Wiping the workspace first forces the clean-clone path.
+      #
+      # Files left by the guest-build Docker containers are owned by
+      # uid 0, so try sudo first, fall back to a throwaway root
+      # container, and finally a best-effort plain rm.
       - name: ensure clean self-hosted workspace
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
-            cd /tmp
-            find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          if [ -z "${GITHUB_WORKSPACE:-}" ] || [ ! -d "${GITHUB_WORKSPACE}" ]; then
+            exit 0
+          fi
+          cd /tmp
+          if sudo -n true 2>/dev/null; then
+            sudo find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          elif command -v docker >/dev/null 2>&1; then
+            docker run --rm --user 0:0 \
+              -v "${GITHUB_WORKSPACE}":/ws \
+              alpine:3 \
+              sh -c 'find /ws -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
+          else
+            find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
           fi
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

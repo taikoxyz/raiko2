@@ -1,9 +1,8 @@
 //! TDX proof construction and attestation quote generation.
 //!
-//! Contains structured proof types (`TdxProof`, `TdxAggregationProof`) and
-//! functions for generating TDX attestation quotes and proving.
-
-#![allow(dead_code)]
+//! `TdxProof` (89 bytes: `instance_id(4) || address(20) || signature(65)`) is the canonical
+//! wire format for both proposal proofs and aggregation proofs. This matches the `SgxVerifier`
+//! wire format so TDX proofs can slot into any `ComposeVerifier` configuration.
 
 use alloy_primitives::{Address, B256};
 use anyhow::{Result, anyhow};
@@ -16,15 +15,13 @@ use crate::tdx::{
     signature::{address_from_private_key, recover_signer, sign_message},
 };
 
-/// Size of a TDX single proof: 4 (`instance_id`) + 20 (address) + 65 (signature).
+/// Wire size: `instance_id(4) || address(20) || signature(65)`.
 pub const TDX_PROOF_SIZE: usize = 89;
-
-/// Size of a TDX aggregation proof: 4 (`instance_id`) + 20 (old) + 20 (new) + 65 (signature).
-pub const TDX_AGGREGATION_PROOF_SIZE: usize = 109;
 
 // ────────────────────────── Proof structures ──────────────────────────
 
 /// A single TDX proof (89 bytes).
+#[derive(Debug)]
 pub struct TdxProof {
     data: [u8; TDX_PROOF_SIZE],
 }
@@ -73,35 +70,6 @@ impl TdxProof {
     #[must_use]
     pub fn signature(&self) -> [u8; 65] {
         self.data[24..89].try_into().unwrap()
-    }
-
-    /// Consume and return the raw bytes.
-    #[must_use]
-    pub fn into_vec(self) -> Vec<u8> {
-        self.data.to_vec()
-    }
-}
-
-/// A TDX aggregation proof (109 bytes).
-pub struct TdxAggregationProof {
-    data: [u8; TDX_AGGREGATION_PROOF_SIZE],
-}
-
-impl TdxAggregationProof {
-    /// Build an aggregation proof from its components.
-    #[must_use]
-    pub fn new(
-        instance_id: u32,
-        old_instance: &Address,
-        new_instance: &Address,
-        signature: &[u8; 65],
-    ) -> Self {
-        let mut data = [0u8; TDX_AGGREGATION_PROOF_SIZE];
-        data[0..4].copy_from_slice(&instance_id.to_be_bytes());
-        data[4..24].copy_from_slice(old_instance.as_slice());
-        data[24..44].copy_from_slice(new_instance.as_slice());
-        data[44..109].copy_from_slice(signature);
-        Self { data }
     }
 
     /// Consume and return the raw bytes.
@@ -212,7 +180,40 @@ pub fn prove_shasta_aggregation(
     sub_proofs: &[(Vec<u8>, B256)],
     aggregation_hash: B256,
 ) -> Result<ProveAggregationData> {
-    // Verify all sub-proofs are signed by the same instance
+    let expected_instance = verify_sub_proofs(sub_proofs)?;
+
+    // Sign the aggregation hash with the current instance's key.
+    // In Shasta, key rotation is not allowed: the local key must match the
+    // sub-proofs' instance, otherwise the emitted aggregation proof would
+    // reference a different prover than the sub-proofs and fail to verify.
+    let private_key = load_private_key()?;
+    let new_instance = address_from_private_key(&private_key);
+
+    if new_instance != expected_instance {
+        return Err(anyhow!(
+            "Shasta aggregation does not allow key rotation: local instance {new_instance} does not match sub-proofs instance {expected_instance}"
+        ));
+    }
+
+    let signature = sign_message(&private_key, &aggregation_hash)?;
+    let proof = TdxProof::new(instance_id, &new_instance, &signature).into_vec();
+    let (quote, _nonce) = generate_tdx_quote(socket_path, &aggregation_hash)?;
+
+    Ok(ProveAggregationData {
+        proof,
+        quote,
+        aggregation_hash,
+    })
+}
+
+/// Verify that all sub-proofs share the same instance and have valid signatures,
+/// returning that instance address.
+///
+/// # Errors
+///
+/// Returns an error if the list is empty, any proof is malformed, any signature
+/// fails to recover the expected signer, or proofs disagree on the prover instance.
+fn verify_sub_proofs(sub_proofs: &[(Vec<u8>, B256)]) -> Result<Address> {
     if sub_proofs.is_empty() {
         return Err(anyhow!("No sub-proofs provided for aggregation"));
     }
@@ -239,17 +240,112 @@ pub fn prove_shasta_aggregation(
         }
     }
 
-    // Sign the aggregation hash with the current instance's key
-    let private_key = load_private_key()?;
-    let new_instance = address_from_private_key(&private_key);
+    Ok(expected_instance)
+}
 
-    let signature = sign_message(&private_key, &aggregation_hash)?;
-    let proof = TdxProof::new(instance_id, &new_instance, &signature).into_vec();
-    let (quote, _nonce) = generate_tdx_quote(socket_path, &aggregation_hash)?;
+#[cfg(test)]
+mod tests {
+    use super::{TDX_PROOF_SIZE, TdxProof, verify_sub_proofs};
+    use crate::tdx::signature::{address_from_private_key, sign_message};
+    use alloy_primitives::{Address, B256};
+    use secp256k1::Secp256k1;
 
-    Ok(ProveAggregationData {
-        proof,
-        quote,
-        aggregation_hash,
-    })
+    fn signed_proof(
+        secret: &secp256k1::SecretKey,
+        instance_id: u32,
+        input_hash: B256,
+    ) -> (Vec<u8>, B256) {
+        let address = address_from_private_key(secret);
+        let signature = sign_message(secret, &input_hash).expect("sign");
+        let proof = TdxProof::new(instance_id, &address, &signature).into_vec();
+        (proof, input_hash)
+    }
+
+    #[test]
+    fn from_bytes_rejects_short_buffer() {
+        let err = TdxProof::from_bytes(&[0u8; TDX_PROOF_SIZE - 1]).expect_err("short");
+        assert!(err.to_string().contains("Invalid proof size"));
+    }
+
+    #[test]
+    fn from_bytes_rejects_long_buffer() {
+        let err = TdxProof::from_bytes(&[0u8; TDX_PROOF_SIZE + 1]).expect_err("long");
+        assert!(err.to_string().contains("Invalid proof size"));
+    }
+
+    #[test]
+    fn proof_round_trip_preserves_fields() {
+        let address = Address::repeat_byte(0xab);
+        let signature = [0x42u8; 65];
+        let proof = TdxProof::new(7, &address, &signature);
+        let bytes = proof.into_vec();
+        let parsed = TdxProof::from_bytes(&bytes).expect("parse");
+
+        assert_eq!(parsed.instance_id(), 7);
+        assert_eq!(parsed.public_key(), address);
+        assert_eq!(parsed.signature(), signature);
+    }
+
+    #[test]
+    fn verify_sub_proofs_rejects_empty() {
+        let err = verify_sub_proofs(&[]).expect_err("empty");
+        assert!(err.to_string().contains("No sub-proofs"));
+    }
+
+    #[test]
+    fn verify_sub_proofs_accepts_consistent_signatures() {
+        let secp = Secp256k1::new();
+        let (secret, _) = secp.generate_keypair(&mut rand::thread_rng());
+        let expected = address_from_private_key(&secret);
+
+        let sub_proofs = vec![
+            signed_proof(&secret, 1, B256::repeat_byte(0x11)),
+            signed_proof(&secret, 1, B256::repeat_byte(0x22)),
+        ];
+
+        let instance = verify_sub_proofs(&sub_proofs).expect("verify");
+        assert_eq!(instance, expected);
+    }
+
+    #[test]
+    fn verify_sub_proofs_rejects_key_rotation() {
+        let secp = Secp256k1::new();
+        let (secret_a, _) = secp.generate_keypair(&mut rand::thread_rng());
+        let (secret_b, _) = secp.generate_keypair(&mut rand::thread_rng());
+
+        let sub_proofs = vec![
+            signed_proof(&secret_a, 1, B256::repeat_byte(0x11)),
+            signed_proof(&secret_b, 1, B256::repeat_byte(0x22)),
+        ];
+
+        let err = verify_sub_proofs(&sub_proofs).expect_err("rotation");
+        assert!(
+            err.to_string().contains("key rotation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_sub_proofs_rejects_signature_against_wrong_hash() {
+        let secp = Secp256k1::new();
+        let (secret, _) = secp.generate_keypair(&mut rand::thread_rng());
+
+        // Sign one hash but claim the proof is for a different hash — recover will
+        // not return the expected signer.
+        let (proof_bytes, _) = signed_proof(&secret, 1, B256::repeat_byte(0x11));
+        let sub_proofs = vec![(proof_bytes, B256::repeat_byte(0x22))];
+
+        let err = verify_sub_proofs(&sub_proofs).expect_err("bad sig");
+        assert!(
+            err.to_string().contains("signature verification failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_sub_proofs_rejects_malformed_proof_bytes() {
+        let sub_proofs = vec![(vec![0u8; TDX_PROOF_SIZE - 1], B256::ZERO)];
+        let err = verify_sub_proofs(&sub_proofs).expect_err("malformed");
+        assert!(err.to_string().contains("Invalid proof size"));
+    }
 }

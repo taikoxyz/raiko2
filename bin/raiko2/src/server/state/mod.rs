@@ -20,10 +20,10 @@ use raiko2_pipeline::{
 };
 use raiko2_primitives::{Proof, ProofType};
 use raiko2_prover::boundless::BoundlessProver;
-use raiko2_prover::validate_external_aggregate_proofs;
-use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 #[cfg(feature = "tdx")]
 use raiko2_prover::tdx::TdxProver;
+use raiko2_prover::validate_external_aggregate_proofs;
+use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -159,8 +159,7 @@ impl AppState {
                     Arc::clone(&runtime_observer),
                 )
                 .await?;
-                tdx_engine
-                    .start_workers_with_maintenance_interval(workers, maintenance_interval);
+                tdx_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
                 factory.insert(
                     pair.key.clone(),
                     PipelineKey::ShastaTdx,
@@ -528,12 +527,7 @@ async fn build_tdx_engine(
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
             let context = setup::build_context(config, pair, ProofType::Tdx)?;
-            let spec = ShastaSpec::new(
-                PipelineKey::ShastaTdx,
-                tdx_prover,
-                NativeBackend,
-                provider,
-            );
+            let spec = ShastaSpec::new(PipelineKey::ShastaTdx, tdx_prover, NativeBackend, provider);
             Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
@@ -550,11 +544,8 @@ async fn build_tdx_engine(
                 let provider = setup::build_provider(config, pair)?;
                 let context = setup::build_context(config, pair, ProofType::Tdx)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace = setup::queue_namespace(
-                    &config.queue.namespace,
-                    pair,
-                    PipelineKey::ShastaTdx,
-                );
+                let namespace =
+                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaTdx);
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, TdxOutput, EngineTaskKey>::connect(
                         &url,
@@ -562,12 +553,8 @@ async fn build_tdx_engine(
                         scheduler_config.lease_duration,
                     )
                     .await?;
-                let spec = ShastaSpec::new(
-                    PipelineKey::ShastaTdx,
-                    tdx_prover,
-                    NativeBackend,
-                    provider,
-                );
+                let spec =
+                    ShastaSpec::new(PipelineKey::ShastaTdx, tdx_prover, NativeBackend, provider);
                 Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,

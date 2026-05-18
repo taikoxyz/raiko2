@@ -143,6 +143,7 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
+  - `tdx -> tdx/local` (operator route; requires `--features tdx` build and running `tdxs` daemon)
   - `boundless -> unsupported legacy error response`
   - `native -> unsupported legacy error response`
   - `sgx -> unsupported legacy error response`
@@ -294,7 +295,7 @@ Registers an aggregation root task from externally supplied proposal proofs.
 - `proofs` must not be empty.
 - Single-proof aggregation is allowed for backward compatibility with `raiko`.
 - `aggregation_ids` is optional for backward compatibility with old `raiko` clients.
-- `proof_type` must be a concrete proof type: `risc0` or `sp1`.
+- `proof_type` must be a concrete proof type: `risc0`, `sp1`, or `tdx`.
 - `proof_type=zk_any` is not supported for aggregate requests.
 - `network` and `l1_network` are optional for backward compatibility with old `raiko` clients.
   When omitted, the server uses the first configured entry in `rpc.pairs` as the default pair.

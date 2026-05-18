@@ -16,7 +16,8 @@
 //!
 //! 1. Compute the Shasta sub-proof input hash from `GuestInput::proof_carry_data`
 //! 2. Sign the hash with the bootstrapped private key
-//! 3. Build the 89-byte SGX-compatible proof (`instance_id` ‖ address ‖ signature)
+//! 3. Build the 89-byte proof (`instance_id` ‖ address ‖ signature), wire-compatible
+//!    with the legacy SGX prover so existing on-chain verifiers accept it
 //! 4. Request a TDX attestation quote over the input hash
 
 mod attestation_client;
@@ -36,7 +37,7 @@ use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
 };
-use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+use raiko2_protocol_shasta::libhash::{hash_public_input, hash_shasta_subproof_input};
 use tokio::sync::OnceCell;
 use tracing::info;
 
@@ -161,13 +162,27 @@ where
         }
 
         let proof_carry_data = input.proof_carry_data;
-        let instance_hash = hash_shasta_subproof_input(&proof_carry_data);
+        let subproof_hash = hash_shasta_subproof_input(&proof_carry_data);
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
+
+        // The on-chain TdxVerifier calls LibPublicInput.hashPublicInputs(commitmentHash,
+        // address(this), instance, taikoChainId) before ECDSA.recover. We must sign that
+        // same 5-element hash so the signature verifies on-chain and verify_sub_proofs
+        // during aggregation can also recover the correct signer.
+        let tdx_instance = config::load_private_key()
+            .map(|key| signature::address_from_private_key(&key))
+            .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
+        let signing_hash = hash_public_input(
+            subproof_hash,
+            proof_carry_data.chain_id,
+            proof_carry_data.verifier,
+            tdx_instance,
+        );
 
         let prove_data = proof::prove(
             &self.config.socket_path,
             self.config.instance_id,
-            instance_hash,
+            signing_hash,
         )
         .map_err(|e| RaikoError::Guest(format!("TDX proof generation failed: {e}")))?;
 
@@ -199,7 +214,7 @@ where
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
-        let sgx_instance = config::load_private_key()
+        let tdx_instance = config::load_private_key()
             .map(|key| signature::address_from_private_key(&key))
             .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
 
@@ -220,7 +235,7 @@ where
                 )
             })?;
         let aggregation_hash =
-            shasta_aggregation_output(&commitment, first.chain_id, first.verifier, sgx_instance);
+            shasta_aggregation_output(&commitment, first.chain_id, first.verifier, tdx_instance);
 
         let sub_proofs = input
             .proofs

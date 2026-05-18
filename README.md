@@ -13,7 +13,7 @@ Hoodi-compatible v3 API.
 ## At a Glance
 
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
+- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `tdx/local`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
 - Config-driven RPC pair allowlist via `rpc.pairs`
@@ -70,6 +70,8 @@ flowchart LR
   `kzg_versioned_hash` manifests are rejected.
 - Public proof types are `risc0`, `sp1`, and admission-time `zk_any` for batch proposal sampling.
   `native` is a host-local pipeline route, not an accepted public proof type.
+- `proof_type=tdx` routes to `tdx/local` and requires `--features tdx` at build time plus a
+  running `tdxs` attestation daemon. It is an operator route, not a public proof type.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
@@ -85,6 +87,9 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
+- `tdx/local` runs the proving pipeline inside a TDX-protected VM. The prover signs the instance
+  hash with the VM's bootstrapped ECDSA key and generates an Intel TDX attestation quote. Requires
+  `--features tdx` and the `tdxs` attestation daemon socket at the configured `socket_path`.
 
 ## Repository Map
 

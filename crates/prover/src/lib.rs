@@ -26,8 +26,10 @@ pub mod boundless;
 pub mod native;
 pub mod risc0;
 pub mod sp1;
-#[cfg(feature = "tdx")]
+#[cfg(all(feature = "tdx", unix))]
 pub mod tdx;
+#[cfg(all(feature = "tdx", not(unix)))]
+compile_error!("The `tdx` feature is only supported on Unix targets (uses Unix domain sockets).");
 pub use sp1::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };

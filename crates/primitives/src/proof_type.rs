@@ -111,8 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sgx_variants_by_u8() {
+    fn rejects_sgx_by_u8() {
         assert!(ProofType::try_from(2u8).is_err());
-        assert!(ProofType::try_from(4u8).is_err());
+    }
+
+    #[test]
+    fn accepts_tdx_by_u8() {
+        assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::Tdx);
     }
 }

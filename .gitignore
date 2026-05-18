@@ -11,3 +11,4 @@ __pycache__/
 core.[0-9]*
 regression.log
 test/regression/**/*.log
+config.toml

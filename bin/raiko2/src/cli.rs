@@ -92,6 +92,66 @@ pub struct Cli {
 pub enum Command {
     /// Run a local fixture-backed HTTP server for manual v3 testing
     FixtureServer(FixtureServerArgs),
+
+    /// TDX prover registration utilities (requires `--features tdx`).
+    #[cfg(feature = "tdx")]
+    Tdx {
+        #[command(subcommand)]
+        sub: TdxCommand,
+    },
+}
+
+/// Subcommands for `raiko2 tdx`.
+#[cfg(feature = "tdx")]
+#[derive(Subcommand, Debug)]
+pub enum TdxCommand {
+    /// Register this prover's TDX instance on a `TdxVerifier` contract.
+    ///
+    /// Reads `~/.config/raiko2/tdx/bootstrap.json` (written during prover bootstrap),
+    /// extracts the on-chain attestation parameters, and submits transactions.
+    Register(TdxRegisterArgs),
+}
+
+#[cfg(feature = "tdx")]
+#[derive(Args, Debug, Clone)]
+pub struct TdxRegisterArgs {
+    /// Address of the deployed `TdxVerifier` contract.
+    #[arg(long, env = "TDX_VERIFIER")]
+    pub verifier: alloy_primitives::Address,
+
+    /// L1 RPC URL where the verifier lives.
+    #[arg(long, env = "TDX_RPC")]
+    pub rpc: String,
+
+    /// Private key used to sign the registration transactions (hex, with or without 0x).
+    ///
+    /// For `--trust`, this must be the verifier owner. For `--register` alone, any funded
+    /// account works.
+    #[arg(long, env = "PRIVATE_KEY")]
+    pub private_key: String,
+
+    /// Trusted params slot to write/read. Use the same index for `--trust` and `--register`
+    /// in one run; pick a fresh index for new image versions.
+    #[arg(long, default_value_t = 0)]
+    pub trusted_params_index: u64,
+
+    /// PCR bitmap (24-bit mask of TPM PCR indices to bind into trusted params).
+    /// Default `0xBA10` = PCRs 4, 9, 11, 12, 13, 15 (matches the Azure paravisor reference set).
+    #[arg(long, default_value_t = 0xBA10)]
+    pub pcr_bitmap: u32,
+
+    /// Owner-only: also call `setTrustedParams` with the measurements extracted from this VM.
+    #[arg(long)]
+    pub trust: bool,
+
+    /// Permissionless: call `registerInstance`. Defaults to true when neither flag is set
+    /// so a bare `raiko2 tdx register` does the common case.
+    #[arg(long)]
+    pub register: bool,
+
+    /// Print the transactions without broadcasting.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]

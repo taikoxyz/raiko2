@@ -125,6 +125,14 @@ max_price_per_mcycle = "0.00000006"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"
 
+# TDX prover config (only used when the binary is built with --features tdx).
+# Requires a running `tdxs` attestation daemon and the on-chain instance_id
+# assigned by `raiko2 tdx register`.
+#
+# [prover.tdx]
+# instance_id = 0
+# socket_path = "/var/tdxs.sock"
+
 [queue]
 backend = "memory"
 namespace = "raiko2:queue"

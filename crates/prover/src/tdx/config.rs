@@ -57,20 +57,33 @@ pub fn generate_private_key() -> Result<secp256k1::SecretKey> {
 }
 
 /// Save a private key to disk with restricted permissions (0600).
+///
+/// The file is created with 0600 from the start (Unix) so the key bytes are
+/// never on disk under the umask default before being narrowed.
 fn save_private_key(key: &secp256k1::SecretKey) -> Result<()> {
     let dir = config_dir()?;
     let secrets_dir = dir.join("secrets");
     fs::create_dir_all(&secrets_dir)?;
 
     let key_file = secrets_dir.join("priv.key");
-    fs::write(&key_file, key.secret_bytes())?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&key_file)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&key_file, perms)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_file)?;
+        file.write_all(&key.secret_bytes())?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&key_file, key.secret_bytes())?;
     }
 
     Ok(())

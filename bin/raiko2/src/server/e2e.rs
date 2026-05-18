@@ -794,10 +794,11 @@ async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_rejects_native_public_proof_type_without_native_route() {
-    let config = base_config();
-    let engine = risc0_fixture_engine(json!({}));
-    let app = app_with_risc0_fixture_engine(config, engine);
+async fn e2e_proposal_proof_native_registers_with_risc0_network_default_route() {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Risc0;
+    config.prover.runner = RunnerKind::Network;
+    let (app, _engine) = app_with_observed_native_fixture_engine(config);
 
     let (status, res) = post_json(
         &app,
@@ -818,13 +819,13 @@ async fn e2e_shasta_rejects_native_public_proof_type_without_native_route() {
     .await;
 
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["status"], "error");
-    assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(
-        res["message"],
-        "proof_type=native is only supported when the server prover route is native/local"
-    );
-    assert!(report_task_ids(&app).await.is_empty());
+    assert_eq!(res["data"]["status"], "registered");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
+    let id = single_report_task_id(&app).await;
+
+    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["data"]["route"], "native/local");
 }
 
 #[tokio::test]

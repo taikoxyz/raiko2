@@ -4,8 +4,8 @@ pub mod aggregation;
 mod config;
 
 pub use config::{
-    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, DeploymentConfig, DeploymentType,
-    OfferParamsConfig, validate_offer_spec,
+    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
+    DeploymentConfig, DeploymentType, OfferParamsConfig, validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -292,12 +292,12 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
 
 #[derive(Debug)]
 struct ValidatedOfferParams {
-    max_price: Amount,
-    min_price: Amount,
+    max_price: Option<Amount>,
+    min_price: Option<Amount>,
     lock_collateral: Amount,
     lock_timeout: u32,
     timeout: u32,
-    ramp_up_period: u32,
+    ramp_up_period_secs: u32,
     bidding_start: u64,
 }
 
@@ -493,13 +493,34 @@ impl BoundlessProver {
         mcycles_count: u32,
         journal: Vec<u8>,
     ) -> RaikoResult<ProofRequest> {
-        let offer = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
+        let ValidatedOfferParams {
+            max_price,
+            min_price,
+            lock_collateral,
+            lock_timeout,
+            timeout,
+            ramp_up_period_secs,
+            bidding_start,
+        } = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
         let input_url = retry_external("upload boundless input", || async {
             client.upload_input(guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
             })
         })
         .await?;
+        let mut offer_params = OfferParams::builder();
+        offer_params
+            .ramp_up_period(ramp_up_period_secs)
+            .lock_timeout(lock_timeout)
+            .timeout(timeout)
+            .lock_collateral(lock_collateral)
+            .bidding_start(bidding_start);
+        if let Some(max_price) = max_price {
+            offer_params.max_price(max_price);
+        }
+        if let Some(min_price) = min_price {
+            offer_params.min_price(min_price);
+        }
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())
@@ -510,16 +531,7 @@ impl BoundlessProver {
             .with_cycles(u64::from(mcycles_count) * MILLION_CYCLES)
             .with_image_id(program.image_id)
             .with_journal(Journal::new(journal))
-            .with_offer(
-                OfferParams::builder()
-                    .ramp_up_period(offer.ramp_up_period)
-                    .lock_timeout(offer.lock_timeout)
-                    .timeout(offer.timeout)
-                    .max_price(offer.max_price)
-                    .min_price(offer.min_price)
-                    .lock_collateral(offer.lock_collateral)
-                    .bidding_start(offer.bidding_start),
-            );
+            .with_offer(offer_params);
         request_params = request_params
             .with_input_url(input_url)
             .expect("with_input_url is infallible for valid URLs");
@@ -1139,25 +1151,36 @@ fn validate_offer_params(
     block_time_sec: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
-    let max_price = parse_request_amount(
-        &offer_spec.max_price_per_mcycle,
-        "max_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
-    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_request_amount(
-        min_price_value,
-        "min_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
+    let (max_price, min_price) = match offer_spec.pricing_mode {
+        BoundlessPricingMode::Manual => {
+            let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
+                )
+            })?;
+            let max_price = parse_request_amount(
+                max_price_value,
+                "max_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+            let min_price = parse_request_amount(
+                min_price_value,
+                "min_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            (Some(max_price), Some(min_price))
+        }
+        BoundlessPricingMode::Market => (None, None),
+    };
     let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let ramp_up_seconds = offer_spec
+    let ramp_up_period_secs = offer_spec
         .ramp_up_period_blocks
         .saturating_mul(block_time_sec);
-    if ramp_up_seconds > lock_timeout {
+    if ramp_up_period_secs > lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
             "ramp_up_period_blocks={} exceeds lock timeout for {} mcycles",
             offer_spec.ramp_up_period_blocks, mcycles_count
@@ -1171,7 +1194,7 @@ fn validate_offer_params(
             .map_err(RaikoError::InvalidRequestConfig)?,
         lock_timeout,
         timeout,
-        ramp_up_period: offer_spec.ramp_up_period_blocks,
+        ramp_up_period_secs,
         bidding_start: SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1214,9 +1237,9 @@ fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, DeploymentConfig, DeploymentType,
-        ElfType, parse_env_bool, parse_env_url, proof_to_envelope, quote_batch_mcycles,
-        user_cycles_to_mcycles, validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
+        DeploymentConfig, DeploymentType, ElfType, parse_env_bool, parse_env_url,
+        proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
     use alloy_primitives::address;
     use boundless_market::price_oracle::Asset;
@@ -1339,9 +1362,27 @@ mod tests {
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
         let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
-        assert_eq!(validated.max_price.asset, Asset::ETH);
-        assert_eq!(validated.min_price.asset, Asset::ETH);
-        assert!(validated.max_price.value > validated.min_price.value);
+        let max_price = validated.max_price.expect("manual max price");
+        let min_price = validated.min_price.expect("manual min price");
+        assert_eq!(max_price.asset, Asset::ETH);
+        assert_eq!(min_price.asset, Asset::ETH);
+        assert!(max_price.value > min_price.value);
+        assert_eq!(validated.ramp_up_period_secs, 120);
+        assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn validate_offer_params_omits_prices_for_market_pricing() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+
+        assert!(validated.max_price.is_none());
+        assert!(validated.min_price.is_none());
+        assert_eq!(validated.ramp_up_period_secs, 120);
         assert!(validated.timeout > validated.lock_timeout);
     }
 

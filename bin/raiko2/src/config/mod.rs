@@ -197,6 +197,12 @@ mod tests {
         path
     }
 
+    fn workspace_config(path: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path)
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<String>,
@@ -231,6 +237,22 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 8080);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_example_validates() {
+        let path = workspace_config("config.example.toml");
+        let mut config = Config::from_file(&path).expect("parse config.example.toml");
+        config.normalize();
+        config.validate().expect("validate config.example.toml");
+    }
+
+    #[test]
+    fn test_docker_compose_config_validates() {
+        let path = workspace_config("docker/config.compose.toml");
+        let mut config = Config::from_file(&path).expect("parse docker config");
+        config.normalize();
+        config.validate().expect("validate docker config");
     }
 
     #[test]

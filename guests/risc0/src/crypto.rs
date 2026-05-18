@@ -1,6 +1,5 @@
 //! Guest-specific crypto hooks for RISC Zero proofs.
 
-use alloy_primitives::keccak256;
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
@@ -8,36 +7,62 @@ pub struct Risc0GuestCrypto;
 
 impl Crypto for Risc0GuestCrypto {
     fn sha256(&self, input: &[u8]) -> [u8; 32] {
-        use sha2::Digest;
+        risc0_crypto_evm::sha256(input)
+    }
 
-        sha2::Sha256::digest(input).into()
+    fn bn254_g1_add(&self, p1: &[u8], p2: &[u8]) -> Result<[u8; 64], PrecompileHalt> {
+        risc0_crypto_evm::bn254_g1_add(p1, p2).ok_or(PrecompileHalt::Bn254AffineGFailedToCreate)
+    }
+
+    fn bn254_g1_mul(&self, point: &[u8], scalar: &[u8]) -> Result<[u8; 64], PrecompileHalt> {
+        risc0_crypto_evm::bn254_g1_mul(point, scalar)
+            .ok_or(PrecompileHalt::Bn254AffineGFailedToCreate)
     }
 
     fn secp256k1_ecrecover(
         &self,
         sig: &[u8; 64],
-        mut recid: u8,
+        recid: u8,
         msg: &[u8; 32],
     ) -> Result<[u8; 32], PrecompileHalt> {
-        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-
-        let mut sig = Signature::from_slice(sig).map_err(|_| {
-            PrecompileHalt::other_static("patched k256 deserialize signature failed")
-        })?;
-        if let Some(sig_normalized) = sig.normalize_s() {
-            sig = sig_normalized;
-            recid ^= 1;
-        }
-
-        let recid = RecoveryId::from_byte(recid)
-            .ok_or_else(|| PrecompileHalt::other_static("invalid recovery ID"))?;
-        let recovered_key = VerifyingKey::recover_from_prehash(msg, &sig, recid)
-            .map_err(|_| PrecompileHalt::Secp256k1RecoverFailed)?;
-
-        let mut hash = keccak256(&recovered_key.to_encoded_point(false).as_bytes()[1..]);
-        hash[..12].fill(0);
-        Ok(*hash)
+        let address = risc0_crypto_evm::secp256k1_ecrecover(sig, recid, msg)
+            .ok_or(PrecompileHalt::Secp256k1RecoverFailed)?;
+        let mut output = [0u8; 32];
+        output[12..].copy_from_slice(address.as_slice());
+        Ok(output)
     }
+
+    fn modexp(&self, base: &[u8], exp: &[u8], modulus: &[u8]) -> Result<Vec<u8>, PrecompileHalt> {
+        Ok(risc0_crypto_evm::modexp(base, exp, modulus)
+            .unwrap_or_else(|| fallback_modexp(base, exp, modulus)))
+    }
+
+    fn secp256r1_verify_signature(&self, msg: &[u8; 32], sig: &[u8; 64], pk: &[u8; 64]) -> bool {
+        risc0_crypto_evm::secp256r1_verify(msg, sig, pk)
+    }
+}
+
+fn fallback_modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {
+    use num_bigint::BigUint;
+
+    if modulus.is_empty() {
+        return Vec::new();
+    }
+
+    let modulus_value = BigUint::from_bytes_be(modulus);
+    if modulus_value == BigUint::default() {
+        return vec![0u8; modulus.len()];
+    }
+
+    let result = BigUint::from_bytes_be(base).modpow(&BigUint::from_bytes_be(exp), &modulus_value);
+    let result_bytes = result.to_bytes_be();
+    if result_bytes.len() >= modulus.len() {
+        return result_bytes[result_bytes.len() - modulus.len()..].to_vec();
+    }
+
+    let mut output = vec![0u8; modulus.len()];
+    output[modulus.len() - result_bytes.len()..].copy_from_slice(&result_bytes);
+    output
 }
 
 pub fn install_guest_crypto() {
@@ -54,6 +79,10 @@ mod tests {
         install_guest_crypto();
 
         assert_eq!(format!("{:?}", crypto()), "Risc0GuestCrypto");
+        if !cfg!(target_os = "zkvm") {
+            return;
+        }
+
         assert_eq!(
             crypto().sha256(b"abc"),
             [

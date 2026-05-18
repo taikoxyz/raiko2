@@ -650,6 +650,28 @@ where
         .map_err(|err| anyhow::anyhow!("execute failed: {err:?}"))
 }
 
+async fn execute_sp1_blocking(
+    prover_mode: Sp1ProverMode,
+    elf: Vec<u8>,
+    stdin: SP1Stdin,
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
+    tokio::task::spawn_blocking(move || match prover_mode {
+        Sp1ProverMode::Mock => {
+            let prover = BlockingProverClient::builder().mock().build();
+            execute_sp1_local(&prover, &elf, stdin)
+        }
+        Sp1ProverMode::Local => {
+            let prover = BlockingProverClient::builder().cpu().build();
+            execute_sp1_local(&prover, &elf, stdin)
+        }
+        Sp1ProverMode::Network => {
+            anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
+        }
+    })
+    .await
+    .context("join SP1 blocking execute task")?
+}
+
 async fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
     let private_key = std::env::var("NETWORK_PRIVATE_KEY")
         .ok()
@@ -731,19 +753,8 @@ async fn run_sp1_proposal(
         Mode::Execute => {
             let start = Instant::now();
             record_memory_snapshot(&mut report, "proposal:before_execute_run");
-            let (public_values, execution_report) = match sp1_config.prover {
-                Sp1ProverMode::Mock => {
-                    let prover = BlockingProverClient::builder().mock().build();
-                    execute_sp1_local(&prover, elf, stdin)?
-                }
-                Sp1ProverMode::Local => {
-                    let prover = BlockingProverClient::builder().cpu().build();
-                    execute_sp1_local(&prover, elf, stdin)?
-                }
-                Sp1ProverMode::Network => {
-                    anyhow::bail!("sp1.mode=execute does not support sp1.prover=network")
-                }
-            };
+            let (public_values, execution_report) =
+                execute_sp1_blocking(sp1_config.prover, elf.to_vec(), stdin).await?;
             record_memory_snapshot(&mut report, "proposal:after_execute_run");
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = public_values.raw();

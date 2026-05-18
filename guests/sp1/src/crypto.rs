@@ -2,7 +2,7 @@
 
 use alloy_primitives::keccak256;
 use num_bigint::BigUint;
-use revm_precompile::{install_crypto, Crypto, PrecompileError};
+use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 use std::sync::OnceLock;
 
 const BN254_BASE_MODULUS_DEC: &[u8] =
@@ -27,13 +27,13 @@ impl Bn254Affine {
 pub struct Sp1GuestCrypto;
 
 impl Crypto for Sp1GuestCrypto {
-    fn bn254_g1_add(&self, p1: &[u8], p2: &[u8]) -> Result<[u8; 64], PrecompileError> {
+    fn bn254_g1_add(&self, p1: &[u8], p2: &[u8]) -> Result<[u8; 64], PrecompileHalt> {
         let point = be_bytes_to_point(p1)?;
         let other = be_bytes_to_point(p2)?;
         point_to_be_bytes(g1_add(&point, &other))
     }
 
-    fn bn254_g1_mul(&self, point: &[u8], scalar: &[u8]) -> Result<[u8; 64], PrecompileError> {
+    fn bn254_g1_mul(&self, point: &[u8], scalar: &[u8]) -> Result<[u8; 64], PrecompileHalt> {
         let point = be_bytes_to_point(point)?;
         let scalar = BigUint::from_bytes_be(scalar) % bn254_group_order();
         point_to_be_bytes(g1_mul(&point, &scalar))
@@ -50,11 +50,11 @@ impl Crypto for Sp1GuestCrypto {
         sig: &[u8; 64],
         mut recid: u8,
         msg: &[u8; 32],
-    ) -> Result<[u8; 32], PrecompileError> {
+    ) -> Result<[u8; 32], PrecompileHalt> {
         use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 
         let mut sig = Signature::from_slice(sig).map_err(|_| {
-            PrecompileError::other_static("patched k256 deserialize signature failed")
+            PrecompileHalt::other_static("patched k256 deserialize signature failed")
         })?;
         if let Some(sig_normalized) = sig.normalize_s() {
             sig = sig_normalized;
@@ -62,9 +62,9 @@ impl Crypto for Sp1GuestCrypto {
         }
 
         let recid = RecoveryId::from_byte(recid)
-            .ok_or_else(|| PrecompileError::other_static("invalid recovery ID"))?;
+            .ok_or_else(|| PrecompileHalt::other_static("invalid recovery ID"))?;
         let recovered_key = VerifyingKey::recover_from_prehash(msg, &sig, recid)
-            .map_err(|_| PrecompileError::Secp256k1RecoverFailed)?;
+            .map_err(|_| PrecompileHalt::Secp256k1RecoverFailed)?;
 
         let mut hash = keccak256(&recovered_key.to_encoded_point(false).as_bytes()[1..]);
         hash[..12].fill(0);
@@ -92,9 +92,9 @@ fn bn254_group_order() -> &'static BigUint {
     })
 }
 
-fn be_bytes_to_point(input: &[u8]) -> Result<Bn254G1, PrecompileError> {
+fn be_bytes_to_point(input: &[u8]) -> Result<Bn254G1, PrecompileHalt> {
     if input.len() != 64 {
-        return Err(PrecompileError::Bn254AffineGFailedToCreate);
+        return Err(PrecompileHalt::Bn254AffineGFailedToCreate);
     }
 
     let x = BigUint::from_bytes_be(&input[..32]);
@@ -105,18 +105,18 @@ fn be_bytes_to_point(input: &[u8]) -> Result<Bn254G1, PrecompileError> {
 
     let modulus = bn254_base_modulus();
     if &x >= modulus || &y >= modulus {
-        return Err(PrecompileError::Bn254FieldPointNotAMember);
+        return Err(PrecompileHalt::Bn254FieldPointNotAMember);
     }
 
     let point = Bn254Affine::new(x, y);
     if !is_on_bn254_g1(&point) {
-        return Err(PrecompileError::Bn254AffineGFailedToCreate);
+        return Err(PrecompileHalt::Bn254AffineGFailedToCreate);
     }
 
     Ok(Bn254G1::Affine(point))
 }
 
-fn point_to_be_bytes(point: Bn254G1) -> Result<[u8; 64], PrecompileError> {
+fn point_to_be_bytes(point: Bn254G1) -> Result<[u8; 64], PrecompileHalt> {
     let Bn254G1::Affine(point) = point else {
         return Ok([0u8; 64]);
     };
@@ -124,7 +124,7 @@ fn point_to_be_bytes(point: Bn254G1) -> Result<[u8; 64], PrecompileError> {
     let x_bytes = point.x.to_bytes_be();
     let y_bytes = point.y.to_bytes_be();
     if x_bytes.len() > 32 || y_bytes.len() > 32 {
-        return Err(PrecompileError::Bn254AffineGFailedToCreate);
+        return Err(PrecompileHalt::Bn254AffineGFailedToCreate);
     }
 
     let mut x = [0u8; 32];
@@ -192,7 +192,11 @@ fn double_affine_point(point: &Bn254Affine) -> Bn254G1 {
         &point.x,
         modulus,
     );
-    let y = mod_sub(&(&slope * mod_sub(&point.x, &x, modulus)), &point.y, modulus);
+    let y = mod_sub(
+        &(&slope * mod_sub(&point.x, &x, modulus)),
+        &point.y,
+        modulus,
+    );
 
     Bn254G1::Affine(Bn254Affine::new(x, y))
 }
@@ -290,21 +294,15 @@ mod tests {
             crypto().bn254_g1_add(&[0u8; 64], &[0u8; 64]).unwrap(),
             [0u8; 64]
         );
-        assert_eq!(
-            crypto().bn254_g1_mul(&p1, &[0u8; 32]).unwrap(),
-            [0u8; 64]
-        );
-        assert_eq!(
-            crypto().bn254_g1_mul(&[0u8; 64], &[2]).unwrap(),
-            [0u8; 64]
-        );
+        assert_eq!(crypto().bn254_g1_mul(&p1, &[0u8; 32]).unwrap(), [0u8; 64]);
+        assert_eq!(crypto().bn254_g1_mul(&[0u8; 64], &[2]).unwrap(), [0u8; 64]);
         assert_eq!(
             crypto().bn254_g1_add(&[0x11u8; 64], &[0u8; 64]),
-            Err(PrecompileError::Bn254AffineGFailedToCreate)
+            Err(PrecompileHalt::Bn254AffineGFailedToCreate)
         );
         assert_eq!(
             crypto().bn254_g1_add(&[0xffu8; 64], &[0u8; 64]),
-            Err(PrecompileError::Bn254FieldPointNotAMember)
+            Err(PrecompileHalt::Bn254FieldPointNotAMember)
         );
 
         let doubled = crypto()

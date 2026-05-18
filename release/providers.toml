@@ -1,0 +1,13 @@
+# External TEE providers are pinned by exact source commit for release provenance.
+# Release execution reads this file and must not follow branch tips at runtime.
+# Each attestation_path must point at a baked metadata file inside the built image.
+[providers.gaiko2]
+repo = "https://github.com/smtmfft/gaiko2.git"
+commit = "96b72bdda0d3ee4452c5773201f5caa4bdc71191"
+provider = "gaiko2-sgxgeth"
+lane = "sgxgeth"
+image_name = "gaiko2-sgxgeth"
+repository = "us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth"
+dockerfile = "docker/Dockerfile.tee"
+context = "."
+attestation_path = "/opt/gaiko2/etc/attestation.json"

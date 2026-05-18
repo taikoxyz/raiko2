@@ -31,6 +31,7 @@ Do not use this skill for:
 - Kubernetes rollout
 - smoke checks against a live service
 - infra changes outside image build and guest registration
+- TEE provider attestation export across multiple provider images
 
 ## Preconditions
 
@@ -56,6 +57,17 @@ Default repository:
 4. Capture the pushed digest from the output line:
    `[INFO] Image pushed: <repository>@sha256:...`
 5. Report the exact digest back to the user.
+
+For TEE-backed provider image attestation capture, use the dedicated `xtask` flow instead:
+
+- `cargo run -r -p xtask -- release-tee-providers --tag <tag>`
+
+That flow owns:
+
+- external provider source pin resolution
+- multi-provider TEE image build/push
+- `mr_enclave` / `mr_signer` export
+- unified `tee-attestation-manifest-<tag>.json`
 
 ## Guest ELF Rule
 

@@ -3,8 +3,8 @@
 use alloy_primitives::B256;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
 use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData};
-use raiko2_prover::gaiko2::protocol::{
-    GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ShastaPayload, Gaiko2ShastaRequest,
+use raiko2_prover::remote_prover::protocol::{
+    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ShastaPayload, Raiko2ShastaRequest,
 };
 use reth_ethereum_primitives::Block;
 use std::path::PathBuf;
@@ -18,18 +18,7 @@ fn u48(value: u64) -> alloy_primitives::Uint<48, 1> {
     alloy_primitives::Uint::from_limbs([value])
 }
 
-fn request_fixture() -> Gaiko2ShastaRequest {
-    let mut carry = ProofCarryData {
-        chain_id: 167_013,
-        ..ProofCarryData::default()
-    };
-    carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
-    carry.transition_input.checkpoint = Checkpoint {
-        blockNumber: u48(42),
-        blockHash: B256::from([0x22; 32]),
-        stateRoot: B256::from([0x33; 32]),
-    };
-
+fn request_fixture() -> Raiko2ShastaRequest {
     let mut stateless = StatelessInput {
         block: Block::default(),
         chain_spec: ChainSpec::default(),
@@ -40,10 +29,22 @@ fn request_fixture() -> Gaiko2ShastaRequest {
     stateless.block.header.parent_hash = B256::from([0x11; 32]);
     stateless.block.header.state_root = B256::from([0x33; 32]);
     stateless.chain_spec.chain_id = 167_013;
+    let block_hash = stateless.block.header.hash_slow();
 
-    Gaiko2ShastaRequest {
-        schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-        payload: Gaiko2ShastaPayload {
+    let mut carry = ProofCarryData {
+        chain_id: 167_013,
+        ..ProofCarryData::default()
+    };
+    carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
+    carry.transition_input.checkpoint = Checkpoint {
+        blockNumber: u48(42),
+        blockHash: block_hash,
+        stateRoot: B256::from([0x33; 32]),
+    };
+
+    Raiko2ShastaRequest {
+        schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+        payload: Raiko2ShastaPayload {
             chain_id: 167_013,
             blocks: vec![stateless.into()],
             proof_carry_data: carry,

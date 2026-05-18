@@ -65,10 +65,13 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn prove_shasta<P>(
     State(state): State<SgxProver<P>>,
-    request: Result<Json<raiko2_prover::gaiko2::protocol::Gaiko2ShastaRequest>, JsonRejection>,
+    request: Result<
+        Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest>,
+        JsonRejection,
+    >,
 ) -> (
     axum::http::StatusCode,
-    Json<raiko2_prover::gaiko2::protocol::Gaiko2ProofResponse>,
+    Json<raiko2_prover::remote_prover::protocol::Raiko2ProofResponse>,
 )
 where
     P: TeeProvider + Clone + Send + Sync + 'static,
@@ -87,12 +90,12 @@ where
 async fn prove_shasta_aggregate<P>(
     State(state): State<SgxProver<P>>,
     request: Result<
-        Json<raiko2_prover::gaiko2::protocol::Gaiko2ShastaAggregateRequest>,
+        Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest>,
         JsonRejection,
     >,
 ) -> (
     axum::http::StatusCode,
-    Json<raiko2_prover::gaiko2::protocol::Gaiko2ProofResponse>,
+    Json<raiko2_prover::remote_prover::protocol::Raiko2ProofResponse>,
 )
 where
     P: TeeProvider + Clone + Send + Sync + 'static,
@@ -117,9 +120,10 @@ mod tests {
     };
     use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
     use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData};
-    use raiko2_prover::gaiko2::protocol::{
-        GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ShastaAggregatePayload, Gaiko2ShastaAggregateRequest,
-        Gaiko2ShastaPayload, Gaiko2ShastaRequest,
+    use raiko2_prover::remote_prover::protocol::{
+        RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
+        Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaPayload,
+        Raiko2ShastaRequest,
     };
     use reth_ethereum_primitives::Block;
     use secp256k1::SecretKey;
@@ -150,18 +154,7 @@ mod tests {
         alloy_primitives::Uint::from_limbs([value])
     }
 
-    fn request_fixture() -> Gaiko2ShastaRequest {
-        let mut carry = ProofCarryData {
-            chain_id: 167_013,
-            ..ProofCarryData::default()
-        };
-        carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
-        carry.transition_input.checkpoint = Checkpoint {
-            blockNumber: u48(42),
-            blockHash: B256::from([0x22; 32]),
-            stateRoot: B256::from([0x33; 32]),
-        };
-
+    fn request_fixture() -> Raiko2ShastaRequest {
         let mut stateless = StatelessInput {
             block: Block::default(),
             chain_spec: ChainSpec::default(),
@@ -172,10 +165,22 @@ mod tests {
         stateless.block.header.parent_hash = B256::from([0x11; 32]);
         stateless.block.header.state_root = B256::from([0x33; 32]);
         stateless.chain_spec.chain_id = 167_013;
+        let block_hash = stateless.block.header.hash_slow();
 
-        Gaiko2ShastaRequest {
-            schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Gaiko2ShastaPayload {
+        let mut carry = ProofCarryData {
+            chain_id: 167_013,
+            ..ProofCarryData::default()
+        };
+        carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
+        carry.transition_input.checkpoint = Checkpoint {
+            blockNumber: u48(42),
+            blockHash: block_hash,
+            stateRoot: B256::from([0x33; 32]),
+        };
+
+        Raiko2ShastaRequest {
+            schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaPayload {
                 chain_id: 167_013,
                 blocks: vec![stateless.into()],
                 proof_carry_data: carry,
@@ -272,9 +277,9 @@ mod tests {
                 instance_id: 99,
             },
         });
-        let body = serde_json::to_vec(&Gaiko2ShastaAggregateRequest {
-            schema: GAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-            payload: Gaiko2ShastaAggregatePayload { proofs: vec![] },
+        let body = serde_json::to_vec(&Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
         })
         .expect("request body");
 

@@ -13,11 +13,12 @@ use raiko2_primitives_shasta::GuestInput;
 
 use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
 
-use self::{
+use crate::remote_prover::{
     adapter::{build_shasta_aggregate_request, build_shasta_packet},
     protocol::{
-        GAIKO2_PROOF_RESPONSE_SCHEMA, GAIKO2_SHASTA_REQUEST_SCHEMA, Gaiko2ProofResponse,
-        Gaiko2ProofResult, Gaiko2ProofStatus, Gaiko2ShastaRequest,
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
+        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
+        Raiko2ShastaRequest,
     },
 };
 
@@ -109,11 +110,11 @@ where
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let packet: Gaiko2ShastaRequest = serde_json::from_slice(input.as_ref())
+        let packet: Raiko2ShastaRequest = serde_json::from_slice(input.as_ref())
             .map_err(|err| RaikoError::Guest(format!("failed to decode gaiko2 packet: {err}")))?;
-        if packet.schema != GAIKO2_SHASTA_REQUEST_SCHEMA {
+        if packet.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
             return Err(RaikoError::Guest(format!(
-                "unsupported gaiko2 request schema: {}",
+                "unsupported remote prover request schema: {}",
                 packet.schema
             )));
         }
@@ -150,9 +151,9 @@ where
         _backend: &B,
     ) -> RaikoResult<Proof> {
         let packet = build_shasta_aggregate_request(&input.proofs)?;
-        if packet.schema != GAIKO2_SHASTA_REQUEST_SCHEMA {
+        if packet.schema != RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA {
             return Err(RaikoError::Guest(format!(
-                "unsupported gaiko2 request schema: {}",
+                "unsupported remote prover request schema: {}",
                 packet.schema
             )));
         }
@@ -188,7 +189,7 @@ impl Gaiko2Prover {
         &self,
         url: Url,
         body: Vec<u8>,
-    ) -> RaikoResult<(Gaiko2ProofResponse, Gaiko2ProofResult)> {
+    ) -> RaikoResult<(Raiko2ProofResponse, Raiko2ProofResult)> {
         let response = self
             .client
             .post(url)
@@ -202,20 +203,20 @@ impl Gaiko2Prover {
             .bytes()
             .await
             .map_err(|err| RaikoError::Guest(format!("gaiko2 read failed: {err}")))?;
-        let envelope: Gaiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
+        let envelope: Raiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
             RaikoError::Guest(format!(
                 "gaiko2 response decode failed (status {status}): {err}"
             ))
         })?;
 
-        if envelope.schema != GAIKO2_PROOF_RESPONSE_SCHEMA {
+        if envelope.schema != RAIKO2_PROOF_RESPONSE_SCHEMA {
             return Err(RaikoError::Guest(format!(
-                "unsupported gaiko2 response schema: {}",
+                "unsupported remote prover response schema: {}",
                 envelope.schema
             )));
         }
 
-        if !status.is_success() || envelope.status == Gaiko2ProofStatus::Error {
+        if !status.is_success() || envelope.status == Raiko2ProofStatus::Error {
             let error = envelope.error.as_ref().ok_or_else(|| {
                 RaikoError::Guest(format!(
                     "gaiko2 request failed with status {status} and no error payload"
@@ -237,7 +238,7 @@ impl Gaiko2Prover {
 
 fn gaiko2_metadata(
     response_schema: &str,
-    result: &protocol::Gaiko2ProofResult,
+    result: &crate::remote_prover::protocol::Raiko2ProofResult,
 ) -> serde_json::Value {
     let mut metadata = Map::from_iter([(
         "schema".to_string(),

@@ -41,6 +41,17 @@ impl ProverConfig {
         PipelineRoute::new(self.guest_system, self.runner)
     }
 
+    #[must_use]
+    pub const fn is_remote_sgx_route(&self) -> bool {
+        matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Sgx,
+                runner: RunnerKind::Remote
+            }
+        )
+    }
+
     /// Applies the canonical server route to backend-specific prover defaults.
     pub fn normalize_route(&mut self) {
         match self.route() {

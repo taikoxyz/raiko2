@@ -148,6 +148,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
   - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`
+- When the server prover route is `sgx/remote`, the hosted public API only accepts
+  `proof_type=sgx` and `proof_type=sgxgeth`.
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the

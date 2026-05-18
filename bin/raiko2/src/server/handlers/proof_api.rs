@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
-    public_task_id_from_fingerprint, route_for_proof_type,
+    public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
 };
 use super::proof_types::{
     AggregateProofRequest, AggregateStatus, ApiOk, BatchProofType, BatchShastaRequest,
@@ -337,6 +337,7 @@ fn build_canonical_batch_submission(
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
     validate_request_shape(&req)?;
+    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let requested_prover_config = augment_system_prover_config(
         &pair,
@@ -659,6 +660,7 @@ async fn build_external_aggregate_submission(
     req: AggregateProofRequest,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
+    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let prover_config = augment_system_prover_config(
         &pair,

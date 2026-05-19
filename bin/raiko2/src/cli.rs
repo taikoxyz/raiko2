@@ -134,6 +134,7 @@ mod tests {
     use super::Cli;
     use clap::Parser;
 
+    #[cfg(not(feature = "fixture-server"))]
     #[test]
     fn fixture_server_command_is_rejected_without_feature() {
         let result = Cli::try_parse_from(["raiko2", "fixture-server"]);

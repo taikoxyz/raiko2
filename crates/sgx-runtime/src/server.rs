@@ -6,6 +6,7 @@ use axum::{
     extract::{DefaultBodyLimit, FromRef, State, rejection::JsonRejection},
     routing::{get, post},
 };
+use tracing::{info, warn};
 
 use crate::{
     aggregation::aggregate_request, config::ServiceConfig, proposal::prove_request,
@@ -48,6 +49,15 @@ where
     let listener = tokio::net::TcpListener::bind(&service_config.listen_addr)
         .await
         .with_context(|| format!("bind {}", service_config.listen_addr))?;
+    let local_addr = listener
+        .local_addr()
+        .context("read local SGX listener address")?;
+    info!(
+        listen = %local_addr,
+        fork = %service_config.fork,
+        instance_id = service_config.instance_id,
+        "raiko2 sgx provider listening"
+    );
     axum::serve(
         listener,
         router(SgxProver {
@@ -79,11 +89,43 @@ where
     match request {
         Ok(Json(request)) => {
             match prove_request(&state.provider, state.service_config.instance_id, &request) {
-                Ok(response) => (axum::http::StatusCode::OK, Json(response)),
-                Err(err) => err.into_response(),
+                Ok(response) => {
+                    if let Some(result) = response.result.as_ref() {
+                        info!(
+                            schema = %request.schema,
+                            chain_id = request.payload.chain_id,
+                            block_count = request.payload.blocks.len(),
+                            instance_id = state.service_config.instance_id,
+                            input = %result.input,
+                            "completed sgx shasta prove request"
+                        );
+                    }
+                    (axum::http::StatusCode::OK, Json(response))
+                }
+                Err(err) => {
+                    warn!(
+                        schema = %request.schema,
+                        chain_id = request.payload.chain_id,
+                        block_count = request.payload.blocks.len(),
+                        instance_id = state.service_config.instance_id,
+                        code = err.code,
+                        message = %err.message,
+                        "sgx shasta prove request failed"
+                    );
+                    err.into_response()
+                }
             }
         }
-        Err(err) => RequestFailure::invalid_json(err.body_text()).into_response(),
+        Err(err) => {
+            let failure = RequestFailure::invalid_json(err.body_text());
+            warn!(
+                instance_id = state.service_config.instance_id,
+                code = failure.code,
+                message = %failure.message,
+                "sgx shasta prove request failed"
+            );
+            failure.into_response()
+        }
     }
 }
 
@@ -103,11 +145,41 @@ where
     match request {
         Ok(Json(request)) => {
             match aggregate_request(&state.provider, state.service_config.instance_id, &request) {
-                Ok(response) => (axum::http::StatusCode::OK, Json(response)),
-                Err(err) => err.into_response(),
+                Ok(response) => {
+                    if let Some(result) = response.result.as_ref() {
+                        info!(
+                            schema = %request.schema,
+                            proof_count = request.payload.proofs.len(),
+                            instance_id = state.service_config.instance_id,
+                            input = %result.input,
+                            "completed sgx shasta aggregate request"
+                        );
+                    }
+                    (axum::http::StatusCode::OK, Json(response))
+                }
+                Err(err) => {
+                    warn!(
+                        schema = %request.schema,
+                        proof_count = request.payload.proofs.len(),
+                        instance_id = state.service_config.instance_id,
+                        code = err.code,
+                        message = %err.message,
+                        "sgx shasta aggregate request failed"
+                    );
+                    err.into_response()
+                }
             }
         }
-        Err(err) => RequestFailure::invalid_json(err.body_text()).into_response(),
+        Err(err) => {
+            let failure = RequestFailure::invalid_json(err.body_text());
+            warn!(
+                instance_id = state.service_config.instance_id,
+                code = failure.code,
+                message = %failure.message,
+                "sgx shasta aggregate request failed"
+            );
+            failure.into_response()
+        }
     }
 }
 

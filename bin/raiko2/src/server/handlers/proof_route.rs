@@ -69,7 +69,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
-        BatchProofType::Native => native_local_route(),
+        BatchProofType::Native => native_route_for_request(state)?,
         BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",

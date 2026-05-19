@@ -22,7 +22,6 @@ pub fn hash_checkpoint(checkpoint: &Checkpoint) -> B256 {
 /// This binds `chain_id` and `verifier` to the signed message to avoid cross-chain / cross-verifier
 /// replay of otherwise identical transition inputs.
 pub fn hash_shasta_subproof_input(carry: &ProofCarryData) -> B256 {
-    tracing::info!("hash_shasta_subproof_input: {carry:?}");
     let transition_hash = hash_shasta_transition_input(&carry.transition_input);
     hash_four_values(
         VERIFY_PROOF_B256,
@@ -119,6 +118,60 @@ pub fn hash_core_state(core_state: &CoreState) -> B256 {
         U256::from(core_state.lastFinalizedTimestamp).into(),
         U256::from(core_state.lastCheckpointTimestamp).into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use tracing::{Level, Subscriber, dispatcher::Dispatch};
+    use tracing_subscriber::{
+        layer::{Context, Layer},
+        prelude::*,
+        registry::LookupSpan,
+    };
+
+    use super::hash_shasta_subproof_input;
+    use crate::shasta::ProofCarryData;
+
+    #[derive(Clone)]
+    struct EventCounter {
+        info_events: Arc<AtomicUsize>,
+    }
+
+    impl<S> Layer<S> for EventCounter
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() == Level::INFO
+                && event.metadata().target() == "raiko2_protocol_shasta::libhash::shasta"
+            {
+                self.info_events.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn hash_shasta_subproof_input_does_not_emit_info_logs() {
+        let info_events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(EventCounter {
+            info_events: info_events.clone(),
+        });
+        let dispatch = Dispatch::new(subscriber);
+
+        let mut carry = ProofCarryData::default();
+        carry.chain_id = 167_000;
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            let _ = hash_shasta_subproof_input(&carry);
+        });
+
+        assert_eq!(info_events.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[must_use]

@@ -73,6 +73,38 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+fn proposal_id_from_request(
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+) -> u64 {
+    request
+        .payload
+        .proof_carry_data
+        .transition_input
+        .proposal_id
+}
+
+fn aggregate_proposal_id_summary(
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest,
+) -> String {
+    if request.payload.proofs.is_empty() {
+        return "none".to_string();
+    }
+
+    let first = request.payload.proofs[0]
+        .proof_carry_data
+        .transition_input
+        .proposal_id;
+    let last = request.payload.proofs[request.payload.proofs.len() - 1]
+        .proof_carry_data
+        .transition_input
+        .proposal_id;
+    if first == last {
+        first.to_string()
+    } else {
+        format!("{first}..{last}")
+    }
+}
+
 async fn prove_shasta<P>(
     State(state): State<SgxProver<P>>,
     request: Result<
@@ -90,13 +122,13 @@ where
         Ok(Json(request)) => {
             match prove_request(&state.provider, state.service_config.instance_id, &request) {
                 Ok(response) => {
-                    if let Some(result) = response.result.as_ref() {
+                    if response.result.is_some() {
                         info!(
                             schema = %request.schema,
+                            proposal_id = proposal_id_from_request(&request),
                             chain_id = request.payload.chain_id,
                             block_count = request.payload.blocks.len(),
                             instance_id = state.service_config.instance_id,
-                            input = %result.input,
                             "completed sgx shasta prove request"
                         );
                     }
@@ -146,12 +178,12 @@ where
         Ok(Json(request)) => {
             match aggregate_request(&state.provider, state.service_config.instance_id, &request) {
                 Ok(response) => {
-                    if let Some(result) = response.result.as_ref() {
+                    if response.result.is_some() {
                         info!(
                             schema = %request.schema,
+                            proposal_ids = %aggregate_proposal_id_summary(&request),
                             proof_count = request.payload.proofs.len(),
                             instance_id = state.service_config.instance_id,
-                            input = %result.input,
                             "completed sgx shasta aggregate request"
                         );
                     }
@@ -201,7 +233,7 @@ mod tests {
     use secp256k1::SecretKey;
     use tower::util::ServiceExt;
 
-    use super::{SgxProver, router};
+    use super::{SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router};
     use crate::config::ServiceConfig;
     use crate::tee::TeeProvider;
 
@@ -368,5 +400,37 @@ mod tests {
             .expect("aggregate response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn proposal_log_summary_uses_business_identifier() {
+        let mut request = request_fixture();
+        request
+            .payload
+            .proof_carry_data
+            .transition_input
+            .proposal_id = 2_222;
+
+        assert_eq!(proposal_id_from_request(&request), 2_222);
+    }
+
+    #[test]
+    fn aggregate_log_summary_summarizes_proposal_ids() {
+        let mut first = request_fixture().payload.proof_carry_data;
+        first.transition_input.proposal_id = 2_222;
+        let aggregate = Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload {
+                proofs: vec![
+                    raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
+                        input: "0x1".to_string(),
+                        proof: "0x2".to_string(),
+                        proof_carry_data: first,
+                    },
+                ],
+            },
+        };
+
+        assert_eq!(aggregate_proposal_id_summary(&aggregate), "2222");
     }
 }

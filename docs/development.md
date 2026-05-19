@@ -56,8 +56,20 @@ second Cargo config source for `getrandom_backend`.
 For manual HTTP testing without external RPC dependencies, run the fixture server:
 
 ```bash
-cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
+cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1 --port 8087
 ```
+
+This fixture-backed server is intended for:
+
+- API upgrade smoke tests that only need stable request/response behavior
+- local validation of `/v3/proof/batch/shasta` and `/v3/proof/report` wiring
+- development without live L1/L2 RPC or a real prover backend
+
+Do not use it as evidence for:
+
+- preflight correctness
+- remote prover integration
+- end-to-end proposal regression on a real network window
 
 Submit an asynchronous v3 request:
 

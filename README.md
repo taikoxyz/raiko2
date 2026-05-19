@@ -26,8 +26,12 @@ Hoodi-compatible v3 API.
 Run the fixture-backed server for a dependency-free local API smoke test:
 
 ```bash
-cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
+cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1 --port 8087
 ```
+
+Use this only for local API-surface smoke testing, request/response contract checks, and simple
+task/report workflow validation when you do not want real RPC or prover dependencies. It is not a
+substitute for preflight correctness, remote-provider integration, or full proposal regression.
 
 Run the real server with an explicit config file:
 

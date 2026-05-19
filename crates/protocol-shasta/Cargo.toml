@@ -31,3 +31,4 @@ net = ["taiko-client-protocol/net"]
 
 [dev-dependencies]
 alloy-rpc-types-engine.workspace = true
+tracing-subscriber.workspace = true

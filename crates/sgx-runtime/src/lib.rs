@@ -12,6 +12,7 @@ pub mod config;
 mod proposal;
 mod protocol;
 mod server;
+mod startup;
 mod tee;
 
 use anyhow::Result;
@@ -35,6 +36,7 @@ pub use config::{
 /// bind, or the axum server exits with an error.
 pub async fn serve(global_opts: GlobalOpts, serve_opts: ServeOpts) -> Result<()> {
     let service_config = resolve_service_config(&global_opts, &serve_opts)?;
+    startup::log_startup_summary(&global_opts, &service_config);
     match global_opts.mode {
         RuntimeMode::Tee => {
             let provider = tee::GramineProvider::new(global_opts.secret_dir);

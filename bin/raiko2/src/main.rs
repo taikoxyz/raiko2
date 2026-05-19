@@ -30,7 +30,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::cli::{Cli, Command};
 use crate::config::Config;
-use crate::server::{run_fixture_server, run_server};
+use crate::server::{log_startup_summary, run_fixture_server, run_server};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -52,10 +52,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = Config::load(&cli)?;
-    info!("Loaded configuration: {:?}", config.server);
+    log_startup_summary(&config, cli.json_logs);
 
     // Run the server
-    run_server(config).await?;
+    run_server(config, cli.json_logs).await?;
 
     Ok(())
 }

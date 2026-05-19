@@ -187,16 +187,16 @@ mod tests {
         let mut config = sample_config();
         config.prover.guest_system = GuestSystem::Sgx;
         config.prover.runner = RunnerKind::Remote;
-        config.prover.remote_sgx.base_url = "http://43.153.195.212:9090".to_string();
-        config.prover.remote_sgx.sgxgeth_base_url = "http://43.153.195.212:8090".to_string();
+        config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
+        config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
 
         let summary = summary_json(&config, true);
 
         assert_eq!(summary["route"], "sgx/remote");
-        assert_eq!(summary["remote_sgx_base_url"], "http://43.153.195.212:9090");
+        assert_eq!(summary["remote_sgx_base_url"], "http://example.com:9090");
         assert_eq!(
             summary["remote_sgx_sgxgeth_base_url"],
-            "http://43.153.195.212:8090"
+            "http://example.com:8090"
         );
         assert_eq!(summary["json_logs"], true);
     }

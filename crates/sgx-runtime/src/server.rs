@@ -178,15 +178,13 @@ where
         Ok(Json(request)) => {
             match aggregate_request(&state.provider, state.service_config.instance_id, &request) {
                 Ok(response) => {
-                    if response.result.is_some() {
-                        info!(
-                            schema = %request.schema,
-                            proposal_ids = %aggregate_proposal_id_summary(&request),
-                            proof_count = request.payload.proofs.len(),
-                            instance_id = state.service_config.instance_id,
-                            "completed sgx shasta aggregate request"
-                        );
-                    }
+                    info!(
+                        schema = %request.schema,
+                        proposal_ids = %aggregate_proposal_id_summary(&request),
+                        proof_count = request.payload.proofs.len(),
+                        instance_id = state.service_config.instance_id,
+                        "completed sgx shasta aggregate request"
+                    );
                     (axum::http::StatusCode::OK, Json(response))
                 }
                 Err(err) => {
@@ -432,5 +430,44 @@ mod tests {
         };
 
         assert_eq!(aggregate_proposal_id_summary(&aggregate), "2222");
+    }
+
+    #[test]
+    fn aggregate_log_summary_reports_none_for_empty_proofs() {
+        let aggregate = Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload { proofs: vec![] },
+        };
+
+        assert_eq!(aggregate_proposal_id_summary(&aggregate), "none");
+    }
+
+    #[test]
+    fn aggregate_log_summary_summarizes_proposal_id_range() {
+        let mut first = request_fixture().payload.proof_carry_data;
+        first.transition_input.proposal_id = 2_222;
+
+        let mut last = request_fixture().payload.proof_carry_data;
+        last.transition_input.proposal_id = 2_333;
+
+        let aggregate = Raiko2ShastaAggregateRequest {
+            schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
+            payload: Raiko2ShastaAggregatePayload {
+                proofs: vec![
+                    raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
+                        input: "0x1".to_string(),
+                        proof: "0x2".to_string(),
+                        proof_carry_data: first,
+                    },
+                    raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
+                        input: "0x3".to_string(),
+                        proof: "0x4".to_string(),
+                        proof_carry_data: last,
+                    },
+                ],
+            },
+        };
+
+        assert_eq!(aggregate_proposal_id_summary(&aggregate), "2222..2333");
     }
 }

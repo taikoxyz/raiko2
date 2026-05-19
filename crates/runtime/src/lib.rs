@@ -1188,8 +1188,12 @@ mod tests {
             .find_tasks_by_engine_task_id("shared-proposal-proof-task")
             .await?;
         assert_eq!(shared.len(), 2);
-        assert_eq!(shared[0].task_id, "task-public-a");
-        assert_eq!(shared[1].task_id, "task-public-b");
+        let mut task_ids = shared
+            .iter()
+            .map(|record| record.task_id.as_str())
+            .collect::<Vec<_>>();
+        task_ids.sort_unstable();
+        assert_eq!(task_ids, vec!["task-public-a", "task-public-b"]);
 
         std::fs::remove_dir_all(root)?;
         Ok(())

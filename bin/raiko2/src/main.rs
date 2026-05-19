@@ -73,6 +73,6 @@ fn init_logging(cli: &Cli) {
     if cli.json_logs {
         registry.with(fmt::layer().json()).init();
     } else {
-        registry.with(fmt::layer()).init();
+        registry.with(fmt::layer().with_ansi(false)).init();
     }
 }

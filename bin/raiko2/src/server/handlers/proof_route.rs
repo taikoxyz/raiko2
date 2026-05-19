@@ -56,6 +56,8 @@ pub(super) fn route_for_proof_type(
     prover_config: &ProverTaskConfig,
     sp1_context: Sp1RequestContext,
 ) -> Result<CanonicalProofRoute, ApiError> {
+    validate_hosted_proof_type(state.config.prover.route(), proof_type)?;
+
     let route = match proof_type {
         BatchProofType::Sp1 => PipelineRoute::new(
             GuestSystem::Sp1,
@@ -67,7 +69,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
-        BatchProofType::Native => native_local_route(),
+        BatchProofType::Native => native_route_for_request(state)?,
         BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
                 "proof_type={} is not supported",
@@ -119,8 +121,42 @@ pub(super) fn route_for_proof_type(
     ))
 }
 
-const fn native_local_route() -> PipelineRoute {
-    PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
+pub(super) fn validate_hosted_proof_type(
+    route: PipelineRoute,
+    proof_type: BatchProofType,
+) -> Result<(), ApiError> {
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Sgx,
+            runner: RunnerKind::Remote,
+        }
+    ) && !matches!(proof_type, BatchProofType::Sgx | BatchProofType::SgxGeth)
+    {
+        return Err(ApiError::bad_request(format!(
+            "proof_type={} is not supported when the server prover route is sgx/remote",
+            proof_type.as_str()
+        )));
+    }
+
+    Ok(())
+}
+
+fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
+    let route = state.config.prover.route();
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Native,
+            runner: RunnerKind::Local,
+        }
+    ) {
+        Ok(route)
+    } else {
+        Err(ApiError::bad_request(
+            "proof_type=native is only supported when the server prover route is native/local",
+        ))
+    }
 }
 
 fn sp1_runner_for_request(
@@ -294,5 +330,41 @@ mod tests {
         assert_eq!(selection.route.to_string(), "native/local");
         assert_eq!(selection.pipeline_key(), PipelineKey::ShastaNative);
         assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Native);
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_sp1_on_remote_sgx_host() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+        let state = AppState {
+            pipelines: Arc::new(StaticPipelineFactory::default()),
+            runtime: Arc::new(
+                RuntimeManager::new(
+                    std::env::temp_dir()
+                        .join(format!("raiko2-proof-route-remote-sgx-tests-{nanos}")),
+                )
+                .expect("runtime manager"),
+            ),
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config: Arc::new(config),
+        };
+
+        let err = route_for_proof_type(
+            &state,
+            BatchProofType::Sp1,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect_err("remote sgx host should reject sp1");
+
+        assert!(
+            err.message.contains("proof_type=sp1"),
+            "unexpected error: {err:?}"
+        );
     }
 }

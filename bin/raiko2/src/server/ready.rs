@@ -178,10 +178,18 @@ fn check_prover(config: &Config) -> Result<()> {
         .validate()
         .context("configured proving capabilities are invalid")?;
 
-    check_risc0_capability(config).context("risc0 capability is invalid")?;
-    check_sp1_capability(config).context("sp1 capability is invalid")?;
+    if requires_risc0_capability_check(config) {
+        check_risc0_capability(config).context("risc0 capability is invalid")?;
+    }
+    if requires_sp1_capability_check(config) {
+        check_sp1_capability(config).context("sp1 capability is invalid")?;
+    }
 
     Ok(())
+}
+
+const fn requires_risc0_capability_check(config: &Config) -> bool {
+    !config.prover.is_remote_sgx_route()
 }
 
 fn check_risc0_capability(config: &Config) -> Result<()> {
@@ -192,6 +200,10 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
         } => check_boundless_prover(config),
         _ => Ok(()),
     }
+}
+
+const fn requires_sp1_capability_check(config: &Config) -> bool {
+    !config.prover.is_remote_sgx_route()
 }
 
 fn check_sp1_capability(config: &Config) -> Result<()> {
@@ -308,8 +320,11 @@ fn check_redis_queue(_config: &QueueConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Sp1RemoteVerifyConfig, sp1_effective_pair_config};
-    use crate::config::Config;
+    use super::{
+        Sp1RemoteVerifyConfig, check_prover, requires_sp1_capability_check,
+        sp1_effective_pair_config,
+    };
+    use crate::config::{Config, GuestSystem, RunnerKind};
 
     #[test]
     fn sp1_effective_pair_config_honors_global_remote_verify() {
@@ -359,5 +374,16 @@ mod tests {
                 .rpc_url,
             "https://pair-verifier.example.com"
         );
+    }
+
+    #[test]
+    fn remote_sgx_route_does_not_require_sp1_capability_check() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.remote_sgx.base_url = "http://127.0.0.1:9090".to_string();
+
+        assert!(!requires_sp1_capability_check(&config));
+        assert!(check_prover(&config).is_ok());
     }
 }

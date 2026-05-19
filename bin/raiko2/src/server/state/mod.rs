@@ -75,13 +75,19 @@ impl AppState {
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
-        let sp1_config = setup::sp1_prover_config(&config);
-        let sp1_backend = shasta_backends.sp1.clone();
-        let sp1_prover = tokio::task::spawn_blocking(move || {
-            Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
-        })
-        .await
-        .context("SP1 setup task panicked")??;
+        let sp1_prover = if should_eagerly_initialize_sp1(&config) {
+            let sp1_config = setup::sp1_prover_config(&config);
+            let sp1_backend = shasta_backends.sp1.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
+                })
+                .await
+                .context("SP1 setup task panicked")??,
+            )
+        } else {
+            None
+        };
 
         let mut factory = StaticPipelineFactory::default();
 
@@ -125,16 +131,29 @@ struct PairPipelineRegistration<'a> {
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
     shasta_backends: &'a ShastaBackends,
-    sp1_prover: Sp1Prover,
+    sp1_prover: Option<Sp1Prover>,
     scheduler_config: SchedulerConfig,
     workers: usize,
     maintenance_interval: Duration,
+}
+
+const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
+    !config.prover.is_remote_sgx_route()
 }
 
 async fn register_pair_pipelines(
     factory: &mut StaticPipelineFactory,
     registration: PairPipelineRegistration<'_>,
 ) -> Result<()> {
+    if registration.config.prover.is_remote_sgx_route() {
+        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+        ));
+        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        return Ok(());
+    }
+
     let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
         Arc::clone(&registration.runtime),
         registration.pair.key.clone(),
@@ -178,7 +197,10 @@ async fn register_pair_pipelines(
     let sp1_engine = build_sp1_engine(
         registration.config,
         registration.pair,
-        registration.sp1_prover.clone(),
+        registration
+            .sp1_prover
+            .clone()
+            .expect("sp1 prover must be initialized for non-remote-sgx hosts"),
         registration.shasta_backends.sp1.clone(),
         registration.scheduler_config.clone(),
         Arc::clone(&runtime_observer),
@@ -1025,6 +1047,24 @@ mod tests {
 
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         Ok(())
+    }
+
+    #[test]
+    fn remote_sgx_route_does_not_eagerly_initialize_sp1() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+
+        assert!(!should_eagerly_initialize_sp1(&config));
+    }
+
+    #[test]
+    fn sp1_route_still_eagerly_initializes_sp1() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sp1;
+        config.prover.runner = RunnerKind::Local;
+
+        assert!(should_eagerly_initialize_sp1(&config));
     }
 
     fn valid_native_proof() -> Proof {

@@ -21,6 +21,7 @@ pub fn hash_checkpoint(checkpoint: &Checkpoint) -> B256 {
 ///
 /// This binds `chain_id` and `verifier` to the signed message to avoid cross-chain / cross-verifier
 /// replay of otherwise identical transition inputs.
+#[must_use]
 pub fn hash_shasta_subproof_input(carry: &ProofCarryData) -> B256 {
     let transition_hash = hash_shasta_transition_input(&carry.transition_input);
     hash_four_values(

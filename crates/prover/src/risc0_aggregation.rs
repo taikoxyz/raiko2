@@ -242,15 +242,35 @@ fn receipt_image_id(receipt: &ZkvmReceipt) -> RaikoResult<ZkvmDigest> {
     })
 }
 
+fn allow_fake_receipts_for_verification() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var("RAIKO_ALLOW_FAKE_RISC0_RECEIPTS")
+            .map(|value| {
+                value.eq_ignore_ascii_case("1")
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("yes")
+                    || value.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false)
+}
+
 fn verify_receipt_against_expected_image_id(
     receipt: &ZkvmReceipt,
     expected_image_id: ZkvmDigest,
 ) -> RaikoResult<()> {
     let result = match &receipt.inner {
-        InnerReceipt::Fake(_) => receipt.verify_with_context(
-            &VerifierContext::default().with_dev_mode(true),
-            expected_image_id,
-        ),
+        InnerReceipt::Fake(_) => {
+            if !allow_fake_receipts_for_verification() {
+                return Err(RaikoError::InvalidRequestConfig(
+                    "fake RISC0 receipts are not accepted unless explicitly enabled for development"
+                        .to_string(),
+                ));
+            }
+            receipt.verify_with_context(
+                &VerifierContext::default().with_dev_mode(true),
+                expected_image_id,
+            )
+        }
         _ => receipt.verify(expected_image_id),
     };
     result.map_err(|err| {

@@ -59,6 +59,7 @@ bincode.workspace = true
 dotenvy = "0.15"
 
 [features]
+fixture-server = []
 redis-queue = ["raiko2-queue/redis"]
 
 [dev-dependencies]

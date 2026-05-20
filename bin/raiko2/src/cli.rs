@@ -1,6 +1,8 @@
 //! Command-line interface for Raiko V2.
 
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
+#[cfg(feature = "fixture-server")]
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
 /// Raiko V2 - Taiko zkVM Prover Server
@@ -8,6 +10,7 @@ use std::path::PathBuf;
 #[command(name = "raiko2")]
 #[command(version, about, long_about = None)]
 pub struct Cli {
+    #[cfg(feature = "fixture-server")]
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -103,12 +106,14 @@ pub struct Cli {
     pub queue_task_timeout_secs: Option<u64>,
 }
 
+#[cfg(feature = "fixture-server")]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run a local fixture-backed HTTP server for manual v3 testing
     FixtureServer(FixtureServerArgs),
 }
 
+#[cfg(feature = "fixture-server")]
 #[derive(Args, Debug, Clone)]
 pub struct FixtureServerArgs {
     /// Fixture server host address
@@ -122,4 +127,36 @@ pub struct FixtureServerArgs {
     /// Number of in-process queue workers
     #[arg(long, default_value_t = 1)]
     pub workers: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[cfg(not(feature = "fixture-server"))]
+    #[test]
+    fn fixture_server_command_is_rejected_without_feature() {
+        let result = Cli::try_parse_from(["raiko2", "fixture-server"]);
+
+        assert!(
+            result.is_err(),
+            "fixture-server should require an explicit feature"
+        );
+    }
+
+    #[cfg(feature = "fixture-server")]
+    #[test]
+    fn fixture_server_command_parses_with_feature() {
+        let result = Cli::try_parse_from(["raiko2", "fixture-server", "--port", "8087"])
+            .expect("fixture-server should parse when the feature is enabled");
+
+        assert!(matches!(
+            result.command,
+            Some(super::Command::FixtureServer(super::FixtureServerArgs {
+                port: 8087,
+                ..
+            }))
+        ));
+    }
 }

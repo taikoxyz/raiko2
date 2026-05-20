@@ -34,6 +34,8 @@ pub mod native;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
+#[cfg(any(feature = "risc0", feature = "boundless", test))]
+mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
 #[cfg(feature = "sp1")]
@@ -184,7 +186,7 @@ pub(crate) fn encode_risc0_aggregation_proof_payload(
     )
 }
 
-#[cfg(feature = "boundless")]
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
     value
         .and_then(|raw| alloy_primitives::hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).ok())
@@ -265,7 +267,7 @@ fn shasta_aggregation_image_id_words(proofs: &[Proof]) -> Result<[u32; 8], Raiko
     Ok(image_id.unwrap_or([0; 8]))
 }
 
-fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
+pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], String> {
     #[cfg(feature = "sp1")]
     {
         crate::sp1::sp1_image_id_words_from_uuid(raw)

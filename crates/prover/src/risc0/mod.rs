@@ -10,7 +10,7 @@ pub use types::{Risc0Config, Risc0ExecutionMetadata, Risc0Response};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, instance::words_to_bytes_le};
+use raiko2_primitives_shasta::GuestInput;
 use risc0_zkvm::{
     Digest, ExecutorEnv, FakeReceipt, ProverOpts, Receipt, VerifierContext, compute_image_id,
     default_executor, default_prover, get_prover_server,
@@ -18,9 +18,9 @@ use risc0_zkvm::{
 use tracing::info;
 
 use crate::{
-    GuestInputCodec, build_shasta_aggregation_input, encode_risc0_aggregation_proof_payload,
-    encode_risc0_proposal_proof_payload, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    GuestInputCodec, encode_risc0_aggregation_proof_payload, encode_risc0_proposal_proof_payload,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+    risc0_aggregation::build_risc0_aggregation_input_from_proofs, with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -86,31 +86,6 @@ impl Risc0Prover {
         env_builder
             .write_frame(input)
             .segment_limit_po2(execution_po2);
-        env_builder
-            .build()
-            .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
-    }
-
-    fn build_aggregation_env<'a, T: serde::Serialize>(
-        aggregation_input: &'a T,
-        proofs: &[Proof],
-        execution_po2: u32,
-    ) -> RaikoResult<ExecutorEnv<'a>> {
-        let mut env_builder = ExecutorEnv::builder();
-        env_builder
-            .write(aggregation_input)
-            .map_err(|e| RaikoError::Guest(format!("Failed to write aggregation input: {e}")))?
-            .segment_limit_po2(execution_po2);
-
-        for proof in proofs {
-            if let Some(receipt_json) = &proof.quote {
-                let receipt: Receipt = serde_json::from_str(receipt_json).map_err(|e| {
-                    RaikoError::Guest(format!("Failed to parse RISC0 receipt: {e}"))
-                })?;
-                env_builder.add_assumption(receipt);
-            }
-        }
-
         env_builder
             .build()
             .map_err(|e| RaikoError::Guest(format!("Failed to build env: {e}")))
@@ -314,20 +289,19 @@ where
             input.proofs.len()
         );
 
-        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        let proposal_elf = backend.elf(ProofStage::Proposal)?.to_vec();
         let elf = backend.elf(ProofStage::Aggregation)?.to_vec();
         let prover_config = self.config.clone();
         let opts = self.prover_opts();
 
         tokio::task::spawn_blocking(move || {
             let prover = Risc0Prover::new(prover_config);
-            let env = Self::build_aggregation_env(
-                &aggregation_input,
-                &input.proofs,
-                prover.config.execution_po2,
-            )?;
+            let proposal_image_id = Self::compute_image_id(&proposal_elf)?;
+            let block_image_id = B256::from_slice(proposal_image_id.as_bytes());
+            let aggregation_input =
+                build_risc0_aggregation_input_from_proofs(input.proofs, proposal_image_id)?;
+            let env = Self::build_framed_env(&aggregation_input, prover.config.execution_po2)?;
             let image_id = Self::compute_image_id(&elf)?;
-            let block_image_id = B256::from(words_to_bytes_le(&aggregation_input.image_id));
             let (receipt, extra_data) = prover.execute_proof(
                 env,
                 &elf,

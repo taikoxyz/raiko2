@@ -252,7 +252,7 @@ pub struct ShastaZkAggregationGuestInput {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ShastaBoundlessAggregationGuestInput {
+pub struct ShastaRisc0AggregationGuestInput {
     /// Verifier image id for the RISC0 proposal proofs being aggregated.
     pub image_id: [u32; 8],
     /// Proof carry data associated with each underlying proof.

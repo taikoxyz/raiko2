@@ -423,12 +423,6 @@ fn build_risc0_calls(
             elves.aggregation.as_ref(),
             config.risc0_verifier,
         )?,
-        risc0_call(
-            "risc0_shasta_boundless_aggregation",
-            Stage::Aggregation,
-            elves.boundless_aggregation.as_ref(),
-            config.risc0_verifier,
-        )?,
     ])
 }
 
@@ -849,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn risc0_plan_includes_boundless_aggregation_registration() {
+    fn risc0_plan_includes_two_shasta_registrations() {
         let args = RegisterImageArgs {
             profile: RegisterImageProfile::HoodiShasta,
             backend: Backend::Risc0,
@@ -869,10 +863,9 @@ mod tests {
             .map(|call| call.registration_key.as_str())
             .collect::<BTreeSet<_>>();
 
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 2);
         assert!(keys.contains("risc0_shasta_proposal-image-id"));
         assert!(keys.contains("risc0_shasta_aggregation-image-id"));
-        assert!(keys.contains("risc0_shasta_boundless_aggregation-image-id"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 # Keep in sync with the upstream cargo-risczero 3.0.5 default guest-builder image.
-ARG RISC0_GUEST_BUILDER_TAG=r0.1.88.0
+ARG RISC0_GUEST_BUILDER_TAG=r0.1.91.1
 FROM risczero/risc0-guest-builder:${RISC0_GUEST_BUILDER_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive

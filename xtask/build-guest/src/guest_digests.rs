@@ -120,11 +120,6 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
             Stage::Aggregation,
             elves.aggregation.as_ref(),
         )?,
-        risc0_digest_entry(
-            "risc0_shasta_boundless_aggregation",
-            Stage::Aggregation,
-            elves.boundless_aggregation.as_ref(),
-        )?,
     ])
 }
 
@@ -239,13 +234,6 @@ mod tests {
         assert_eq!(
             counts.get(&(
                 "risc0_shasta_aggregation".to_string(),
-                "ImageId".to_string()
-            )),
-            Some(&1)
-        );
-        assert_eq!(
-            counts.get(&(
-                "risc0_shasta_boundless_aggregation".to_string(),
                 "ImageId".to_string()
             )),
             Some(&1)

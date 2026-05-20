@@ -28,9 +28,6 @@ use boundless_market::{
     storage::StorageUploaderType,
 };
 use raiko2_pipeline::{ProofStage, ProverBackend};
-use raiko2_primitives::proof::{
-    AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
-};
 use raiko2_primitives::{AggregationGuestInput, ProverConfig};
 use raiko2_primitives::{Proof, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
@@ -42,9 +39,8 @@ use url::Url;
 
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
-    RISC0_SEAL_PAYLOAD_KIND, decode_hex_payload, encode_risc0_aggregation_seal_payload,
-    encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -100,14 +96,10 @@ async fn build_boundless_aggregation_input(
     expected_image_id: Digest,
 ) -> RaikoResult<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        let agg = AggregationInput {
-            proofs: proofs.into_iter().map(proof_to_envelope).collect(),
-            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
-                expected_image_id.as_bytes(),
-            )),
-            metadata: None,
-        };
-        aggregation::build_risc0_aggregation_input(&agg)
+        crate::risc0_aggregation::build_risc0_aggregation_input_from_proofs(
+            proofs,
+            expected_image_id,
+        )
     })
     .await
     .map_err(|err| RaikoError::Guest(format!("Boundless aggregation input task failed: {err}")))?
@@ -1203,43 +1195,13 @@ fn validate_offer_params(
     })
 }
 
-fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
-    let mut verifier_artifacts = Vec::new();
-    if let Some(receipt) = proof.quote {
-        verifier_artifacts.push(VerifierArtifact {
-            kind: "receipt_json".to_string(),
-            value: serde_json::Value::String(receipt),
-        });
-    }
-    let input_hash = proof
-        .input
-        .map(|value| alloy_primitives::hex::encode_prefixed(value.as_slice()));
-    let carry_data = proof.extra_data;
-    let payload_bytes = decode_hex_payload(proof.proof.as_deref());
-
-    ProofEnvelope {
-        backend: "risc0".to_string(),
-        public_inputs: PublicInputs {
-            input_hash,
-            instance_hash: None,
-        },
-        payload: ProofPayload {
-            payload_kind: RISC0_SEAL_PAYLOAD_KIND.to_string(),
-            bytes: payload_bytes,
-        },
-        verifier_artifacts,
-        carry_data,
-        metadata: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, parse_env_bool, parse_env_url,
-        proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
+        quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
     use alloy_primitives::address;
     use boundless_market::price_oracle::Asset;
@@ -1422,7 +1384,7 @@ mod tests {
     #[test]
     fn proof_to_envelope_preserves_risc0_seal_payload() {
         let expected_input_hash = alloy_primitives::hex::encode_prefixed([0x55; 32]);
-        let envelope = proof_to_envelope(Proof {
+        let envelope = crate::risc0_aggregation::proof_to_envelope(Proof {
             proof: Some("0x1234".to_string()),
             input: Some(alloy_primitives::B256::from([0x55; 32])),
             quote: Some("{\"receipt\":true}".to_string()),

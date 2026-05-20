@@ -2,8 +2,8 @@
 # Release execution reads this file and must not follow branch tips at runtime.
 # Each attestation_path must point at a baked metadata file inside the built image.
 [providers.gaiko2]
-repo = "https://github.com/smtmfft/gaiko2.git"
-commit = "fa1b9ad205e6293eb64b10876e210893765b93f4"
+repo = "https://github.com/taikoxyz/gaiko2.git"
+commit = "b30b28a922e737a5f7ba88df7b2d378ff4abd5bf"
 provider = "gaiko2-sgxgeth"
 lane = "sgxgeth"
 image_name = "gaiko2-sgxgeth"

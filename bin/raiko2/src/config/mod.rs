@@ -15,6 +15,7 @@ mod validation;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
+#[allow(unused_imports)]
 pub use raiko2_provider::L2ProviderKind;
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;

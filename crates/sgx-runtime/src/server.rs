@@ -73,7 +73,7 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-fn proposal_id_from_request(
+const fn proposal_id_from_request(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
 ) -> u64 {
     request

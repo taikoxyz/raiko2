@@ -287,11 +287,11 @@ dependencies = [
 [[package]]
 name = "alethia-reth-block"
 version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4#12553e4bcdf97196bd079fced618b3e77ee88cd4"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=2213eabe288a267764160ba64eb86864930bc258#2213eabe288a267764160ba64eb86864930bc258"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-primitives",
  "alloy-consensus 2.0.4",
  "alloy-eips 2.0.4",
  "alloy-evm",
@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-chainspec"
 version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4#12553e4bcdf97196bd079fced618b3e77ee88cd4"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=2213eabe288a267764160ba64eb86864930bc258#2213eabe288a267764160ba64eb86864930bc258"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.0.4",
@@ -341,11 +341,11 @@ dependencies = [
 [[package]]
 name = "alethia-reth-consensus"
 version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4#12553e4bcdf97196bd079fced618b3e77ee88cd4"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=2213eabe288a267764160ba64eb86864930bc258#2213eabe288a267764160ba64eb86864930bc258"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-primitives",
  "alloy-consensus 2.0.4",
  "alloy-hardforks 0.4.7",
  "alloy-primitives",
@@ -360,24 +360,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "alethia-reth-consensus"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=2ebe77c3afaae3992270186d4d026e97b4c62e4c#2ebe77c3afaae3992270186d4d026e97b4c62e4c"
-dependencies = [
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=2ebe77c3afaae3992270186d4d026e97b4c62e4c)",
- "alloy-consensus 2.0.4",
- "alloy-primitives",
- "alloy-sol-types",
- "reth-primitives-traits",
-]
-
-[[package]]
 name = "alethia-reth-evm"
 version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4#12553e4bcdf97196bd079fced618b3e77ee88cd4"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=2213eabe288a267764160ba64eb86864930bc258#2213eabe288a267764160ba64eb86864930bc258"
 dependencies = [
  "alethia-reth-chainspec",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-primitives",
  "alloy-evm",
  "alloy-primitives",
  "reth-evm",
@@ -389,26 +377,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-primitives"
 version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4#12553e4bcdf97196bd079fced618b3e77ee88cd4"
-dependencies = [
- "alloy-consensus 2.0.4",
- "alloy-primitives",
- "alloy-rlp",
- "alloy-rpc-types-engine",
- "alloy-rpc-types-eth 2.0.1",
- "alloy-serde 2.0.4",
- "reth-ethereum-primitives",
- "reth-primitives-traits",
- "serde",
- "serde_with",
- "sha2 0.10.9",
- "tracing",
-]
-
-[[package]]
-name = "alethia-reth-primitives"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=2ebe77c3afaae3992270186d4d026e97b4c62e4c#2ebe77c3afaae3992270186d4d026e97b4c62e4c"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=2213eabe288a267764160ba64eb86864930bc258#2213eabe288a267764160ba64eb86864930bc258"
 dependencies = [
  "alloy-consensus 2.0.4",
  "alloy-primitives",
@@ -3397,7 +3366,7 @@ dependencies = [
  "bitflags 2.11.1",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -3409,7 +3378,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#6b2d202719882cc0c095034cad34cee1b604adbb"
+source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#795728dcec307ac46039c7077041c06cc734e76b"
 dependencies = [
  "alloy 1.8.3",
  "serde",
@@ -5266,7 +5235,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5692,7 +5661,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7051,7 +7020,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -7086,7 +7055,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -8789,7 +8758,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8973,7 +8942,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10207,7 +10176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -10227,7 +10196,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10240,7 +10209,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10273,10 +10242,11 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#6b2d202719882cc0c095034cad34cee1b604adbb"
+source = "git+https://github.com/taikoxyz/taiko-mono?branch=main#795728dcec307ac46039c7077041c06cc734e76b"
 dependencies = [
- "alethia-reth-consensus 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=2ebe77c3afaae3992270186d4d026e97b4c62e4c)",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=2ebe77c3afaae3992270186d4d026e97b4c62e4c)",
+ "alethia-reth-chainspec",
+ "alethia-reth-consensus",
+ "alethia-reth-primitives",
  "alloy 1.8.3",
  "alloy-consensus 1.8.3",
  "alloy-contract 1.8.3",
@@ -10361,7 +10331,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.38",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -10399,9 +10369,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10497,7 +10467,7 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-primitives",
  "alloy-consensus 2.0.4",
  "alloy-hardforks 0.4.7",
  "alloy-primitives",
@@ -10527,7 +10497,7 @@ name = "raiko2-pipeline"
 version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
- "alethia-reth-consensus 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-consensus",
  "alloy-consensus 2.0.4",
  "alloy-primitives",
  "alloy-sol-types",
@@ -10610,7 +10580,7 @@ dependencies = [
 name = "raiko2-protocol-shasta"
 version = "0.1.0"
 dependencies = [
- "alethia-reth-consensus 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-consensus",
  "alloy-eips 2.0.4",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -10665,7 +10635,7 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
- "alethia-reth-primitives 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-primitives",
  "alloy 2.0.1",
  "alloy-chains",
  "alloy-json-rpc 2.0.1",
@@ -10768,7 +10738,7 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
- "alethia-reth-consensus 1.1.0 (git+https://github.com/taikoxyz/alethia-reth?rev=12553e4bcdf97196bd079fced618b3e77ee88cd4)",
+ "alethia-reth-consensus",
  "alloy-consensus 2.0.4",
  "alloy-primitives",
  "alloy-rlp",
@@ -14717,7 +14687,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -14818,7 +14788,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.7",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -16898,7 +16868,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -18475,7 +18445,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

@@ -28,7 +28,6 @@ It does **not** add:
 - Export the exact digest values that matter for Shasta verifier registration:
   - `risc0` proposal image id
   - `risc0` aggregation image id
-  - `risc0` boundless aggregation image id
   - `sp1` proposal `vk_bn254`
   - `sp1` proposal `vk_hash_bytes`
   - `sp1` aggregation `vk_bn254`
@@ -79,7 +78,7 @@ Each digest entry should include:
 
 - Add `xtask-build-guest` unit tests that validate the exported digest set shape:
   - all expected object names are present
-  - `risc0` exports exactly three `image_id` entries
+  - `risc0` exports exactly two `image_id` entries
   - `sp1` exports exactly four verification-key-derived entries
 - Verify the workflow YAML still parses after CI changes.
 

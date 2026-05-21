@@ -1,5 +1,5 @@
 use super::net;
-use crate::config::{Config, QueueBackend};
+use crate::config::{Config, NetworkPairConfig, QueueBackend};
 use serde::Serialize;
 use tracing::info;
 use url::Url;
@@ -33,9 +33,14 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
     };
 
     StartupSummary {
-        listen: net::bind_addr(config).to_string(),
+        listen: net::bind_addr(config),
         route: config.prover.route().to_string(),
-        pairs: config.rpc.pairs.iter().map(|pair| pair.key()).collect(),
+        pairs: config
+            .rpc
+            .pairs
+            .iter()
+            .map(NetworkPairConfig::key)
+            .collect(),
         runtime_root: config.runtime.root.display().to_string(),
         queue_backend: queue_backend_name(config.queue.backend).to_string(),
         queue_workers: config.queue.workers,

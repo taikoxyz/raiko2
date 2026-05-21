@@ -71,22 +71,22 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", branch = "main", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "0094ea38796b7183de9e7be09727abb343191a52", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
 sp1-sdk = { version = "=6.1.0", features = ["blocking", "network"] }
 
 # Alethia reth
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "12553e4bcdf97196bd079fced618b3e77ee88cd4", default-features = false, features = [
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "12553e4bcdf97196bd079fced618b3e77ee88cd4", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "12553e4bcdf97196bd079fced618b3e77ee88cd4", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "12553e4bcdf97196bd079fced618b3e77ee88cd4", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }

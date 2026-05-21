@@ -241,6 +241,7 @@ mod tests {
     use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
     use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{AppState, StaticPipelineFactory};
+    use axum::http::StatusCode;
     use raiko2_engine::ProverTaskConfig;
     use raiko2_pipeline::PipelineKey;
     use raiko2_prover::sp1::Sp1RequestContext;
@@ -313,10 +314,10 @@ mod tests {
     }
 
     #[test]
-    fn route_for_proof_type_keeps_native_on_native_local_with_risc0_network_default() {
+    fn route_for_proof_type_keeps_native_on_native_local_route() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Network;
+        config.prover.guest_system = GuestSystem::Native;
+        config.prover.runner = RunnerKind::Local;
         let state = test_state_with_config(config);
 
         let selection = route_for_proof_type(
@@ -330,6 +331,28 @@ mod tests {
         assert_eq!(selection.route.to_string(), "native/local");
         assert_eq!(selection.pipeline_key(), PipelineKey::ShastaNative);
         assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Native);
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_native_without_native_local_route() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Network;
+        let state = test_state_with_config(config);
+
+        let error = route_for_proof_type(
+            &state,
+            BatchProofType::Native,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.message,
+            "proof_type=native is only supported when the server prover route is native/local"
+        );
     }
 
     #[test]

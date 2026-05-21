@@ -2,7 +2,7 @@
 
 ## Status
 
-Resolved on `main` by `#58` (`fix: split fixture server from default runtime image`).
+Resolved on `main` by #58 (`fix: split fixture server from default runtime image`).
 
 ## Problem
 

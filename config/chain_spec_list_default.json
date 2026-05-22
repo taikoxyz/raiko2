@@ -137,7 +137,7 @@
         "rpc": "https://l1rpc.internal.taiko.xyz",
         "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
         "verifier_address_forks": {},
-        "genesis_time": 1778414800,
+        "genesis_time": 1778677100,
         "seconds_per_slot": 12,
         "is_taiko": false
     },

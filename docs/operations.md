@@ -297,6 +297,10 @@ Release prerequisites:
 - create both:
   - a human-readable release notes file
   - a machine-readable release manifest
+- include human-readable ZK guest digests in the release notes:
+  - `risc0` proposal and aggregation `image_id`
+  - `sp1` proposal and aggregation `vk_bn254`
+  - `sp1` proposal and aggregation `vk_hash_bytes`
 
 Suggested local variables:
 
@@ -362,9 +366,16 @@ Recommended sequence:
    - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
    - includes both `risc0` and `sp1` guest ELFs
 
-   ## Guest Digests
+   ## ZK Guest Digests
 
-   See attached `release-manifest-${TAG}.json`.
+   - risc0 proposal image_id: 0x...
+   - risc0 aggregation image_id: 0x...
+   - sp1 proposal vk_bn254: 0x...
+   - sp1 proposal vk_hash_bytes: 0x...
+   - sp1 aggregation vk_bn254: 0x...
+   - sp1 aggregation vk_hash_bytes: 0x...
+
+   See attached `release-manifest-vX.Y.Z.json` and `guest-digests-summary.json`.
    EOF
    ```
 
@@ -378,7 +389,8 @@ Recommended sequence:
      --target "${RELEASE_SHA}" \
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
-     "${RELEASE_DIR}/release-manifest-${TAG}.json"
+     "${RELEASE_DIR}/release-manifest-${TAG}.json" \
+     "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
 Expected release outputs:
@@ -387,6 +399,7 @@ Expected release outputs:
 - runtime image tag: `${TAG}`
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
+- guest digest export file: `guest-digests-summary.json`
 
 Do not:
 

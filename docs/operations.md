@@ -375,7 +375,7 @@ Recommended sequence:
    - sp1 aggregation vk_bn254: 0x...
    - sp1 aggregation vk_hash_bytes: 0x...
 
-   See attached `release-manifest-${TAG}.json` and `guest-digests-summary.json`.
+   See attached `release-manifest-vX.Y.Z.json` and `guest-digests-summary.json`.
    EOF
    ```
 

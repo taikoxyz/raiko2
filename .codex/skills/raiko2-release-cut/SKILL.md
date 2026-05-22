@@ -40,7 +40,7 @@ Every release cut must produce:
 - image tag: `vX.Y.Z`
 - release notes markdown
 - release manifest JSON
-- guest digest export JSON
+- guest digests summary JSON
 
 The release manifest must include:
 

@@ -90,6 +90,24 @@ impl Default for ProofRequest {
 pub struct PreflightOptions {
     /// When set, preflight cross-checks proposal boundary blocks against this L2 RPC.
     pub verify_checkpoint_l2_rpc: Option<String>,
+    /// RPC client settings to reuse for checkpoint verification.
+    pub rpc_client_config: Option<PreflightRpcClientConfig>,
+}
+
+/// RPC retry settings used by preflight-only checkpoint verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightRpcRetryConfig {
+    pub max_attempts: u32,
+    pub initial_backoff_ms: u64,
+    pub compute_units_per_second: u64,
+}
+
+/// RPC client settings used by preflight-only checkpoint verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightRpcClientConfig {
+    pub timeout_ms: u64,
+    pub concurrency_limit: usize,
+    pub retry: PreflightRpcRetryConfig,
 }
 
 /// Proof context containing chain specs and request parameters.

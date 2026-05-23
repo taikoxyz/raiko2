@@ -47,8 +47,9 @@ root = "./data/runtime"
 inactive_ttl_secs = 7200
 
 # Optional preflight cross-check against a second L2 RPC endpoint.
-# [preflight]
-# verify_checkpoint_l2_rpc = "https://rpc.hoodi.taiko.xyz"
+# Keys are L2 network names from rpc.pairs[*].network. Omit a network to skip verification.
+# [preflight.verify_checkpoint_l2_rpcs]
+# taiko_hoodi = "https://rpc.hoodi.taiko.xyz"
 
 [prover]
 # Server default route.

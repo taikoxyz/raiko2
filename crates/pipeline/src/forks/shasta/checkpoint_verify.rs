@@ -136,8 +136,8 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::B256;
     use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
-    use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData, TransitionInputData};
     use raiko2_protocol_shasta::TaikoManifest;
+    use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData, TransitionInputData};
 
     fn sample_guest_input(first_parent_hash: B256) -> GuestInput {
         let mut first = StatelessInput {
@@ -208,10 +208,7 @@ mod tests {
         let input = sample_guest_input(parent_hash);
         let mut mismatched_last = block_from_witness(&input.witnesses[1]);
         mismatched_last.header.state_root = B256::from([0x99; 32]);
-        let blocks = vec![
-            block_from_witness(&input.witnesses[0]),
-            mismatched_last,
-        ];
+        let blocks = vec![block_from_witness(&input.witnesses[0]), mismatched_last];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect_err("hash mismatch");
@@ -224,10 +221,7 @@ mod tests {
         let input = sample_guest_input(parent_hash);
         let mut mismatched_first = block_from_witness(&input.witnesses[0]);
         mismatched_first.header.parent_hash = B256::from([0x99; 32]);
-        let blocks = vec![
-            mismatched_first,
-            block_from_witness(&input.witnesses[1]),
-        ];
+        let blocks = vec![mismatched_first, block_from_witness(&input.witnesses[1])];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
             .expect_err("parent mismatch");

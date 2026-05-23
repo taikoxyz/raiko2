@@ -10,8 +10,8 @@ use alloy_primitives::B256;
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
-    ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
-    SupportedChainSpecs,
+    ChainSpec, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError, RaikoResult,
+    StatelessInput, SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{
@@ -125,12 +125,14 @@ where
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
         if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
-            verify_guest_input_checkpoint_against_l2_rpc(
-                &input,
-                verify_rpc,
-                &RpcClientConfig::default(),
-            )
-            .await?;
+            let rpc_client_config = ctx
+                .preflight
+                .rpc_client_config
+                .as_ref()
+                .map(preflight_rpc_client_config)
+                .unwrap_or_default();
+            verify_guest_input_checkpoint_against_l2_rpc(&input, verify_rpc, &rpc_client_config)
+                .await?;
         }
 
         info!(
@@ -140,6 +142,18 @@ where
             "completed shasta preflight"
         );
         Ok(input)
+    }
+}
+
+fn preflight_rpc_client_config(config: &PreflightRpcClientConfig) -> RpcClientConfig {
+    RpcClientConfig {
+        timeout_ms: config.timeout_ms,
+        concurrency_limit: config.concurrency_limit,
+        retry: raiko2_provider::RpcRetryConfig {
+            max_attempts: config.retry.max_attempts,
+            initial_backoff_ms: config.retry.initial_backoff_ms,
+            compute_units_per_second: config.retry.compute_units_per_second,
+        },
     }
 }
 

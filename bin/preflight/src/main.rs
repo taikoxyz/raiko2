@@ -104,6 +104,10 @@ struct Args {
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     validate: bool,
 
+    /// Optional external L2 RPC used to cross-check proposal checkpoint data after preflight.
+    #[arg(long, env = "PREFLIGHT_VERIFY_CHECKPOINT_L2_RPC")]
+    verify_checkpoint_l2_rpc: Option<String>,
+
     /// Output path for the serialized guest input JSON.
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -184,6 +188,12 @@ async fn main() -> Result<()> {
 
     let mut ctx = ProofContext::new(request, ProverConfig::default());
     ctx.l2_chain_spec = resolved.l2_chain_spec.to_taiko_chain_spec()?;
+    ctx.preflight.verify_checkpoint_l2_rpc = args
+        .verify_checkpoint_l2_rpc
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 

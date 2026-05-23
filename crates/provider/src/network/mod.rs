@@ -291,6 +291,18 @@ impl NetworkProvider {
     }
 }
 
+/// Fetch L2 blocks from a standalone RPC endpoint.
+///
+/// Used for optional cross-node checkpoint verification during preflight.
+pub async fn fetch_l2_blocks(
+    l2_rpc_url: &str,
+    block_numbers: &[u64],
+    config: &RpcClientConfig,
+) -> RaikoResult<Vec<RethBlock>> {
+    let l2_provider = RpcL2Provider::new(l2_rpc_url, None, None, config)?;
+    l2_provider.fetch_blocks(block_numbers).await
+}
+
 #[async_trait::async_trait]
 impl Provider for NetworkProvider {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {

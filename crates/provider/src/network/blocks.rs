@@ -8,7 +8,7 @@ use super::RpcL2Provider;
 const BLOCK_BATCH_SIZE: usize = 32;
 
 impl RpcL2Provider {
-    pub(super) async fn fetch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+    pub(crate) async fn fetch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
         let mut blocks = Vec::with_capacity(block_numbers.len());
         for chunk in block_numbers.chunks(BLOCK_BATCH_SIZE) {
             let mut batch = self.client.new_batch();

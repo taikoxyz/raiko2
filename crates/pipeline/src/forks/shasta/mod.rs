@@ -1,4 +1,5 @@
 mod backends;
+mod checkpoint_verify;
 mod manifest;
 mod spec;
 
@@ -6,6 +7,9 @@ pub use backends::{
     ShastaBackends, load_risc0_boundless_shasta_backend, load_risc0_shasta_backend,
     load_shasta_backends, load_sp1_shasta_backend, risc0_boundless_shasta_backend_from_elves,
     risc0_shasta_backend_from_elves, shasta_backends_from_elves, sp1_shasta_backend_from_elves,
+};
+pub use checkpoint_verify::{
+    compare_guest_input_checkpoint_against_l2_blocks, verify_guest_input_checkpoint_against_l2_rpc,
 };
 pub use manifest::ShastaManifestBuilder;
 pub use spec::{ShastaSpec, validate_shasta_guest_input};

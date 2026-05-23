@@ -1,3 +1,4 @@
+use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
@@ -22,7 +23,7 @@ use raiko2_protocol_shasta::shasta::{
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
     decode_proposal_id_from_extra_data,
 };
-use raiko2_provider::Provider;
+use raiko2_provider::{Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
     future::Future,
@@ -123,6 +124,14 @@ where
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
+        if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
+            verify_guest_input_checkpoint_against_l2_rpc(
+                &input,
+                verify_rpc,
+                &RpcClientConfig::default(),
+            )
+            .await?;
+        }
 
         info!(
             proposal_id = ctx.request.proposal_id,

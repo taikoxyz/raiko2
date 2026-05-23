@@ -105,7 +105,7 @@ struct Args {
     validate: bool,
 
     /// Optional external L2 RPC used to cross-check proposal checkpoint data after preflight.
-    #[arg(long, env = "PREFLIGHT_VERIFY_CHECKPOINT_L2_RPC")]
+    #[arg(long)]
     verify_checkpoint_l2_rpc: Option<String>,
 
     /// Output path for the serialized guest input JSON.

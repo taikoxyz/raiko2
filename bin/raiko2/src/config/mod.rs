@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod preflight;
 mod prover;
 mod queue;
 mod rpc;
@@ -12,6 +13,7 @@ mod runtime;
 mod server;
 mod validation;
 
+pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
@@ -33,6 +35,8 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
+    #[serde(default)]
+    pub preflight: PreflightConfig,
 }
 
 impl Config {
@@ -145,6 +149,9 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
+        self.preflight
+            .validate()
+            .context("Preflight configuration error")?;
         for pair in self
             .rpc
             .resolved_pairs()

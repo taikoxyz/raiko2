@@ -35,13 +35,15 @@ pub(crate) fn build_context(
             serde_json::json!(pair.l1_network),
         );
     }
-    if let Ok(verify_rpc) = std::env::var("PREFLIGHT_VERIFY_CHECKPOINT_L2_RPC") {
-        let verify_rpc = verify_rpc.trim();
-        if !verify_rpc.is_empty() {
-            context.preflight.verify_checkpoint_l2_rpc = Some(verify_rpc.to_owned());
-        }
+    if let Some(verify_rpc) = config
+        .preflight
+        .verify_checkpoint_l2_rpc
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        context.preflight.verify_checkpoint_l2_rpc = Some(verify_rpc.to_owned());
     }
-    let _ = config;
     Ok(context)
 }
 

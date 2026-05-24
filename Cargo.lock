@@ -10500,6 +10500,7 @@ dependencies = [
  "alethia-reth-consensus",
  "alloy-consensus 2.0.4",
  "alloy-primitives",
+ "alloy-rpc-types-eth 2.0.1",
  "alloy-sol-types",
  "alloy-trie 0.9.5",
  "async-trait",

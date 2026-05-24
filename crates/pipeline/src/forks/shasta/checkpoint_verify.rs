@@ -1,7 +1,8 @@
+use alloy_consensus::BlockHeader;
+use alloy_rpc_types_eth::Header as AlloyHeader;
 use raiko2_primitives::{RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
-use raiko2_provider::{RpcClientConfig, fetch_l2_blocks};
-use reth_ethereum_primitives::Block as RethBlock;
+use raiko2_provider::{RpcClientConfig, fetch_l2_headers};
 use std::collections::HashMap;
 use tracing::info;
 use url::Url;
@@ -14,7 +15,7 @@ use url::Url;
 /// checkpoint or parent-block field disagrees with the preflight guest input.
 pub fn compare_guest_input_checkpoint_against_l2_blocks(
     input: &GuestInput,
-    blocks: &[RethBlock],
+    blocks: &[AlloyHeader],
 ) -> RaikoResult<()> {
     let first_witness = input.witnesses.first().ok_or_else(|| {
         RaikoError::Preflight(
@@ -31,8 +32,8 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
 
     let blocks_by_number = blocks
         .iter()
-        .map(|block| (block.header.number, block))
-        .collect::<HashMap<_, _>>();
+        .map(|block| (block.number(), block))
+        .collect::<HashMap<u64, &AlloyHeader>>();
     let rpc_first = blocks_by_number.get(&first_block_number).ok_or_else(|| {
         RaikoError::Preflight(format!(
             "external L2 RPC did not return proposal start block {first_block_number}"
@@ -45,22 +46,23 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
     })?;
 
     let carry = &input.proof_carry_data.transition_input;
-    if rpc_first.header.parent_hash != carry.parent_block_hash {
+    if rpc_first.parent_hash() != carry.parent_block_hash {
         return Err(RaikoError::Preflight(format!(
             "external L2 RPC parent block hash mismatch at block {first_block_number}: rpc={:#x}, preflight={:#x}",
-            rpc_first.header.parent_hash, carry.parent_block_hash
+            rpc_first.parent_hash(),
+            carry.parent_block_hash
         )));
     }
 
     let expected_checkpoint = &carry.checkpoint;
     let expected_block_number = expected_checkpoint.blockNumber.to::<u64>();
-    if rpc_last.header.number != expected_block_number {
+    if rpc_last.number() != expected_block_number {
         return Err(RaikoError::Preflight(format!(
             "external L2 RPC checkpoint block number mismatch: rpc={}, preflight={expected_block_number}",
-            rpc_last.header.number
+            rpc_last.number()
         )));
     }
-    let rpc_last_hash = rpc_last.header.hash_slow();
+    let rpc_last_hash = rpc_last.hash;
     if rpc_last_hash != expected_checkpoint.blockHash {
         return Err(RaikoError::Preflight(format!(
             "external L2 RPC checkpoint block hash mismatch at block {expected_block_number}: rpc={rpc_last_hash:#x}, preflight={:#x}",
@@ -104,7 +106,7 @@ pub async fn verify_guest_input_checkpoint_against_l2_rpc(
         .header
         .number;
 
-    let blocks = fetch_l2_blocks(
+    let blocks = fetch_l2_headers(
         l2_rpc_url,
         &[first_block_number, last_block_number],
         rpc_config,
@@ -192,8 +194,8 @@ mod tests {
         }
     }
 
-    fn block_from_witness(witness: &StatelessInput) -> RethBlock {
-        witness.block.clone()
+    fn block_from_witness(witness: &StatelessInput) -> AlloyHeader {
+        AlloyHeader::new(witness.block.header.clone())
     }
 
     #[test]
@@ -213,7 +215,7 @@ mod tests {
         let parent_hash = B256::from([0xAA; 32]);
         let input = sample_guest_input(parent_hash);
         let mut mismatched_last = block_from_witness(&input.witnesses[1]);
-        mismatched_last.header.state_root = B256::from([0x99; 32]);
+        mismatched_last.hash = B256::from([0x99; 32]);
         let blocks = vec![block_from_witness(&input.witnesses[0]), mismatched_last];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)
@@ -226,7 +228,7 @@ mod tests {
         let parent_hash = B256::from([0xAA; 32]);
         let input = sample_guest_input(parent_hash);
         let mut mismatched_first = block_from_witness(&input.witnesses[0]);
-        mismatched_first.header.parent_hash = B256::from([0x99; 32]);
+        mismatched_first.parent_hash = B256::from([0x99; 32]);
         let blocks = vec![mismatched_first, block_from_witness(&input.witnesses[1])];
 
         let err = compare_guest_input_checkpoint_against_l2_blocks(&input, &blocks)

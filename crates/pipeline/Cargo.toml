@@ -22,6 +22,7 @@ alethia-reth-consensus.workspace = true
 
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
 
 tracing.workspace = true

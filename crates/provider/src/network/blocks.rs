@@ -1,5 +1,5 @@
 use alloy::eips::BlockNumberOrTag;
-use alloy_rpc_types_eth::Block as AlloyBlock;
+use alloy_rpc_types_eth::{Block as AlloyBlock, Header as AlloyHeader};
 use raiko2_primitives::{RaikoError, RaikoResult};
 use reth_ethereum_primitives::Block as RethBlock;
 
@@ -50,5 +50,53 @@ impl RpcL2Provider {
         }
 
         Ok(blocks)
+    }
+
+    pub(super) async fn fetch_headers(
+        &self,
+        block_numbers: &[u64],
+    ) -> RaikoResult<Vec<AlloyHeader>> {
+        let mut headers = Vec::with_capacity(block_numbers.len());
+        for chunk in block_numbers.chunks(BLOCK_BATCH_SIZE) {
+            let mut batch = self.client.new_batch();
+            let mut requests = Vec::with_capacity(chunk.len());
+            for &block_number in chunk {
+                requests.push((
+                    block_number,
+                    Box::pin(
+                        batch
+                            .add_call::<_, Option<AlloyHeader>>(
+                                "eth_getBlockByNumber",
+                                &(BlockNumberOrTag::from(block_number), false),
+                            )
+                            .map_err(|_| {
+                                RaikoError::RPC(
+                                    "failed adding eth_getBlockByNumber call to batch".to_owned(),
+                                )
+                            })?,
+                    ),
+                ));
+            }
+
+            batch.send().await.map_err(|e| {
+                RaikoError::RPC(format!(
+                    "error sending eth_getBlockByNumber header batch for blocks {chunk:?}: {e}"
+                ))
+            })?;
+
+            for (block_number, request) in requests {
+                let rpc_header = request.await.map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "error collecting eth_getBlockByNumber header for block {block_number}: {e}"
+                    ))
+                })?;
+                let rpc_header = rpc_header.ok_or_else(|| {
+                    RaikoError::RPC(format!("block header {block_number} not found"))
+                })?;
+                headers.push(rpc_header);
+            }
+        }
+
+        Ok(headers)
     }
 }

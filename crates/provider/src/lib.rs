@@ -115,8 +115,8 @@ mod tests {
         let account = TrieAccount {
             nonce: 1,
             balance: U256::from(100),
-            storage_root: Default::default(),
-            code_hash: Default::default(),
+            storage_root: alloy_primitives::FixedBytes::default(),
+            code_hash: alloy_primitives::FixedBytes::default(),
         };
 
         assert_eq!(account.nonce, 1);

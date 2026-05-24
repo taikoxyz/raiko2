@@ -294,6 +294,11 @@ impl NetworkProvider {
 /// Fetch L2 blocks from a standalone RPC endpoint.
 ///
 /// Used for optional cross-node checkpoint verification during preflight.
+///
+/// # Errors
+///
+/// Returns an error if the RPC client cannot be constructed or any requested block cannot be
+/// fetched from the target endpoint.
 pub async fn fetch_l2_blocks(
     l2_rpc_url: &str,
     block_numbers: &[u64],

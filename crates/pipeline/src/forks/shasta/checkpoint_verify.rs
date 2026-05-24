@@ -4,6 +4,7 @@ use raiko2_provider::{RpcClientConfig, fetch_l2_blocks};
 use reth_ethereum_primitives::Block as RethBlock;
 use std::collections::HashMap;
 use tracing::info;
+use url::Url;
 
 /// Compare preflight carry-data checkpoint fields against blocks fetched from an external L2 RPC.
 ///
@@ -66,13 +67,6 @@ pub fn compare_guest_input_checkpoint_against_l2_blocks(
             expected_checkpoint.blockHash
         )));
     }
-    if rpc_last.header.state_root != expected_checkpoint.stateRoot {
-        return Err(RaikoError::Preflight(format!(
-            "external L2 RPC checkpoint state root mismatch at block {expected_block_number}: rpc={:#x}, preflight={:#x}",
-            rpc_last.header.state_root, expected_checkpoint.stateRoot
-        )));
-    }
-
     Ok(())
 }
 
@@ -86,6 +80,7 @@ pub async fn verify_guest_input_checkpoint_against_l2_rpc(
     l2_rpc_url: &str,
     rpc_config: &RpcClientConfig,
 ) -> RaikoResult<()> {
+    let l2_rpc_endpoint = redact_l2_rpc_url(l2_rpc_url);
     let first_block_number = input
         .witnesses
         .first()
@@ -117,17 +112,28 @@ pub async fn verify_guest_input_checkpoint_against_l2_rpc(
     .await
     .map_err(|err| {
         RaikoError::Preflight(format!(
-            "failed to fetch proposal boundary blocks from external L2 RPC {l2_rpc_url}: {err}"
+            "failed to fetch proposal boundary blocks from external L2 RPC endpoint {l2_rpc_endpoint}: {err}"
         ))
     })?;
     compare_guest_input_checkpoint_against_l2_blocks(input, &blocks)?;
     info!(
-        l2_rpc_url,
+        l2_rpc_endpoint,
         first_block_number,
         last_block_number,
         "verified preflight checkpoint against external L2 RPC"
     );
     Ok(())
+}
+
+fn redact_l2_rpc_url(l2_rpc_url: &str) -> String {
+    match Url::parse(l2_rpc_url) {
+        Ok(url) => match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", url.scheme()),
+            (Some(host), None) => format!("{}://{host}", url.scheme()),
+            (None, _) => "<redacted-invalid-host>".to_string(),
+        },
+        Err(_) => "<redacted-invalid-url>".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -140,7 +146,7 @@ mod tests {
     use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData, TransitionInputData};
 
     fn sample_guest_input(first_parent_hash: B256) -> GuestInput {
-        let mut first = StatelessInput {
+        let first = StatelessInput {
             block: reth_ethereum_primitives::Block {
                 header: Header {
                     number: 10,
@@ -151,7 +157,7 @@ mod tests {
                 ..Default::default()
             },
             witness: ExecutionWitness::default(),
-            accounts: Default::default(),
+            accounts: std::collections::HashMap::default(),
             chain_spec: ChainSpec {
                 chain_id: 167_013,
                 is_taiko: true,

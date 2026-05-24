@@ -145,7 +145,7 @@ where
     }
 }
 
-fn preflight_rpc_client_config(config: &PreflightRpcClientConfig) -> RpcClientConfig {
+const fn preflight_rpc_client_config(config: &PreflightRpcClientConfig) -> RpcClientConfig {
     RpcClientConfig {
         timeout_ms: config.timeout_ms,
         concurrency_limit: config.concurrency_limit,

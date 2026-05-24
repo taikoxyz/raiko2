@@ -683,8 +683,8 @@ maintenance_interval_ms = 200
             .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
-        assert_eq!(pair.l1_chain_id(), 560048);
-        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(pair.l1_chain_id(), 560_048);
+        assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(
             config.prover.route(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
@@ -761,8 +761,8 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l2_rpc, "http://taiko-hoodi.example.test:8545");
         assert_eq!(pair.l2_provider, L2ProviderKind::Reth);
         assert_eq!(pair.l2_witness_rpc, "http://taiko-hoodi.example.test:8545");
-        assert_eq!(pair.l1_chain_id(), 560048);
-        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(pair.l1_chain_id(), 560_048);
+        assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);
 
         let _ = std::fs::remove_file(path);

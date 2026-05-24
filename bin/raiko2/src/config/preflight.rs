@@ -25,28 +25,35 @@ impl PreflightConfig {
         }
 
         for (network, url) in &self.verify_checkpoint_l2_rpcs {
-            let network = network.trim();
+            let trimmed_network = network.trim();
             let url = url.trim();
-            if network.is_empty() {
+            if network != trimmed_network {
+                bail!(
+                    "preflight.verify_checkpoint_l2_rpcs keys must not have leading or trailing whitespace: '{network}'"
+                );
+            }
+            if trimmed_network.is_empty() {
                 bail!("preflight.verify_checkpoint_l2_rpcs keys must not be empty");
             }
             if url.is_empty() {
-                bail!("preflight.verify_checkpoint_l2_rpcs.{network} must not be empty");
+                bail!("preflight.verify_checkpoint_l2_rpcs.{trimmed_network} must not be empty");
             }
             if !super::rpc::is_valid_url(url) {
-                bail!("preflight.verify_checkpoint_l2_rpcs.{network} is not a valid URL: {url}");
+                bail!(
+                    "preflight.verify_checkpoint_l2_rpcs.{trimmed_network} is not a valid URL: {url}"
+                );
             }
 
-            match pair_count_by_network.get(network).copied() {
+            match pair_count_by_network.get(trimmed_network).copied() {
                 Some(1) => {}
                 Some(count) if count > 1 => {
                     bail!(
-                        "preflight.verify_checkpoint_l2_rpcs.{network} is ambiguous because rpc.pairs contains {count} entries with network='{network}'"
+                        "preflight.verify_checkpoint_l2_rpcs.{trimmed_network} is ambiguous because rpc.pairs contains {count} entries with network='{trimmed_network}'"
                     );
                 }
                 _ => {
                     bail!(
-                        "preflight.verify_checkpoint_l2_rpcs.{network} does not match any configured rpc.pairs network"
+                        "preflight.verify_checkpoint_l2_rpcs.{trimmed_network} does not match any configured rpc.pairs network"
                     );
                 }
             }

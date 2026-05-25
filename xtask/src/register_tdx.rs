@@ -3,7 +3,7 @@
 //! Fetches bootstrap data from a running raiko2 instance
 //! (`GET <raiko-url>/v3/proof/tdx/bootstrap`) or reads
 //! `~/.config/raiko2/tdx/bootstrap.json` from the local filesystem, then
-//! submits up to two transactions to the `TdxVerifier` contract:
+//! submits up to two transactions to the `AzureTdxVerifier` contract:
 //!
 //! * `setTrustedParams` (owner-only) — locks in the running image's hardware
 //!   measurements (mrSeam, mrTd, teeTcbSvn, PCRs). Skipped unless `--trust`.
@@ -29,7 +29,7 @@ use serde_json::Value;
 
 #[derive(Args)]
 pub(crate) struct RegisterTdxArgs {
-    /// Address of the deployed `TdxVerifier` contract.
+    /// Address of the deployed `AzureTdxVerifier` contract.
     #[arg(long, env = "TDX_VERIFIER")]
     verifier: alloy::primitives::Address,
 
@@ -98,7 +98,7 @@ struct BootstrapData {
 
 sol! {
     #[sol(rpc)]
-    contract TdxVerifier {
+    contract AzureTdxVerifier {
         struct TrustedParams {
             bytes16 teeTcbSvn;
             uint24 pcrBitmap;
@@ -204,7 +204,7 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         .wallet(signer)
         .connect_http(rpc_url.parse().context("invalid --rpc URL")?);
 
-    let contract = TdxVerifier::new(args.verifier, provider);
+    let contract = AzureTdxVerifier::new(args.verifier, provider);
 
     if do_trust {
         let params = extract_trusted_params(metadata, &bootstrap.quote, args.pcr_bitmap)
@@ -285,7 +285,7 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
             println!();
             println!("=======================================");
             println!("  TDX PROVER REGISTERED");
-            println!("  TdxVerifier:        {}", args.verifier);
+            println!("  AzureTdxVerifier:   {}", args.verifier);
             println!("  Instance address:   {}", bootstrap.public_key);
             println!("  trustedParamsIndex: {}", args.trusted_params_index);
             println!(
@@ -392,7 +392,7 @@ fn parse_verify_params(
     metadata: &Value,
     bootstrap_quote: &str,
     bootstrap_nonce_hex: &str,
-) -> Result<TdxVerifier::VerifyParams> {
+) -> Result<AzureTdxVerifier::VerifyParams> {
     // Decode the outer hex wrapper
     let quote_hex = bootstrap_quote.trim_start_matches("0x");
     let doc_bytes = hex::decode(quote_hex).context("bootstrap quote: not valid hex")?;
@@ -532,7 +532,7 @@ fn parse_verify_params(
     // ---- metadata.pcrs (array of {index, digest}) — built from SHA-256 bank ----
     // The metadata may have pcrs as a dict {"0": "0x...", ...} (32-byte hex)
     let meta_pcrs_val = metadata.get("pcrs");
-    let pcrs: Vec<TdxVerifier::PCR> =
+    let pcrs: Vec<AzureTdxVerifier::PCR> =
         if let Some(meta_pcrs) = meta_pcrs_val.and_then(Value::as_object) {
             let mut out = Vec::new();
             for (k, v) in meta_pcrs.iter() {
@@ -543,7 +543,7 @@ fn parse_verify_params(
                 if raw.len() != 32 {
                     continue; // skip non-SHA256 entries
                 }
-                out.push(TdxVerifier::PCR {
+                out.push(AzureTdxVerifier::PCR {
                     index: U256::from(idx),
                     digest: FixedBytes::from_slice(&raw),
                 });
@@ -553,7 +553,7 @@ fn parse_verify_params(
         } else {
             // fallback: use tpm_pcrs from the SHA-256 quote bank
             (0u64..24u64)
-                .map(|i| TdxVerifier::PCR {
+                .map(|i| AzureTdxVerifier::PCR {
                     index: U256::from(i),
                     digest: tpm_pcrs[i as usize],
                 })
@@ -567,20 +567,20 @@ fn parse_verify_params(
     let nonce_bytes = hex::decode(bootstrap_nonce_hex.trim_start_matches("0x"))
         .context("bootstrap.nonce: not valid hex")?;
 
-    Ok(TdxVerifier::VerifyParams {
-        attestationDocument: TdxVerifier::AttestationDocument {
-            attestation: TdxVerifier::Attestation {
-                tpmQuote: TdxVerifier::TPMQuote {
+    Ok(AzureTdxVerifier::VerifyParams {
+        attestationDocument: AzureTdxVerifier::AttestationDocument {
+            attestation: AzureTdxVerifier::Attestation {
+                tpmQuote: AzureTdxVerifier::TPMQuote {
                     quote: Bytes::from(tpm_quote_bytes),
                     rsaSignature: Bytes::from(tpm_sig_bytes),
                     pcrs: tpm_pcrs,
                 },
             },
-            instanceInfo: TdxVerifier::InstanceInfo {
+            instanceInfo: AzureTdxVerifier::InstanceInfo {
                 attestationReport: Bytes::from(att_report),
-                runtimeData: TdxVerifier::RuntimeData {
+                runtimeData: AzureTdxVerifier::RuntimeData {
                     raw: Bytes::from(rd_bytes),
-                    hclAkPub: TdxVerifier::AkPub {
+                    hclAkPub: AzureTdxVerifier::AkPub {
                         exponentRaw: alloy::primitives::aliases::U24::from(exponent),
                         modulusRaw: Bytes::from(n_bytes),
                     },
@@ -611,7 +611,7 @@ fn extract_trusted_params(
     metadata: &Value,
     bootstrap_quote: &str,
     pcr_bitmap: u32,
-) -> Result<TdxVerifier::TrustedParams> {
+) -> Result<AzureTdxVerifier::TrustedParams> {
     // Decode the outer hex wrapper to get the attestation doc JSON
     let quote_hex = bootstrap_quote.trim_start_matches("0x");
     let doc_bytes = hex::decode(quote_hex).context("bootstrap quote: not valid hex")?;
@@ -684,7 +684,7 @@ fn extract_trusted_params(
         }
     }
 
-    Ok(TdxVerifier::TrustedParams {
+    Ok(AzureTdxVerifier::TrustedParams {
         teeTcbSvn: FixedBytes::from(tee_tcb_svn),
         pcrBitmap: alloy::primitives::aliases::U24::from(pcr_bitmap),
         mrSeam: Bytes::from(mr_seam),

@@ -25,7 +25,7 @@ mod server;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::cli::Cli;

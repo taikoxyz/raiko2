@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
 

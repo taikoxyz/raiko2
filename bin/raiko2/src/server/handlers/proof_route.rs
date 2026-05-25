@@ -100,6 +100,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Native => PipelineKey::ShastaNative,
         BatchProofType::Sgx => PipelineKey::ShastaSgx,
         BatchProofType::SgxGeth => PipelineKey::ShastaSgxGeth,
+        BatchProofType::Tdx => PipelineKey::ShastaTdx,
         BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
@@ -110,6 +111,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Native => ProofType::Native,
         BatchProofType::Sgx => ProofType::Sgx,
         BatchProofType::SgxGeth => ProofType::SgxGeth,
+        BatchProofType::Tdx => ProofType::Tdx,
         BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }

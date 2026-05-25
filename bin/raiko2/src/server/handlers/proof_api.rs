@@ -2632,7 +2632,13 @@ async fn compatibility_response_for_task(
         }
         ProofStatus::Completed => legacy_proof_response(
             proof_type,
-            legacy_root_proof_material(&lookup.record, &lookup.metadata, task.proof).await?,
+            legacy_root_proof_material(
+                state.runtime.as_ref(),
+                &lookup.record,
+                &lookup.metadata,
+                task.proof,
+            )
+            .await?,
         ),
         ProofStatus::Failed => legacy_status_response(
             proof_type,
@@ -2661,6 +2667,7 @@ fn with_compatibility_status(mut response: Response, status: &ProofStatus) -> Re
 }
 
 async fn legacy_root_proof_material(
+    runtime_manager: &RuntimeManager,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &TaskMetadata,
     fallback_proof: Option<String>,
@@ -2669,6 +2676,27 @@ async fn legacy_root_proof_material(
         && let Some(proof) = load_persisted_root_proof_material(record).await?
     {
         return Ok(proof);
+    }
+
+    // Single-proposal fallback: when the root record's proof_path isn't set
+    // (e.g. a duplicate root whose proposal artifact already existed, so the
+    // runtime observer didn't fire on it), look up the proposal's artifact
+    // directly. Without this, the response loses `input` / `extra_data` and
+    // only carries the raw proof bytes from `fallback_proof`.
+    if metadata.aggregate_task_id.is_none()
+        && !metadata.aggregate_requested
+        && let [proposal] = metadata.proposals.as_slice()
+        && let Some(material) = load_proof_artifact_material(
+            runtime_manager,
+            &metadata.network_pair,
+            &proposal.task_id,
+        )
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!("failed to load single-proposal artifact: {err}"))
+        })?
+    {
+        return Ok(material.proof);
     }
 
     Ok(Proof {

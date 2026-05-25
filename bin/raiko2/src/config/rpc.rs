@@ -248,6 +248,25 @@ impl RpcConfig {
             }
         }
 
+        // Validate raw pair URL overrides before resolution so errors point at the config key.
+        for pair in &self.pairs {
+            for (field, url) in [
+                ("l1_beacon_rpc", pair.l1_beacon_rpc.as_deref()),
+                ("l2_rpc", pair.l2_rpc.as_deref()),
+                ("l2_witness_rpc", pair.l2_witness_rpc.as_deref()),
+            ] {
+                if let Some(url) = url {
+                    if !is_valid_url(url) {
+                        bail!(
+                            "{}: {field} = '{url}': {}",
+                            pair.key(),
+                            validation::INVALID_RPC_URL
+                        );
+                    }
+                }
+            }
+        }
+
         let mut seen = HashSet::new();
         for pair in self.resolved_pairs()? {
             if !seen.insert(pair.key.clone()) {

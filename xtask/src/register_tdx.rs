@@ -83,9 +83,15 @@ pub(crate) struct RegisterTdxArgs {
 // Bootstrap data (mirrors raiko2_prover::tdx::config::BootstrapData)
 // ---------------------------------------------------------------
 
+// The prover writes `~/.config/raiko2/tdx/bootstrap.json` with camelCase keys
+// (`#[serde(rename_all = "camelCase")]` on raiko2_prover::tdx::config::BootstrapData),
+// while the `/guest_data` HTTP endpoint serializes with hardcoded snake_case keys. The
+// xtask reads from either path, so each field accepts both casings via serde aliases.
 #[derive(Deserialize)]
 struct BootstrapData {
+    #[serde(alias = "issuerType")]
     issuer_type: String,
+    #[serde(alias = "publicKey")]
     public_key: String,
     quote: String,
     nonce: String,
@@ -252,7 +258,10 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
             .call()
             .await
             .context("failed to read on-chain trustedParams")?;
-        if on_chain._1.is_zero() {
+        // A configured slot has both measurement bytes populated (TDX mrSeam/mrTd are
+        // always 48 bytes when written). Using pcrBitmap=0 to detect "not set" would
+        // misclassify slots that an owner legitimately set with a zero bitmap.
+        if on_chain._2.is_empty() && on_chain._3.is_empty() {
             bail!(
                 "trustedParams[{}] not set on-chain — run with --trust (as contract owner) first",
                 args.trusted_params_index
@@ -519,6 +528,13 @@ fn parse_verify_params(
     let offset = 4usize.saturating_sub(e_bytes.len());
     e_padded[offset..].copy_from_slice(&e_bytes[e_bytes.len().saturating_sub(4)..]);
     let exponent = u32::from_be_bytes(e_padded);
+    if exponent > 0xFF_FFFF {
+        bail!(
+            "JWK exponent {exponent:#010x} exceeds 24 bits (max 0x00FFFFFF) — \
+             on-chain uint24 would truncate it, causing AK public-key mismatch and \
+             a hard-to-diagnose verification failure"
+        );
+    }
 
     let n_val = hcl_ak
         .get("n")

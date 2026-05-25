@@ -178,7 +178,7 @@ pub struct NetworkProvider {
     l1_provider: DynProvider,
     l2_provider: Arc<dyn L2Provider>,
     http_client: reqwest::Client,
-    _l1_chain_spec: Option<ChainSpec>,
+    l1_chain_spec: Option<ChainSpec>,
     _l2_chain_spec: Option<ChainSpec>,
 }
 
@@ -285,7 +285,7 @@ impl NetworkProvider {
             l1_provider,
             l2_provider,
             http_client,
-            _l1_chain_spec: l1_chain_spec,
+            l1_chain_spec,
             _l2_chain_spec: l2_chain_spec,
         })
     }
@@ -331,7 +331,13 @@ impl Provider for NetworkProvider {
         proposal_event: &ShastaEventData,
         blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
-        self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
+        // Prefer the chain spec stored on the provider (built from `pair.l1_spec` which
+        // already has `RpcConfig.pairs[*].l1_beacon_rpc` / `l1_genesis_time` overrides
+        // applied) over the caller's copy. Callers in pipeline/forks/shasta reload the
+        // chain spec fresh from `SupportedChainSpecs::default()`, which is the sanitized
+        // on-disk JSON and ignores any operator overrides.
+        let effective_spec = self.l1_chain_spec.as_ref().unwrap_or(l1_chain_spec);
+        self.fetch_shasta_data_sources(effective_spec, proposal_event, blob_proof_type)
             .await
     }
 }

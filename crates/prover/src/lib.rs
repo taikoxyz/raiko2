@@ -248,8 +248,9 @@ fn is_tdx_proof_envelope(proof: &Proof) -> bool {
         return false;
     };
     let stripped = hex.strip_prefix("0x").unwrap_or(hex);
-    // 89 bytes = 178 hex chars
-    stripped.len() == 178
+    // Must be exactly 89 bytes (instance_id(4) || address(20) || signature(65)) and valid hex.
+    // Checking both prevents a same-length non-TDX proof from bypassing the carry-data check.
+    stripped.len() == 178 && alloy_primitives::hex::decode(stripped).is_ok()
 }
 
 pub(crate) fn with_shasta_extra_data(

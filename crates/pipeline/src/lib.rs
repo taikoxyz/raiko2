@@ -233,8 +233,11 @@ impl PipelineRoute {
                 Err("Unsupported proving route: sgx/network".to_string())
             }
             (GuestSystem::Tdx, RunnerKind::Local) => Ok(PipelineKey::ShastaTdx),
-            (GuestSystem::Tdx, RunnerKind::Network | RunnerKind::Remote) => {
+            (GuestSystem::Tdx, RunnerKind::Network) => {
                 Err("Unsupported proving route: tdx/network".to_string())
+            }
+            (GuestSystem::Tdx, RunnerKind::Remote) => {
+                Err("Unsupported proving route: tdx/remote".to_string())
             }
             (GuestSystem::Sp1, RunnerKind::Remote) => {
                 Err("Unsupported proving route: sp1/remote".to_string())

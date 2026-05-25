@@ -158,6 +158,10 @@ async fn register_pair_pipelines(
         return Ok(());
     }
 
+    // Only build the TDX engine when the server is actually configured to route to
+    // tdx/local. `build_tdx_engine` lazily bootstraps the local TDX prover (reading the
+    // `tdxs` socket), so registering it unconditionally would force every --features tdx
+    // build to depend on a live attestation daemon even for routes that never use TDX.
     #[cfg(feature = "tdx")]
     if registration.config.prover.is_tdx_route() {
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
@@ -261,30 +265,6 @@ async fn register_pair_pipelines(
         PipelineKey::ShastaNative,
         Arc::new(native_engine),
     );
-
-    // Only build the TDX engine when the server is actually configured to route to
-    // tdx/local. `build_tdx_engine` lazily bootstraps the local TDX prover (reading the
-    // `tdxs` socket), so registering it unconditionally would force every --features tdx
-    // build to depend on a live attestation daemon even for routes that never use TDX.
-    #[cfg(feature = "tdx")]
-    if registration.config.prover.is_tdx_route() {
-        let tdx_engine = build_tdx_engine(
-            registration.config,
-            registration.pair,
-            registration.scheduler_config.clone(),
-            Arc::clone(&runtime_observer),
-        )
-        .await?;
-        tdx_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
-        factory.insert(
-            registration.pair.key.clone(),
-            PipelineKey::ShastaTdx,
-            Arc::new(tdx_engine),
-        );
-    }
 
     register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
     Ok(())

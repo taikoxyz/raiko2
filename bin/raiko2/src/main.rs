@@ -23,9 +23,6 @@ mod cli;
 mod config;
 mod server;
 
-#[cfg(feature = "tdx")]
-mod tdx_register;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing::{debug, info};
@@ -48,21 +45,9 @@ async fn main() -> Result<()> {
 
     info!("Starting Raiko V2 Prover Server");
 
-    match &cli.command {
-        Some(Command::FixtureServer(args)) => {
-            run_fixture_server(args).await?;
-            return Ok(());
-        }
-        #[cfg(feature = "tdx")]
-        Some(Command::Tdx { sub }) => {
-            match sub {
-                cli::TdxCommand::Register(args) => {
-                    tdx_register::run(args.clone()).await?;
-                }
-            }
-            return Ok(());
-        }
-        _ => {}
+    if let Some(Command::FixtureServer(args)) = &cli.command {
+        run_fixture_server(args).await?;
+        return Ok(());
     }
 
     // Load configuration

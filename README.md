@@ -90,6 +90,8 @@ flowchart LR
 - `tdx/local` runs the proving pipeline inside a TDX-protected VM. The prover signs the instance
   hash with the VM's bootstrapped ECDSA key and generates an Intel TDX attestation quote. Requires
   `--features tdx` and the `tdxs` attestation daemon socket at the configured `socket_path`.
+  To register a TDX prover on-chain after the VM is up, see
+  [docs/tdx_register.md](docs/tdx_register.md) (`cargo run -p xtask -- register-tdx`).
 
 ## Repository Map
 

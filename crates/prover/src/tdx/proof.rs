@@ -56,6 +56,7 @@ impl TdxProof {
 
     /// Extract the `instance_id` field (bytes 0..4, big-endian).
     #[must_use]
+    #[allow(dead_code)]
     pub fn instance_id(&self) -> u32 {
         u32::from_be_bytes(self.data[0..4].try_into().unwrap())
     }

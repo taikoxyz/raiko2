@@ -1,6 +1,7 @@
 mod bench_guest;
 mod latest_proposal_request;
 mod register_image;
+mod register_tdx;
 mod release_image;
 mod replay_guest_input;
 mod util;
@@ -36,6 +37,9 @@ enum Cmd {
     /// Register the current Shasta guest image ids on verifier contracts.
     RegisterImage(register_image::RegisterImageArgs),
 
+    /// Register a TDX prover instance on a TdxVerifier contract.
+    RegisterTdx(register_tdx::RegisterTdxArgs),
+
     /// Replay repo-managed Shasta GuestInput fixtures.
     ReplayGuestInput(replay_guest_input::ReplayGuestInputArgs),
 }
@@ -52,6 +56,7 @@ async fn main() -> Result<()> {
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
         Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
+        Cmd::RegisterTdx(args) => register_tdx::run(args).await,
         Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),
     }
 }

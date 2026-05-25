@@ -79,7 +79,7 @@ fn shasta_chain_constants_are_chain_aware() {
         1_775_135_700
     );
     assert!(shasta_fork_timestamp_for_chain(1).is_err());
-    assert!(shasta_fork_condition_for_chain(1).is_none());
+    assert!(shasta_fork_condition_for_chain(1).is_err());
 }
 
 #[test]

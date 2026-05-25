@@ -37,7 +37,6 @@ use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data,
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
 };
-use raiko2_protocol_shasta::libhash::{hash_public_input, hash_shasta_subproof_input};
 use tokio::sync::OnceCell;
 use tracing::info;
 
@@ -162,18 +161,25 @@ where
         }
 
         let proof_carry_data = input.proof_carry_data;
-        let subproof_hash = hash_shasta_subproof_input(&proof_carry_data);
         let extra_data = encode_proof_carry_data(&proof_carry_data)?;
 
-        // The on-chain TdxVerifier calls LibPublicInput.hashPublicInputs(commitmentHash,
-        // address(this), instance, taikoChainId) before ECDSA.recover. We must sign that
-        // same 5-element hash so the signature verifies on-chain and verify_sub_proofs
-        // during aggregation can also recover the correct signer.
-        let tdx_instance = config::load_private_key()
-            .map(|key| signature::address_from_private_key(&key))
+        let private_key = config::load_private_key()
             .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
-        let signing_hash = hash_public_input(
-            subproof_hash,
+        let tdx_instance = signature::address_from_private_key(&private_key);
+
+        // Build the Commitment the same way aggregation does (vec of one entry).
+        // The Inbox always passes hashCommitment(commitment) as _commitmentHash to verifyProof.
+        // shasta_aggregation_output = hash_public_input(hashCommitment(commitment), ...) is
+        // therefore what we must sign so the on-chain ECDSA.recover check passes.
+        let commitment =
+            build_shasta_commitment_from_proof_carry_data_vec(&[proof_carry_data.clone()])
+                .ok_or_else(|| {
+                    RaikoError::Guest(
+                        "Failed to build commitment from proof carry data".to_string(),
+                    )
+                })?;
+        let signing_hash = shasta_aggregation_output(
+            &commitment,
             proof_carry_data.chain_id,
             proof_carry_data.verifier,
             tdx_instance,
@@ -182,6 +188,7 @@ where
         let prove_data = proof::prove(
             &self.config.socket_path,
             self.config.instance_id,
+            &private_key,
             signing_hash,
         )
         .map_err(|e| RaikoError::Guest(format!("TDX proof generation failed: {e}")))?;
@@ -191,7 +198,9 @@ where
         Ok(TdxResponse {
             proof: format!("0x{}", hex::encode(&prove_data.proof)),
             quote: hex::encode(&prove_data.quote),
-            input: prove_data.instance_hash,
+            // proof.input = signing_hash: the value the ECDSA signature was made over,
+            // analogous to the ZK guest's committed public output in SP1/RISC0 proposals.
+            input: signing_hash,
             extra_data: Some(extra_data),
         }
         .into())
@@ -214,9 +223,9 @@ where
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
 
-        let tdx_instance = config::load_private_key()
-            .map(|key| signature::address_from_private_key(&key))
+        let private_key = config::load_private_key()
             .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
+        let tdx_instance = signature::address_from_private_key(&private_key);
 
         let commitment = build_shasta_commitment_from_proof_carry_data_vec(
             &aggregation_input.proof_carry_data_vec,
@@ -237,6 +246,8 @@ where
         let aggregation_hash =
             shasta_aggregation_output(&commitment, first.chain_id, first.verifier, tdx_instance);
 
+        // Each sub-proof's proof.input is already the signing_hash that the ECDSA
+        // signature was made over, so pass it directly to verify_sub_proofs.
         let sub_proofs = input
             .proofs
             .iter()
@@ -247,16 +258,17 @@ where
                 let proof_bytes = hex::decode(proof_hex.trim_start_matches("0x")).map_err(|e| {
                     RaikoError::Guest(format!("Failed to decode sub-proof hex: {e}"))
                 })?;
-                let input_hash = p.input.ok_or_else(|| {
+                let signing_hash = p.input.ok_or_else(|| {
                     RaikoError::Guest("Missing input hash in sub-proof".to_string())
                 })?;
-                Ok((proof_bytes, input_hash))
+                Ok((proof_bytes, signing_hash))
             })
             .collect::<RaikoResult<Vec<_>>>()?;
 
         let agg_data = proof::prove_shasta_aggregation(
             &self.config.socket_path,
             self.config.instance_id,
+            &private_key,
             &sub_proofs,
             aggregation_hash,
         )
@@ -267,6 +279,8 @@ where
         Ok(TdxResponse {
             proof: format!("0x{}", hex::encode(&agg_data.proof)),
             quote: hex::encode(&agg_data.quote),
+            // proof.input = aggregation_hash: the value the ECDSA signature was made over,
+            // analogous to parse_shasta_aggregation_input_hash in SP1/RISC0 aggregations.
             input: agg_data.aggregation_hash,
             extra_data: None,
         }

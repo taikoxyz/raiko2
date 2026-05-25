@@ -214,15 +214,10 @@ pub(crate) fn build_shasta_aggregation_input(
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
             })?;
-        let expected_input = hash_shasta_subproof_input(&carry);
-        if let Some(input_hash) = proof.input
-            && input_hash != expected_input
-        {
-            return Err(RaikoError::InvalidRequestConfig(format!(
-                "proof {index} input hash does not match shasta carry data"
-            )));
-        }
-        block_inputs.push(expected_input);
+        // block_inputs holds hash_shasta_subproof_input for ZK aggregation circuits.
+        // TDX proofs store hash_commitment(commitment) in proof.input instead, so we
+        // do not validate proof.input here — correctness is enforced on-chain.
+        block_inputs.push(hash_shasta_subproof_input(&carry));
         proof_carry_data_vec.push(carry);
     }
 

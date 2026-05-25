@@ -106,7 +106,7 @@
                 "RISC0": "0x0000000000000000000000000000000000000000"
             }
         },
-        "genesis_time": 1777785000,
+        "genesis_time": 1779670900,
         "seconds_per_slot": 12,
         "is_taiko": false
     },
@@ -143,39 +143,6 @@
         "genesis_time": 0,
         "seconds_per_slot": 1,
         "is_taiko": true
-    },
-    {
-        "name": "taiko_dev_l1",
-        "chain_id": 32382,
-        "max_spec_id": "CANCUN",
-        "hard_forks": {
-            "FRONTIER": {
-                "Block": 0
-            },
-            "MERGE": {
-                "Block": 0
-            },
-            "SHANGHAI": {
-                "Timestamp": 0
-            },
-            "CANCUN": {
-                "Timestamp": 0
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
-        "l1_contract": {},
-        "l2_contract": null,
-        "rpc": "https://l1rpc.internal.taiko.xyz",
-        "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
-        "verifier_address_forks": {},
-        "genesis_time": 1778677100,
-        "seconds_per_slot": 12,
-        "is_taiko": false
     },
     {
         "name": "taiko_dev",

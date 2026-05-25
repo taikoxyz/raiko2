@@ -142,7 +142,7 @@ struct PairPipelineRegistration<'a> {
 }
 
 const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_tdx_route()
 }
 
 async fn register_pair_pipelines(
@@ -155,6 +155,31 @@ async fn register_pair_pipelines(
             registration.pair.key.clone(),
         ));
         register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        return Ok(());
+    }
+
+    #[cfg(feature = "tdx")]
+    if registration.config.prover.is_tdx_route() {
+        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+        ));
+        let tdx_engine = build_tdx_engine(
+            registration.config,
+            registration.pair,
+            registration.scheduler_config.clone(),
+            runtime_observer,
+        )
+        .await?;
+        tdx_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaTdx,
+            Arc::new(tdx_engine),
+        );
         return Ok(());
     }
 
@@ -731,6 +756,7 @@ async fn build_tdx_engine(
     Ok(engine)
 }
 
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_native_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,

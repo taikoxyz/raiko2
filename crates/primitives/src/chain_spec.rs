@@ -769,12 +769,12 @@ mod tests {
         let unzen_timestamp = 1_777_787_739;
 
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
+        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://example.com/taiko-dev-l1-beacon")
+            Some("https://l1beacon.internal.taiko.xyz")
         );
-        assert_eq!(l1_spec.genesis_time, 1_777_785_000);
+        assert_eq!(l1_spec.genesis_time, 1_779_670_900);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);

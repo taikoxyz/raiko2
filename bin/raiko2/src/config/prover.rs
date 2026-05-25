@@ -56,6 +56,17 @@ impl ProverConfig {
         )
     }
 
+    #[must_use]
+    pub const fn is_tdx_route(&self) -> bool {
+        matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Tdx,
+                runner: RunnerKind::Local
+            }
+        )
+    }
+
     /// Applies the canonical server route to backend-specific prover defaults.
     pub fn normalize_route(&mut self) {
         match self.route() {

@@ -41,6 +41,8 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l2_rpc: None,
         l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
+        l1_beacon_rpc: None,
+        l1_genesis_time: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
         boundless: BoundlessPairConfig::default(),
@@ -69,6 +71,14 @@ pub struct NetworkPairConfig {
     pub l2_provider: L2ProviderKind,
     #[serde(default)]
     pub l2_witness_rpc: Option<String>,
+    /// Override the L1 beacon RPC URL from the chain spec. Needed when the devnet
+    /// beacon endpoint differs from what is baked into chain_spec_list_default.json.
+    #[serde(default)]
+    pub l1_beacon_rpc: Option<String>,
+    /// Override the L1 genesis time (seconds since Unix epoch) from the chain spec.
+    /// A value of 0 is ignored (treated as "use chain spec default").
+    #[serde(default)]
+    pub l1_genesis_time: Option<u64>,
     #[serde(default)]
     pub sp1_verifier_rpc_url: Option<String>,
     #[serde(default)]
@@ -350,9 +360,19 @@ fn resolve_pair(
     let l2_spec = known_specs
         .get_chain_spec(&pair.network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L2 network '{}'", pair.network))?;
-    let l1_spec = known_specs
+    let mut l1_spec = known_specs
         .get_chain_spec(&pair.l1_network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
+
+    if let Some(beacon_rpc) = pair.l1_beacon_rpc.clone() {
+        l1_spec.beacon_rpc = Some(beacon_rpc);
+    }
+    if let Some(genesis_time) = pair.l1_genesis_time
+        && genesis_time > 0
+    {
+        l1_spec.genesis_time = genesis_time;
+    }
+
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 
     Ok(ResolvedNetworkPair {

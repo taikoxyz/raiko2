@@ -11,7 +11,6 @@ use tracing::info;
 
 use crate::tdx::{
     attestation_client,
-    config::load_private_key,
     signature::{address_from_private_key, recover_signer, sign_message},
 };
 
@@ -130,31 +129,29 @@ pub fn get_tdx_metadata(socket_path: &str) -> Result<attestation_client::Metadat
 pub struct ProveData {
     pub proof: Vec<u8>,
     pub quote: Vec<u8>,
-    pub instance_hash: B256,
 }
 
 /// Generate a TDX proof for the given instance hash.
 ///
-/// Signs the hash with the bootstrapped private key, builds the 89-byte proof,
+/// Signs the hash with the supplied private key, builds the 89-byte proof,
 /// and generates a TDX attestation quote over the hash.
 ///
 /// # Errors
 ///
-/// Returns an error if the private key cannot be loaded, signing fails, or the
-/// attestation service is unreachable.
-pub fn prove(socket_path: &str, instance_id: u32, instance_hash: B256) -> Result<ProveData> {
-    let private_key = load_private_key()?;
-    let address = address_from_private_key(&private_key);
+/// Returns an error if signing fails or the attestation service is unreachable.
+pub fn prove(
+    socket_path: &str,
+    instance_id: u32,
+    private_key: &secp256k1::SecretKey,
+    instance_hash: B256,
+) -> Result<ProveData> {
+    let address = address_from_private_key(private_key);
 
-    let signature = sign_message(&private_key, &instance_hash)?;
+    let signature = sign_message(private_key, &instance_hash)?;
     let proof = TdxProof::new(instance_id, &address, &signature).into_vec();
     let (quote, _nonce) = generate_tdx_quote(socket_path, &instance_hash)?;
 
-    Ok(ProveData {
-        proof,
-        quote,
-        instance_hash,
-    })
+    Ok(ProveData { proof, quote })
 }
 
 // ────────────────────────── Prove aggregation ──────────────────────────
@@ -173,11 +170,12 @@ pub struct ProveAggregationData {
 ///
 /// # Errors
 ///
-/// Returns an error if sub-proof verification fails, the private key cannot be
-/// loaded, or the attestation service is unreachable.
+/// Returns an error if sub-proof verification fails or the attestation service
+/// is unreachable.
 pub fn prove_shasta_aggregation(
     socket_path: &str,
     instance_id: u32,
+    private_key: &secp256k1::SecretKey,
     sub_proofs: &[(Vec<u8>, B256)],
     aggregation_hash: B256,
 ) -> Result<ProveAggregationData> {
@@ -187,8 +185,7 @@ pub fn prove_shasta_aggregation(
     // In Shasta, key rotation is not allowed: the local key must match the
     // sub-proofs' instance, otherwise the emitted aggregation proof would
     // reference a different prover than the sub-proofs and fail to verify.
-    let private_key = load_private_key()?;
-    let new_instance = address_from_private_key(&private_key);
+    let new_instance = address_from_private_key(private_key);
 
     if new_instance != expected_instance {
         return Err(anyhow!(
@@ -196,7 +193,7 @@ pub fn prove_shasta_aggregation(
         ));
     }
 
-    let signature = sign_message(&private_key, &aggregation_hash)?;
+    let signature = sign_message(private_key, &aggregation_hash)?;
     let proof = TdxProof::new(instance_id, &new_instance, &signature).into_vec();
     let (quote, _nonce) = generate_tdx_quote(socket_path, &aggregation_hash)?;
 

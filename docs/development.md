@@ -56,8 +56,20 @@ second Cargo config source for `getrandom_backend`.
 For manual HTTP testing without external RPC dependencies, run the fixture server:
 
 ```bash
-cargo run -p raiko2 -- fixture-server --host 127.0.0.1 --port 8087
+cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1 --port 8087
 ```
+
+This fixture-backed server is intended for:
+
+- API upgrade smoke tests that only need stable request/response behavior
+- local validation of `/v3/proof/batch/shasta` and `/v3/proof/report` wiring
+- development without live L1/L2 RPC or a real prover backend
+
+Do not use it as evidence for:
+
+- preflight correctness
+- remote prover integration
+- end-to-end proposal regression on a real network window
 
 Submit an asynchronous v3 request:
 
@@ -164,20 +176,28 @@ cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all
 PRIVATE_KEY=0x... cargo run -r -p xtask -- register-image --profile mainnet-shasta --backend all --apply
 ```
 
+This `register-image` flow only covers zk guest digests (`risc0` image IDs and `sp1` verifier
+digests). SGX registration is separate: read `mr_enclave` from the baked
+`/opt/raiko2-sgx/etc/attestation.raiko2.json` file in the built `raiko2-sgx` image and use your
+external SGX verifier tooling, such as the `taiko-mono` SGX verifier scripts, to register it.
+
 ## Guest Benchmarking
 
 `bench-guest` measures execution metadata, cycles, and wall time for guest runs.
+The checked-in sample input lives at
+`tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json` and was
+generated from a real Shasta preflight.
 
 Typical workflow:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json --repeat 3
 ```
 
 Reuse prebuilt ELFs:
 
 ```bash
-cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./test/guest_inputs/shasta/fixture/proposals/proposal_3.json --repeat 3
+cargo run -r -p xtask -- bench-guest sp1 --skip-build-guest --input ./tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json --repeat 3
 ```
 
 If the checked-in SP1 ELF is stale, rebuild it with the benchmark feature:
@@ -228,6 +248,11 @@ Suites are tracked as `test/guest_inputs/shasta/<network>/suites/<name>.json`:
   "proposals": [17460, 17462]
 }
 ```
+
+Masaya also carries a checked-in `shasta_unzen_transition` suite with proposals `25125`,
+`25126`, and `25127`. Use it as the fixed fork-transition regression case around the
+`SHASTA -> UNZEN` boundary: `25125` and `25126` are pre-fork controls, while `25127`
+spans the transition window itself.
 
 ## Regression Harness
 

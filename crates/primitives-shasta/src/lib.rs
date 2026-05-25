@@ -21,9 +21,9 @@ pub use fixture::{
     validate_fixture_key,
 };
 pub use input::{
-    ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, ShastaBoundlessAggregationGuestInput,
-    ShastaRawAggregationGuestInput, ShastaZkAggregationGuestInput, roll_proposal_ancestor_headers,
-    roll_proposal_ancestor_headers_in_place,
+    ANCESTOR_HEADER_WINDOW_LIMIT, GuestInput, ShastaRawAggregationGuestInput,
+    ShastaRisc0AggregationGuestInput, ShastaZkAggregationGuestInput,
+    roll_proposal_ancestor_headers, roll_proposal_ancestor_headers_in_place,
 };
 pub use proof::{
     build_proof_carry_data, decode_proof_carry_data, decode_proof_carry_data_opt,

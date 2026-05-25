@@ -620,10 +620,7 @@ impl RuntimeManager {
     }
 
     fn build_task_record(&self, registration: &TaskRegistration) -> Result<RuntimeTaskRecord> {
-        let pipeline_key = registration
-            .route
-            .pipeline_key()
-            .map_err(anyhow::Error::msg)?;
+        let pipeline_key = task_registration_pipeline_key(registration)?;
         let task_dir = self.task_dir(pipeline_key, &registration.task_id);
         Ok(RuntimeTaskRecord {
             task_id: registration.task_id.clone(),
@@ -646,10 +643,7 @@ impl RuntimeManager {
     }
 
     async fn write_task_workspace(&self, registration: &TaskRegistration) -> Result<()> {
-        let pipeline_key = registration
-            .route
-            .pipeline_key()
-            .map_err(anyhow::Error::msg)?;
+        let pipeline_key = task_registration_pipeline_key(registration)?;
         let task_dir = self.task_dir(pipeline_key, &registration.task_id);
         fs::create_dir_all(task_dir.join("logs"))
             .await
@@ -733,6 +727,8 @@ impl RuntimeManager {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRegistration {
     pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_key: Option<PipelineKey>,
     pub route: PipelineRoute,
     pub task_kind: String,
     pub proposal_id: Option<u64>,
@@ -765,6 +761,38 @@ pub struct RuntimeTaskRecord {
     pub updated_at: i64,
 }
 
+fn task_registration_pipeline_key(registration: &TaskRegistration) -> Result<PipelineKey> {
+    let pipeline_key = if let Some(pipeline_key) = registration.pipeline_key {
+        pipeline_key
+    } else {
+        registration
+            .route
+            .pipeline_key()
+            .map_err(anyhow::Error::msg)?
+    };
+    if !pipeline_key_matches_route(pipeline_key, registration.route) {
+        anyhow::bail!(
+            "pipeline_key '{}' does not match route '{}'",
+            pipeline_key.as_str(),
+            registration.route
+        );
+    }
+    Ok(pipeline_key)
+}
+
+fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
+    match (pipeline_key, route) {
+        (
+            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth,
+            PipelineRoute {
+                guest_system: raiko2_pipeline::GuestSystem::Sgx,
+                runner: raiko2_pipeline::RunnerKind::Remote,
+            },
+        ) => true,
+        _ => route.pipeline_key() == Ok(pipeline_key),
+    }
+}
+
 fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTaskRecord> {
     let proof_ids_json: String = row.get(7)?;
     let metadata_json: String = row.get(15)?;
@@ -781,13 +809,7 @@ fn runtime_task_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run
     let route = route_raw.parse::<PipelineRoute>().map_err(|err| {
         invalid_runtime_task_row(2, format!("invalid route '{route_raw}': {err}"))
     })?;
-    let expected_pipeline_key = route.pipeline_key().map_err(|err| {
-        invalid_runtime_task_row(
-            2,
-            format!("route '{route_raw}' does not map to a supported pipeline: {err}"),
-        )
-    })?;
-    if pipeline_key != expected_pipeline_key {
+    if !pipeline_key_matches_route(pipeline_key, route) {
         return Err(invalid_runtime_task_row(
             1,
             format!("pipeline_key '{pipeline_key_raw}' does not match route '{route_raw}'"),
@@ -1048,6 +1070,7 @@ mod tests {
         let runtime = RuntimeManager::new(root.clone())?;
         let registration = TaskRegistration {
             task_id: "task-1".to_string(),
+            pipeline_key: None,
             route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
             task_kind: "proposal".to_string(),
             proposal_id: Some(7),
@@ -1105,6 +1128,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task-public".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1145,6 +1169,7 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.to_string(),
+                    pipeline_key: None,
                     route: "risc0/network"
                         .parse::<PipelineRoute>()
                         .expect("parse route"),
@@ -1163,8 +1188,12 @@ mod tests {
             .find_tasks_by_engine_task_id("shared-proposal-proof-task")
             .await?;
         assert_eq!(shared.len(), 2);
-        assert_eq!(shared[0].task_id, "task-public-a");
-        assert_eq!(shared[1].task_id, "task-public-b");
+        let mut task_ids = shared
+            .iter()
+            .map(|record| record.task_id.as_str())
+            .collect::<Vec<_>>();
+        task_ids.sort_unstable();
+        assert_eq!(task_ids, vec!["task-public-a", "task-public-b"]);
 
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1234,6 +1263,7 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.to_string(),
+                    pipeline_key: None,
                     route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
                     task_kind: "hoodi_batch".to_string(),
                     proposal_id: Some(7),
@@ -1279,6 +1309,7 @@ mod tests {
             runtime
                 .register_task(TaskRegistration {
                     task_id: task_id.to_string(),
+                    pipeline_key: None,
                     route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
                     task_kind: "hoodi_batch".to_string(),
                     proposal_id: Some(7),
@@ -1391,6 +1422,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task-public".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1423,6 +1455,7 @@ mod tests {
         let created = runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "task-created".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1440,6 +1473,7 @@ mod tests {
         let existing = runtime
             .register_task_if_absent(TaskRegistration {
                 task_id: "task-duplicate".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1477,6 +1511,7 @@ mod tests {
                 runtime
                     .register_task_if_absent(TaskRegistration {
                         task_id: format!("task-{index}"),
+                        pipeline_key: None,
                         route: "risc0/network"
                             .parse::<PipelineRoute>()
                             .expect("parse route"),

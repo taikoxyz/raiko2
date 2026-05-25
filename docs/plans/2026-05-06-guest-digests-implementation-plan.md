@@ -24,12 +24,11 @@ Add tests that expect:
 - a `risc0` digest export containing:
   - `risc0_shasta_proposal`
   - `risc0_shasta_aggregation`
-  - `risc0_shasta_boundless_aggregation`
 - an `sp1` digest export containing:
   - `sp1_shasta_proposal`
   - `sp1_shasta_aggregation`
 - the expected digest-source counts:
-  - `risc0`: three `image_id`
+  - `risc0`: two `image_id`
   - `sp1`: two `vk_bn254` plus two `vk_hash_bytes`
 
 **Step 2: Run tests to verify they fail**

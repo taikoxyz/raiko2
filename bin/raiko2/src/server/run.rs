@@ -5,14 +5,15 @@ use anyhow::Result;
 use tokio::{net::TcpListener, signal};
 use tracing::info;
 
-use super::AppState;
 use super::app;
 use super::net;
 use super::ready;
+use super::{AppState, log_startup_readiness_passed};
 
 /// Run the HTTP server.
-pub async fn run_server(config: Config) -> Result<()> {
+pub async fn run_server(config: Config, json_logs: bool) -> Result<()> {
     ready::ensure_startup_ready(&config).await?;
+    log_startup_readiness_passed(&config, json_logs);
 
     // Create application state
     let state = AppState::new(config.clone()).await?;

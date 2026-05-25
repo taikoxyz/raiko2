@@ -70,6 +70,9 @@ Use `--rpc-url` and `--l1-rpc-url` only when you need to override the chain spec
 `--l2-chain-id` and `--l1-chain-id` only for custom chain spec files or compatibility with older
 commands.
 
+If you already know the proposal tuple, you can skip discovery and run `preflight` directly with
+the same chain-spec-derived defaults.
+
 For a host-side native replay after preflight, run the guest launcher against the generated input:
 
 ```bash
@@ -91,13 +94,47 @@ cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
 curl -sS \
   -H 'content-type: application/json' \
   --data-binary @/tmp/proposal-17771.gaiko2-request.json \
-  "${RAIKO2_GAIKO2_BASE_URL:-http://127.0.0.1:9090}/prove/shasta"
+  "${RAIKO2_REMOTE_SGX_BASE_URL:-http://127.0.0.1:9090}/prove/shasta"
 ```
 
 SGX checks still require the SGX prover stack or a remote SGX prover. `preflight` only builds and
 optionally validates the `GuestInput`; it does not launch SGX by itself. For `sgxgeth`, point the
-same request at the gaiko2 SGXGETH service instead of `raiko2-sgx-prover`.
+same request at the geth-backed remote SGX service instead of `raiko2-sgx-prover`.
+
+For a fixed Masaya fork-boundary replay case, use the checked-in
+`taiko_masaya/shasta_unzen_transition` fixture suite. It captures proposals `25125`, `25126`,
+and `25127`, with `25127` spanning the `SHASTA -> UNZEN` transition and the first two proposals
+serving as pre-fork controls.
 
 ## Outputs
 
 Artifacts are written under `test/regression/shasta/`.
+
+## SGX Regression Stack
+
+For SGX-backed API regression, start the dedicated compose stack first:
+
+```bash
+cp docker/.env.sgx.regression.sample docker/.env.sgx.regression
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile init up raiko2-sgx-init gaiko2-sgxgeth-init
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml up -d
+```
+
+That stack starts:
+
+- `raiko2-sgx-prover` for the `sgx` lane
+- `gaiko2-sgxgeth` for the `sgxgeth` lane
+
+If you also want a dockerized `raiko2`:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
+```
+
+The dockerized or local `raiko2` process can then target both remote lanes in the same stack:
+
+- `proof_type=sgx` -> `raiko2-sgx-prover`
+- `proof_type=sgxgeth` -> `gaiko2-sgxgeth`
+
+The file-based regression harness in this directory still only supports `native` and `sp1`.
+Use the SGX stack for API-driven regression and remote-server smoke testing.

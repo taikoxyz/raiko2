@@ -23,6 +23,16 @@ pub(crate) struct RuntimeCleanupStats {
     pub retained_failures: usize,
 }
 
+impl RuntimeCleanupStats {
+    const fn is_idle(self) -> bool {
+        self.scanned == 0
+            && self.expired == 0
+            && self.removed_roots == 0
+            && self.skipped_shared_children == 0
+            && self.retained_failures == 0
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChildCleanupOutcome {
     pub skipped_shared_children: usize,
@@ -323,14 +333,16 @@ pub(crate) fn proposal_task_chain_ids(task_id: &EngineTaskId) -> Vec<EngineTaskI
 fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
     match result {
         Ok(stats) => {
-            debug!(
-                scanned = stats.scanned,
-                expired = stats.expired,
-                removed_roots = stats.removed_roots,
-                skipped_shared_children = stats.skipped_shared_children,
-                retained_failures = stats.retained_failures,
-                "runtime cleanup tick completed"
-            );
+            if !stats.is_idle() {
+                info!(
+                    scanned = stats.scanned,
+                    expired = stats.expired,
+                    removed_roots = stats.removed_roots,
+                    skipped_shared_children = stats.skipped_shared_children,
+                    retained_failures = stats.retained_failures,
+                    "runtime cleanup tick completed"
+                );
+            }
         }
         Err(err) => {
             warn!(error = %err, "runtime cleanup tick failed");
@@ -409,6 +421,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    #[test]
+    fn runtime_cleanup_stats_report_idle_when_zero() {
+        assert!(RuntimeCleanupStats::default().is_idle());
+        assert!(
+            !RuntimeCleanupStats {
+                scanned: 1,
+                ..RuntimeCleanupStats::default()
+            }
+            .is_idle()
+        );
+    }
 
     #[derive(Default)]
     struct MockEngine {
@@ -749,6 +773,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
+                pipeline_key: None,
                 route: "risc0/local".parse().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(1),

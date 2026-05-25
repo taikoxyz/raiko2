@@ -72,10 +72,12 @@ pub(crate) struct FixtureProvider {
 
 impl FixtureProvider {
     #[must_use]
-    pub(crate) fn from_repo_test_json() -> Self {
-        let raw =
-            include_str!("../../../../test/guest_inputs/shasta/fixture/proposals/proposal_3.json");
-        let mut input: GuestInput = serde_json::from_str(raw).expect("parse fixture GuestInput");
+    pub(crate) fn from_repo_shared_fixture() -> Self {
+        let raw = include_str!(
+            "../../../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json"
+        );
+        let mut input: GuestInput =
+            serde_json::from_str(raw).expect("parse shared fixture json as GuestInput");
         if input.taiko.l1_ancestor_headers.is_empty() && input.taiko.l1_header.number != 0 {
             input.taiko.l1_ancestor_headers = vec![input.taiko.l1_header.clone()];
         }
@@ -506,7 +508,7 @@ pub(crate) fn base_config() -> Config {
         l1_network: "ethereum".to_string(),
         l1_rpc: Some("http://localhost:8545".to_string()),
         l2_rpc: Some("http://localhost:9545".to_string()),
-        l2_provider: crate::config::L2ProviderKind::Reth,
+        l2_provider: raiko2_provider::L2ProviderKind::Reth,
         l2_witness_rpc: None,
         sp1_verifier_rpc_url: None,
         sp1_verifier_address: None,
@@ -553,7 +555,7 @@ where
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaNative,
         NativeProver,
@@ -575,6 +577,11 @@ fn native_fixture_engine_with_observer(
         raiko2_primitives::ProverConfig::default(),
     );
     build_engine_with_observer(spec, ctx, observer)
+}
+
+#[cfg(test)]
+pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
+    native_fixture_engine_with_observer(None)
 }
 
 #[cfg(test)]
@@ -606,7 +613,7 @@ fn risc0_fixture_engine_for_pipeline_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Risc0ShastaBackend,
 ) -> Risc0FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(pipeline_key, FixtureRisc0Prover, backend, provider);
     let ctx = ProofContext::new(
         ProofRequest {
@@ -644,7 +651,7 @@ fn sp1_fixture_engine_with_backend(
     observer: Option<Arc<dyn EngineObserver>>,
     backend: Sp1ShastaBackend,
 ) -> Sp1FixtureEngine {
-    let provider = FixtureProvider::from_repo_test_json();
+    let provider = FixtureProvider::from_repo_shared_fixture();
     let spec = FixtureSpec::new(
         PipelineKey::ShastaSp1,
         FixtureSp1Prover::new(Sp1Config {
@@ -780,6 +787,34 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
 #[cfg(test)]
 pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, Sp1FixtureEngine) {
     let (state, engine) = state_with_observed_sp1_fixture_engine(config);
+    (app::build_router(state), engine)
+}
+
+#[cfg(test)]
+pub(crate) fn app_with_observed_native_fixture_engine(
+    config: Config,
+) -> (Router, NativeFixtureEngine) {
+    let runtime = Arc::new(
+        RuntimeManager::new(unique_runtime_root("raiko2-e2e-observed-native-runtime"))
+            .expect("runtime manager"),
+    );
+    let observer = engine_observer(Arc::clone(&runtime));
+    let engine = native_fixture_engine_with_observer(Some(observer));
+
+    let mut factory = StaticPipelineFactory::default();
+    factory.insert(
+        "taiko_dev/ethereum".to_string(),
+        PipelineKey::ShastaNative,
+        Arc::new(engine.clone()),
+    );
+    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+    let state = AppState {
+        config: Arc::new(config),
+        pipelines: Arc::new(factory),
+        runtime,
+        zk_any_sampler,
+    };
+
     (app::build_router(state), engine)
 }
 

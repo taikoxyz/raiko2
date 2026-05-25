@@ -9,10 +9,12 @@ workspace = true
 
 [dependencies]
 # Workspace dependencies
+raiko2-guest-common.workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
 raiko2-pipeline.workspace = true
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -27,23 +29,30 @@ url.workspace = true
 alloy.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
+alloy-consensus.workspace = true
+reth-ethereum-primitives.workspace = true
+serde_with.workspace = true
 
-# RISC0 dependencies
-risc0-zkvm.workspace = true
-risc0-ethereum-contracts-boundless.workspace = true
-boundless-market.workspace = true
+# RISC0 dependencies (optional)
+risc0-zkvm = { workspace = true, optional = true }
+risc0-ethereum-contracts-boundless = { workspace = true, optional = true }
+boundless-market = { workspace = true, optional = true }
 
-# SP1 dependencies
-sp1-sdk.workspace = true
+# SP1 dependencies (optional)
+sp1-sdk = { workspace = true, optional = true }
 
 # TDX dependencies (optional)
 dirs = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
-anyhow = { workspace = true, optional = true }
 secp256k1 = { workspace = true, optional = true }
 
 [features]
-tdx = ["dep:dirs", "dep:rand", "dep:anyhow", "dep:secp256k1"]
+default = ["risc0", "sp1", "boundless"]
+risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts-boundless"]
+sp1 = ["dep:sp1-sdk"]
+boundless = ["risc0", "dep:boundless-market"]
+tdx = ["dep:dirs", "dep:rand", "dep:secp256k1"]
+
 
 [dev-dependencies]
 httpmock = "0.7"

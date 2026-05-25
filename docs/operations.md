@@ -1,6 +1,6 @@
 # Operations Guide
 
-This guide covers runtime configuration, Docker, release images, and Boundless operation.
+This guide covers runtime configuration, Docker, SGX operation, and Boundless operation.
 API contracts live in [API.md](API.md), and the canonical config shape lives in
 [`config.example.toml`](../config.example.toml).
 
@@ -85,6 +85,203 @@ Operational notes:
 - The request body is intentionally aligned with old `raiko`'s global body-limit posture; do not
   widen it ad hoc at the route level.
 
+## SGX Runtime
+
+The `sgx` lane is operated as a separate remote service built from this repository:
+
+- binary: `raiko2-sgx-prover`
+- image: [`Dockerfile.sgx`](../Dockerfile.sgx)
+- compose: [`docker/docker-compose.sgx.yml`](../docker/docker-compose.sgx.yml)
+- env template: [`docker/.env.sgx.sample`](../docker/.env.sgx.sample)
+
+The SGX binary exposes:
+
+- `bootstrap`
+- `check`
+- `serve`
+
+Serving endpoints are:
+
+- `GET /health`
+- `POST /prove/shasta`
+- `POST /prove/shasta-aggregate`
+
+`bootstrap` and `check` are CLI lifecycle commands, not HTTP routes.
+
+The binary supports two runtime modes:
+
+- `tee` (default): Gramine-backed SGX mode with quote generation
+- `native`: operator/testing mode that reuses the fixed native signer, omits quotes, and keeps the
+  same remote HTTP surface
+
+### Local CLI
+
+Build and inspect the binary:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- --help
+```
+
+Bootstrap the SGX runtime:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  bootstrap
+```
+
+Check the lifecycle state:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  check
+```
+
+Run the SGX sign server:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode tee \
+  --config-dir ~/.config/raiko2/sgx/config \
+  --secret-dir ~/.config/raiko2/sgx/secrets \
+  serve --listen-addr 0.0.0.0:8080 --instance-id 3131899904
+```
+
+If `--instance-id` is omitted, `serve` resolves it from `registered.json` using `--fork`.
+
+For operator/link testing without SGX, start the same remote surface in native mode:
+
+```bash
+cargo run -r -p raiko2-sgx-prover -- \
+  --mode native \
+  serve --listen-addr 0.0.0.0:8080
+```
+
+Native mode treats `bootstrap` as a no-op, `check` as a lightweight no-op, and falls back to the
+mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
+
+You can smoke-test the live server with the checked-in fixture:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/prove/shasta \
+  -H 'content-type: application/json' \
+  --data-binary @tests/fixtures/shasta_remote_request_fixture_chain_167013_block_42.json
+```
+
+### Docker Compose
+
+Quickstart:
+
+```bash
+cp docker/.env.sgx.sample docker/.env.sgx
+$EDITOR docker/.env.sgx
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml --profile init up raiko2-sgx-init
+docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up raiko2-sgx
+```
+
+Operator notes:
+
+- The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
+  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
+  only when you intentionally need a different signer.
+- `raiko2-sgx-init` is a one-shot bootstrap job.
+- `raiko2-sgx` is the long-running sign server.
+- The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
+  manifest/signature artifacts.
+- Set `RAIKO2_SGX_MODE=native` to bypass Gramine for operator/link testing while keeping the same
+  `/prove/shasta*` server behavior.
+- This compose file is still SGX-oriented and mounts SGX devices by default. For native-mode runs
+  on a host without SGX devices, run the binary directly or trim the device mounts locally.
+- Either set `RAIKO2_SGX_INSTANCE_ID` directly or provide a `registered.json` mapping under the
+  mounted config directory and select it with `RAIKO2_SGX_FORK`.
+- This compose file only covers the `sgx` lane. `sgxgeth` is served by external geth-backed
+  remote SGX infrastructure and is not built in this repository.
+
+Read the baked SGX measurement from:
+
+```bash
+docker run --rm --entrypoint cat \
+  raiko2-sgx:local \
+  /opt/raiko2-sgx/etc/attestation.raiko2.json
+```
+
+`attestation.raiko2.json` is the operator-facing source for `mr_enclave` on the `raiko2-sgx`
+image. Use that value with your external SGX verifier registration flow; this repository does not
+apply SGX attester registration onchain.
+
+## SGX Regression Stack
+
+For SGX regression work, use the unified compose stack:
+
+- [`docker/docker-compose.sgx.regression.yml`](../docker/docker-compose.sgx.regression.yml)
+- [`docker/.env.sgx.regression.sample`](../docker/.env.sgx.regression.sample)
+
+This stack is intentionally SGX-focused:
+
+- it starts `raiko2-sgx-prover` for the `sgx` lane
+- it starts an external geth-backed remote SGX tee image for the `sgxgeth` lane
+- it can optionally start the `raiko2` main service under the `raiko2` profile
+- it does not build `../gaiko2` automatically; operators should pre-build or pull the
+  `GAIKO2_SGXGETH_IMAGE`
+
+Bootstrap both tee services:
+
+```bash
+cp docker/.env.sgx.regression.sample docker/.env.sgx.regression
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile init up raiko2-sgx-init gaiko2-sgxgeth-init
+```
+
+Start the two remote SGX services:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml up -d
+```
+
+Add the optional dockerized `raiko2` main service:
+
+```bash
+docker compose --env-file docker/.env.sgx.regression -f docker/docker-compose.sgx.regression.yml --profile raiko2 up -d raiko2
+```
+
+The optional dockerized `raiko2` service is prewired with both remote SGX URLs:
+
+- `proof_type=sgx` uses `RAIKO2_REMOTE_SGX_BASE_URL`
+- `proof_type=sgxgeth` uses `RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL`
+
+The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
+both SGX lanes can boot and prove without an onchain registration step. Replace them with the real
+registered instance ids, or mount the corresponding registration metadata, when you need
+chain-verifiable SGX proofs.
+
+For a local `raiko2` CLI against the compose-managed SGX servers:
+
+```bash
+RAIKO2_CONFIG=docker/config.compose.toml \
+RAIKO2_PROVER=sgx/remote \
+RAIKO2_L1_RPC=http://127.0.0.1:8545 \
+RAIKO2_L2_RPC=http://127.0.0.1:9545 \
+RAIKO2_REMOTE_SGX_BASE_URL=http://127.0.0.1:9090 \
+RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL=http://127.0.0.1:8090 \
+cargo run -r -p raiko2 -- --config docker/config.compose.toml
+```
+
+Then choose the lane per request:
+
+- `proof_type=sgx` targets `raiko2-sgx-prover`
+- `proof_type=sgxgeth` targets the external geth-backed remote SGX server
+
+### Main-Service Wiring
+
+`raiko2` keeps the SGX path as a remote route. The dedicated `raiko2-sgx-prover` binary is the
+runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from an external
+`gaiko2` SGX service.
+
 ## Source Releases
 
 Use this flow when cutting a versioned source release such as `v0.1.0`.
@@ -100,6 +297,10 @@ Release prerequisites:
 - create both:
   - a human-readable release notes file
   - a machine-readable release manifest
+- include human-readable ZK guest digests in the release notes:
+  - `risc0` proposal and aggregation `image_id`
+  - `sp1` proposal and aggregation `vk_bn254`
+  - `sp1` proposal and aggregation `vk_hash_bytes`
 
 Suggested local variables:
 
@@ -165,9 +366,16 @@ Recommended sequence:
    - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
    - includes both `risc0` and `sp1` guest ELFs
 
-   ## Guest Digests
+   ## ZK Guest Digests
 
-   See attached `release-manifest-${TAG}.json`.
+   - risc0 proposal image_id: 0x...
+   - risc0 aggregation image_id: 0x...
+   - sp1 proposal vk_bn254: 0x...
+   - sp1 proposal vk_hash_bytes: 0x...
+   - sp1 aggregation vk_bn254: 0x...
+   - sp1 aggregation vk_hash_bytes: 0x...
+
+   See attached `release-manifest-vX.Y.Z.json` and `guest-digests-summary.json`.
    EOF
    ```
 
@@ -181,7 +389,8 @@ Recommended sequence:
      --target "${RELEASE_SHA}" \
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
-     "${RELEASE_DIR}/release-manifest-${TAG}.json"
+     "${RELEASE_DIR}/release-manifest-${TAG}.json" \
+     "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
 Expected release outputs:
@@ -190,6 +399,7 @@ Expected release outputs:
 - runtime image tag: `${TAG}`
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
+- guest digest export file: `guest-digests-summary.json`
 
 Do not:
 
@@ -247,6 +457,52 @@ Current behavior:
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
+## Release TEE Provider Metadata
+
+TEE-backed remote prover images have a separate pre-release metadata flow.
+
+Use:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
+```
+
+for local smoke verification, and:
+
+```bash
+cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
+```
+
+for a formal pre-release export.
+
+This flow:
+
+- reads exact external provider pins from `release/providers.toml`
+- builds the local `raiko2-sgx` provider image
+- clones and builds each pinned external TEE provider image
+- pushes provider images unless `--no-push` is set
+- records immutable image digests
+- reads baked attestation metadata from each image
+- emits one handoff artifact:
+  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+Use this manifest to hand off:
+
+- `mr_enclave`
+- `mr_signer`
+- source commit
+- pushed image digest
+
+to whoever configures the on-chain verifier allowlists.
+
+This command does not:
+
+- run bootstrap/init
+- register instance quotes
+- apply on-chain verifier changes
+
+Those steps remain part of later operator workflows.
+
 ## RISC0 Network Route
 
 To use the network-backed RISC0 route, configure:
@@ -262,6 +518,9 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+
+[prover.boundless.deployment]
+deployment_type = "base"
 ```
 
 Full deployment and offer parameter examples live in
@@ -277,6 +536,11 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+  `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
+  `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
+- `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
+  values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
   `aggregation_quoted_mcycles`, and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.

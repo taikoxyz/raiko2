@@ -339,6 +339,7 @@ fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
         "NATIVE" | "Native" => Ok(ProofType::Native),
         "SP1" | "Sp1" => Ok(ProofType::Sp1),
         "SGX" | "Sgx" => Ok(ProofType::Sgx),
+        "SGXGETH" | "SgxGeth" => Ok(ProofType::SgxGeth),
         "RISC0" | "Risc0" => Ok(ProofType::Risc0),
         "TDX" | "Tdx" => Ok(ProofType::Tdx),
         _ => Err(format!("unknown ProofType variant: {value}")),
@@ -367,15 +368,9 @@ where
     for (key, inner_map) in string_map {
         let spec_id = ForkId::from_str(&key).map_err(serde::de::Error::custom)?;
 
-        // Convert inner map: skip SGXGETH, convert other keys to ProofType
+        // Convert inner map string proof types to the canonical enum.
         let mut proof_type_map = BTreeMap::new();
         for (proof_key, address) in inner_map {
-            // Skip SGXGETH
-            if proof_key == "SGXGETH" {
-                continue;
-            }
-
-            // Convert proof type string to ProofType enum
             let proof_type = parse_proof_type_str(&proof_key).map_err(serde::de::Error::custom)?;
             proof_type_map.insert(proof_type, address);
         }
@@ -737,6 +732,10 @@ mod tests {
             spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::Risc0)?,
             address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
         );
+        assert_eq!(
+            spec.get_fork_verifier_address(5_412_478, 1_775_988_339, ProofType::SgxGeth)?,
+            address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")
+        );
         Ok(())
     }
 
@@ -757,21 +756,34 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
-        let spec = list
-            .into_iter()
+        let l1_spec = list
+            .iter()
+            .find(|spec| spec.name == "taiko_dev_l1")
+            .ok_or_else(|| anyhow!("missing taiko_dev_l1 spec"))?;
+        let l2_spec = list
+            .iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
         let unzen_timestamp = 1_777_787_739;
 
-        assert_eq!(spec.chain_id, 167_001);
+        assert_eq!(l1_spec.chain_id, 32_382);
+        assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
         assert_eq!(
-            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            l1_spec.beacon_rpc.as_deref(),
+            Some("https://example.com/taiko-dev-l1-beacon")
+        );
+        assert_eq!(l1_spec.genesis_time, 1_777_785_000);
+        assert_eq!(l1_spec.seconds_per_slot, 12);
+        assert!(!l1_spec.is_taiko);
+        assert_eq!(l2_spec.chain_id, 167_001);
+        assert_eq!(
+            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
             Some(&ForkCondition::Timestamp(unzen_timestamp))
         );
         assert_eq!(
-            spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
+            l2_spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
             address!("b432bbe475e569b2adef4830ae43d587932f139c")
         );
         Ok(())

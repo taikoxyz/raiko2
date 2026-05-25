@@ -1,0 +1,20 @@
+[package]
+name = "raiko2-sgx-prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "raiko2-sgx-prover"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+raiko2-sgx-runtime.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

@@ -3,6 +3,7 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
+    gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1::{ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
@@ -33,12 +34,26 @@ pub struct ProverConfig {
     /// Request sampling policy for `proof_type=zk_any`.
     #[serde(default)]
     pub zk_any: ZkAnyConfig,
+    /// Remote SGX prover configuration.
+    #[serde(default)]
+    pub remote_sgx: RemoteSgxConfig,
 }
 
 impl ProverConfig {
     #[must_use]
     pub const fn route(&self) -> PipelineRoute {
         PipelineRoute::new(self.guest_system, self.runner)
+    }
+
+    #[must_use]
+    pub const fn is_remote_sgx_route(&self) -> bool {
+        matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Sgx,
+                runner: RunnerKind::Remote
+            }
+        )
     }
 
     /// Applies the canonical server route to backend-specific prover defaults.
@@ -83,6 +98,24 @@ impl ProverConfig {
         self.boundless.validate()?;
         if self.risc0.execution_po2 == 0 {
             bail!("prover.risc0.execution_po2 must be greater than zero");
+        }
+        if matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Sgx,
+                runner: RunnerKind::Remote
+            }
+        ) {
+            if self.remote_sgx.base_url.trim().is_empty()
+                && self.remote_sgx.sgxgeth_base_url.trim().is_empty()
+            {
+                bail!(
+                    "either prover.remote_sgx.base_url or prover.remote_sgx.sgxgeth_base_url must not be empty"
+                );
+            }
+            if self.remote_sgx.timeout_ms == 0 {
+                bail!("prover.remote_sgx.timeout_ms must be greater than zero");
+            }
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
         if matches!(self.sp1.mode, raiko2_prover::sp1::ExecutionMode::Prove) && !self.sp1.verify {
@@ -160,6 +193,30 @@ impl Default for ZkAnyTargetConfig {
         Self {
             probability: 0.0,
             per_day: 0,
+        }
+    }
+}
+
+/// Remote SGX prover configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteSgxConfig {
+    pub base_url: String,
+    pub sgxgeth_base_url: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for RemoteSgxConfig {
+    fn default() -> Self {
+        let defaults = Gaiko2ProverConfig::default();
+        Self {
+            base_url: defaults.base_url,
+            sgxgeth_base_url: String::new(),
+            timeout_ms: if defaults.timeout_ms == 0 {
+                300_000
+            } else {
+                defaults.timeout_ms
+            },
         }
     }
 }

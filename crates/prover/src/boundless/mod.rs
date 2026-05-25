@@ -4,10 +4,11 @@ pub mod aggregation;
 mod config;
 
 pub use config::{
-    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, DeploymentConfig, DeploymentType,
-    OfferParamsConfig, validate_offer_spec,
+    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
+    DeploymentConfig, DeploymentType, OfferParamsConfig, validate_offer_spec,
 };
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256, address};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
@@ -27,9 +28,6 @@ use boundless_market::{
     storage::StorageUploaderType,
 };
 use raiko2_pipeline::{ProofStage, ProverBackend};
-use raiko2_primitives::proof::{
-    AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
-};
 use raiko2_primitives::{AggregationGuestInput, ProverConfig};
 use raiko2_primitives::{Proof, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
@@ -41,9 +39,8 @@ use url::Url;
 
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
-    RISC0_SEAL_PAYLOAD_KIND, decode_hex_payload, encode_risc0_aggregation_seal_payload,
-    encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -52,6 +49,7 @@ const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
 where
@@ -98,14 +96,10 @@ async fn build_boundless_aggregation_input(
     expected_image_id: Digest,
 ) -> RaikoResult<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        let agg = AggregationInput {
-            proofs: proofs.into_iter().map(proof_to_envelope).collect(),
-            expected_image_id: Some(alloy_primitives::hex::encode_prefixed(
-                expected_image_id.as_bytes(),
-            )),
-            metadata: None,
-        };
-        aggregation::build_risc0_aggregation_input(&agg)
+        crate::risc0_aggregation::build_risc0_aggregation_input_from_proofs(
+            proofs,
+            expected_image_id,
+        )
     })
     .await
     .map_err(|err| RaikoError::Guest(format!("Boundless aggregation input task failed: {err}")))?
@@ -142,6 +136,7 @@ impl BoundlessConfig {
         let mut deployment = match self.get_deployment_type() {
             DeploymentType::Sepolia => SEPOLIA,
             DeploymentType::Base => BASE,
+            DeploymentType::Taiko => taiko_deployment(),
         };
 
         if let Some(overrides) = self
@@ -158,6 +153,20 @@ impl BoundlessConfig {
 
         deployment
     }
+}
+
+fn taiko_deployment() -> Deployment {
+    Deployment::builder()
+        .market_chain_id(167_000_u64)
+        .boundless_market_address(address!("0xb3f5c7b4379052eade8c7f3fa6da37fb871da28b"))
+        .verifier_router_address(address!("0x607d196b43abc5d9BE3c7Fb8e336Ca82fec18C45"))
+        .set_verifier_address(address!("0x6135DC08D14EF8a44496B009e2181426628B8ebd"))
+        .collateral_token_address(address!("0xC284A781072442cC1882a8Db4573990B7B49DaC4"))
+        .order_stream_url(Cow::Borrowed("https://taiko-mainnet.boundless.network"))
+        .indexer_url(Cow::Borrowed(TAIKO_MAINNET_INDEXER_URL))
+        .deployment_block(4_819_525_u64)
+        .build()
+        .expect("Taiko Boundless deployment constants should be valid")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -275,12 +284,12 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
 
 #[derive(Debug)]
 struct ValidatedOfferParams {
-    max_price: Amount,
-    min_price: Amount,
+    max_price: Option<Amount>,
+    min_price: Option<Amount>,
     lock_collateral: Amount,
     lock_timeout: u32,
     timeout: u32,
-    ramp_up_period: u32,
+    ramp_up_period_secs: u32,
     bidding_start: u64,
 }
 
@@ -476,13 +485,34 @@ impl BoundlessProver {
         mcycles_count: u32,
         journal: Vec<u8>,
     ) -> RaikoResult<ProofRequest> {
-        let offer = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
+        let ValidatedOfferParams {
+            max_price,
+            min_price,
+            lock_collateral,
+            lock_timeout,
+            timeout,
+            ramp_up_period_secs,
+            bidding_start,
+        } = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
         let input_url = retry_external("upload boundless input", || async {
             client.upload_input(guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
             })
         })
         .await?;
+        let mut offer_params = OfferParams::builder();
+        offer_params
+            .ramp_up_period(ramp_up_period_secs)
+            .lock_timeout(lock_timeout)
+            .timeout(timeout)
+            .lock_collateral(lock_collateral)
+            .bidding_start(bidding_start);
+        if let Some(max_price) = max_price {
+            offer_params.max_price(max_price);
+        }
+        if let Some(min_price) = min_price {
+            offer_params.min_price(min_price);
+        }
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())
@@ -493,16 +523,7 @@ impl BoundlessProver {
             .with_cycles(u64::from(mcycles_count) * MILLION_CYCLES)
             .with_image_id(program.image_id)
             .with_journal(Journal::new(journal))
-            .with_offer(
-                OfferParams::builder()
-                    .ramp_up_period(offer.ramp_up_period)
-                    .lock_timeout(offer.lock_timeout)
-                    .timeout(offer.timeout)
-                    .max_price(offer.max_price)
-                    .min_price(offer.min_price)
-                    .lock_collateral(offer.lock_collateral)
-                    .bidding_start(offer.bidding_start),
-            );
+            .with_offer(offer_params);
         request_params = request_params
             .with_input_url(input_url)
             .expect("with_input_url is infallible for valid URLs");
@@ -1122,25 +1143,36 @@ fn validate_offer_params(
     block_time_sec: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
-    let max_price = parse_request_amount(
-        &offer_spec.max_price_per_mcycle,
-        "max_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
-    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_request_amount(
-        min_price_value,
-        "min_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
+    let (max_price, min_price) = match offer_spec.pricing_mode {
+        BoundlessPricingMode::Manual => {
+            let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
+                )
+            })?;
+            let max_price = parse_request_amount(
+                max_price_value,
+                "max_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+            let min_price = parse_request_amount(
+                min_price_value,
+                "min_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            (Some(max_price), Some(min_price))
+        }
+        BoundlessPricingMode::Market => (None, None),
+    };
     let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let ramp_up_seconds = offer_spec
+    let ramp_up_period_secs = offer_spec
         .ramp_up_period_blocks
         .saturating_mul(block_time_sec);
-    if ramp_up_seconds > lock_timeout {
+    if ramp_up_period_secs > lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
             "ramp_up_period_blocks={} exceeds lock timeout for {} mcycles",
             offer_spec.ramp_up_period_blocks, mcycles_count
@@ -1154,7 +1186,7 @@ fn validate_offer_params(
             .map_err(RaikoError::InvalidRequestConfig)?,
         lock_timeout,
         timeout,
-        ramp_up_period: offer_spec.ramp_up_period_blocks,
+        ramp_up_period_secs,
         bidding_start: SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1163,44 +1195,15 @@ fn validate_offer_params(
     })
 }
 
-fn proof_to_envelope(proof: Proof) -> ProofEnvelope {
-    let mut verifier_artifacts = Vec::new();
-    if let Some(receipt) = proof.quote {
-        verifier_artifacts.push(VerifierArtifact {
-            kind: "receipt_json".to_string(),
-            value: serde_json::Value::String(receipt),
-        });
-    }
-    let input_hash = proof
-        .input
-        .map(|value| alloy_primitives::hex::encode_prefixed(value.as_slice()));
-    let carry_data = proof.extra_data;
-    let payload_bytes = decode_hex_payload(proof.proof.as_deref());
-
-    ProofEnvelope {
-        backend: "risc0".to_string(),
-        public_inputs: PublicInputs {
-            input_hash,
-            instance_hash: None,
-        },
-        payload: ProofPayload {
-            payload_kind: RISC0_SEAL_PAYLOAD_KIND.to_string(),
-            bytes: payload_bytes,
-        },
-        verifier_artifacts,
-        carry_data,
-        metadata: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::config::default_batch_offer_params;
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessProver, ElfType, parse_env_bool,
-        parse_env_url, proof_to_envelope, quote_batch_mcycles, user_cycles_to_mcycles,
-        validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
+        DeploymentConfig, DeploymentType, ElfType, parse_env_bool, parse_env_url,
+        quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
+    use alloy_primitives::address;
     use boundless_market::price_oracle::Asset;
     use raiko2_primitives::Proof;
 
@@ -1253,6 +1256,41 @@ mod tests {
     }
 
     #[test]
+    fn taiko_deployment_resolves_boundless_mainnet_contracts() {
+        let config = BoundlessConfig {
+            deployment: Some(DeploymentConfig {
+                deployment_type: Some(DeploymentType::Taiko),
+                overrides: None,
+            }),
+            ..Default::default()
+        };
+        let deployment = config.get_effective_deployment();
+
+        assert_eq!(deployment.market_chain_id, Some(167_000));
+        assert_eq!(
+            deployment.boundless_market_address,
+            address!("0xb3f5c7b4379052eade8c7f3fa6da37fb871da28b")
+        );
+        assert_eq!(
+            deployment.verifier_router_address,
+            Some(address!("0x607d196b43abc5d9BE3c7Fb8e336Ca82fec18C45"))
+        );
+        assert_eq!(
+            deployment.set_verifier_address,
+            address!("0x6135DC08D14EF8a44496B009e2181426628B8ebd")
+        );
+        assert_eq!(
+            deployment.collateral_token_address,
+            Some(address!("0xC284A781072442cC1882a8Db4573990B7B49DaC4"))
+        );
+        assert_eq!(
+            deployment.order_stream_url.as_deref(),
+            Some("https://taiko-mainnet.boundless.network")
+        );
+        assert_eq!(deployment.deployment_block, Some(4_819_525));
+    }
+
+    #[test]
     fn quote_batch_mcycles_rounds_up_like_old_agent() {
         assert_eq!(quote_batch_mcycles(0), 2_000);
         assert_eq!(quote_batch_mcycles(1_491), 2_000);
@@ -1286,9 +1324,27 @@ mod tests {
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
         let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
-        assert_eq!(validated.max_price.asset, Asset::ETH);
-        assert_eq!(validated.min_price.asset, Asset::ETH);
-        assert!(validated.max_price.value > validated.min_price.value);
+        let max_price = validated.max_price.expect("manual max price");
+        let min_price = validated.min_price.expect("manual min price");
+        assert_eq!(max_price.asset, Asset::ETH);
+        assert_eq!(min_price.asset, Asset::ETH);
+        assert!(max_price.value > min_price.value);
+        assert_eq!(validated.ramp_up_period_secs, 120);
+        assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn validate_offer_params_omits_prices_for_market_pricing() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+
+        assert!(validated.max_price.is_none());
+        assert!(validated.min_price.is_none());
+        assert_eq!(validated.ramp_up_period_secs, 120);
         assert!(validated.timeout > validated.lock_timeout);
     }
 
@@ -1328,7 +1384,7 @@ mod tests {
     #[test]
     fn proof_to_envelope_preserves_risc0_seal_payload() {
         let expected_input_hash = alloy_primitives::hex::encode_prefixed([0x55; 32]);
-        let envelope = proof_to_envelope(Proof {
+        let envelope = crate::risc0_aggregation::proof_to_envelope(Proof {
             proof: Some("0x1234".to_string()),
             input: Some(alloy_primitives::B256::from([0x55; 32])),
             quote: Some("{\"receipt\":true}".to_string()),

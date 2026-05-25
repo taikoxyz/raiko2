@@ -40,6 +40,7 @@ Every release cut must produce:
 - image tag: `vX.Y.Z`
 - release notes markdown
 - release manifest JSON
+- guest digests summary JSON
 
 The release manifest must include:
 
@@ -49,12 +50,19 @@ The release manifest must include:
 - runtime image digest reference
 - exported guest digests
 
+The release notes must include the human-readable ZK guest digests:
+
+- `risc0` proposal and aggregation `image_id`
+- `sp1` proposal and aggregation `vk_bn254`
+- `sp1` proposal and aggregation `vk_hash_bytes`
+
 ## Guardrails
 
 - Start from a clean checkout of `main` or an explicit release commit.
 - Publish one runtime image that includes both guest backends.
 - Record immutable digest references, not just mutable image tags.
 - Use the manifest helper in `scripts/release/write_release_manifest.py`.
+- Upload both `release-manifest-*.json` and `guest-digests-summary.json` to the GitHub Release.
 - Stop before rollout or `register-image --apply` unless the user explicitly asks for that as a
   separate task.
 
@@ -66,4 +74,5 @@ The user does not see raw command output. Always summarize:
 - release commit SHA
 - runtime image tag and digest
 - manifest location
+- guest digest asset location
 - whether the GitHub Release was created successfully

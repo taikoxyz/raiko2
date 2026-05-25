@@ -14,6 +14,7 @@ const STAKE_TOKEN_DECIMALS: u8 = 18;
 pub enum DeploymentType {
     Sepolia,
     Base,
+    Taiko,
 }
 
 impl FromStr for DeploymentType {
@@ -23,18 +24,30 @@ impl FromStr for DeploymentType {
         match value.to_lowercase().as_str() {
             "sepolia" => Ok(Self::Sepolia),
             "base" => Ok(Self::Base),
+            "taiko" => Ok(Self::Taiko),
             _ => Err(format!("Invalid boundless deployment_type: {value}")),
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundlessPricingMode {
+    #[default]
+    Manual,
+    Market,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoundlessOfferParams {
+    #[serde(default)]
+    pub pricing_mode: BoundlessPricingMode,
     pub ramp_up_start_sec: u32,
     pub ramp_up_period_blocks: u32,
     pub lock_timeout_ms_per_mcycle: u32,
     pub timeout_ms_per_mcycle: u32,
-    pub max_price_per_mcycle: String,
+    #[serde(default)]
+    pub max_price_per_mcycle: Option<String>,
     #[serde(default)]
     pub min_price_per_mcycle: Option<String>,
     pub lock_collateral: String,
@@ -127,11 +140,12 @@ const fn default_aggregation_quoted_mcycles() -> u32 {
 
 pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
+        pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 200,
         timeout_ms_per_mcycle: 410,
-        max_price_per_mcycle: "0.000000085".to_string(),
+        max_price_per_mcycle: Some("0.000000085".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
         lock_collateral: "20".to_string(),
     }
@@ -139,11 +153,12 @@ pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {
 
 fn default_aggregation_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
+        pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 3000,
         timeout_ms_per_mcycle: 6000,
-        max_price_per_mcycle: "0.00000006".to_string(),
+        max_price_per_mcycle: Some("0.00000006".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
         lock_collateral: "20".to_string(),
     }
@@ -163,6 +178,7 @@ impl BoundlessConfig {
         match self.get_deployment_type() {
             DeploymentType::Base => 2,
             DeploymentType::Sepolia => 12,
+            DeploymentType::Taiko => 1,
         }
     }
 }
@@ -184,18 +200,7 @@ pub(super) fn parse_staking_token(value: &str) -> RaikoResult<U256> {
 /// Returns an error when the configured min/max price range, timeout ordering, or staking token
 /// amount is invalid.
 pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
-    let max_price = parse_ether(&offer_spec.max_price_per_mcycle).map_err(|e| {
-        format!(
-            "Failed to parse max_price_per_mcycle {}: {e}",
-            offer_spec.max_price_per_mcycle
-        )
-    })?;
-    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_ether(min_price_value)
-        .map_err(|e| format!("Failed to parse min_price_per_mcycle {min_price_value}: {e}"))?;
-    if min_price > max_price {
-        return Err("min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string());
-    }
+    validate_offer_prices(offer_spec)?;
     if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
         return Err("timeout must be greater than lock_timeout".to_string());
     }
@@ -203,9 +208,45 @@ pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
+    match offer_spec.pricing_mode {
+        BoundlessPricingMode::Manual => validate_manual_offer_prices(offer_spec),
+        BoundlessPricingMode::Market => validate_market_offer_prices(offer_spec),
+    }
+}
+
+fn validate_manual_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
+    let max_price_value = offer_spec
+        .max_price_per_mcycle
+        .as_deref()
+        .ok_or_else(|| "max_price_per_mcycle is required when pricing_mode=manual".to_string())?;
+    let max_price = parse_ether(max_price_value)
+        .map_err(|e| format!("Failed to parse max_price_per_mcycle {max_price_value}: {e}"))?;
+    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+    let min_price = parse_ether(min_price_value)
+        .map_err(|e| format!("Failed to parse min_price_per_mcycle {min_price_value}: {e}"))?;
+    if min_price > max_price {
+        return Err("min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string());
+    }
+    Ok(())
+}
+
+fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
+    if offer_spec.max_price_per_mcycle.is_some() || offer_spec.min_price_per_mcycle.is_some() {
+        return Err(
+            "max_price_per_mcycle and min_price_per_mcycle must be omitted when pricing_mode=market"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BoundlessConfig, DeploymentType, validate_offer_spec};
+    use super::{
+        BoundlessConfig, BoundlessPricingMode, DeploymentConfig, DeploymentType,
+        validate_offer_spec,
+    };
 
     #[test]
     fn default_config_uses_base_deployment() {
@@ -215,13 +256,40 @@ mod tests {
     }
 
     #[test]
+    fn taiko_deployment_type_parses_and_uses_taiko_block_time() {
+        let deployment_type = "taiko".parse::<DeploymentType>().expect("parse taiko");
+        assert_eq!(deployment_type, DeploymentType::Taiko);
+
+        let mut config = BoundlessConfig::default();
+        config
+            .deployment
+            .as_mut()
+            .expect("default deployment")
+            .deployment_type = Some(deployment_type);
+
+        assert_eq!(config.get_deployment_type(), DeploymentType::Taiko);
+        assert_eq!(config.block_time_sec(), 1);
+    }
+
+    #[test]
+    fn taiko_deployment_type_deserializes_from_config_value() {
+        let deployment: DeploymentConfig = serde_json::from_value(serde_json::json!({
+            "deployment_type": "taiko"
+        }))
+        .expect("deserialize taiko deployment");
+
+        assert_eq!(deployment.deployment_type, Some(DeploymentType::Taiko));
+    }
+
+    #[test]
     fn default_batch_offer_matches_documented_defaults() {
         let batch = BoundlessConfig::default().offer_params.batch;
         assert_eq!(batch.ramp_up_start_sec, 20);
         assert_eq!(batch.ramp_up_period_blocks, 60);
         assert_eq!(batch.lock_timeout_ms_per_mcycle, 200);
         assert_eq!(batch.timeout_ms_per_mcycle, 410);
-        assert_eq!(batch.max_price_per_mcycle, "0.000000085");
+        assert_eq!(batch.pricing_mode, BoundlessPricingMode::Manual);
+        assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.000000085"));
         assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
         assert_eq!(batch.lock_collateral, "20");
     }
@@ -233,7 +301,11 @@ mod tests {
         assert_eq!(aggregation.ramp_up_period_blocks, 60);
         assert_eq!(aggregation.lock_timeout_ms_per_mcycle, 3000);
         assert_eq!(aggregation.timeout_ms_per_mcycle, 6000);
-        assert_eq!(aggregation.max_price_per_mcycle, "0.00000006");
+        assert_eq!(aggregation.pricing_mode, BoundlessPricingMode::Manual);
+        assert_eq!(
+            aggregation.max_price_per_mcycle.as_deref(),
+            Some("0.00000006")
+        );
         assert_eq!(
             aggregation.min_price_per_mcycle.as_deref(),
             Some("0.000000006")
@@ -256,5 +328,30 @@ mod tests {
         offer.timeout_ms_per_mcycle = 300;
         let err = validate_offer_spec(&offer).expect_err("timeout not above lock_timeout");
         assert!(err.contains("timeout"));
+    }
+
+    #[test]
+    fn validate_offer_spec_accepts_market_pricing_without_manual_prices() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        validate_offer_spec(&offer).expect("valid market offer");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_market_pricing_with_manual_prices() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        let err = validate_offer_spec(&offer).expect_err("market offer with manual prices");
+        assert!(err.contains("must be omitted when pricing_mode=market"));
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_manual_pricing_without_max_price() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.max_price_per_mcycle = None;
+        let err = validate_offer_spec(&offer).expect_err("manual offer without max price");
+        assert!(err.contains("max_price_per_mcycle is required"));
     }
 }

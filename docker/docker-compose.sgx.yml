@@ -1,0 +1,55 @@
+name: raiko2-sgx
+
+x-raiko2-sgx-common: &raiko2-sgx-common
+  build:
+    context: ..
+    dockerfile: Dockerfile.sgx
+    args:
+      GRAMINE_LOG_LEVEL: ${GRAMINE_LOG_LEVEL:-error}
+    secrets:
+      - source: gramine_enclave_key
+        target: gramine_enclave_key
+  image: ${RAIKO2_SGX_IMAGE:-raiko2-sgx:local}
+  environment:
+    RUST_LOG: ${RUST_LOG:-info}
+    PCCS_HOST: ${PCCS_HOST:-host.docker.internal:8081}
+    RAIKO2_SGX_CONFIG_DIR: /var/lib/raiko2/sgx/config
+    RAIKO2_SGX_SECRET_DIR: /var/lib/raiko2/sgx/secrets
+    RAIKO2_SGX_LISTEN_ADDR: 0.0.0.0:8080
+    RAIKO2_SGX_MODE: ${RAIKO2_SGX_MODE:-tee}
+    RAIKO2_SGX_FORK: ${RAIKO2_SGX_FORK:-shasta}
+    RAIKO2_SGX_INSTANCE_ID: ${RAIKO2_SGX_INSTANCE_ID:-}
+  devices:
+    - /dev/sgx_enclave:/dev/sgx_enclave
+    - /dev/sgx_provision:/dev/sgx_provision
+  volumes:
+    - ${RAIKO2_SGX_CONFIG_DIR_HOST:-./var/sgx/config}:/var/lib/raiko2/sgx/config
+    - ${RAIKO2_SGX_SECRET_DIR_HOST:-./var/sgx/secrets}:/var/lib/raiko2/sgx/secrets
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+secrets:
+  gramine_enclave_key:
+    file: ${RAIKO2_SGX_ENCLAVE_KEY_HOST:-./enclave-key.pem}
+
+services:
+  raiko2-sgx-init:
+    <<: *raiko2-sgx-common
+    container_name: raiko2-sgx-init
+    command:
+      - --init
+    restart: "no"
+    profiles:
+      - init
+
+  raiko2-sgx:
+    <<: *raiko2-sgx-common
+    container_name: raiko2-sgx
+    ports:
+      - "${RAIKO2_SGX_PUBLIC_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

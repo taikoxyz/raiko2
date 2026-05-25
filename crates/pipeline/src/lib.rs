@@ -40,6 +40,8 @@ pub enum PipelineKey {
     ShastaSp1,
     ShastaNative,
     ShastaRisc0Network,
+    ShastaSgx,
+    ShastaSgxGeth,
     ShastaTdx,
 }
 
@@ -51,6 +53,8 @@ impl PipelineKey {
             PipelineKey::ShastaSp1 => "shasta-sp1-local",
             PipelineKey::ShastaNative => "shasta-native-local",
             PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
+            PipelineKey::ShastaSgx => "shasta-sgx-remote",
+            PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
             PipelineKey::ShastaTdx => "shasta-tdx-local",
         }
     }
@@ -61,6 +65,9 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
+            Self::ShastaSgx | Self::ShastaSgxGeth => {
+                PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
+            }
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
             Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
         }
@@ -81,6 +88,8 @@ impl FromStr for PipelineKey {
             "shasta-risc0-local" => Ok(Self::ShastaRisc0),
             "shasta-sp1-local" => Ok(Self::ShastaSp1),
             "shasta-native-local" => Ok(Self::ShastaNative),
+            "shasta-sgx-remote" => Ok(Self::ShastaSgx),
+            "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
             "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
             "shasta-tdx-local" => Ok(Self::ShastaTdx),
             _ => Err(format!("Unknown pipeline key: {s}")),
@@ -96,6 +105,7 @@ pub enum GuestSystem {
     Risc0,
     Sp1,
     Native,
+    Sgx,
     Tdx,
 }
 
@@ -106,6 +116,7 @@ impl GuestSystem {
             Self::Risc0 => "risc0",
             Self::Sp1 => "sp1",
             Self::Native => "native",
+            Self::Sgx => "sgx",
             Self::Tdx => "tdx",
         }
     }
@@ -125,6 +136,7 @@ impl FromStr for GuestSystem {
             "risc0" => Ok(Self::Risc0),
             "sp1" => Ok(Self::Sp1),
             "native" => Ok(Self::Native),
+            "sgx" => Ok(Self::Sgx),
             "tdx" => Ok(Self::Tdx),
             _ => Err(format!("Unknown guest_system: {s}")),
         }
@@ -138,6 +150,7 @@ pub enum RunnerKind {
     #[default]
     Local,
     Network,
+    Remote,
 }
 
 impl RunnerKind {
@@ -146,6 +159,7 @@ impl RunnerKind {
         match self {
             Self::Local => "local",
             Self::Network => "network",
+            Self::Remote => "remote",
         }
     }
 }
@@ -163,6 +177,7 @@ impl FromStr for RunnerKind {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
             "network" | "boundless" => Ok(Self::Network),
+            "remote" => Ok(Self::Remote),
             _ => Err(format!("Unknown runner: {s}")),
         }
     }
@@ -190,6 +205,7 @@ impl PipelineRoute {
             GuestSystem::Risc0 => raiko2_primitives::ProofType::Risc0,
             GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
             GuestSystem::Native => raiko2_primitives::ProofType::Native,
+            GuestSystem::Sgx => raiko2_primitives::ProofType::Sgx,
             GuestSystem::Tdx => raiko2_primitives::ProofType::Tdx,
         }
     }
@@ -206,12 +222,25 @@ impl PipelineRoute {
                 Ok(PipelineKey::ShastaSp1)
             }
             (GuestSystem::Native, RunnerKind::Local) => Ok(PipelineKey::ShastaNative),
-            (GuestSystem::Native, RunnerKind::Network) => {
+            (GuestSystem::Native, RunnerKind::Network | RunnerKind::Remote) => {
                 Err("Unsupported proving route: native/network".to_string())
             }
+            (GuestSystem::Sgx, RunnerKind::Remote) => Ok(PipelineKey::ShastaSgx),
+            (GuestSystem::Sgx, RunnerKind::Local) => {
+                Err("Unsupported proving route: sgx/local".to_string())
+            }
+            (GuestSystem::Sgx, RunnerKind::Network) => {
+                Err("Unsupported proving route: sgx/network".to_string())
+            }
             (GuestSystem::Tdx, RunnerKind::Local) => Ok(PipelineKey::ShastaTdx),
-            (GuestSystem::Tdx, RunnerKind::Network) => {
+            (GuestSystem::Tdx, RunnerKind::Network | RunnerKind::Remote) => {
                 Err("Unsupported proving route: tdx/network".to_string())
+            }
+            (GuestSystem::Sp1, RunnerKind::Remote) => {
+                Err("Unsupported proving route: sp1/remote".to_string())
+            }
+            (GuestSystem::Risc0, RunnerKind::Remote) => {
+                Err("Unsupported proving route: risc0/remote".to_string())
             }
         }
     }
@@ -295,6 +324,41 @@ mod route_tests {
         assert_eq!(
             route.pipeline_key().expect("supported route"),
             PipelineKey::ShastaSp1
+        );
+    }
+
+    #[test]
+    fn sgx_remote_route_uses_sgx_pipeline() {
+        let route = PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote);
+        assert_eq!(
+            route.pipeline_key().expect("supported route"),
+            PipelineKey::ShastaSgx
+        );
+        assert_eq!(
+            "shasta-sgx-remote"
+                .parse::<PipelineKey>()
+                .expect("parse sgx pipeline key"),
+            PipelineKey::ShastaSgx
+        );
+        assert_eq!(
+            "sgx/remote"
+                .parse::<PipelineRoute>()
+                .expect("parse sgx route"),
+            route
+        );
+    }
+
+    #[test]
+    fn pipeline_key_parses_sgx_variants() {
+        assert_eq!(
+            "shasta-sgx-remote".parse::<PipelineKey>().expect("sgx key"),
+            PipelineKey::ShastaSgx
+        );
+        assert_eq!(
+            "shasta-sgxgeth-remote"
+                .parse::<PipelineKey>()
+                .expect("sgxgeth key"),
+            PipelineKey::ShastaSgxGeth
         );
     }
 }

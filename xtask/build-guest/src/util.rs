@@ -109,7 +109,7 @@ pub(crate) fn docker_user_ids() -> Result<Option<(String, String)>> {
     {
         let uid = current_id_arg("-u")?;
         let gid = current_id_arg("-g")?;
-        return Ok(Some((uid, gid)));
+        Ok(Some((uid, gid)))
     }
 
     #[cfg(not(unix))]

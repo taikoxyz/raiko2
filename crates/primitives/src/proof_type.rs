@@ -26,11 +26,16 @@ pub enum ProofType {
     /// Uses the RISC0 prover to build the block.
     #[serde(alias = "RISC0")]
     Risc0 = 3u8,
+    /// # `SgxGeth`
+    ///
+    /// Uses the external gaiko2 SGX service lane for Shasta proving.
+    #[serde(alias = "SGXGETH")]
+    SgxGeth = 4u8,
     /// # Tdx
     ///
     /// Builds the block inside a TDX-protected VM and produces an attestation quote.
     #[serde(alias = "TDX")]
-    Tdx = 4u8,
+    Tdx = 5u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -39,6 +44,7 @@ impl std::fmt::Display for ProofType {
             ProofType::Native => "native",
             ProofType::Sp1 => "sp1",
             ProofType::Sgx => "sgx",
+            ProofType::SgxGeth => "sgxgeth",
             ProofType::Risc0 => "risc0",
             ProofType::Tdx => "tdx",
         })
@@ -52,6 +58,8 @@ impl std::str::FromStr for ProofType {
         match s.trim().to_lowercase().as_str() {
             "native" => Ok(ProofType::Native),
             "sp1" => Ok(ProofType::Sp1),
+            "sgx" => Ok(ProofType::Sgx),
+            "sgxgeth" => Ok(ProofType::SgxGeth),
             "risc0" => Ok(ProofType::Risc0),
             "tdx" => Ok(ProofType::Tdx),
             _ => Err(format!("Unknown proof type {s}")),
@@ -66,8 +74,10 @@ impl TryFrom<u8> for ProofType {
         match value {
             0 => Ok(Self::Native),
             1 => Ok(Self::Sp1),
+            2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
-            4 => Ok(Self::Tdx),
+            4 => Ok(Self::SgxGeth),
+            5 => Ok(Self::Tdx),
             _ => Err(format!("Unknown proof type {value}")),
         }
     }
@@ -105,18 +115,16 @@ mod tests {
     use super::ProofType;
 
     #[test]
-    fn rejects_sgx_variants_by_string() {
-        assert!("sgx".parse::<ProofType>().is_err());
-        assert!("sgxgeth".parse::<ProofType>().is_err());
+    fn accepts_sgx_variants_by_string() {
+        assert_eq!("sgx".parse::<ProofType>().unwrap(), ProofType::Sgx);
+        assert_eq!("sgxgeth".parse::<ProofType>().unwrap(), ProofType::SgxGeth);
     }
 
     #[test]
-    fn rejects_sgx_by_u8() {
-        assert!(ProofType::try_from(2u8).is_err());
-    }
-
-    #[test]
-    fn accepts_tdx_by_u8() {
-        assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::Tdx);
+    fn accepts_sgx_variants_by_u8() {
+        assert_eq!(ProofType::try_from(2u8).unwrap(), ProofType::Sgx);
+        assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::SgxGeth);
+        assert_eq!(ProofType::try_from(5u8).unwrap(), ProofType::Tdx);
+        assert!(ProofType::try_from(6u8).is_err());
     }
 }

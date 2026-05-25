@@ -16,14 +16,16 @@ use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{
     NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{ShastaSpec, load_shasta_backends},
+    forks::shasta::{ShastaBackends, ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
-use raiko2_prover::boundless::BoundlessProver;
 #[cfg(feature = "tdx")]
 use raiko2_prover::tdx::TdxProver;
 use raiko2_prover::validate_external_aggregate_proofs;
-use raiko2_prover::{native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover};
+use raiko2_prover::{
+    boundless::BoundlessProver, gaiko2::Gaiko2Prover, native::NativeProver, risc0::Risc0Prover,
+    sp1::Sp1Prover,
+};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -44,6 +46,7 @@ type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
+type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 #[cfg(feature = "tdx")]
 type TdxSpec = ShastaSpec<TdxProver, NativeBackend, NetworkProvider>;
@@ -76,96 +79,37 @@ impl AppState {
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
-        let sp1_config = setup::sp1_prover_config(&config);
-        let sp1_backend = shasta_backends.sp1.clone();
-        let sp1_prover = tokio::task::spawn_blocking(move || {
-            Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
-        })
-        .await
-        .context("SP1 setup task panicked")??;
+        let sp1_prover = if should_eagerly_initialize_sp1(&config) {
+            let sp1_config = setup::sp1_prover_config(&config);
+            let sp1_backend = shasta_backends.sp1.clone();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
+                })
+                .await
+                .context("SP1 setup task panicked")??,
+            )
+        } else {
+            None
+        };
 
         let mut factory = StaticPipelineFactory::default();
 
         for pair in &resolved_pairs {
-            let runtime_observer: Arc<dyn EngineObserver> =
-                Arc::new(RuntimeObserver::new(Arc::clone(&runtime), pair.key.clone()));
-            let risc0_engine = build_risc0_engine(
-                &config,
-                pair,
-                shasta_backends.risc0.clone(),
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            risc0_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaRisc0,
-                Arc::new(risc0_engine),
-            );
-
-            let boundless_scheduler_config = setup::boundless_scheduler_config(&config);
-            let boundless_engine = build_boundless_engine(
-                &config,
-                pair,
-                shasta_backends.risc0_boundless.clone(),
-                boundless_scheduler_config,
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            boundless_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaRisc0Network,
-                Arc::new(boundless_engine),
-            );
-
-            let sp1_engine = build_sp1_engine(
-                &config,
-                pair,
-                sp1_prover.clone(),
-                shasta_backends.sp1.clone(),
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            sp1_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaSp1,
-                Arc::new(sp1_engine),
-            );
-
-            let native_engine = build_native_engine(
-                &config,
-                pair,
-                scheduler_config.clone(),
-                Arc::clone(&runtime_observer),
-            )
-            .await?;
-            native_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-            factory.insert(
-                pair.key.clone(),
-                PipelineKey::ShastaNative,
-                Arc::new(native_engine),
-            );
-
-            #[cfg(feature = "tdx")]
-            {
-                let tdx_engine = build_tdx_engine(
-                    &config,
+            register_pair_pipelines(
+                &mut factory,
+                PairPipelineRegistration {
+                    config: &config,
                     pair,
-                    scheduler_config.clone(),
-                    Arc::clone(&runtime_observer),
-                )
-                .await?;
-                tdx_engine.start_workers_with_maintenance_interval(workers, maintenance_interval);
-                factory.insert(
-                    pair.key.clone(),
-                    PipelineKey::ShastaTdx,
-                    Arc::new(tdx_engine),
-                );
-            }
+                    runtime: Arc::clone(&runtime),
+                    shasta_backends: &shasta_backends,
+                    sp1_prover: sp1_prover.clone(),
+                    scheduler_config: scheduler_config.clone(),
+                    workers,
+                    maintenance_interval,
+                },
+            )
+            .await?;
         }
 
         let config = Arc::new(config);
@@ -184,6 +128,217 @@ impl AppState {
             zk_any_sampler,
         })
     }
+}
+
+struct PairPipelineRegistration<'a> {
+    config: &'a Config,
+    pair: &'a ResolvedNetworkPair,
+    runtime: Arc<RuntimeManager>,
+    shasta_backends: &'a ShastaBackends,
+    sp1_prover: Option<Sp1Prover>,
+    scheduler_config: SchedulerConfig,
+    workers: usize,
+    maintenance_interval: Duration,
+}
+
+const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
+    !config.prover.is_remote_sgx_route()
+}
+
+async fn register_pair_pipelines(
+    factory: &mut StaticPipelineFactory,
+    registration: PairPipelineRegistration<'_>,
+) -> Result<()> {
+    if registration.config.prover.is_remote_sgx_route() {
+        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+        ));
+        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        return Ok(());
+    }
+
+    let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+        Arc::clone(&registration.runtime),
+        registration.pair.key.clone(),
+    ));
+    let risc0_engine = build_risc0_engine(
+        registration.config,
+        registration.pair,
+        registration.shasta_backends.risc0.clone(),
+        registration.scheduler_config.clone(),
+        Arc::clone(&runtime_observer),
+    )
+    .await?;
+    risc0_engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        PipelineKey::ShastaRisc0,
+        Arc::new(risc0_engine),
+    );
+
+    let boundless_engine = build_boundless_engine(
+        registration.config,
+        registration.pair,
+        registration.shasta_backends.risc0_boundless.clone(),
+        setup::boundless_scheduler_config(registration.config),
+        Arc::clone(&runtime_observer),
+    )
+    .await?;
+    boundless_engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        PipelineKey::ShastaRisc0Network,
+        Arc::new(boundless_engine),
+    );
+
+    let sp1_engine = build_sp1_engine(
+        registration.config,
+        registration.pair,
+        registration
+            .sp1_prover
+            .clone()
+            .expect("sp1 prover must be initialized for non-remote-sgx hosts"),
+        registration.shasta_backends.sp1.clone(),
+        registration.scheduler_config.clone(),
+        Arc::clone(&runtime_observer),
+    )
+    .await?;
+    sp1_engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        PipelineKey::ShastaSp1,
+        Arc::new(sp1_engine),
+    );
+
+    let native_engine = build_native_engine(
+        registration.config,
+        registration.pair,
+        registration.scheduler_config.clone(),
+        Arc::clone(&runtime_observer),
+    )
+    .await?;
+    native_engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        PipelineKey::ShastaNative,
+        Arc::new(native_engine),
+    );
+
+    #[cfg(feature = "tdx")]
+    {
+        let tdx_engine = build_tdx_engine(
+            registration.config,
+            registration.pair,
+            registration.scheduler_config.clone(),
+            Arc::clone(&runtime_observer),
+        )
+        .await?;
+        tdx_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaTdx,
+            Arc::new(tdx_engine),
+        );
+    }
+
+    register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+    Ok(())
+}
+
+async fn register_remote_sgx_pipelines(
+    factory: &mut StaticPipelineFactory,
+    registration: &PairPipelineRegistration<'_>,
+    runtime_observer: Arc<dyn EngineObserver>,
+) -> Result<()> {
+    register_remote_sgx_engine(
+        factory,
+        RemoteSgxRegistration {
+            config: registration.config,
+            pair: registration.pair,
+            scheduler_config: registration.scheduler_config.clone(),
+            observer: Arc::clone(&runtime_observer),
+            workers: registration.workers,
+            maintenance_interval: registration.maintenance_interval,
+            pipeline_key: PipelineKey::ShastaSgx,
+            proof_type: ProofType::Sgx,
+            base_url: &registration.config.prover.remote_sgx.base_url,
+        },
+    )
+    .await?;
+    register_remote_sgx_engine(
+        factory,
+        RemoteSgxRegistration {
+            config: registration.config,
+            pair: registration.pair,
+            scheduler_config: registration.scheduler_config.clone(),
+            observer: runtime_observer,
+            workers: registration.workers,
+            maintenance_interval: registration.maintenance_interval,
+            pipeline_key: PipelineKey::ShastaSgxGeth,
+            proof_type: ProofType::SgxGeth,
+            base_url: &registration.config.prover.remote_sgx.sgxgeth_base_url,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+struct RemoteSgxRegistration<'a> {
+    config: &'a Config,
+    pair: &'a ResolvedNetworkPair,
+    scheduler_config: SchedulerConfig,
+    observer: Arc<dyn EngineObserver>,
+    workers: usize,
+    maintenance_interval: Duration,
+    pipeline_key: PipelineKey,
+    proof_type: ProofType,
+    base_url: &'a str,
+}
+
+async fn register_remote_sgx_engine(
+    factory: &mut StaticPipelineFactory,
+    registration: RemoteSgxRegistration<'_>,
+) -> Result<()> {
+    if registration.base_url.trim().is_empty() {
+        return Ok(());
+    }
+
+    let engine = build_remote_sgx_engine(
+        registration.config,
+        registration.pair,
+        registration.scheduler_config,
+        registration.observer,
+        registration.pipeline_key,
+        registration.proof_type,
+        registration.base_url.to_string(),
+    )
+    .await?;
+    engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        registration.pipeline_key,
+        Arc::new(engine),
+    );
+    Ok(())
 }
 
 async fn restore_proof_artifacts_from_runtime_tasks(runtime: &Arc<RuntimeManager>) -> Result<()> {
@@ -722,6 +877,80 @@ async fn build_boundless_engine(
     Ok(engine)
 }
 
+#[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
+async fn build_remote_sgx_engine(
+    config: &Config,
+    pair: &ResolvedNetworkPair,
+    scheduler_config: SchedulerConfig,
+    observer: Arc<dyn EngineObserver>,
+    pipeline_key: PipelineKey,
+    proof_type: ProofType,
+    base_url: String,
+) -> Result<Engine<Gaiko2Spec>> {
+    let gaiko2_config =
+        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
+
+    let engine = match config.queue.backend {
+        QueueBackend::Memory => {
+            let provider = setup::build_provider(config, pair)?;
+            let context = setup::build_context(config, pair, proof_type)?;
+            let spec = ShastaSpec::new(
+                pipeline_key,
+                Gaiko2Prover::new(&gaiko2_config)?,
+                NativeBackend,
+                provider,
+            );
+            Engine::with_store_scheduler_config_and_observer(
+                spec,
+                context,
+                MemoryStore::with_lease(scheduler_config.lease_duration),
+                scheduler_config,
+                Some(Arc::clone(&observer)),
+            )
+        }
+        QueueBackend::Redis => {
+            #[cfg(feature = "redis-queue")]
+            {
+                type Gaiko2Output =
+                    EngineOutput<<Gaiko2Spec as raiko2_pipeline::PipelineSpec>::GuestInput>;
+                let provider = setup::build_provider(config, pair)?;
+                let context = setup::build_context(config, pair, proof_type)?;
+                let url = config.queue.redis_url.clone().unwrap_or_default();
+                let namespace = setup::queue_namespace(&config.queue.namespace, pair, pipeline_key);
+                let store =
+                    raiko2_queue::RedisStore::<EngineTask, Gaiko2Output, EngineTaskKey>::connect(
+                        &url,
+                        &namespace,
+                        scheduler_config.lease_duration,
+                    )
+                    .await?;
+                let spec = ShastaSpec::new(
+                    pipeline_key,
+                    Gaiko2Prover::new(&gaiko2_config)?,
+                    NativeBackend,
+                    provider,
+                );
+                Engine::with_store_scheduler_config_and_observer(
+                    spec,
+                    context,
+                    store,
+                    scheduler_config,
+                    Some(observer),
+                )
+            }
+
+            #[cfg(not(feature = "redis-queue"))]
+            {
+                anyhow::bail!(
+                    "queue backend redis requires building raiko2 with `--features redis-queue`"
+                );
+            }
+        }
+    };
+
+    Ok(engine)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,6 +1142,24 @@ mod tests {
 
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         Ok(())
+    }
+
+    #[test]
+    fn remote_sgx_route_does_not_eagerly_initialize_sp1() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+
+        assert!(!should_eagerly_initialize_sp1(&config));
+    }
+
+    #[test]
+    fn sp1_route_still_eagerly_initializes_sp1() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sp1;
+        config.prover.runner = RunnerKind::Local;
+
+        assert!(should_eagerly_initialize_sp1(&config));
     }
 
     fn valid_native_proof() -> Proof {

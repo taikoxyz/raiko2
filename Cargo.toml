@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "xtask",
     "xtask/build-guest",
+    "crates/guest-common",
     "crates/pipeline",
     "crates/guests",
     "crates/primitives",
@@ -15,7 +16,9 @@ members = [
     "crates/protocol-shasta",
     "crates/primitives-shasta",
     "crates/queue",
+    "crates/sgx-runtime",
     "bin/raiko2",
+    "bin/raiko2-sgx-prover",
     "bin/rpc-proxy",
     "bin/witness-check",
     "bin/guest-launcher",
@@ -53,7 +56,8 @@ lto = true
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
-raiko2-prover = { path = "./crates/prover", default-features = false }
+raiko2-guest-common = { path = "./crates/guest-common" }
+raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
 raiko2-engine = { path = "./crates/engine" }
@@ -64,24 +68,25 @@ raiko2-protocol-shasta = { path = "./crates/protocol-shasta" }
 raiko2-primitives-shasta = { path = "./crates/primitives-shasta" }
 raiko2-queue = { path = "./crates/queue" }
 raiko2-guests = { path = "./crates/guests" }
+raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", branch = "main", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "0094ea38796b7183de9e7be09727abb343191a52", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
-sp1-sdk = { version = "=5.2.4", features = ["network"] }
+sp1-sdk = { version = "=6.1.0", features = ["blocking", "network"] }
 
-# Alethia reth (raiko2 integration branch)
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false, features = [
+# Alethia reth
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "a6782fe948f86fdf9b13a2f3f5f1a89f00d1c9c9", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "6e17536f31e7f3d8fcb76e391210c72e64bfbc13", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
@@ -202,7 +207,7 @@ itertools = "0.14"
 revm = { version = "38.0.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.1" }
 risc0-ethereum-contracts-boundless = { package = "risc0-ethereum-contracts", version = "=3.0.1" }
-boundless-market = { version = "=1.4.0" }
+boundless-market = { version = "=2.0.0" }
 
 # kzg
 c-kzg = { version = "2.1.7", default-features = false, features = [
@@ -210,4 +215,4 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "portable",
     "std",
 ] }
-kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", rev = "cd9c40b38b82558baa92e4cc4da6e6e007d9d704", default-features = false }
+kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false }

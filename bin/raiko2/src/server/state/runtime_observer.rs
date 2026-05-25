@@ -952,6 +952,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: task_id.to_string(),
+                pipeline_key: Some(pipeline),
                 route: "native/local"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -994,6 +995,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public".to_string(),
+                pipeline_key: None,
                 route: "risc0/network"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),
@@ -1135,6 +1137,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_aggregate_pending".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1383,6 +1386,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_multi_proposal".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
@@ -1481,6 +1485,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1526,6 +1531,8 @@ mod tests {
                     skip_simulation: true,
                     cycle_limit: 1_000_000_000_000,
                     timeout_secs: 3_600,
+                    max_price_per_pgu: Some(42),
+                    auction_timeout_secs: Some(120),
                 }),
             )
             .await;
@@ -1550,6 +1557,8 @@ mod tests {
         assert_eq!(runtime_entry.sp1_skip_simulation, Some(true));
         assert_eq!(runtime_entry.sp1_cycle_limit, Some(1_000_000_000_000));
         assert_eq!(runtime_entry.sp1_timeout_secs, Some(3_600));
+        assert_eq!(runtime_entry.sp1_max_price_per_pgu, Some(42));
+        assert_eq!(runtime_entry.sp1_auction_timeout_secs, Some(120));
         let mut record = runtime
             .get_task("task_public_sp1")
             .await?
@@ -1594,6 +1603,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_load".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: Some(42),
@@ -1650,6 +1660,8 @@ mod tests {
                     skip_simulation: true,
                     cycle_limit: 1_000_000_000_000,
                     timeout_secs: 3_600,
+                    max_price_per_pgu: Some(42),
+                    auction_timeout_secs: Some(120),
                 }),
             )
             .await;
@@ -1701,6 +1713,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_sp1_aggregate".to_string(),
+                pipeline_key: None,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 task_kind: "hoodi_batch".to_string(),
                 proposal_id: None,
@@ -1758,6 +1771,8 @@ mod tests {
                     skip_simulation: true,
                     cycle_limit: 1_000_000_000_000,
                     timeout_secs: 3_600,
+                    max_price_per_pgu: Some(42),
+                    auction_timeout_secs: Some(120),
                 }),
             )
             .await;
@@ -1815,6 +1830,7 @@ mod tests {
         runtime
             .register_task(TaskRegistration {
                 task_id: "task_public_restart".to_string(),
+                pipeline_key: None,
                 route: "native/local"
                     .parse::<PipelineRoute>()
                     .expect("parse route"),

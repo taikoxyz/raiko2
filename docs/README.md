@@ -11,6 +11,7 @@ This directory contains the contributor- and operator-facing documentation for `
 - [Operations guide](operations.md)
 - [TDX prover registration](tdx_register.md)
 - [Regression harness](../scripts/regression/README.md)
+- [Gaiko2 remote prover integration](gaiko2-remote-prover-integration.md)
 - [Configuration example](../config.example.toml)
 
 ## How to Use These Docs
@@ -23,6 +24,8 @@ This directory contains the contributor- and operator-facing documentation for `
 - Read [operations.md](operations.md) for runtime configuration, Docker, and image publishing.
 - Read [tdx_register.md](tdx_register.md) when registering a Nethermind-TDX prover on-chain
   (`cargo run -p xtask -- register-tdx`, `--trust` vs `--register`, key/image rotation).
+- Read [gaiko2-remote-prover-integration.md](gaiko2-remote-prover-integration.md) when updating
+  `gaiko2` to match the canonical remote prover protocol and conformance harness.
 
 ## Historical Notes
 

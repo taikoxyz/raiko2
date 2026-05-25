@@ -1,10 +1,11 @@
+#![cfg(feature = "boundless")]
 #![allow(missing_docs)]
 
 use alloy_primitives::{Address, B256, Uint, address, b256};
 use raiko2_primitives::proof::{
     AggregationInput, ProofEnvelope, ProofPayload, PublicInputs, VerifierArtifact,
 };
-use raiko2_primitives_shasta::{ShastaBoundlessAggregationGuestInput, encode_proof_carry_data};
+use raiko2_primitives_shasta::{ShastaRisc0AggregationGuestInput, encode_proof_carry_data};
 use raiko2_protocol_shasta::{
     libhash::hash_shasta_subproof_input,
     shasta::{Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData},
@@ -45,8 +46,8 @@ fn builds_risc0_aggregation_input() {
 
     let bytes = build_risc0_aggregation_input(&agg).expect("build input");
     assert!(!bytes.is_empty());
-    let decoded: ShastaBoundlessAggregationGuestInput =
-        bincode::deserialize(&bytes).expect("decode boundless aggregation input");
+    let decoded: ShastaRisc0AggregationGuestInput =
+        bincode::deserialize(&bytes).expect("decode RISC0 aggregation input");
     assert_eq!(decoded.proof_carry_data_vec.len(), 1);
     assert_eq!(decoded.receipts.len(), 1);
 }

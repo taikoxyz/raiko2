@@ -262,8 +262,12 @@ async fn register_pair_pipelines(
         Arc::new(native_engine),
     );
 
+    // Only build the TDX engine when the server is actually configured to route to
+    // tdx/local. `build_tdx_engine` lazily bootstraps the local TDX prover (reading the
+    // `tdxs` socket), so registering it unconditionally would force every --features tdx
+    // build to depend on a live attestation daemon even for routes that never use TDX.
     #[cfg(feature = "tdx")]
-    {
+    if registration.config.prover.is_tdx_route() {
         let tdx_engine = build_tdx_engine(
             registration.config,
             registration.pair,

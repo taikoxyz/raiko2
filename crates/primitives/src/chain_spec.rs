@@ -769,10 +769,13 @@ mod tests {
         let unzen_timestamp = 1_777_787_739;
 
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
+        // Public defaults use sanitized example.com placeholders per the open-source
+        // sanitization policy; operators override these via `RpcConfig.pairs[*].l1_rpc`
+        // and `l1_beacon_rpc` for their actual deployment.
+        assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://l1beacon.internal.taiko.xyz")
+            Some("https://example.com/taiko-dev-l1-beacon")
         );
         assert_eq!(l1_spec.genesis_time, 1_779_670_900);
         assert_eq!(l1_spec.seconds_per_slot, 12);

@@ -1,8 +1,15 @@
 # Registering a TDX prover on-chain
 
 `cargo run -p xtask -- register-tdx` admits a Nethermind-TDX prover to the on-chain
-`TdxVerifier` instance registry so its proofs verify on Taiko. This page covers when to use
-each flag, what each one does, and the common day-2 flows (key rotation, new image rollout).
+`AzureTdxVerifier` instance registry so its proofs verify on Taiko. This page covers when to
+use each flag, what each one does, and the common day-2 flows (key rotation, new image
+rollout).
+
+Throughout this doc, `TdxVerifier` refers to the proxy/role name in operator runbooks and
+chain-spec entries; the deployed implementation contract is `AzureTdxVerifier`
+([`taiko-mono/.../AzureTdxVerifier.sol`](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/contracts/layer1/verifiers/AzureTdxVerifier.sol)).
+The xtask's `--verifier` flag and chain spec's `TDX` entry both point at the proxy address
+that delegates to this implementation.
 
 For the broader pipeline (image build, VM deploy, smart-contract deploy) see
 [`taiko-mono/.../tdx_deployment.md`](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/docs/tdx_deployment.md).
@@ -11,7 +18,7 @@ For the broader pipeline (image build, VM deploy, smart-contract deploy) see
 
 The xtask fetches the prover's TDX bootstrap data (either from the running raiko2 HTTP API or
 from `~/.config/raiko2/tdx/bootstrap.json` on the local filesystem), then sends up to two
-transactions to `TdxVerifier`:
+transactions to the verifier (i.e. the `AzureTdxVerifier` behind the proxy):
 
 | Flag | Transaction | Permission | Purpose |
 |------|-------------|------------|---------|

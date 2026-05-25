@@ -168,6 +168,13 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
     let do_trust = args.trust;
     let do_register = args.register || !args.trust;
 
+    if args.pcr_bitmap >= (1u32 << 24) {
+        anyhow::bail!(
+            "--pcr-bitmap={:#x} exceeds 24-bit range; high bits would be silently truncated when packed into the Solidity uint24",
+            args.pcr_bitmap
+        );
+    }
+
     println!(
         "register-tdx: verifier={:?} index={} trust={} register={} dry_run={}",
         args.verifier, args.trusted_params_index, do_trust, do_register, args.dry_run
@@ -566,6 +573,12 @@ fn parse_verify_params(
     // (e.g. from the inner metadata object) will cause ExtraDataMismatch on-chain.
     let nonce_bytes = hex::decode(bootstrap_nonce_hex.trim_start_matches("0x"))
         .context("bootstrap.nonce: not valid hex")?;
+    if nonce_bytes.len() != 32 {
+        anyhow::bail!(
+            "bootstrap.nonce must be 32 bytes; got {} bytes — the contract's _makeExtraData expects a 32-byte nonce and will revert with ExtraDataMismatch otherwise",
+            nonce_bytes.len()
+        );
+    }
 
     Ok(AzureTdxVerifier::VerifyParams {
         attestationDocument: AzureTdxVerifier::AttestationDocument {

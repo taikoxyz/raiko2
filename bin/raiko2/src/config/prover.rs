@@ -134,6 +134,16 @@ impl ProverConfig {
         }
         self.zk_any.validate()?;
 
+        // The tdx/local route requires the `tdx` cargo feature at build time — without it
+        // the TDX engine isn't compiled in and the pipeline factory will never serve tdx
+        // requests. Fail fast at config time so operators get a clear actionable error
+        // instead of an opaque 404 at request time.
+        if self.is_tdx_route() && !cfg!(feature = "tdx") {
+            bail!(
+                "prover.guest_system=tdx/runner=local requires building raiko2 with --features tdx"
+            );
+        }
+
         Ok(())
     }
 }

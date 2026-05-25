@@ -214,10 +214,21 @@ pub(crate) fn build_shasta_aggregation_input(
             .ok_or_else(|| {
                 RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
             })?;
-        // block_inputs holds hash_shasta_subproof_input for ZK aggregation circuits.
-        // TDX proofs store hash_commitment(commitment) in proof.input instead, so we
-        // do not validate proof.input here — correctness is enforced on-chain.
-        block_inputs.push(hash_shasta_subproof_input(&carry));
+        let expected_input = hash_shasta_subproof_input(&carry);
+        // Validate proof.input matches the carry data for non-TDX proofs to catch
+        // malformed client submissions early. TDX proofs store signing_hash (=
+        // hash_public_input(hash_commitment, ...)) in proof.input instead, so the
+        // equality check would be a false positive there. TDX proofs are detected
+        // by their fixed 89-byte wire format (instance_id || address || signature).
+        if let Some(input_hash) = proof.input
+            && !is_tdx_proof_envelope(proof)
+            && input_hash != expected_input
+        {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "proof {index} input hash does not match shasta carry data"
+            )));
+        }
+        block_inputs.push(expected_input);
         proof_carry_data_vec.push(carry);
     }
 
@@ -227,6 +238,18 @@ pub(crate) fn build_shasta_aggregation_input(
         proof_carry_data_vec,
         prover_address: alloy_primitives::Address::ZERO,
     })
+}
+
+/// Returns true if `proof` carries a TDX-format envelope (89 raw bytes:
+/// `instance_id(4) || address(20) || signature(65)`). Used to skip raiko-internal
+/// `hash_shasta_subproof_input` consistency checks that don't apply to TDX.
+fn is_tdx_proof_envelope(proof: &Proof) -> bool {
+    let Some(hex) = proof.proof.as_deref() else {
+        return false;
+    };
+    let stripped = hex.strip_prefix("0x").unwrap_or(hex);
+    // 89 bytes = 178 hex chars
+    stripped.len() == 178
 }
 
 pub(crate) fn with_shasta_extra_data(

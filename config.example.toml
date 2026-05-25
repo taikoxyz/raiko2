@@ -136,7 +136,7 @@ lock_collateral = "20"
 
 # TDX prover config (only used when the binary is built with --features tdx).
 # Requires a running `tdxs` attestation daemon and the on-chain instance_id
-# assigned by `raiko2 tdx register`.
+# assigned by `cargo run -p xtask -- register-tdx` (see docs/tdx_register.md).
 #
 # [prover.tdx]
 # instance_id = 0

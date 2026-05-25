@@ -73,11 +73,13 @@ flowchart LR
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
-- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
+- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, `tdx`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
   regression when the server route is `native/local`.
-- `proof_type=tdx` routes to `tdx/local` and requires `--features tdx` at build time plus a
-  running `tdxs` attestation daemon. It is an operator route, not a public proof type.
+- `proof_type=tdx` routes to `tdx/local` and is accepted only when raiko2 is built with
+  `--features tdx` and the server is configured for `tdx/local` (a running `tdxs` attestation
+  daemon is also required). `ProverConfig::validate()` rejects misconfigured deployments at
+  startup, and the TDX engine is only registered for the configured route.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless

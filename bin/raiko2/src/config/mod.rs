@@ -505,31 +505,6 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    #[cfg(feature = "boundless")]
-    #[test]
-    fn test_boundless_route_requires_signer_key() {
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Boundless;
-        config.prover.boundless.signer_key.clear();
-
-        let err = config.prover.validate().expect_err("missing signer key");
-        assert!(err.to_string().contains("signer_key"));
-    }
-
-    #[cfg(feature = "boundless")]
-    #[test]
-    fn test_boundless_route_requires_rpc_url() {
-        let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Risc0;
-        config.prover.runner = RunnerKind::Boundless;
-        config.prover.boundless.rpc_url.clear();
-        config.prover.boundless.signer_key =
-            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string();
-
-        let err = config.prover.validate().expect_err("missing rpc url");
-        assert!(err.to_string().contains("rpc_url"));
-    }
     #[test]
     fn test_boundless_route_requires_signer_key() {
         let mut config = Config::default();

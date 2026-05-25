@@ -27,8 +27,10 @@ pub struct ProverConfig {
     /// Boundless runner configuration.
     #[serde(default)]
     pub boundless: BoundlessConfig,
-    /// TDX prover configuration.
-    #[cfg(feature = "tdx")]
+    /// TDX prover configuration. Always present for deserialization so that a
+    /// config with `[prover.tdx]` doesn't fail with "unknown field" on non-tdx
+    /// builds. Actual usage of this section is gated by `#[cfg(feature = "tdx")]`
+    /// in the engine-registration code.
     #[serde(default)]
     pub tdx: TdxConfig,
     /// Request sampling policy for `proof_type=zk_any`.
@@ -312,7 +314,6 @@ impl Default for BoundlessConfig {
 }
 
 /// TDX prover configuration.
-#[cfg(feature = "tdx")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TdxConfig {
     /// On-chain verifier instance ID.
@@ -323,12 +324,10 @@ pub struct TdxConfig {
     pub socket_path: String,
 }
 
-#[cfg(feature = "tdx")]
 fn default_tdx_socket_path() -> String {
     "/var/tdxs.sock".to_string()
 }
 
-#[cfg(feature = "tdx")]
 impl Default for TdxConfig {
     fn default() -> Self {
         Self {

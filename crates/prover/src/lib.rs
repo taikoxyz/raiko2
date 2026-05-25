@@ -248,8 +248,10 @@ fn is_tdx_proof_envelope(proof: &Proof) -> bool {
         return false;
     };
     let stripped = hex.strip_prefix("0x").unwrap_or(hex);
-    // Must be exactly 89 bytes (instance_id(4) || address(20) || signature(65)) and valid hex.
-    // Checking both prevents a same-length non-TDX proof from bypassing the carry-data check.
+    // Heuristic: must be exactly 89 bytes (instance_id(4) || address(20) || signature(65))
+    // and valid hex. This reduces misclassification risk vs. a length-only check but is not
+    // a guarantee — any valid 89-byte hex string would match. TDX proofs in aggregation
+    // requests come from this prover, so the check is sufficient in practice.
     stripped.len() == 178 && alloy_primitives::hex::decode(stripped).is_ok()
 }
 

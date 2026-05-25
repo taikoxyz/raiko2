@@ -523,10 +523,19 @@ fn parse_verify_params(
         .decode(e_val)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(e_val))
         .context("HCLAkPub.e: urlsafe b64 decode failed")?;
-    // JWK exponent is big-endian; pad to 4 bytes
+    // JWK exponent is big-endian. Standard RSA exponents (e.g. 65537 = 0x010001)
+    // are at most 4 bytes. Reject anything longer with non-zero high bytes rather
+    // than silently truncating, which would produce an incorrect uint24 on-chain.
+    if e_bytes.len() > 4 && e_bytes[..e_bytes.len() - 4].iter().any(|&b| b != 0) {
+        bail!(
+            "JWK exponent is {} bytes with non-zero high bytes — not a standard RSA exponent \
+             and cannot be represented as uint24 without silent truncation",
+            e_bytes.len()
+        );
+    }
     let mut e_padded = [0u8; 4];
-    let offset = 4usize.saturating_sub(e_bytes.len());
-    e_padded[offset..].copy_from_slice(&e_bytes[e_bytes.len().saturating_sub(4)..]);
+    let start = e_bytes.len().saturating_sub(4);
+    e_padded[4 - (e_bytes.len() - start)..].copy_from_slice(&e_bytes[start..]);
     let exponent = u32::from_be_bytes(e_padded);
     if exponent > 0xFF_FFFF {
         bail!(

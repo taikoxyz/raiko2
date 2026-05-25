@@ -7,9 +7,10 @@ use super::errors::ApiError;
 
 /// Return on-disk TDX bootstrap data (public key, attestation quote, nonce, metadata).
 ///
-/// This data is generated once at server startup by `TdxProver::ensure_bootstrapped`
-/// and persisted to `~/.config/raiko2/tdx/bootstrap.json`. It is intended to be
-/// publicly inspectable so that operators can register the prover on-chain.
+/// The bootstrap file (`~/.config/raiko2/tdx/bootstrap.json`) is written by
+/// `TdxProver::ensure_bootstrapped`, which runs only when the server is configured
+/// for the `tdx/local` route. Returns 404 if the file has not been generated yet.
+/// The data is publicly inspectable so operators can register the prover on-chain.
 pub async fn bootstrap() -> Result<Json<Value>, ApiError> {
     let exists = raiko2_prover::tdx::config::bootstrap_exists()
         .map_err(|e| ApiError::internal(e.to_string()))?;

@@ -609,6 +609,19 @@ fn decode_anchor_checkpoint(
     })
 }
 
+async fn fetch_shasta_origin_header<P: Provider>(
+    provider: &P,
+    origin_block_number: u64,
+) -> RaikoResult<Header> {
+    let l1_headers = retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
+        provider.batch_l1_headers(&[origin_block_number]).await
+    })
+    .await?;
+    l1_headers.into_iter().next().ok_or_else(|| {
+        RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
+    })
+}
+
 async fn hydrate_shasta_l1_headers<P: Provider>(
     provider: &P,
     chain_id: u64,
@@ -625,15 +638,7 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
     }
 
     if origin_only {
-        let l1_headers =
-            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
-                provider.batch_l1_headers(&[origin_block_number]).await
-            })
-            .await?;
-        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
-            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
-        })?;
-        manifest.l1_header = origin_header;
+        manifest.l1_header = fetch_shasta_origin_header(provider, origin_block_number).await?;
         manifest.l1_ancestor_headers.clear();
         return Ok(());
     }
@@ -656,14 +661,7 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         origin_block_number,
         chain_id,
     ) {
-        let l1_headers =
-            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
-                provider.batch_l1_headers(&[origin_block_number]).await
-            })
-            .await?;
-        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
-            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
-        })?;
+        let origin_header = fetch_shasta_origin_header(provider, origin_block_number).await?;
         if origin_header.number != origin_block_number {
             return Err(RaikoError::Preflight(format!(
                 "proposal origin block number mismatch: expected {origin_block_number}, got {}",

@@ -334,10 +334,17 @@ async fn fetch_bootstrap(raiko_url: &str) -> Result<BootstrapData> {
         .with_context(|| format!("failed to parse JSON from {url}"))?;
 
     // Response shape: { "<issuer_type>": { issuer_type, public_key, quote, nonce, metadata } }
-    let (issuer_key, inner) = response
+    let obj = response
         .as_object()
-        .and_then(|m| m.iter().next())
-        .ok_or_else(|| anyhow!("bootstrap response is not a JSON object with one key"))?;
+        .ok_or_else(|| anyhow!("bootstrap response is not a JSON object"))?;
+    if obj.len() != 1 {
+        bail!(
+            "bootstrap response must have exactly one top-level key, got {}: {:?}",
+            obj.len(),
+            obj.keys().collect::<Vec<_>>()
+        );
+    }
+    let (issuer_key, inner) = obj.iter().next().expect("len == 1 checked above");
 
     serde_json::from_value::<BootstrapData>(inner.clone())
         .with_context(|| format!("failed to deserialize bootstrap data under key '{issuer_key}'"))

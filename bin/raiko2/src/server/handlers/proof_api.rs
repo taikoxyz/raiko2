@@ -2686,15 +2686,12 @@ async fn legacy_root_proof_material(
     if metadata.aggregate_task_id.is_none()
         && !metadata.aggregate_requested
         && let [proposal] = metadata.proposals.as_slice()
-        && let Some(material) = load_proof_artifact_material(
-            runtime_manager,
-            &metadata.network_pair,
-            &proposal.task_id,
-        )
-        .await
-        .map_err(|err| {
-            ApiError::internal(format!("failed to load single-proposal artifact: {err}"))
-        })?
+        && let Some(material) =
+            load_proof_artifact_material(runtime_manager, &metadata.network_pair, &proposal.task_id)
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to load single-proposal artifact: {err}"))
+                })?
     {
         return Ok(material.proof);
     }

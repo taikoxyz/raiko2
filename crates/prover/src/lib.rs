@@ -197,6 +197,14 @@ pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Build a ZK aggregation input from a list of sub-proofs.
+///
+/// Verifies that each sub-proof's `proof.input` matches `hash_shasta_subproof_input`
+/// of its carry data — required for ZK aggregation guests where the public input is
+/// the canonical sub-proof input hash.
+///
+/// Provers whose `proof.input` is not `hash_shasta_subproof_input` (e.g. TDX, which
+/// uses `signing_hash`) must use [`collect_proof_carry_data_vec`] instead.
 pub(crate) fn build_shasta_aggregation_input(
     proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
@@ -205,23 +213,9 @@ pub(crate) fn build_shasta_aggregation_input(
     let mut proof_carry_data_vec = Vec::with_capacity(proofs.len());
 
     for (index, proof) in proofs.iter().enumerate() {
-        let carry = proof_carry_from_proof(proof)
-            .map_err(|err| {
-                RaikoError::InvalidRequestConfig(format!(
-                    "proof {index} invalid shasta carry data: {err}"
-                ))
-            })?
-            .ok_or_else(|| {
-                RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
-            })?;
+        let carry = extract_proof_carry_data(index, proof)?;
         let expected_input = hash_shasta_subproof_input(&carry);
-        // Validate proof.input matches the carry data for non-TDX proofs to catch
-        // malformed client submissions early. TDX proofs store signing_hash (=
-        // hash_public_input(hash_commitment, ...)) in proof.input instead, so the
-        // equality check would be a false positive there. TDX proofs are detected
-        // by their fixed 89-byte wire format (instance_id || address || signature).
         if let Some(input_hash) = proof.input
-            && !is_tdx_proof_envelope(proof)
             && input_hash != expected_input
         {
             return Err(RaikoError::InvalidRequestConfig(format!(
@@ -240,19 +234,31 @@ pub(crate) fn build_shasta_aggregation_input(
     })
 }
 
-/// Returns true if `proof` carries a TDX-format envelope (89 raw bytes:
-/// `instance_id(4) || address(20) || signature(65)`). Used to skip raiko-internal
-/// `hash_shasta_subproof_input` consistency checks that don't apply to TDX.
-fn is_tdx_proof_envelope(proof: &Proof) -> bool {
-    let Some(hex) = proof.proof.as_deref() else {
-        return false;
-    };
-    let stripped = hex.strip_prefix("0x").unwrap_or(hex);
-    // Heuristic: must be exactly 89 bytes (instance_id(4) || address(20) || signature(65))
-    // and valid hex. This reduces misclassification risk vs. a length-only check but is not
-    // a guarantee — any valid 89-byte hex string would match. TDX proofs in aggregation
-    // requests come from this prover, so the check is sufficient in practice.
-    stripped.len() == 178 && alloy_primitives::hex::decode(stripped).is_ok()
+/// Collect carry data from sub-proofs without validating `proof.input`.
+///
+/// Use this in non-ZK aggregation paths (TDX) where `proof.input` is not the
+/// `hash_shasta_subproof_input` of the carry data and the strict equality check
+/// in [`build_shasta_aggregation_input`] would produce false negatives.
+pub(crate) fn collect_proof_carry_data_vec(
+    proofs: &[Proof],
+) -> Result<Vec<ProofCarryData>, RaikoError> {
+    proofs
+        .iter()
+        .enumerate()
+        .map(|(index, proof)| extract_proof_carry_data(index, proof))
+        .collect()
+}
+
+fn extract_proof_carry_data(index: usize, proof: &Proof) -> Result<ProofCarryData, RaikoError> {
+    proof_carry_from_proof(proof)
+        .map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "proof {index} invalid shasta carry data: {err}"
+            ))
+        })?
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!("proof {index} missing shasta carry data"))
+        })
 }
 
 pub(crate) fn with_shasta_extra_data(

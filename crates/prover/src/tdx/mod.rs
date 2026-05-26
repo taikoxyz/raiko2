@@ -40,7 +40,7 @@ use raiko2_primitives_shasta::{
 use tokio::sync::OnceCell;
 use tracing::info;
 
-use crate::{GuestInputCodec, build_shasta_aggregation_input};
+use crate::{GuestInputCodec, collect_proof_carry_data_vec};
 
 /// TDX Prover for Shasta proposal and aggregation proofs.
 pub struct TdxProver {
@@ -105,7 +105,10 @@ pub fn guest_data_from_bootstrap() -> RaikoResult<serde_json::Value> {
     let bootstrap = config::read_bootstrap()
         .map_err(|e| RaikoError::Guest(format!("Failed to read TDX bootstrap data: {e}")))?;
 
-    let issuer_type = config::issuer_proof_type()
+    // Reuse the already-loaded `issuer_type` instead of re-reading the file. Avoids
+    // duplicate I/O and the possibility of inconsistent reads if the file changes
+    // between calls.
+    let issuer_type = config::issuer_proof_type_from_str(&bootstrap.issuer_type)
         .map_err(|e| RaikoError::Guest(format!("Failed to resolve TDX issuer type: {e}")))?
         .to_string();
 
@@ -221,28 +224,25 @@ where
         config::validate_issuer_type(ProofType::Tdx)
             .map_err(|e| RaikoError::Guest(format!("TDX issuer mismatch: {e}")))?;
 
-        let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
+        // TDX sub-proofs store `signing_hash` (not `hash_shasta_subproof_input`) in
+        // `proof.input`, so use the non-validating helper to collect carry data.
+        let proof_carry_data_vec = collect_proof_carry_data_vec(&input.proofs)?;
 
         let private_key = config::load_private_key()
             .map_err(|e| RaikoError::Guest(format!("Failed to load TDX key: {e}")))?;
         let tdx_instance = signature::address_from_private_key(&private_key);
 
-        let commitment = build_shasta_commitment_from_proof_carry_data_vec(
-            &aggregation_input.proof_carry_data_vec,
-        )
-        .ok_or_else(|| {
+        let commitment = build_shasta_commitment_from_proof_carry_data_vec(&proof_carry_data_vec)
+            .ok_or_else(|| {
             RaikoError::InvalidRequestConfig(
                 "Invalid proof_carry_data_vec for aggregation".to_string(),
             )
         })?;
-        let first = aggregation_input
-            .proof_carry_data_vec
-            .first()
-            .ok_or_else(|| {
-                RaikoError::InvalidRequestConfig(
-                    "Missing proof_carry_data_vec for aggregation".to_string(),
-                )
-            })?;
+        let first = proof_carry_data_vec.first().ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(
+                "Missing proof_carry_data_vec for aggregation".to_string(),
+            )
+        })?;
         let aggregation_hash =
             shasta_aggregation_output(&commitment, first.chain_id, first.verifier, tdx_instance);
 

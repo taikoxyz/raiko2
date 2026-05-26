@@ -44,6 +44,20 @@ pub fn bootstrap_exists() -> Result<bool> {
     Ok(dir.join("bootstrap.json").exists() && dir.join("secrets").join("priv.key").exists())
 }
 
+/// Check whether the public bootstrap record (`bootstrap.json`) exists.
+///
+/// Unlike [`bootstrap_exists`], this does not require the private key file to be
+/// present. Use this when only the public attestation record is needed (e.g. the
+/// `/v3/proof/tdx/bootstrap` HTTP endpoint).
+///
+/// # Errors
+///
+/// Returns an error if the config directory cannot be resolved.
+pub fn bootstrap_record_exists() -> Result<bool> {
+    let dir = config_dir()?;
+    Ok(dir.join("bootstrap.json").exists())
+}
+
 /// Generate a new secp256k1 private key and save it to disk.
 ///
 /// # Errors
@@ -150,7 +164,16 @@ pub fn write_bootstrap(
 /// Returns an error if the bootstrap file is missing or the issuer is unknown.
 pub fn issuer_proof_type() -> Result<ProofType> {
     let bootstrap = read_bootstrap()?;
-    match bootstrap.issuer_type.as_str() {
+    issuer_proof_type_from_str(&bootstrap.issuer_type)
+}
+
+/// Map an `issuer_type` string to a [`ProofType`] without reading the bootstrap file.
+///
+/// # Errors
+///
+/// Returns an error if the issuer string is not recognized.
+pub fn issuer_proof_type_from_str(issuer: &str) -> Result<ProofType> {
+    match issuer {
         "tdx" | "azure" | "simulator" => Ok(ProofType::Tdx),
         other => Err(anyhow!("Unknown TDX issuer type: {other}")),
     }

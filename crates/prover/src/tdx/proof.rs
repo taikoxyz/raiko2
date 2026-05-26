@@ -86,7 +86,7 @@ impl TdxProof {
 /// # Errors
 ///
 /// Returns an error if the attestation service is unreachable.
-pub fn generate_tdx_quote(
+pub async fn generate_tdx_quote(
     socket_path: &str,
     user_report_data: &B256,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -95,7 +95,8 @@ pub fn generate_tdx_quote(
 
     info!("Requesting TDX attestation from: {socket_path}");
     let attestation_doc =
-        attestation_client::issue_attestation(socket_path, user_report_data.as_slice(), &nonce)?;
+        attestation_client::issue_attestation(socket_path, user_report_data.as_slice(), &nonce)
+            .await?;
 
     Ok((attestation_doc, nonce))
 }
@@ -105,13 +106,13 @@ pub fn generate_tdx_quote(
 /// # Errors
 ///
 /// Returns an error if the attestation service is unreachable.
-pub fn generate_tdx_quote_from_public_key(
+pub async fn generate_tdx_quote_from_public_key(
     socket_path: &str,
     public_key: &Address,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut padded = [0u8; 32];
     padded[..20].copy_from_slice(public_key.as_slice());
-    generate_tdx_quote(socket_path, &B256::from(padded))
+    generate_tdx_quote(socket_path, &B256::from(padded)).await
 }
 
 /// Retrieve metadata from the attestation service.
@@ -119,8 +120,10 @@ pub fn generate_tdx_quote_from_public_key(
 /// # Errors
 ///
 /// Returns an error if the attestation service is unreachable.
-pub fn get_tdx_metadata(socket_path: &str) -> Result<attestation_client::MetadataResponseData> {
-    attestation_client::metadata(socket_path)
+pub async fn get_tdx_metadata(
+    socket_path: &str,
+) -> Result<attestation_client::MetadataResponseData> {
+    attestation_client::metadata(socket_path).await
 }
 
 // ────────────────────────── Prove (single / batch) ──────────────────────────
@@ -139,7 +142,7 @@ pub struct ProveData {
 /// # Errors
 ///
 /// Returns an error if signing fails or the attestation service is unreachable.
-pub fn prove(
+pub async fn prove(
     socket_path: &str,
     instance_id: u32,
     private_key: &secp256k1::SecretKey,
@@ -149,7 +152,7 @@ pub fn prove(
 
     let signature = sign_message(private_key, &instance_hash)?;
     let proof = TdxProof::new(instance_id, &address, &signature).into_vec();
-    let (quote, _nonce) = generate_tdx_quote(socket_path, &instance_hash)?;
+    let (quote, _nonce) = generate_tdx_quote(socket_path, &instance_hash).await?;
 
     Ok(ProveData { proof, quote })
 }
@@ -172,7 +175,7 @@ pub struct ProveAggregationData {
 ///
 /// Returns an error if sub-proof verification fails or the attestation service
 /// is unreachable.
-pub fn prove_shasta_aggregation(
+pub async fn prove_shasta_aggregation(
     socket_path: &str,
     instance_id: u32,
     private_key: &secp256k1::SecretKey,
@@ -195,7 +198,7 @@ pub fn prove_shasta_aggregation(
 
     let signature = sign_message(private_key, &aggregation_hash)?;
     let proof = TdxProof::new(instance_id, &new_instance, &signature).into_vec();
-    let (quote, _nonce) = generate_tdx_quote(socket_path, &aggregation_hash)?;
+    let (quote, _nonce) = generate_tdx_quote(socket_path, &aggregation_hash).await?;
 
     Ok(ProveAggregationData {
         proof,

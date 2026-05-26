@@ -66,7 +66,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Tdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
+        BatchProofType::Tdx => tdx_route_for_request(state)?,
         BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
@@ -143,6 +143,23 @@ pub(super) fn validate_hosted_proof_type(
     }
 
     Ok(())
+}
+
+fn tdx_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
+    let route = state.config.prover.route();
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Tdx,
+            runner: RunnerKind::Local,
+        }
+    ) {
+        Ok(route)
+    } else {
+        Err(ApiError::bad_request(
+            "proof_type=tdx is only supported when the server prover route is tdx/local",
+        ))
+    }
 }
 
 fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {

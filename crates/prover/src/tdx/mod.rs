@@ -70,6 +70,7 @@ impl TdxProver {
         self.bootstrapped
             .get_or_try_init(|| async {
                 bootstrap(&self.config.socket_path)
+                    .await
                     .map_err(|e| RaikoError::Guest(format!("TDX bootstrap failed: {e}")))?;
                 Ok::<(), RaikoError>(())
             })
@@ -194,6 +195,7 @@ where
             &private_key,
             signing_hash,
         )
+        .await
         .map_err(|e| RaikoError::Guest(format!("TDX proof generation failed: {e}")))?;
 
         info!("TDX proposal proof generated successfully");
@@ -272,6 +274,7 @@ where
             &sub_proofs,
             aggregation_hash,
         )
+        .await
         .map_err(|e| RaikoError::Guest(format!("TDX aggregation failed: {e}")))?;
 
         info!("TDX aggregation proof generated successfully");
@@ -292,7 +295,7 @@ where
 ///
 /// If bootstrap data already exists on disk, this is a no-op.
 /// Otherwise, generates a new private key and requests a TDX attestation quote.
-fn bootstrap(socket_path: &str) -> anyhow::Result<()> {
+async fn bootstrap(socket_path: &str) -> anyhow::Result<()> {
     if config::bootstrap_exists()? {
         info!("TDX already bootstrapped, reusing existing key");
         return Ok(());
@@ -304,10 +307,10 @@ fn bootstrap(socket_path: &str) -> anyhow::Result<()> {
     let address = signature::address_from_private_key(&private_key);
     info!("Generated TDX prover address: {address}");
 
-    let (quote, nonce) = proof::generate_tdx_quote_from_public_key(socket_path, &address)?;
+    let (quote, nonce) = proof::generate_tdx_quote_from_public_key(socket_path, &address).await?;
     info!("TDX bootstrap quote generated ({} bytes)", quote.len());
 
-    let metadata = proof::get_tdx_metadata(socket_path)?;
+    let metadata = proof::get_tdx_metadata(socket_path).await?;
     config::write_bootstrap(
         &metadata.issuer_type,
         &quote,

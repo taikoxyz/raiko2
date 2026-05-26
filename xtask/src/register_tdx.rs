@@ -85,7 +85,7 @@ pub(crate) struct RegisterTdxArgs {
 
 // The prover writes `~/.config/raiko2/tdx/bootstrap.json` with camelCase keys
 // (`#[serde(rename_all = "camelCase")]` on raiko2_prover::tdx::config::BootstrapData),
-// while the `/guest_data` HTTP endpoint serializes with hardcoded snake_case keys. The
+// while the `/v3/proof/tdx/bootstrap` HTTP endpoint serializes with hardcoded snake_case keys. The
 // xtask reads from either path, so each field accepts both casings via serde aliases.
 #[derive(Deserialize)]
 struct BootstrapData {

@@ -18,8 +18,8 @@ pub async fn bootstrap() -> Result<Json<Value>, ApiError> {
         .map_err(|e| ApiError::internal(e.to_string()))?;
     if !exists {
         return Err(ApiError::not_found(
-            "TDX bootstrap not found — configure guest_system=tdx/runner=local and \
-             ensure the tdxs attestation daemon is running so the prover can bootstrap",
+            "TDX bootstrap not found — set prover.guest_system=tdx and prover.runner=local \
+             in your config, and ensure the tdxs attestation daemon is running",
         ));
     }
     let data = raiko2_prover::tdx::guest_data_from_bootstrap()

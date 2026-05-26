@@ -78,21 +78,29 @@ impl<T> Response<T> {
 /// # Errors
 ///
 /// Returns an error if the attestation service is unreachable or returns an error.
-pub fn issue_attestation(socket_path: &str, user_data: &[u8], nonce: &[u8]) -> Result<Vec<u8>> {
+pub async fn issue_attestation(
+    socket_path: &str,
+    user_data: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>> {
     let issue_data = IssueRequestData {
         user_data: hex::encode(user_data),
         nonce: hex::encode(nonce),
     };
-
     let request = Request {
         method: "issue".to_string(),
         data: serde_json::to_value(issue_data)?,
     };
+    let request_json = serde_json::to_string(&request).context("Failed to serialize request")?;
+    let socket_path = socket_path.to_owned();
 
-    let response_buf = send_request(socket_path, &request)?;
+    let response_buf =
+        tokio::task::spawn_blocking(move || send_request_blocking(&socket_path, &request_json))
+            .await
+            .context("attestation blocking task panicked")??;
+
     let response: IssueResponse = serde_json::from_slice(&response_buf)
         .context("Failed to parse attestation service response")?;
-
     let data = response.into_result()?;
     hex::decode(&data.document).context("Failed to decode attestation document from hex")
 }
@@ -102,23 +110,26 @@ pub fn issue_attestation(socket_path: &str, user_data: &[u8], nonce: &[u8]) -> R
 /// # Errors
 ///
 /// Returns an error if the attestation service is unreachable or returns an error.
-pub fn metadata(socket_path: &str) -> Result<MetadataResponseData> {
+pub async fn metadata(socket_path: &str) -> Result<MetadataResponseData> {
     let request = Request {
         method: "metadata".to_string(),
         data: serde_json::to_value(MetadataRequestData {})?,
     };
+    let request_json = serde_json::to_string(&request).context("Failed to serialize request")?;
+    let socket_path = socket_path.to_owned();
 
-    let response_buf = send_request(socket_path, &request)?;
+    let response_buf =
+        tokio::task::spawn_blocking(move || send_request_blocking(&socket_path, &request_json))
+            .await
+            .context("attestation blocking task panicked")??;
+
     let response: MetadataResponse = serde_json::from_slice(&response_buf)
         .context("Failed to parse attestation service response")?;
-
     response.into_result()
 }
 
-/// Send a JSON request over a Unix socket and read the response.
-fn send_request<T: Serialize>(socket_path: &str, request: &Request<T>) -> Result<Vec<u8>> {
-    let request_json = serde_json::to_string(request).context("Failed to serialize request")?;
-
+/// Blocking Unix-socket round-trip: connect → write → shutdown write → read all.
+fn send_request_blocking(socket_path: &str, request_json: &str) -> Result<Vec<u8>> {
     let mut stream = UnixStream::connect(socket_path)
         .with_context(|| format!("Failed to connect to attestation service at {socket_path}"))?;
 

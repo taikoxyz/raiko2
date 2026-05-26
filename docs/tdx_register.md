@@ -13,6 +13,8 @@ that delegates to this implementation.
 
 For the broader pipeline (image build, VM deploy, smart-contract deploy) see
 [`taiko-mono/.../tdx_deployment.md`](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/docs/tdx_deployment.md).
+For the runtime architecture (what runs inside the image and how the pieces talk) see
+[`tdx_architecture.md`](./tdx_architecture.md).
 
 ## What the command does
 

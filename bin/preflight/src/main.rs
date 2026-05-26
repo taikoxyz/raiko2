@@ -7,8 +7,8 @@ use clap::Parser;
 use raiko2_pipeline::forks::shasta::ShastaSpec;
 use raiko2_pipeline::{NativeBackend, Pipeline, PipelineKey};
 use raiko2_primitives::{
-    ChainSpec, ProofContext, ProofRequest, ProofType, ProverConfig, ShastaRequest,
-    SupportedChainSpecs,
+    ChainSpec, PreflightRpcClientConfig, PreflightRpcRetryConfig, ProofContext, ProofRequest,
+    ProofType, ProverConfig, ShastaRequest, SupportedChainSpecs,
 };
 use raiko2_primitives_shasta::{DEFAULT_GUEST_INPUT_ROOT, GuestInput, guest_input_proposal_path};
 use raiko2_provider::{DEFAULT_RPC_TIMEOUT_MS, NetworkProvider, RpcClientConfig, RpcRetryConfig};
@@ -104,6 +104,10 @@ struct Args {
     #[arg(long, value_parser = clap::builder::BoolishValueParser::new(), default_value = "false")]
     validate: bool,
 
+    /// Optional external L2 RPC used to cross-check proposal checkpoint data after preflight.
+    #[arg(long)]
+    verify_checkpoint_l2_rpc: Option<String>,
+
     /// Output path for the serialized guest input JSON.
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -184,6 +188,21 @@ async fn main() -> Result<()> {
 
     let mut ctx = ProofContext::new(request, ProverConfig::default());
     ctx.l2_chain_spec = resolved.l2_chain_spec.to_taiko_chain_spec()?;
+    ctx.preflight.rpc_client_config = Some(PreflightRpcClientConfig {
+        timeout_ms: args.rpc_timeout_ms,
+        concurrency_limit: args.rpc_concurrency_limit,
+        retry: PreflightRpcRetryConfig {
+            max_attempts: args.rpc_retry_max_attempts,
+            initial_backoff_ms: args.rpc_retry_initial_backoff_ms,
+            compute_units_per_second: args.rpc_retry_cu_per_second,
+        },
+    });
+    ctx.preflight.verify_checkpoint_l2_rpc = args
+        .verify_checkpoint_l2_rpc
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let spec = ShastaSpec::new(PipelineKey::ShastaNative, (), NativeBackend, provider);
     let pipeline = Pipeline::new(&spec);
 
@@ -382,6 +401,7 @@ mod tests {
             rpc_retry_max_attempts: 4,
             rpc_retry_initial_backoff_ms: 1_000,
             rpc_retry_cu_per_second: 1_000,
+            verify_checkpoint_l2_rpc: None,
             l2_chain_id: None,
             l1_chain_id: None,
             proposal_id: 17_771,

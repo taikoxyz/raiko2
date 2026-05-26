@@ -4,6 +4,7 @@ use alloy::{
     rpc::client::RpcClient,
 };
 use alloy_primitives::{Address, map::AddressMap};
+use alloy_rpc_types_eth::Header as AlloyRpcHeader;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
@@ -289,6 +290,40 @@ impl NetworkProvider {
             _l2_chain_spec: l2_chain_spec,
         })
     }
+}
+
+/// Fetch L2 blocks from a standalone RPC endpoint.
+///
+/// Used for optional cross-node checkpoint verification during preflight.
+///
+/// # Errors
+///
+/// Returns an error if the RPC client cannot be constructed or any requested block cannot be
+/// fetched from the target endpoint.
+pub async fn fetch_l2_blocks(
+    l2_rpc_url: &str,
+    block_numbers: &[u64],
+    config: &RpcClientConfig,
+) -> RaikoResult<Vec<RethBlock>> {
+    let l2_provider = RpcL2Provider::new(l2_rpc_url, None, None, config)?;
+    l2_provider.fetch_blocks(block_numbers).await
+}
+
+/// Fetch L2 headers from a standalone RPC endpoint.
+///
+/// Used for optional cross-node checkpoint verification during preflight.
+///
+/// # Errors
+///
+/// Returns an error if the RPC client cannot be constructed or any requested header cannot be
+/// fetched from the target endpoint.
+pub async fn fetch_l2_headers(
+    l2_rpc_url: &str,
+    block_numbers: &[u64],
+    config: &RpcClientConfig,
+) -> RaikoResult<Vec<AlloyRpcHeader>> {
+    let l2_provider = RpcL2Provider::new(l2_rpc_url, None, None, config)?;
+    l2_provider.fetch_headers(block_numbers).await
 }
 
 #[async_trait::async_trait]

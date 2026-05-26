@@ -500,6 +500,11 @@ All API errors use the Hoodi-style envelope:
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
 - `rpc.client.timeout_ms` defaults to `600000` to tolerate slow preflight witness and
   `eth_getProof` RPC calls. It controls provider RPC calls, not remote prover request deadlines.
+- `preflight.verify_checkpoint_l2_rpcs` is an optional map from `rpc.pairs[*].network` to a
+  second L2 RPC endpoint used to cross-check the proposal boundary parent/checkpoint blocks after
+  preflight. Omit a network from the map to skip that verification for the pair. The verification
+  RPC uses the same `rpc.client` timeout, concurrency, and retry settings as the main preflight
+  provider RPCs.
 - Shasta preflight splits proposals into chunks of `8` blocks by default and runs at most `6`
   chunks concurrently. Operators may override those values with `PREFLIGHT_CHUNK_SIZE`
   (`PREFETCH_CHUNK_SIZE` is accepted for old-raiko compatibility) and

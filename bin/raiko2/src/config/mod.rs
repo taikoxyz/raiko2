@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod preflight;
 mod prover;
 mod queue;
 mod rpc;
@@ -12,6 +13,7 @@ mod runtime;
 mod server;
 mod validation;
 
+pub use preflight::PreflightConfig;
 pub use prover::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
 pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
@@ -33,6 +35,8 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub queue: QueueConfig,
+    #[serde(default)]
+    pub preflight: PreflightConfig,
 }
 
 impl Config {
@@ -145,11 +149,14 @@ impl Config {
             .validate()
             .context("Runtime configuration error")?;
         self.queue.validate().context("Queue configuration error")?;
-        for pair in self
+        let resolved_pairs = self
             .rpc
             .resolved_pairs()
-            .context("RPC configuration error")?
-        {
+            .context("RPC configuration error")?;
+        self.preflight
+            .validate(&resolved_pairs)
+            .context("Preflight configuration error")?;
+        for pair in resolved_pairs {
             self.prover
                 .boundless
                 .apply_pair_override(&pair.boundless)
@@ -676,8 +683,8 @@ maintenance_interval_ms = 200
             .rpc
             .resolve_pair("taiko_hoodi", "hoodi")
             .expect("resolved pair");
-        assert_eq!(pair.l1_chain_id(), 560048);
-        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(pair.l1_chain_id(), 560_048);
+        assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(
             config.prover.route(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
@@ -754,8 +761,8 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l2_rpc, "http://taiko-hoodi.example.test:8545");
         assert_eq!(pair.l2_provider, L2ProviderKind::Reth);
         assert_eq!(pair.l2_witness_rpc, "http://taiko-hoodi.example.test:8545");
-        assert_eq!(pair.l1_chain_id(), 560048);
-        assert_eq!(pair.l2_chain_id(), 167013);
+        assert_eq!(pair.l1_chain_id(), 560_048);
+        assert_eq!(pair.l2_chain_id(), 167_013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);
 
         let _ = std::fs::remove_file(path);
@@ -930,6 +937,74 @@ maintenance_interval_ms = 200
             .expect("resolved pair");
 
         assert_eq!(pair.l2_provider, L2ProviderKind::GethLocalWitness);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_file_accepts_preflight_verify_checkpoint_l2_rpc_map() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz" },
+]
+
+[preflight.verify_checkpoint_l2_rpcs]
+taiko_hoodi = "https://verify.hoodi.example"
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(
+            config
+                .preflight
+                .verify_checkpoint_l2_rpcs
+                .get("taiko_hoodi")
+                .map(String::as_str),
+            Some("https://verify.hoodi.example")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_rejects_preflight_verify_checkpoint_rpc_for_ambiguous_network() {
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_dev", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz" },
+  { network = "taiko_dev", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz" },
+]
+
+[preflight.verify_checkpoint_l2_rpcs]
+taiko_dev = "https://verify.dev.example"
+
+[prover]
+guest_system = "native"
+runner = "local"
+"#;
+        let path = write_temp_config(config_toml);
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("ambiguous network verify rpc must fail");
+        let err_text = format!("{err:#}");
+        assert!(
+            err_text.contains("ambiguous") && err_text.contains("taiko_dev"),
+            "unexpected error: {err_text}"
+        );
 
         let _ = std::fs::remove_file(path);
     }

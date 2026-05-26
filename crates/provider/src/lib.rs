@@ -14,7 +14,7 @@ use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
 
-pub use network::{L2ProviderKind, NetworkProvider};
+pub use network::{L2ProviderKind, NetworkProvider, fetch_l2_blocks, fetch_l2_headers};
 pub use rpc::{DEFAULT_RPC_TIMEOUT_MS, RpcClientConfig, RpcRetryConfig};
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
@@ -115,8 +115,8 @@ mod tests {
         let account = TrieAccount {
             nonce: 1,
             balance: U256::from(100),
-            storage_root: Default::default(),
-            code_hash: Default::default(),
+            storage_root: alloy_primitives::FixedBytes::default(),
+            code_hash: alloy_primitives::FixedBytes::default(),
         };
 
         assert_eq!(account.nonce, 1);

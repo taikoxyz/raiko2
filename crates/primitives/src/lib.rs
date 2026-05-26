@@ -19,7 +19,10 @@ mod serde_bincode;
 mod stateless;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
-pub use context::{L2BlockRange, ProofContext, ProofRequest, ShastaCheckpoint, ShastaRequest};
+pub use context::{
+    L2BlockRange, PreflightOptions, PreflightRpcClientConfig, PreflightRpcRetryConfig,
+    ProofContext, ProofRequest, ShastaCheckpoint, ShastaRequest,
+};
 pub use error::{RaikoError, RaikoResult};
 pub use input::{AggregationGuestInput, RawAggregationGuestInput, RawProof, StatelessInput};
 pub use output::{AggregationGuestOutput, GuestOutput, GuestProposalOutput};

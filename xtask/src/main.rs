@@ -1,4 +1,5 @@
 mod bench_guest;
+mod fixture;
 mod latest_proposal_request;
 mod register_image;
 mod release_image;
@@ -46,6 +47,9 @@ enum Cmd {
     /// Replay repo-managed Shasta GuestInput fixtures.
     ReplayGuestInput(replay_guest_input::ReplayGuestInputArgs),
 
+    /// Check repo-managed fixture envelopes.
+    Fixture(fixture::FixtureArgs),
+
     /// Update the checked-in TEE provider source pin.
     UpdateTeeProviderLock(update_tee_provider_lock::UpdateTeeProviderLockArgs),
 }
@@ -64,6 +68,7 @@ async fn main() -> Result<()> {
         Cmd::RegisterImage(args) => register_image::run(&root, args).await,
         Cmd::ReleaseTeeProviders(args) => release_tee_providers::run(&root, args),
         Cmd::ReplayGuestInput(args) => replay_guest_input::run(&root, args),
+        Cmd::Fixture(args) => fixture::run(&root, args),
         Cmd::UpdateTeeProviderLock(args) => update_tee_provider_lock::run(&root, args),
     }
 }

@@ -1,0 +1,48 @@
+{
+  "schema": "raiko2-fixture-v1",
+  "case_id": "shasta/taiko_hoodi/proposal_17460",
+  "fork": "shasta",
+  "stage": "proposal",
+  "description": "Hoodi Shasta proposal fixture for public input conformance",
+  "statement": {
+    "proof_type": "native",
+    "public_input_kind": "shasta_subproof_input"
+  },
+  "input": {
+    "kind": "shasta_guest_input",
+    "path": "test/guest_inputs/shasta/taiko_hoodi/proposals/proposal_17460.json",
+    "sha256": "0x5897065804629a7b01fa454672c345bb77b598014c171153cdf9e2a6dff8176e"
+  },
+  "expected": {
+    "commitment": "0xc943338ec4b3b5c9159dbef06ee4058270d650bba09fec08d0baa781e8c502aa",
+    "opening": {
+      "kind": "shasta_proof_carry_data",
+      "proof_carry_data": {
+        "chain_id": 167013,
+        "verifier": "0x40ccafc1c2d14bdd70984b221f2b49af5e7c6114",
+        "transition_input": {
+          "proposal_id": 17460,
+          "proposal_hash": "0x8f249e9522e142fcafb324e007895299b777cceeb99e92039ecb2a097f7f80db",
+          "parent_proposal_hash": "0x4e33261a634ae945275d1e76a2572dc2bb6bfedba094507e98418d6b66ab7d7b",
+          "parent_block_hash": "0xa877c5570a3cb4a0daa7d605038149c798f6121ef5d145bf73c3404d0887e093",
+          "actual_prover": "0x0000000000000000000000000000000000000000",
+          "transition": {
+            "proposer": "0x0000008f5dd9a790ffbe9142e6828a11c2cf51c0",
+            "timestamp": 1776854352
+          },
+          "checkpoint": {
+            "blockNumber": "0x6d57cc",
+            "blockHash": "0x8efd34db53fd78740b4b78f04870e8ce1cc2e88d3c86f0a6f0dceaebb0564556",
+            "stateRoot": "0x1c6262d6153ed7c0a8867b84fa0e72d194e78f916c4b21fc0270ce422455a5d5"
+          }
+        }
+      }
+    }
+  },
+  "checks": {
+    "open_commitment": true,
+    "check_provider_public_input": false,
+    "verify_proof": false
+  },
+  "providers": {}
+}

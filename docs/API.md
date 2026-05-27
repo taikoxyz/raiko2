@@ -482,6 +482,10 @@ All API errors use the Hoodi-style envelope:
 - `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
   when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
+- `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
+  `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
+  `market` omits both price fields and delegates price selection to the Boundless SDK price
+  provider.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

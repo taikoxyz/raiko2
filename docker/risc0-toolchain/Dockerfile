@@ -2,6 +2,9 @@
 ARG RISC0_GUEST_BUILDER_TAG=r0.1.91.1
 FROM risczero/risc0-guest-builder:${RISC0_GUEST_BUILDER_TAG}
 
+ARG RISC0_GUEST_BUILDER_TAG
+LABEL org.raiko2.risc0.guest-builder-tag="${RISC0_GUEST_BUILDER_TAG}"
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_TERM_COLOR=always
 

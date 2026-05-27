@@ -270,6 +270,8 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_PROFILE_RELEASE_LTO: "false"
       RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
       SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
     steps:
@@ -319,9 +321,6 @@ jobs:
       - uses: taiki-e/install-action@3f9f98517dede275478bf30d33e779b37701c7fa # just
         with:
           tool: just
-
-      - name: rebuild RISC0 toolchain image
-        run: just build-risc0-toolchain-image "${RISC0_TOOLCHAIN_IMAGE}" --pull
 
       - name: rebuild guest elfs
         run: |

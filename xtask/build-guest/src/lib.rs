@@ -17,6 +17,8 @@ const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext
 const DEFAULT_SP1_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C panic=abort --cfg getrandom_backend=\"custom\"";
 const DEFAULT_RISC0_TOOLCHAIN_IMAGE: &str = "raiko2-risc0-toolchain:local";
 const DEFAULT_SP1_TOOLCHAIN_IMAGE: &str = "raiko2-sp1-toolchain:local";
+const DEFAULT_RISC0_GUEST_BUILDER_TAG: &str = "r0.1.91.1";
+const RISC0_GUEST_BUILDER_TAG_LABEL: &str = "org.raiko2.risc0.guest-builder-tag";
 const DEFAULT_RISC0_CC: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-gcc";
 const DEFAULT_RISC0_CXX: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-g++";
 const DEFAULT_RISC0_AR: &str = "/root/.risc0/toolchains/v2024.1.5-cpp-x86_64-unknown-linux-gnu/riscv32im-linux-x86_64/bin/riscv32-unknown-elf-ar";
@@ -1040,10 +1042,21 @@ fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
         .arg("image")
         .arg("inspect")
         .arg(image)
-        .stdout(Stdio::null())
+        .arg("--format")
+        .arg(format!(
+            r#"{{{{index .Config.Labels "{RISC0_GUEST_BUILDER_TAG_LABEL}"}}}}"#
+        ))
         .stderr(Stdio::null());
-    if inspect.status().is_ok_and(|status| status.success()) {
-        return Ok(());
+    if let Ok(output) = inspect.output()
+        && output.status.success()
+    {
+        let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if tag == DEFAULT_RISC0_GUEST_BUILDER_TAG {
+            return Ok(());
+        }
+        println!(
+            "[INFO] Rebuilding local RISC0 toolchain image: found guest builder tag {tag}, expected {DEFAULT_RISC0_GUEST_BUILDER_TAG}"
+        );
     }
 
     println!("[INFO] Building local RISC0 toolchain image: {image}");
@@ -1054,6 +1067,10 @@ fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
         .arg(root.join("docker/risc0-toolchain/Dockerfile"))
         .arg("-t")
         .arg(image)
+        .arg("--build-arg")
+        .arg(format!(
+            "RISC0_GUEST_BUILDER_TAG={DEFAULT_RISC0_GUEST_BUILDER_TAG}"
+        ))
         .arg(root.join("docker/risc0-toolchain"));
     util::run(build)
 }

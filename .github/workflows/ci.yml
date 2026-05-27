@@ -320,6 +320,9 @@ jobs:
         with:
           tool: just
 
+      - name: rebuild RISC0 toolchain image
+        run: just build-risc0-toolchain-image "${RISC0_TOOLCHAIN_IMAGE}" --pull
+
       - name: rebuild guest elfs
         run: |
           just build-guest risc0

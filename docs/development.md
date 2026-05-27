@@ -29,19 +29,15 @@ cargo test -p raiko2-queue -p raiko2-runtime
 
 ## Alethia Reth Integration Workflow
 
-Raiko2 consumes [taikoxyz/alethia-reth](https://github.com/taikoxyz/alethia-reth) through the
-`feat/raiko2` branch. That branch is the single integration baseline for raiko2-specific
-alethia-reth patches, regardless of where you keep your local checkout.
+Raiko2 consumes [taikoxyz/alethia-reth](https://github.com/taikoxyz/alethia-reth) from upstream
+`main`. The Cargo manifests pin reviewed `main` commits with explicit `rev` values, and the lockfiles
+record the exact resolved source used by workspace and guest builds.
 
 Development rules:
 
-- Put every alethia-reth change required by raiko2 on `feat/raiko2`.
-- Rebase `feat/raiko2` onto alethia-reth `origin/main` when adopting upstream alethia-reth or reth
-  updates.
-- Open the alethia-reth PR from `feat/raiko2` so the patch stack is reviewable upstream.
-- Point raiko2 alethia-reth Cargo dependencies at `branch = "feat/raiko2"`.
-- Use raiko2 lockfiles as the exact commit pin for reproducible builds.
-- Update raiko2 lockfiles after the alethia-reth branch moves.
+- Land every alethia-reth change required by raiko2 on alethia-reth `main` before updating raiko2.
+- Point raiko2 alethia-reth Cargo dependencies at explicit `rev` pins from `origin/main`.
+- Update raiko2 manifests and lockfiles together when adopting a new alethia-reth `main` commit.
 - Rebuild guest ELFs with the normal `xtask`/`just` entrypoints when guest-facing dependencies change.
 
 Do not keep raiko2-required alethia-reth fixes only in stale local branches, one-off PR branches, or

@@ -275,6 +275,27 @@ jobs:
       RISC0_TOOLCHAIN_IMAGE: raiko2-risc0-toolchain:local
       SP1_TOOLCHAIN_IMAGE: raiko2-sp1-toolchain:local
     steps:
+      - name: free self-hosted runner disk
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h
+
+          if command -v docker >/dev/null 2>&1; then
+            docker container prune -f || true
+            docker image prune -f || true
+            docker builder prune -af || true
+          fi
+
+          if [ -n "${RUNNER_TEMP:-}" ]; then
+            runner_root="$(dirname "$(dirname "${RUNNER_TEMP}")")"
+            if [ -d "${runner_root}/_diag" ]; then
+              find "${runner_root}/_diag" -type f -name '*.log' -mtime +1 -delete || true
+            fi
+          fi
+
+          df -h
+
       # Self-hosted runner workaround for actions/checkout#2008: when a
       # previous job leaves stale files in the workspace without a `.git`
       # directory, checkout's "Removing auth" step fails with

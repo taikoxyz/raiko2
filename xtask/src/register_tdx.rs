@@ -668,10 +668,15 @@ fn extract_trusted_params(
         );
     }
 
+    // The mrSeam / mrTd / teeTcbSvn slices below are at TDX V4 body offsets.
+    // A non-V4 quote would silently slice unrelated bytes and write incorrect
+    // measurements on-chain via `setTrustedParams`, so refuse to proceed.
     if &report[0..2] != [0x04, 0x00] {
-        eprintln!(
-            "warning: attestationReport version is 0x{:02x}{:02x} — expected TDX V4 (0x04 0x00); proceeding anyway",
-            report[0], report[1]
+        bail!(
+            "attestationReport version is 0x{:02x}{:02x} — expected TDX V4 (0x04 0x00); \
+             refusing to extract trusted params from an unknown quote layout",
+            report[0],
+            report[1]
         );
     }
 

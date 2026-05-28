@@ -9,6 +9,7 @@ use raiko2_protocol_shasta::shasta::TransitionInputData;
 
 const SHASTA_METADATA_KEY: &str = "shasta";
 const PROOF_CARRY_DATA_KEY: &str = "proof_carry_data";
+const PROOF_CARRY_DATA_VEC_KEY: &str = "proof_carry_data_vec";
 
 /// Encode `ProofCarryData` into JSON for storage in `Proof.extra_data`.
 ///
@@ -19,6 +20,23 @@ pub fn encode_proof_carry_data(carry: &ProofCarryData) -> RaikoResult<serde_json
     Ok(serde_json::json!({
         SHASTA_METADATA_KEY: {
             PROOF_CARRY_DATA_KEY: carry,
+        }
+    }))
+}
+
+/// Encode a slice of `ProofCarryData` into JSON for storage in
+/// `Proof.extra_data` on aggregation proofs. Stored under
+/// `shasta.proof_carry_data_vec` so that on-chain callers can rebuild
+/// `commitmentHash = hashCommitment(commitment)` from the original sub-proof
+/// inputs.
+///
+/// # Errors
+///
+/// Returns an error if the slice cannot be serialized to JSON.
+pub fn encode_proof_carry_data_vec(carry_vec: &[ProofCarryData]) -> RaikoResult<serde_json::Value> {
+    Ok(serde_json::json!({
+        SHASTA_METADATA_KEY: {
+            PROOF_CARRY_DATA_VEC_KEY: carry_vec,
         }
     }))
 }
@@ -53,6 +71,29 @@ pub fn decode_proof_carry_data_opt(
         Some(v) => Ok(Some(decode_proof_carry_data(v)?)),
         None => Ok(None),
     }
+}
+
+/// Decode `Vec<ProofCarryData>` from JSON stored by
+/// [`encode_proof_carry_data_vec`] in `Proof.extra_data` on aggregation proofs.
+/// Returns `Ok(None)` when the field is absent so callers can fall back to the
+/// singular-shape lookup if they choose.
+///
+/// # Errors
+///
+/// Returns an error if the field is present but cannot be deserialized.
+pub fn decode_proof_carry_data_vec_opt(
+    value: Option<&serde_json::Value>,
+) -> RaikoResult<Option<Vec<ProofCarryData>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(vec) = value
+        .get(SHASTA_METADATA_KEY)
+        .and_then(|v| v.get(PROOF_CARRY_DATA_VEC_KEY))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_value(vec.clone())?))
 }
 
 /// Decode `ProofCarryData` from a `Proof` if present.

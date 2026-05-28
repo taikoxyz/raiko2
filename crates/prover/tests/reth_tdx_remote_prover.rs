@@ -277,4 +277,73 @@ async fn reth_tdx_prover_aggregates_and_maps_success_response() {
     assert_eq!(proof.proof.as_deref(), Some("0xagg"));
     assert_eq!(proof.quote.as_deref(), Some("0xaggquote"));
     assert_eq!(proof.input, Some(B256::from([0x77; 32])));
+
+    // The aggregation proof must carry the full vec under
+    // `extra_data.shasta.proof_carry_data_vec` so on-chain callers can compute
+    // `hashCommitment(commitment)` from the original sub-proof inputs.
+    let extra_data = proof
+        .extra_data
+        .as_ref()
+        .expect("aggregation extra_data populated");
+    let vec_field = extra_data
+        .pointer("/shasta/proof_carry_data_vec")
+        .expect("proof_carry_data_vec stored in extra_data");
+    assert!(vec_field.is_array(), "expected an array, got {vec_field}");
+    assert_eq!(vec_field.as_array().unwrap().len(), 1);
+    assert!(
+        extra_data.pointer("/reth_tdx/schema").is_some(),
+        "reth_tdx metadata must remain alongside the carry vec"
+    );
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_aggregate_missing_proof_carry_data_vec() {
+    let server = MockServer::start();
+    let signing_hash = format!("0x{}", hex::encode([0x77; 32]));
+    let _mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta-aggregate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xagg",
+                    "quote": "0xaggquote",
+                    "input": signing_hash,
+                    // proof_carry_data_vec deliberately omitted.
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let sub_proof = Proof {
+        proof: Some("0xsub".to_string()),
+        input: Some(B256::from([0x88; 32])),
+        quote: Some("0xsubquote".to_string()),
+        extra_data: Some(serde_json::json!({
+            "shasta": {
+                "proof_carry_data": carry_for_response(),
+            }
+        })),
+        ..Default::default()
+    };
+    let aggregate_input = raiko2_primitives::AggregationGuestInput {
+        proofs: vec![sub_proof],
+    };
+
+    let err = Prover::<NativeBackend>::aggregate(
+        &prover,
+        aggregate_input,
+        &ProverConfig::default(),
+        &NativeBackend,
+    )
+    .await
+    .expect_err("aggregation missing carry vec must error");
+    assert!(err.to_string().contains("proof_carry_data_vec"));
 }

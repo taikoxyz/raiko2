@@ -337,7 +337,11 @@ fn build_canonical_batch_submission(
     req: BatchShastaRequest,
 ) -> Result<Option<CanonicalBatchSubmission>, ApiError> {
     validate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
+    validate_hosted_proof_type(
+        state.config.prover.route(),
+        req.proof_type,
+        !state.config.prover.tdx.base_url.trim().is_empty(),
+    )?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let requested_prover_config = augment_system_prover_config(
         &pair,
@@ -663,7 +667,11 @@ async fn build_external_aggregate_submission(
     req: AggregateProofRequest,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
-    validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
+    validate_hosted_proof_type(
+        state.config.prover.route(),
+        req.proof_type,
+        !state.config.prover.tdx.base_url.trim().is_empty(),
+    )?;
     let pair = resolved_pair(state, req.network.as_deref(), req.l1_network.as_deref())?;
     let prover_config = augment_system_prover_config(
         &pair,
@@ -4009,5 +4017,36 @@ mod tests {
         assert_eq!(proposals[0].task_id, "legacy-corrupt-id");
         assert!(matches!(proposals[0].status, ProofStatus::Proving));
         Ok(())
+    }
+
+    fn aggregate_request_with_proof_type(proof_type: BatchProofType) -> AggregateProofRequest {
+        AggregateProofRequest {
+            aggregation_ids: vec![1],
+            proofs: vec![Proof::default()],
+            proof_type,
+            network: None,
+            l1_network: None,
+            graffiti: None,
+            prover: None,
+            blob_proof_type: None,
+            prover_args: PublicProverArgs::default(),
+        }
+    }
+
+    #[test]
+    fn validate_aggregate_request_shape_accepts_tdx() {
+        // Regression test for the Copilot review finding: validate_aggregate_request_shape
+        // gates on is_concrete_public_proof_type, which must include Tdx so the
+        // TDX aggregation route is reachable.
+        let req = aggregate_request_with_proof_type(BatchProofType::Tdx);
+        validate_aggregate_request_shape(&req).expect("Tdx aggregate request should validate");
+    }
+
+    #[test]
+    fn validate_aggregate_request_shape_rejects_zk_any() {
+        let req = aggregate_request_with_proof_type(BatchProofType::ZkAny);
+        let err = validate_aggregate_request_shape(&req)
+            .expect_err("zk_any aggregate request must be rejected");
+        assert!(err.message.contains("zk_any"));
     }
 }

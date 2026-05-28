@@ -27,5 +27,6 @@ pub use input::{
 };
 pub use proof::{
     build_proof_carry_data, decode_proof_carry_data, decode_proof_carry_data_opt,
-    encode_proof_carry_data, proof_carry_from_proof,
+    decode_proof_carry_data_vec_opt, encode_proof_carry_data, encode_proof_carry_data_vec,
+    proof_carry_from_proof,
 };

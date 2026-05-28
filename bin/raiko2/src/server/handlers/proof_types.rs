@@ -49,7 +49,10 @@ impl BatchProofType {
     }
 
     pub(super) const fn is_concrete_public_proof_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth)
+        matches!(
+            self,
+            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::Tdx
+        )
     }
 }
 
@@ -327,5 +330,14 @@ mod tests {
     #[test]
     fn native_is_accepted_for_internal_batch_requests() {
         assert!(BatchProofType::Native.is_public_batch_request_type());
+    }
+
+    #[test]
+    fn tdx_is_a_concrete_public_proof_type_for_aggregate_requests() {
+        // Regression: /v3/proof/aggregate validates proof_type through
+        // is_concrete_public_proof_type. Without Tdx here the aggregate path is
+        // rejected at validation time, before the TDX aggregation pipeline can
+        // be reached.
+        assert!(BatchProofType::Tdx.is_concrete_public_proof_type());
     }
 }

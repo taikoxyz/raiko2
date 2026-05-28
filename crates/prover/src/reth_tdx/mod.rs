@@ -27,7 +27,7 @@ use std::{str::FromStr, time::Duration};
 use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
+use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data_vec, proof_carry_from_proof};
 use reqwest::{
     Client, Url,
     header::{CONTENT_TYPE, HeaderValue},
@@ -209,13 +209,31 @@ where
                 result.input
             ))
         })?;
+
+        let carry_vec = result
+            .proof_carry_data_vec
+            .as_ref()
+            .filter(|vec| !vec.is_empty())
+            .ok_or_else(|| {
+                RaikoError::Guest(
+                    "reth-tdx aggregation response is missing `proof_carry_data_vec`; \
+                     the remote prover must echo the carry data it signed over for \
+                     on-chain verification"
+                        .to_string(),
+                )
+            })?;
+
         let metadata = reth_tdx_metadata(&envelope.schema, &result);
+        let mut extra_data = encode_proof_carry_data_vec(carry_vec)?;
+        if let Some(root) = extra_data.as_object_mut() {
+            root.insert("reth_tdx".to_string(), metadata);
+        }
 
         Ok(Proof {
             proof: Some(result.proof),
             input: Some(input_hash),
             quote: Some(result.quote),
-            extra_data: Some(serde_json::json!({ "reth_tdx": metadata })),
+            extra_data: Some(extra_data),
             ..Default::default()
         })
     }

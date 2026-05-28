@@ -96,7 +96,7 @@ flowchart TB
     OP -->|port 22 / 8080: SSH key inject| RTI
     L1 -->|L1 blocks + blobs| TAIKO_CLI
     L1 -->|L1 RPC / beacon| R2
-    TAIKO_CLI -->|engine API (JWT)| NMSURGE
+    TAIKO_CLI -->|"engine API (JWT)"| NMSURGE
     R2 -->|"HTTP POST /prove/shasta — L1 fields only"| RTDX
     RTDX -->|"local JSON-RPC :8547 — eth_getBlockByNumber"| NMSURGE
     RTDX -->|Unix socket: issue / metadata| TDXS

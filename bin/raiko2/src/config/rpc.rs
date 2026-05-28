@@ -244,14 +244,14 @@ impl RpcConfig {
                 ("l2_rpc", pair.l2_rpc.as_deref()),
                 ("l2_witness_rpc", pair.l2_witness_rpc.as_deref()),
             ] {
-                if let Some(url) = url {
-                    if !is_valid_url(url) {
-                        bail!(
-                            "{}: {field} = '{url}': {}",
-                            pair.key(),
-                            validation::INVALID_RPC_URL
-                        );
-                    }
+                if let Some(url) = url
+                    && !is_valid_url(url)
+                {
+                    bail!(
+                        "{}: {field} = '{url}': {}",
+                        pair.key(),
+                        validation::INVALID_RPC_URL
+                    );
                 }
             }
         }

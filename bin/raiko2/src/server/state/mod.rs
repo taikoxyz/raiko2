@@ -147,47 +147,27 @@ async fn register_pair_pipelines(
     factory: &mut StaticPipelineFactory,
     registration: PairPipelineRegistration<'_>,
 ) -> Result<()> {
-    if registration.config.prover.is_remote_sgx_route() {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
-        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
-        return Ok(());
-    }
-
-    // Only build the TDX engine when the server is actually configured to route to
-    // tdx/remote. The reth-tdx HTTP client is constructed lazily here — registering
-    // it unconditionally would force every raiko2 deployment to declare a
-    // reth-tdx base URL even for routes that never use TDX.
-    if registration.config.prover.is_tdx_route() {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
-        let tdx_engine = build_tdx_engine(
-            registration.config,
-            registration.pair,
-            registration.scheduler_config.clone(),
-            runtime_observer,
-        )
-        .await?;
-        tdx_engine.start_workers_with_maintenance_interval(
-            registration.workers,
-            registration.maintenance_interval,
-        );
-        factory.insert(
-            registration.pair.key.clone(),
-            PipelineKey::ShastaTdx,
-            Arc::new(tdx_engine),
-        );
-        return Ok(());
-    }
-
     let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
         Arc::clone(&registration.runtime),
         registration.pair.key.clone(),
     ));
+
+    if registration.config.prover.is_remote_sgx_route() {
+        register_remote_sgx_pipelines(factory, &registration, Arc::clone(&runtime_observer))
+            .await?;
+        register_tdx_pipeline(factory, &registration, Arc::clone(&runtime_observer)).await?;
+        return Ok(());
+    }
+
+    // tdx/remote default-route hosts register only the TDX engine (plus any
+    // remote SGX engines that are also configured). Skipping the ZK / native /
+    // boundless engines avoids requiring guest ELFs or zkVM keys on an
+    // operator who only wants to serve TDX proofs.
+    if registration.config.prover.is_tdx_route() {
+        register_tdx_pipeline(factory, &registration, Arc::clone(&runtime_observer)).await?;
+        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        return Ok(());
+    }
     let risc0_engine = build_risc0_engine(
         registration.config,
         registration.pair,
@@ -263,7 +243,39 @@ async fn register_pair_pipelines(
         Arc::new(native_engine),
     );
 
-    register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+    register_remote_sgx_pipelines(factory, &registration, Arc::clone(&runtime_observer)).await?;
+    register_tdx_pipeline(factory, &registration, runtime_observer).await?;
+    Ok(())
+}
+
+/// Build the TDX engine alongside whatever other engines this pair already has,
+/// gated on `[prover.tdx].base_url` being non-empty. This is the same pattern
+/// `register_remote_sgx_engine` uses for SGX — TDX is an opt-in additional
+/// proof type rather than a primary route.
+async fn register_tdx_pipeline(
+    factory: &mut StaticPipelineFactory,
+    registration: &PairPipelineRegistration<'_>,
+    observer: Arc<dyn EngineObserver>,
+) -> Result<()> {
+    if registration.config.prover.tdx.base_url.trim().is_empty() {
+        return Ok(());
+    }
+    let tdx_engine = build_tdx_engine(
+        registration.config,
+        registration.pair,
+        registration.scheduler_config.clone(),
+        observer,
+    )
+    .await?;
+    tdx_engine.start_workers_with_maintenance_interval(
+        registration.workers,
+        registration.maintenance_interval,
+    );
+    factory.insert(
+        registration.pair.key.clone(),
+        PipelineKey::ShastaTdx,
+        Arc::new(tdx_engine),
+    );
     Ok(())
 }
 

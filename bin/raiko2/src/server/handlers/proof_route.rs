@@ -142,24 +142,41 @@ pub(super) fn validate_hosted_proof_type(
         )));
     }
 
-    Ok(())
-}
-
-fn tdx_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
-    let route = state.config.prover.route();
+    // tdx/remote hosts only register the TDX engine (plus optionally SGX
+    // engines via `[prover.remote_sgx].*base_url`); the ZK / native engines
+    // are skipped. Reject any other proof type up-front so the caller gets a
+    // clear error instead of a downstream "engine not registered" failure.
     if matches!(
         route,
         PipelineRoute {
             guest_system: GuestSystem::Tdx,
             runner: RunnerKind::Remote,
         }
+    ) && !matches!(
+        proof_type,
+        BatchProofType::Tdx | BatchProofType::Sgx | BatchProofType::SgxGeth
     ) {
-        Ok(route)
-    } else {
-        Err(ApiError::bad_request(
-            "proof_type=tdx is only supported when the server prover route is tdx/remote",
-        ))
+        return Err(ApiError::bad_request(format!(
+            "proof_type={} is not supported when the server prover route is tdx/remote",
+            proof_type.as_str()
+        )));
     }
+
+    Ok(())
+}
+
+fn tdx_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
+    // TDX is registered as an opt-in additional engine alongside any default
+    // route (ZK or otherwise) whenever `[prover.tdx].base_url` is non-empty
+    // (see `register_tdx_pipeline` in server::state). The request is accepted
+    // for any host that has the TDX engine configured.
+    if state.config.prover.tdx.base_url.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "proof_type=tdx is not configured on this host \
+             (set [prover.tdx].base_url to a reachable reth-tdx instance)",
+        ));
+    }
+    Ok(PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote))
 }
 
 fn native_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
@@ -410,5 +427,67 @@ mod tests {
             err.message.contains("proof_type=sp1"),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_sp1_on_tdx_remote_host() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Tdx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.tdx.base_url = "http://localhost:8080".to_string();
+        let state = AppState {
+            pipelines: Arc::new(StaticPipelineFactory::default()),
+            runtime: Arc::new(
+                RuntimeManager::new(
+                    std::env::temp_dir()
+                        .join(format!("raiko2-proof-route-tdx-remote-tests-{nanos}")),
+                )
+                .expect("runtime manager"),
+            ),
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config: Arc::new(config),
+        };
+
+        let err = route_for_proof_type(
+            &state,
+            BatchProofType::Sp1,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect_err("tdx/remote host should reject sp1");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("proof_type=sp1"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            err.message.contains("tdx/remote"),
+            "expected route hint in error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn route_for_proof_type_accepts_tdx_on_tdx_remote_host() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Tdx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.tdx.base_url = "http://localhost:8080".to_string();
+        let state = test_state_with_config(config);
+
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::Tdx,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect("tdx/remote host should accept tdx");
+
+        assert_eq!(selection.route.to_string(), "tdx/remote");
+        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaTdx);
     }
 }

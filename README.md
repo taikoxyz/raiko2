@@ -13,7 +13,7 @@ Hoodi-compatible v3 API.
 ## At a Glance
 
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `tdx/local`
+- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `tdx/remote`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
@@ -76,10 +76,13 @@ flowchart LR
 - Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, `tdx`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
   regression when the server route is `native/local`.
-- `proof_type=tdx` routes to `tdx/local` and is accepted only when raiko2 is built with
-  `--features tdx` and the server is configured for `tdx/local` (a running `tdxs` attestation
-  daemon is also required). `ProverConfig::validate()` rejects misconfigured deployments at
-  startup, and the TDX engine is only registered for the configured route.
+- `proof_type=tdx` routes to `tdx/remote` and is accepted only when the server is configured for
+  `tdx/remote` with a reachable [`reth-tdx`](https://github.com/NethermindEth/reth-tdx) endpoint
+  in `[prover.tdx].base_url`. `reth-tdx` runs inside a TDX-protected Nethermind VM (see
+  [nethermind-tdx](https://github.com/NethermindEth/nethermind-tdx)) and handles all
+  attestation-key custody on its side. `ProverConfig::validate()` rejects misconfigured
+  deployments at startup, and the TDX engine is only registered when the configured base URL is
+  non-empty.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
 - `proof_type=risc0` resolves to the server's configured RISC Zero prover type. The
   `prover_type=network` path submits to Boundless and exposes Boundless quote metadata; Boundless
@@ -95,10 +98,12 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
-- `tdx/local` runs the proving pipeline inside a TDX-protected VM. The prover signs the instance
-  hash with the VM's bootstrapped ECDSA key and generates an Intel TDX attestation quote. Requires
-  `--features tdx` and the `tdxs` attestation daemon socket at the configured `socket_path`.
-  To register a TDX prover on-chain after the VM is up, see
+- `tdx/remote` forwards Shasta proving to a [`reth-tdx`](https://github.com/NethermindEth/reth-tdx)
+  HTTP service running inside a TDX-protected Nethermind VM. raiko2 sends only L1-derived
+  proposal data over the wire; `reth-tdx` fetches the L2 block from its co-resident Nethermind,
+  signs the Shasta aggregation hash with its TDX-bound bootstrap key, and produces an Intel TDX
+  attestation quote. Requires `[prover.tdx].base_url` pointing at a reachable `reth-tdx`
+  endpoint. To register a TDX prover on-chain after the VM is up, see
   [docs/tdx_register.md](docs/tdx_register.md) (`cargo run -p xtask -- register-tdx`).
 - `sgx/remote` submits Shasta proving to the dedicated remote SGX runtime. This repo now ships
   `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode

@@ -346,10 +346,7 @@ fn read_bootstrap_from_disk() -> Result<BootstrapData> {
 
 fn bootstrap_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to get home directory"))?;
-    Ok(home
-        .join(".config")
-        .join("reth-tdx")
-        .join("bootstrap.json"))
+    Ok(home.join(".config").join("reth-tdx").join("bootstrap.json"))
 }
 
 // ---------------------------------------------------------------

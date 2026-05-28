@@ -110,7 +110,7 @@ impl RethTdxProver {
 
 impl GuestInputCodec<GuestInput> for RethTdxProver {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let request = build_shasta_request(input)?;
+        let request = build_shasta_request(input);
         let payload = serde_json::to_vec(&request).map_err(|err| {
             RaikoError::Guest(format!("failed to encode reth-tdx request: {err}"))
         })?;
@@ -154,17 +154,23 @@ where
             ))
         })?;
 
-        // Prefer the carry_data the prover actually signed over (returned by
-        // reth-tdx in `proof_carry_data_vec`). Fall back to a stub
-        // reconstructed from the L1-only request payload only if the prover is
-        // running an older release without that field — in that case the
-        // checkpoint/parent_block_hash fields will be zero and downstream
-        // on-chain verification will not be possible.
+        // reth-tdx must echo back the exact ProofCarryData it signed over so
+        // raiko2 can compute the on-chain commitment hash. A missing or empty
+        // `proof_carry_data_vec` means the remote prover is too old (or
+        // misbehaving) and the resulting proof cannot be verified on-chain;
+        // surface that as an error instead of returning a known-unverifiable
+        // payload.
         let carry = result
             .proof_carry_data_vec
             .as_ref()
             .and_then(|v| v.first().cloned())
-            .unwrap_or_else(|| reconstruct_proof_carry_data(&packet.payload));
+            .ok_or_else(|| {
+                RaikoError::Guest(
+                    "reth-tdx response is missing `proof_carry_data_vec`; the remote prover \
+                     must echo the carry data it signed over for on-chain verification"
+                        .to_string(),
+                )
+            })?;
 
         let extra_data = with_shasta_extra_data(
             &carry,
@@ -269,7 +275,7 @@ impl RethTdxProver {
 
 // ─────────────────────────── Helpers ───────────────────────────
 
-fn build_shasta_request(input: &GuestInput) -> RaikoResult<ShastaProveRequest> {
+fn build_shasta_request(input: &GuestInput) -> ShastaProveRequest {
     let carry = &input.proof_carry_data;
     let payload = ShastaProvePayload {
         chain_id: carry.chain_id,
@@ -280,10 +286,10 @@ fn build_shasta_request(input: &GuestInput) -> RaikoResult<ShastaProveRequest> {
         actual_prover: carry.transition_input.actual_prover,
         transition: carry.transition_input.transition.clone(),
     };
-    Ok(ShastaProveRequest {
+    ShastaProveRequest {
         schema: RETH_TDX_SHASTA_REQUEST_SCHEMA.to_string(),
         payload,
-    })
+    }
 }
 
 fn build_shasta_aggregate_request(proofs: &[Proof]) -> RaikoResult<ShastaAggregateRequest> {
@@ -331,30 +337,6 @@ fn build_shasta_aggregate_request(proofs: &[Proof]) -> RaikoResult<ShastaAggrega
         schema: RETH_TDX_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
         payload: ShastaAggregatePayload { proofs: entries },
     })
-}
-
-/// Reconstruct a minimal [`ProofCarryData`](raiko2_protocol_shasta::shasta::ProofCarryData)
-/// from a `ShastaProvePayload` for `extra_data` annotation. The L2-derived
-/// fields (parent_block_hash, checkpoint) are populated by reth-tdx inside the
-/// TEE and are not carried in raiko2's view of the request — this stub is
-/// only used to label the returned `Proof` with chain-id / proposal-id for
-/// downstream aggregation lookup.
-fn reconstruct_proof_carry_data(
-    payload: &ShastaProvePayload,
-) -> raiko2_protocol_shasta::shasta::ProofCarryData {
-    raiko2_protocol_shasta::shasta::ProofCarryData {
-        chain_id: payload.chain_id,
-        verifier: payload.verifier,
-        transition_input: raiko2_protocol_shasta::shasta::TransitionInputData {
-            proposal_id: payload.proposal_id,
-            proposal_hash: payload.proposal_hash,
-            parent_proposal_hash: payload.parent_proposal_hash,
-            parent_block_hash: B256::ZERO,
-            actual_prover: payload.actual_prover,
-            transition: payload.transition.clone(),
-            checkpoint: Default::default(),
-        },
-    }
 }
 
 fn reth_tdx_metadata(response_schema: &str, result: &ProofResult) -> Value {

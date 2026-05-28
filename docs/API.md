@@ -145,7 +145,8 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode
   - `risc0 -> risc0/<server default runner>` with `prover_type = mock | local | network`
   - `zk_any -> admission-time draw to sp1 or risc0`
-  - `tdx -> tdx/local` (operator route; requires `--features tdx` build and running `tdxs` daemon)
+  - `tdx -> tdx/remote` (forwards to a `reth-tdx` instance running inside a Nethermind TDX VM;
+     requires `[prover.tdx].base_url` to be set)
   - `sgx -> sgx/remote` backed by `raiko2-sgx-prover`
   - `sgxgeth -> sgx/remote` backed by the external geth-backed remote SGX server
   - `boundless -> unsupported legacy error response`

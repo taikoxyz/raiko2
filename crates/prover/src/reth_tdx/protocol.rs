@@ -42,7 +42,7 @@ pub struct ShastaProvePayload {
     /// On-chain Shasta verifier address.
     pub verifier: Address,
     /// Shasta proposal id — used as the L2 block number to fetch locally
-    /// (proposal_id ↔ L2 block number is 1:1 in Shasta).
+    /// (`proposal_id` ↔ L2 block number is 1:1 in Shasta).
     pub proposal_id: u64,
     /// L1 proposal hash.
     pub proposal_hash: B256,

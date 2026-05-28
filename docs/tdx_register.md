@@ -18,8 +18,9 @@ For the runtime architecture (what runs inside the image and how the pieces talk
 
 ## What the command does
 
-The xtask fetches the prover's TDX bootstrap data (either from the running raiko2 HTTP API or
-from `~/.config/raiko2/tdx/bootstrap.json` on the local filesystem), then sends up to two
+The xtask fetches the prover's TDX bootstrap data — either from the running `reth-tdx`
+HTTP API (`GET <url>/bootstrap`, served from inside the TDX VM) or from
+`~/.config/reth-tdx/bootstrap.json` on the local filesystem — then sends up to two
 transactions to the verifier (i.e. the `AzureTdxVerifier` behind the proxy):
 
 | Flag | Transaction | Permission | Purpose |
@@ -76,7 +77,7 @@ cargo run -p xtask -- register-tdx \
   --verifier 0x<TdxVerifier proxy> \
   --rpc http://<L1 RPC>             \
   --private-key 0x<owner key>       \
-  --raiko-url http://<VM_IP>:8080   \
+  --reth-tdx-url http://<VM_IP>:8080   \
   --trust --register
 ```
 
@@ -102,7 +103,7 @@ cargo run -p xtask -- register-tdx \
   --verifier 0x<TdxVerifier proxy> \
   --rpc http://<L1 RPC>             \
   --private-key 0x<funded key>      \
-  --raiko-url http://<NEW_VM_IP>:8080 \
+  --reth-tdx-url http://<NEW_VM_IP>:8080 \
   --register
 ```
 
@@ -116,7 +117,7 @@ cargo run -p xtask -- register-tdx \
   --verifier 0x<TdxVerifier proxy>  \
   --rpc http://<L1 RPC>              \
   --private-key 0x<owner key>        \
-  --raiko-url http://<VM_IP>:8080    \
+  --reth-tdx-url http://<VM_IP>:8080    \
   --trusted-params-index 1           \
   --trust --register
 ```
@@ -130,7 +131,7 @@ cargo run -p xtask -- register-tdx \
   --verifier 0x...                 \
   --rpc http://...                 \
   --private-key 0x...              \
-  --raiko-url http://...           \
+  --reth-tdx-url http://...        \
   --register --dry-run
 ```
 
@@ -141,7 +142,7 @@ cargo run -p xtask -- register-tdx \
 | `--verifier` | `TDX_VERIFIER` | — | `TdxVerifier` proxy address |
 | `--rpc` | `TDX_RPC` | — | L1 RPC URL |
 | `--private-key` | `PRIVATE_KEY` | — | Hex key (with or without `0x`). Owner for `--trust`, any funded key for `--register` alone |
-| `--raiko-url` | `TDX_RAIKO_URL` | — | Fetch bootstrap from `GET <url>/v3/proof/tdx/bootstrap`. If unset, reads `~/.config/raiko2/tdx/bootstrap.json` |
+| `--reth-tdx-url` | `TDX_RETH_URL` | — | Fetch bootstrap from `GET <url>/bootstrap` (on the `reth-tdx` HTTP server inside the TDX VM). If unset, reads `~/.config/reth-tdx/bootstrap.json` |
 | `--trusted-params-index` | — | `0` | Slot to read/write |
 | `--pcr-bitmap` | — | `0xBA10` | 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set) |
 | `--trust` | — | `false` | Also call `setTrustedParams` (owner-only) |
@@ -150,12 +151,19 @@ cargo run -p xtask -- register-tdx \
 
 ## Where the bootstrap comes from
 
-`TdxProver::ensure_bootstrapped` runs on first boot of the raiko2 process inside the TDX VM.
-It asks the `tdxs` daemon for a fresh attestation quote bound to a freshly-generated
-secp256k1 signing key, then writes the result to `~/.config/raiko2/tdx/bootstrap.json` and
-exposes the same payload via `GET /v3/proof/tdx/bootstrap`. The bootstrap is sticky — the
-prover reuses the same TDX-sealed key across restarts, so the registered instance survives a
-process restart or a `raiko2` binary update on the same image.
+`reth-tdx` (running inside the TDX VM — see
+[`nethermind-tdx/reth-tdx`](https://github.com/NethermindEth/nethermind-tdx/tree/main/reth-tdx))
+bootstraps eagerly on first boot. It asks the `tdxs` daemon for a fresh attestation quote
+bound to a freshly-generated secp256k1 signing key, writes the record to
+`~/.config/reth-tdx/bootstrap.json`, and exposes the same payload at
+`GET /bootstrap`. The bootstrap is sticky — `reth-tdx` reuses the same TDX-sealed
+key across restarts, so the registered instance survives a process restart or a
+`reth-tdx` binary update on the same image.
+
+raiko2 itself no longer holds a TDX bootstrap key. When `raiko2` is configured for the
+`tdx/remote` route, it forwards proof requests over HTTP to the `reth-tdx` instance running
+inside the VM — see
+[`raiko2-prover::reth_tdx`](../crates/prover/src/reth_tdx/mod.rs) for the wire protocol.
 
 If the underlying image changes (rebuilt mkosi image, new kernel, new init), the seal context
 changes and the bootstrap key changes too — you need a fresh `--register` (and a fresh
@@ -187,12 +195,13 @@ the proof bytes, **for the given `_commitmentHash`**. Usually one of:
 
 - Wrong `_commitmentHash` passed in — it must be the **pre-hash** of `LibPublicInput`
   (i.e. `hash_shasta_subproof_input(proof_carry_data)`), not the already-hashed
-  `signing_hash` that raiko returns as the `input` field of `/v3/proof/batch/shasta`.
+  `signing_hash` that raiko2 returns as the `input` field of `/v3/proof/batch/shasta`.
 - `TdxVerifier`'s `taikoChainId` (set at construction) doesn't match the L2 chain the
-  prover was configured against (`raiko2 chain_spec.chain_id`).
+  prover was configured against (`reth-tdx`'s `--l2-chain-id` env var).
 - The verifier address the prover signed for doesn't match the contract address being
-  called. Raiko looks the verifier address up by L2 fork in its chain spec
-  (`verifier_address_forks.TDX`).
+  called. `reth-tdx` reads its verifier address from the `--verifier` flag /
+  `SHASTA_VERIFIER` env var at startup; raiko2 also validates this on the request side
+  in its `prover.tdx` config.
 
 ### `TDX_INVALID_INSTANCE()` (`0x07b8ce1e`) when calling `verifyProof`
 

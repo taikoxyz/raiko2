@@ -331,11 +331,10 @@ impl Provider for NetworkProvider {
         proposal_event: &ShastaEventData,
         blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
-        // Prefer the chain spec stored on the provider (built from `pair.l1_spec` which
-        // already has `RpcConfig.pairs[*].l1_beacon_rpc` / `l1_genesis_time` overrides
-        // applied) over the caller's copy. Callers in pipeline/forks/shasta reload the
-        // chain spec fresh from `SupportedChainSpecs::default()`, which is the sanitized
-        // on-disk JSON and ignores any operator overrides.
+        // Prefer the chain spec stored on the provider (built from `pair.l1_spec`)
+        // over the caller's copy. Callers in pipeline/forks/shasta reload the chain
+        // spec fresh from `SupportedChainSpecs::default()`, which is the sanitized
+        // on-disk JSON.
         let effective_spec = self.l1_chain_spec.as_ref().unwrap_or(l1_chain_spec);
         self.fetch_shasta_data_sources(effective_spec, proposal_event, blob_proof_type)
             .await

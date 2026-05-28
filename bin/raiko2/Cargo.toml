@@ -62,7 +62,6 @@ dotenvy = "0.15"
 default = []
 fixture-server = []
 redis-queue = ["raiko2-queue/redis"]
-tdx = ["raiko2-prover/tdx"]
 
 [dev-dependencies]
 tower.workspace = true

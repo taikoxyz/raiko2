@@ -4,6 +4,7 @@ use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
+    reth_tdx::RethTdxConfig as RethTdxProverConfig,
     sp1::{ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
@@ -27,10 +28,9 @@ pub struct ProverConfig {
     /// Boundless runner configuration.
     #[serde(default)]
     pub boundless: BoundlessConfig,
-    /// TDX prover configuration. Always present for deserialization so that a
-    /// config with `[prover.tdx]` doesn't fail with "unknown field" on non-tdx
-    /// builds. Actual usage of this section is gated by `#[cfg(feature = "tdx")]`
-    /// in the engine-registration code.
+    /// TDX prover configuration. Points raiko2 at a `reth-tdx` remote prover
+    /// running inside a Nethermind TDX VM — raiko2 never speaks the tdxs
+    /// daemon protocol itself, so this section is just URL + timeout.
     #[serde(default)]
     pub tdx: TdxConfig,
     /// Request sampling policy for `proof_type=zk_any`.
@@ -64,7 +64,7 @@ impl ProverConfig {
             self.route(),
             PipelineRoute {
                 guest_system: GuestSystem::Tdx,
-                runner: RunnerKind::Local
+                runner: RunnerKind::Remote
             }
         )
     }
@@ -136,14 +136,15 @@ impl ProverConfig {
         }
         self.zk_any.validate()?;
 
-        // The tdx/local route requires the `tdx` cargo feature at build time — without it
-        // the TDX engine isn't compiled in and the pipeline factory will never serve tdx
-        // requests. Fail fast at config time so operators get a clear actionable error
-        // instead of an opaque 404 at request time.
-        if self.is_tdx_route() && !cfg!(feature = "tdx") {
-            bail!(
-                "prover.guest_system=tdx/runner=local requires building raiko2 with --features tdx"
-            );
+        // The tdx/remote route requires a configured base URL — raiko2 has no
+        // way to reach the reth-tdx server inside the VM otherwise.
+        if self.is_tdx_route() {
+            if self.tdx.base_url.trim().is_empty() {
+                bail!("prover.tdx.base_url must not be empty for the tdx/remote route");
+            }
+            if self.tdx.timeout_ms == 0 {
+                bail!("prover.tdx.timeout_ms must be greater than zero");
+            }
         }
 
         Ok(())
@@ -313,26 +314,31 @@ impl Default for BoundlessConfig {
     }
 }
 
-/// TDX prover configuration.
+/// Remote TDX prover configuration.
+///
+/// Points raiko2 at a `reth-tdx` server running inside a Nethermind TDX VM.
+/// raiko2 never speaks the tdxs daemon protocol or holds the bootstrap key —
+/// that all happens inside the TEE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TdxConfig {
-    /// On-chain verifier instance ID.
-    #[serde(default)]
-    pub instance_id: u32,
-    /// Path to the TDX attestation service Unix socket.
-    #[serde(default = "default_tdx_socket_path")]
-    pub socket_path: String,
-}
-
-fn default_tdx_socket_path() -> String {
-    "/var/tdxs.sock".to_string()
+    /// Base URL of the reth-tdx server, e.g. `http://10.0.0.42:8080`.
+    pub base_url: String,
+    /// Per-request timeout in milliseconds. The bootstrap quote round-trip on
+    /// the first request can be slow, so default generously.
+    pub timeout_ms: u64,
 }
 
 impl Default for TdxConfig {
     fn default() -> Self {
+        let defaults = RethTdxProverConfig::default();
         Self {
-            instance_id: 0,
-            socket_path: default_tdx_socket_path(),
+            base_url: defaults.base_url,
+            timeout_ms: if defaults.timeout_ms == 0 {
+                600_000
+            } else {
+                defaults.timeout_ms
+            },
         }
     }
 }

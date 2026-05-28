@@ -19,8 +19,7 @@ use raiko2_pipeline::{
     forks::shasta::{ShastaBackends, ShastaSpec, load_shasta_backends},
 };
 use raiko2_primitives::{Proof, ProofType};
-#[cfg(feature = "tdx")]
-use raiko2_prover::tdx::TdxProver;
+use raiko2_prover::reth_tdx::{RethTdxConfig, RethTdxProver};
 use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_prover::{
     boundless::BoundlessProver, gaiko2::Gaiko2Prover, native::NativeProver, risc0::Risc0Prover,
@@ -48,8 +47,7 @@ type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
-#[cfg(feature = "tdx")]
-type TdxSpec = ShastaSpec<TdxProver, NativeBackend, NetworkProvider>;
+type TdxSpec = ShastaSpec<RethTdxProver, NativeBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
 use super::task_cleanup::spawn_runtime_cleanup_loop;
@@ -159,10 +157,9 @@ async fn register_pair_pipelines(
     }
 
     // Only build the TDX engine when the server is actually configured to route to
-    // tdx/local. `build_tdx_engine` lazily bootstraps the local TDX prover (reading the
-    // `tdxs` socket), so registering it unconditionally would force every --features tdx
-    // build to depend on a live attestation daemon even for routes that never use TDX.
-    #[cfg(feature = "tdx")]
+    // tdx/remote. The reth-tdx HTTP client is constructed lazily here — registering
+    // it unconditionally would force every raiko2 deployment to declare a
+    // reth-tdx base URL even for routes that never use TDX.
     if registration.config.prover.is_tdx_route() {
         let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
             Arc::clone(&registration.runtime),
@@ -669,23 +666,19 @@ async fn build_sp1_engine(
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
-#[cfg(feature = "tdx")]
 async fn build_tdx_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
 ) -> Result<Engine<TdxSpec>> {
-    let tdx_config = raiko2_prover::tdx::TdxConfig {
-        instance_id: config.prover.tdx.instance_id,
-        socket_path: config.prover.tdx.socket_path.clone(),
+    let tdx_config = RethTdxConfig {
+        base_url: config.prover.tdx.base_url.clone(),
+        timeout_ms: config.prover.tdx.timeout_ms,
     };
-    let tdx_prover = TdxProver::new(tdx_config);
-    tdx_prover
-        .ensure_bootstrapped()
-        .await
+    let tdx_prover = RethTdxProver::new(&tdx_config)
         .map_err(anyhow::Error::msg)
-        .context("TDX bootstrap failed")?;
+        .context("reth-tdx client construction failed")?;
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

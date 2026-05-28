@@ -1,6 +1,6 @@
 # raiko2 ↔ nethermind-tdx architecture
 
-This doc explains how the raiko2 TDX prover is packaged into a sealed Linux image by the
+This doc explains how the TDX prover is packaged into a sealed Linux image by the
 [`nethermind-tdx`](https://github.com/NethermindEth/nethermind-tdx) repo, what runs inside
 that image at runtime, and how the parts talk to each other to produce a TDX-attested
 proof that lands on-chain.
@@ -9,6 +9,19 @@ For the on-chain registration flow (`AzureTdxVerifier`, `setTrustedParams`, `reg
 see [`tdx_register.md`](./tdx_register.md). For the full deployment pipeline (image build →
 smart-contract deploy → registration) see
 [taiko-mono — TDX deployment](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/docs/tdx_deployment.md).
+
+> **Architecture change (May 2026):** The TDX prover logic that used to live in
+> `raiko2 --features tdx` (running inside the TDX VM) has been extracted into a
+> separate binary, [`reth-tdx`](https://github.com/NethermindEth/nethermind-tdx/tree/main/reth-tdx),
+> that lives in the `nethermind-tdx` repo and now runs inside the VM in place of
+> raiko2. raiko2 itself runs **outside** the VM and forwards proof requests over
+> HTTP via `RethTdxProver` (see [`crates/prover/src/reth_tdx`](../crates/prover/src/reth_tdx/mod.rs)).
+> Bootstrap data is served at `GET /bootstrap` (flat JSON) instead of the legacy
+> `GET /v3/proof/tdx/bootstrap`, and the on-disk bootstrap record moved from
+> `~/.config/raiko2/tdx/` to `~/.config/reth-tdx/`. Diagrams below still depict
+> the original in-process design — refer to them for the cryptographic flow
+> (carry-data, signing hash, attestation binding) which is unchanged; the only
+> moves are the binary name and the HTTP boundary.
 
 ## Repo relationships (build time vs. runtime)
 

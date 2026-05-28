@@ -1,9 +1,9 @@
 //! `cargo xtask register-tdx` — register a TDX prover instance on-chain.
 //!
-//! Fetches bootstrap data from a running raiko2 instance
-//! (`GET <raiko-url>/v3/proof/tdx/bootstrap`) or reads
-//! `~/.config/raiko2/tdx/bootstrap.json` from the local filesystem, then
-//! submits up to two transactions to the `AzureTdxVerifier` contract:
+//! Fetches bootstrap data from a running reth-tdx instance
+//! (`GET <reth-tdx-url>/bootstrap`) or reads `~/.config/reth-tdx/bootstrap.json`
+//! from the local filesystem, then submits up to two transactions to the
+//! `AzureTdxVerifier` contract:
 //!
 //! * `setTrustedParams` (owner-only) — locks in the running image's hardware
 //!   measurements (mrSeam, mrTd, teeTcbSvn, PCRs). Skipped unless `--trust`.
@@ -44,14 +44,14 @@ pub(crate) struct RegisterTdxArgs {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// Fetch bootstrap data from a running raiko2 instance instead of reading
-    /// the local `~/.config/raiko2/tdx/bootstrap.json`.
+    /// Fetch bootstrap data from a running reth-tdx instance instead of reading
+    /// the local `~/.config/reth-tdx/bootstrap.json`.
     ///
-    /// Example: `--raiko-url http://localhost:8080`
+    /// Example: `--reth-tdx-url http://localhost:8080`
     ///
-    /// The CLI appends `/v3/proof/tdx/bootstrap` and parses the JSON response.
-    #[arg(long, env = "TDX_RAIKO_URL")]
-    raiko_url: Option<String>,
+    /// The CLI appends `/bootstrap` and parses the JSON response.
+    #[arg(long, env = "TDX_RETH_URL", alias = "raiko-url")]
+    reth_tdx_url: Option<String>,
 
     /// Trusted params slot to write/read. Use the same index for `--trust` and
     /// `--register` in one run; pick a fresh index for new image versions.
@@ -80,13 +80,13 @@ pub(crate) struct RegisterTdxArgs {
 }
 
 // ---------------------------------------------------------------
-// Bootstrap data (mirrors raiko2_prover::tdx::config::BootstrapData)
+// Bootstrap data (mirrors reth-tdx's persistence::BootstrapData)
 // ---------------------------------------------------------------
 
-// The prover writes `~/.config/raiko2/tdx/bootstrap.json` with camelCase keys
-// (`#[serde(rename_all = "camelCase")]` on raiko2_prover::tdx::config::BootstrapData),
-// while the `/v3/proof/tdx/bootstrap` HTTP endpoint serializes with hardcoded snake_case keys. The
-// xtask reads from either path, so each field accepts both casings via serde aliases.
+// reth-tdx writes `~/.config/reth-tdx/bootstrap.json` with camelCase keys
+// (`#[serde(rename_all = "camelCase")]` in `reth_tdx::persistence::BootstrapData`)
+// and serves the same record with snake_case keys at `GET /bootstrap`. We accept
+// both casings via serde aliases.
 #[derive(Deserialize)]
 struct BootstrapData {
     #[serde(alias = "issuerType")]
@@ -186,12 +186,12 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         args.verifier, args.trusted_params_index, do_trust, do_register, args.dry_run
     );
 
-    let bootstrap = match &args.raiko_url {
+    let bootstrap = match &args.reth_tdx_url {
         Some(url) => fetch_bootstrap(url)
             .await
-            .context("failed to fetch TDX bootstrap data from raiko2")?,
+            .context("failed to fetch TDX bootstrap data from reth-tdx")?,
         None => read_bootstrap_from_disk()
-            .context("failed to read TDX bootstrap data — has the prover booted?")?,
+            .context("failed to read TDX bootstrap data — has reth-tdx booted?")?,
     };
     let metadata = &bootstrap.metadata;
     println!(
@@ -320,34 +320,21 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
 // Bootstrap loading
 // ---------------------------------------------------------------
 
-async fn fetch_bootstrap(raiko_url: &str) -> Result<BootstrapData> {
-    let url = format!("{}/v3/proof/tdx/bootstrap", raiko_url.trim_end_matches('/'));
+async fn fetch_bootstrap(reth_tdx_url: &str) -> Result<BootstrapData> {
+    let url = format!("{}/bootstrap", reth_tdx_url.trim_end_matches('/'));
     println!("fetching TDX bootstrap from {url}");
 
-    let response: Value = reqwest::get(&url)
+    // reth-tdx's `GET /bootstrap` returns the bootstrap record directly (flat
+    // object) — no issuer-type wrapping. Serde aliases handle camelCase vs
+    // snake_case for forward-compat with the on-disk record format.
+    reqwest::get(&url)
         .await
         .with_context(|| format!("GET {url} failed"))?
         .error_for_status()
         .with_context(|| format!("GET {url} returned error status"))?
-        .json()
+        .json::<BootstrapData>()
         .await
-        .with_context(|| format!("failed to parse JSON from {url}"))?;
-
-    // Response shape: { "<issuer_type>": { issuer_type, public_key, quote, nonce, metadata } }
-    let obj = response
-        .as_object()
-        .ok_or_else(|| anyhow!("bootstrap response is not a JSON object"))?;
-    if obj.len() != 1 {
-        bail!(
-            "bootstrap response must have exactly one top-level key, got {}: {:?}",
-            obj.len(),
-            obj.keys().collect::<Vec<_>>()
-        );
-    }
-    let (issuer_key, inner) = obj.iter().next().expect("len == 1 checked above");
-
-    serde_json::from_value::<BootstrapData>(inner.clone())
-        .with_context(|| format!("failed to deserialize bootstrap data under key '{issuer_key}'"))
+        .with_context(|| format!("failed to parse JSON from {url}"))
 }
 
 fn read_bootstrap_from_disk() -> Result<BootstrapData> {
@@ -361,8 +348,7 @@ fn bootstrap_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to get home directory"))?;
     Ok(home
         .join(".config")
-        .join("raiko2")
-        .join("tdx")
+        .join("reth-tdx")
         .join("bootstrap.json"))
 }
 

@@ -134,13 +134,14 @@ lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
 lock_collateral = "20"
 
-# TDX prover config (only used when the binary is built with --features tdx).
-# Requires a running `tdxs` attestation daemon and the on-chain instance_id
-# assigned by `cargo run -p xtask -- register-tdx` (see docs/tdx_register.md).
+# TDX prover config (used when [prover].guest_system = "tdx" and runner = "remote").
+# Points raiko2 at a `reth-tdx` instance running inside a Nethermind TDX VM —
+# raiko2 itself never speaks the tdxs daemon protocol or holds the bootstrap
+# key (that all happens inside the TEE).
 #
 # [prover.tdx]
-# instance_id = 0
-# socket_path = "/var/tdxs.sock"
+# base_url = "http://localhost:8080"
+# timeout_ms = 600000
 
 [queue]
 backend = "memory"

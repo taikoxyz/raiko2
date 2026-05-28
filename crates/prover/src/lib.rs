@@ -32,16 +32,13 @@ pub mod boundless;
 pub mod gaiko2;
 pub mod native;
 pub mod remote_prover;
+pub mod reth_tdx;
 #[cfg(feature = "risc0")]
 pub mod risc0;
 #[cfg(any(feature = "risc0", feature = "boundless", test))]
 mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
-#[cfg(all(feature = "tdx", unix))]
-pub mod tdx;
-#[cfg(all(feature = "tdx", not(unix)))]
-compile_error!("The `tdx` feature is only supported on Unix targets (uses Unix domain sockets).");
 #[cfg(feature = "sp1")]
 pub use sp1::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
@@ -203,8 +200,10 @@ pub(crate) fn decode_hex_payload(value: Option<&str>) -> Vec<u8> {
 /// of its carry data — required for ZK aggregation guests where the public input is
 /// the canonical sub-proof input hash.
 ///
-/// Provers whose `proof.input` is not `hash_shasta_subproof_input` (e.g. TDX, which
-/// uses `signing_hash`) must use [`collect_proof_carry_data_vec`] instead.
+/// Provers whose `proof.input` is not `hash_shasta_subproof_input` (e.g. the
+/// reth-tdx remote prover, which signs the Shasta aggregation hash directly)
+/// handle their own carry-data collection in the prover-specific aggregate
+/// path and do not call this helper.
 pub(crate) fn build_shasta_aggregation_input(
     proofs: &[Proof],
 ) -> Result<ShastaZkAggregationGuestInput, RaikoError> {
@@ -232,21 +231,6 @@ pub(crate) fn build_shasta_aggregation_input(
         proof_carry_data_vec,
         prover_address: alloy_primitives::Address::ZERO,
     })
-}
-
-/// Collect carry data from sub-proofs without validating `proof.input`.
-///
-/// Use this in non-ZK aggregation paths (TDX) where `proof.input` is not the
-/// `hash_shasta_subproof_input` of the carry data and the strict equality check
-/// in [`build_shasta_aggregation_input`] would produce false negatives.
-pub(crate) fn collect_proof_carry_data_vec(
-    proofs: &[Proof],
-) -> Result<Vec<ProofCarryData>, RaikoError> {
-    proofs
-        .iter()
-        .enumerate()
-        .map(|(index, proof)| extract_proof_carry_data(index, proof))
-        .collect()
 }
 
 fn extract_proof_carry_data(index: usize, proof: &Proof) -> Result<ProofCarryData, RaikoError> {

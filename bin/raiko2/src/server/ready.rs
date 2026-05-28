@@ -189,7 +189,7 @@ fn check_prover(config: &Config) -> Result<()> {
 }
 
 const fn requires_risc0_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_tdx_route()
 }
 
 fn check_risc0_capability(config: &Config) -> Result<()> {
@@ -203,7 +203,7 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
 }
 
 const fn requires_sp1_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_tdx_route()
 }
 
 fn check_sp1_capability(config: &Config) -> Result<()> {

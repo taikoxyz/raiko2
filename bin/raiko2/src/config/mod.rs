@@ -309,8 +309,6 @@ mod tests {
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
                 boundless: BoundlessPairConfig::default(),
-                l1_beacon_rpc: None,
-                l1_genesis_time: None,
             }],
             ..Default::default()
         };
@@ -330,8 +328,6 @@ mod tests {
                 sp1_verifier_rpc_url: None,
                 sp1_verifier_address: None,
                 boundless: BoundlessPairConfig::default(),
-                l1_beacon_rpc: None,
-                l1_genesis_time: None,
             }],
             ..Default::default()
         };
@@ -353,8 +349,6 @@ mod tests {
                 sp1_verifier_rpc_url: Some("https://verifier.example.com".to_string()),
                 sp1_verifier_address: None,
                 boundless: BoundlessPairConfig::default(),
-                l1_beacon_rpc: None,
-                l1_genesis_time: None,
             }],
             ..Default::default()
         };
@@ -384,8 +378,6 @@ mod tests {
                     "0x0000000000000000000000000000000000000001".to_string(),
                 ),
                 boundless: BoundlessPairConfig::default(),
-                l1_beacon_rpc: None,
-                l1_genesis_time: None,
             }],
             ..Default::default()
         };
@@ -408,8 +400,6 @@ mod tests {
                     "0x0000000000000000000000000000000000000000".to_string(),
                 ),
                 boundless: BoundlessPairConfig::default(),
-                l1_beacon_rpc: None,
-                l1_genesis_time: None,
             }],
             ..Default::default()
         };
@@ -479,8 +469,8 @@ mod tests {
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
         assert_eq!(
-            "tdx/local".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local)
+            "tdx/remote".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote)
         );
         assert_eq!(
             "risc0/boundless".parse::<PipelineRoute>().unwrap(),

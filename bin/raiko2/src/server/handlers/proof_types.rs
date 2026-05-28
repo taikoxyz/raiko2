@@ -37,13 +37,13 @@ impl BatchProofType {
 
     pub(super) const fn is_public_batch_request_type(self) -> bool {
         match self {
-            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny => {
-                true
-            }
-            // TDX is only a valid public request type when raiko2 is built with --features tdx.
-            // Without the feature, no TDX pipeline is registered and the request would produce
-            // an opaque 404; returning false here lets the handler emit a clear 400 instead.
-            Self::Tdx => cfg!(feature = "tdx"),
+            Self::Native
+            | Self::Sp1
+            | Self::Risc0
+            | Self::Sgx
+            | Self::SgxGeth
+            | Self::Tdx
+            | Self::ZkAny => true,
             Self::Boundless => false,
         }
     }

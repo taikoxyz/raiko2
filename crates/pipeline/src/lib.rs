@@ -55,7 +55,7 @@ impl PipelineKey {
             PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
             PipelineKey::ShastaSgx => "shasta-sgx-remote",
             PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
-            PipelineKey::ShastaTdx => "shasta-tdx-local",
+            PipelineKey::ShastaTdx => "shasta-tdx-remote",
         }
     }
 
@@ -69,7 +69,7 @@ impl PipelineKey {
                 PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
             }
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
-            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Local),
+            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote),
         }
     }
 }
@@ -91,7 +91,7 @@ impl FromStr for PipelineKey {
             "shasta-sgx-remote" => Ok(Self::ShastaSgx),
             "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
             "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
-            "shasta-tdx-local" => Ok(Self::ShastaTdx),
+            "shasta-tdx-remote" => Ok(Self::ShastaTdx),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -232,12 +232,12 @@ impl PipelineRoute {
             (GuestSystem::Sgx, RunnerKind::Network) => {
                 Err("Unsupported proving route: sgx/network".to_string())
             }
-            (GuestSystem::Tdx, RunnerKind::Local) => Ok(PipelineKey::ShastaTdx),
+            (GuestSystem::Tdx, RunnerKind::Remote) => Ok(PipelineKey::ShastaTdx),
             (GuestSystem::Tdx, RunnerKind::Network) => {
                 Err("Unsupported proving route: tdx/network".to_string())
             }
-            (GuestSystem::Tdx, RunnerKind::Remote) => {
-                Err("Unsupported proving route: tdx/remote".to_string())
+            (GuestSystem::Tdx, RunnerKind::Local) => {
+                Err("Unsupported proving route: tdx/local".to_string())
             }
             (GuestSystem::Sp1, RunnerKind::Remote) => {
                 Err("Unsupported proving route: sp1/remote".to_string())

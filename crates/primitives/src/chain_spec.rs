@@ -770,8 +770,8 @@ mod tests {
 
         assert_eq!(l1_spec.chain_id, 32_382);
         // Public defaults use sanitized example.com placeholders per the open-source
-        // sanitization policy; operators override these via `RpcConfig.pairs[*].l1_rpc`
-        // and `l1_beacon_rpc` for their actual deployment.
+        // sanitization policy; operators override `l1_rpc` via `RpcConfig.pairs[*].l1_rpc`
+        // for their actual deployment.
         assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),

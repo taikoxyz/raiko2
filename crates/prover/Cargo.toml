@@ -41,17 +41,11 @@ boundless-market = { workspace = true, optional = true }
 # SP1 dependencies (optional)
 sp1-sdk = { workspace = true, optional = true }
 
-# TDX dependencies (optional)
-dirs = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
-secp256k1 = { workspace = true, optional = true }
-
 [features]
 default = ["risc0", "sp1", "boundless"]
 risc0 = ["dep:risc0-zkvm", "dep:risc0-ethereum-contracts-boundless"]
 sp1 = ["dep:sp1-sdk"]
 boundless = ["risc0", "dep:boundless-market"]
-tdx = ["dep:dirs", "dep:rand", "dep:secp256k1"]
 
 
 [dev-dependencies]

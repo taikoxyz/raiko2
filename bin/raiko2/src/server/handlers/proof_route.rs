@@ -151,13 +151,13 @@ fn tdx_route_for_request(state: &AppState) -> Result<PipelineRoute, ApiError> {
         route,
         PipelineRoute {
             guest_system: GuestSystem::Tdx,
-            runner: RunnerKind::Local,
+            runner: RunnerKind::Remote,
         }
     ) {
         Ok(route)
     } else {
         Err(ApiError::bad_request(
-            "proof_type=tdx is only supported when the server prover route is tdx/local",
+            "proof_type=tdx is only supported when the server prover route is tdx/remote",
         ))
     }
 }

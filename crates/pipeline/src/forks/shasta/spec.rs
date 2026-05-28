@@ -481,6 +481,10 @@ fn validate_fetched_block_numbers(
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
+    if let Some(chain_spec) = ctx.preflight.l2_chain_spec.clone() {
+        return chain_spec;
+    }
+
     SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
         .unwrap_or_else(|| ChainSpec {
@@ -491,6 +495,10 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = ctx.preflight.l1_chain_spec.clone() {
+        return Ok(chain_spec);
+    }
+
     SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
         .ok_or_else(|| {
@@ -1029,7 +1037,7 @@ mod tests {
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
     use raiko2_provider::Provider;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1041,6 +1049,7 @@ mod tests {
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        data_source_beacon_rpcs: Arc<Mutex<Vec<Option<String>>>>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
     }
@@ -1102,10 +1111,14 @@ mod tests {
 
         async fn shasta_data_sources(
             &self,
-            _l1_chain_spec: &raiko2_primitives::ChainSpec,
+            l1_chain_spec: &raiko2_primitives::ChainSpec,
             _proposal_event: &ShastaEventData,
             _blob_proof_type: BlobProofType,
         ) -> RaikoResult<Vec<InputDataSource>> {
+            self.data_source_beacon_rpcs
+                .lock()
+                .expect("data source beacon rpc recorder")
+                .push(l1_chain_spec.beacon_rpc.clone());
             Ok(self.data_sources.clone())
         }
     }
@@ -1209,6 +1222,7 @@ mod tests {
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            data_source_beacon_rpcs: Arc::new(Mutex::new(Vec::new())),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
         }
@@ -1411,6 +1425,21 @@ mod tests {
     }
 
     #[test]
+    fn chain_spec_from_context_prefers_preflight_l2_override() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut override_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .expect("supported chain");
+        override_spec.name = "custom_l2".to_string();
+        override_spec.is_taiko = false;
+        ctx.preflight.l2_chain_spec = Some(override_spec.clone());
+
+        let chain_spec = super::chain_spec_from_context(&ctx);
+
+        assert_eq!(chain_spec, override_spec);
+    }
+
+    #[test]
     fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
         let ctx = sample_context(42, 11, 9);
         let chain_spec = super::chain_spec_from_context(&ctx);
@@ -1550,5 +1579,47 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+    }
+
+    #[tokio::test]
+    async fn preflight_uses_context_l1_chain_spec_for_data_sources() {
+        let mut provider = sample_provider();
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: vec![B256::from([0x44; 32])],
+                offset: 0u32.try_into().expect("fits in uint24"),
+                timestamp: 777u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: Vec::new(),
+            tx_data_from_blob: vec![vec![1, 2, 3]],
+            blob_commitments: vec![vec![4; 48]],
+            blob_proofs: vec![vec![5; 48]],
+            is_forced_inclusion: false,
+        }];
+        let mut ctx = sample_context(42, 11, 9);
+        let mut override_l1 = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+            .expect("supported chain");
+        override_l1.beacon_rpc = Some("https://custom-beacon.example".to_string());
+        ctx.preflight.l1_chain_spec = Some(override_l1.clone());
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.taiko.data_sources.len(), 1);
+        let recorded_beacon_rpcs = provider
+            .data_source_beacon_rpcs
+            .lock()
+            .expect("data source beacon rpc recorder")
+            .clone();
+        assert_eq!(recorded_beacon_rpcs, vec![override_l1.beacon_rpc]);
     }
 }

@@ -39,6 +39,8 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
         beacon_rpc: None,
+        l1_genesis_time: None,
+        l1_seconds_per_slot: None,
         l2_rpc: None,
         l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
@@ -66,6 +68,10 @@ pub struct NetworkPairConfig {
     pub l1_rpc: Option<String>,
     #[serde(default)]
     pub beacon_rpc: Option<String>,
+    #[serde(default)]
+    pub l1_genesis_time: Option<u64>,
+    #[serde(default)]
+    pub l1_seconds_per_slot: Option<u64>,
     #[serde(default)]
     pub l2_rpc: Option<String>,
     #[serde(default)]
@@ -263,6 +269,9 @@ impl RpcConfig {
                     );
                 }
             }
+            if pair.l1_spec.seconds_per_slot == 0 {
+                bail!("{}: l1_seconds_per_slot must be > 0", pair.key);
+            }
             if !is_valid_url(&pair.l2_rpc) {
                 bail!(
                     "{}: l2_rpc = '{}'",
@@ -367,6 +376,12 @@ fn resolve_pair(
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
     if let Some(beacon_rpc) = &pair.beacon_rpc {
         l1_spec.beacon_rpc = Some(beacon_rpc.clone());
+    }
+    if let Some(genesis_time) = pair.l1_genesis_time {
+        l1_spec.genesis_time = genesis_time;
+    }
+    if let Some(seconds_per_slot) = pair.l1_seconds_per_slot {
+        l1_spec.seconds_per_slot = seconds_per_slot;
     }
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 

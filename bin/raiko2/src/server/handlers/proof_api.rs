@@ -2847,6 +2847,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             l1_rpc: "http://l1.example".to_string(),
+            beacon_rpc: None,
             l2_rpc: "http://l2.example".to_string(),
             l2_provider: raiko2_provider::L2ProviderKind::Reth,
             l2_witness_rpc: "http://l2w.example".to_string(),

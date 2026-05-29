@@ -197,6 +197,7 @@ mod tests {
             network: network.to_string(),
             l1_network: l1_network.to_string(),
             l1_rpc: l1_spec.rpc.clone(),
+            beacon_rpc: l1_spec.beacon_rpc.clone(),
             l2_rpc: l2_spec.rpc.clone(),
             l2_provider: L2ProviderKind::Reth,
             l2_witness_rpc: l2_spec.rpc.clone(),

@@ -26,6 +26,7 @@ pub(crate) fn build_context(
         },
         raiko2_primitives::ProverConfig::default(),
     );
+    context.preflight.resolved_l1_chain_spec = Some(pair.l1_spec.clone());
     context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
     if !context.config.is_object() {
         context.config = serde_json::json!({});

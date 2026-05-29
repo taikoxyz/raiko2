@@ -613,6 +613,10 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = &ctx.preflight.resolved_l1_chain_spec {
+        return Ok(chain_spec.clone());
+    }
+
     SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
         .ok_or_else(|| {
@@ -1143,15 +1147,15 @@ mod tests {
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
-        ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
-        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs, WitnessHeader,
+        ChainSpec, ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType,
+        ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs, WitnessHeader,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
     use raiko2_provider::Provider;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1163,6 +1167,7 @@ mod tests {
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        observed_l1_chain_spec: Arc<Mutex<Option<ChainSpec>>>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
     }
@@ -1233,10 +1238,14 @@ mod tests {
 
         async fn shasta_data_sources(
             &self,
-            _l1_chain_spec: &raiko2_primitives::ChainSpec,
+            l1_chain_spec: &raiko2_primitives::ChainSpec,
             _proposal_event: &ShastaEventData,
             _blob_proof_type: BlobProofType,
         ) -> RaikoResult<Vec<InputDataSource>> {
+            *self
+                .observed_l1_chain_spec
+                .lock()
+                .expect("observed l1 chain spec lock") = Some(l1_chain_spec.clone());
             Ok(self.data_sources.clone())
         }
     }
@@ -1340,6 +1349,7 @@ mod tests {
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            observed_l1_chain_spec: Arc::new(Mutex::new(None)),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
         }
@@ -1661,7 +1671,16 @@ mod tests {
             blob_proofs: vec![vec![5; 48]],
             is_forced_inclusion: false,
         }];
-        let ctx = sample_context(42, 11, 9);
+        let mut ctx = sample_context(42, 11, 9);
+        let resolved_l1_chain_spec = ChainSpec {
+            name: "custom_l1".to_string(),
+            chain_id: ctx.request.l1_chain_id,
+            beacon_rpc: Some("https://beacon.example.test".to_string()),
+            genesis_time: 1779670900,
+            seconds_per_slot: 12,
+            ..Default::default()
+        };
+        ctx.preflight.resolved_l1_chain_spec = Some(resolved_l1_chain_spec.clone());
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
             (),
@@ -1681,5 +1700,12 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+        assert_eq!(
+            *provider
+                .observed_l1_chain_spec
+                .lock()
+                .expect("observed l1 chain spec lock"),
+            Some(resolved_l1_chain_spec)
+        );
     }
 }

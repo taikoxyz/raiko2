@@ -311,8 +311,6 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 beacon_rpc: None,
-                l1_genesis_time: None,
-                l1_seconds_per_slot: None,
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
@@ -333,8 +331,6 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
                 beacon_rpc: None,
-                l1_genesis_time: None,
-                l1_seconds_per_slot: None,
                 l2_rpc: Some("http://localhost:9545".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -357,8 +353,6 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 beacon_rpc: None,
-                l1_genesis_time: None,
-                l1_seconds_per_slot: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -387,8 +381,6 @@ mod tests {
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 beacon_rpc: None,
-                l1_genesis_time: None,
-                l1_seconds_per_slot: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -412,8 +404,6 @@ mod tests {
                 l1_network: "ethereum".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
                 beacon_rpc: None,
-                l1_genesis_time: None,
-                l1_seconds_per_slot: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -717,7 +707,7 @@ port = 9090
 
 [rpc]
 pairs = [
-  { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", beacon_rpc = "https://beacon.example.test", l1_genesis_time = 123, l1_seconds_per_slot = 6, l2_rpc = "https://l2.example.test" },
+  { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", beacon_rpc = "https://beacon.example.test", l2_rpc = "https://l2.example.test" },
 ]
 
 [prover]
@@ -743,8 +733,8 @@ maintenance_interval_ms = 200
             pair.l1_spec.beacon_rpc.as_deref(),
             Some("https://beacon.example.test")
         );
-        assert_eq!(pair.l1_spec.genesis_time, 123);
-        assert_eq!(pair.l1_spec.seconds_per_slot, 6);
+        assert_eq!(pair.l1_spec.genesis_time, 1_779_670_900);
+        assert_eq!(pair.l1_spec.seconds_per_slot, 12);
 
         let _ = std::fs::remove_file(path);
     }
@@ -777,38 +767,6 @@ maintenance_interval_ms = 200
 
         let err = Config::load(&cli).expect_err("invalid beacon rpc should fail");
         assert!(format!("{err:#}").contains("beacon_rpc"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_config_rejects_invalid_pair_slot_duration_override() {
-        let config_toml = r#"
-[server]
-host = "127.0.0.1"
-port = 9090
-
-[rpc]
-pairs = [
-  { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", l1_seconds_per_slot = 0, l2_rpc = "https://l2.example.test" },
-]
-
-[prover]
-guest_system = "native"
-runner = "local"
-
-[queue]
-backend = "memory"
-namespace = "raiko2:queue"
-workers = 1
-maintenance_interval_ms = 200
-"#;
-        let path = write_temp_config(config_toml);
-
-        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
-
-        let err = Config::load(&cli).expect_err("zero slot duration should fail");
-        assert!(format!("{err:#}").contains("l1_seconds_per_slot"));
 
         let _ = std::fs::remove_file(path);
     }

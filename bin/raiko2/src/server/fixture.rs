@@ -508,8 +508,6 @@ pub(crate) fn base_config() -> Config {
         l1_network: "ethereum".to_string(),
         l1_rpc: Some("http://localhost:8545".to_string()),
         beacon_rpc: None,
-        l1_genesis_time: None,
-        l1_seconds_per_slot: None,
         l2_rpc: Some("http://localhost:9545".to_string()),
         l2_provider: raiko2_provider::L2ProviderKind::Reth,
         l2_witness_rpc: None,

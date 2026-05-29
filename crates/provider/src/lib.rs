@@ -7,7 +7,7 @@ pub mod on_the_spot_witness;
 pub mod rpc;
 
 use alloy::consensus::Header;
-use alloy_primitives::{Address, map::AddressMap};
+use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -42,6 +42,14 @@ pub trait Provider: Send + Sync {
 
     async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
 
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        blocks: &[u64],
+        _tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.batch_witnesses(blocks).await
+    }
+
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
 
     async fn shasta_proposal_event(
@@ -70,7 +78,7 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{Bytes, U256};
 
     /// Mock provider for testing.
     pub(crate) struct MockProvider {
@@ -145,6 +153,17 @@ mod tests {
     async fn test_mock_provider_witnesses() -> Result<(), Box<dyn std::error::Error>> {
         let provider = MockProvider { blocks: vec![] };
         let witnesses = provider.batch_witnesses(&[1]).await?;
+        assert!(witnesses.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_tx_list_witnesses_fall_back()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = MockProvider { blocks: vec![] };
+        let witnesses = provider
+            .batch_witnesses_with_tx_lists(&[1], &[Bytes::from_static(&[0xc0])])
+            .await?;
         assert!(witnesses.is_empty());
         Ok(())
     }

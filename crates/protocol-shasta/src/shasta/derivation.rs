@@ -218,6 +218,40 @@ pub fn prepare_source_manifest(
     )
 }
 
+/// Decode a source manifest for tx-list replay without applying inherited metadata validation.
+///
+/// This is used by preflight to recover the proposal transaction list that was submitted for a
+/// block. Witness replay needs that raw list, while full protocol validation still happens through
+/// [`prepare_source_manifest`].
+///
+/// # Errors
+///
+/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or when
+/// the provided blob bytes cannot be decoded with the shared Shasta blob codec.
+pub fn decode_source_manifest_for_tx_list(
+    source: &DerivationSource,
+    data_source: Option<&InputDataSource>,
+    max_blocks: usize,
+) -> Result<DerivationSourceManifest, SourceDerivationError> {
+    let manifest = if source.blobSlice.blobHashes.is_empty() {
+        decode_inline_manifest(
+            data_source,
+            source.blobSlice.offset.to::<usize>(),
+            max_blocks,
+        )
+    } else if !is_source_offset_valid(source) {
+        DerivationSourceManifest::default()
+    } else {
+        decode_blob_backed_manifest(
+            data_source.ok_or(SourceDerivationError::MissingBlobData)?,
+            source.blobSlice.offset.to::<usize>(),
+            max_blocks,
+        )?
+    };
+
+    Ok(manifest)
+}
+
 /// Decode and sanitize a source manifest using a caller-selected per-source block limit.
 ///
 /// # Errors

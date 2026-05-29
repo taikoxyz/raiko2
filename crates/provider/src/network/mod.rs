@@ -3,7 +3,7 @@ use alloy::{
     providers::{DynProvider, Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
 };
-use alloy_primitives::{Address, map::AddressMap};
+use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_rpc_types_eth::Header as AlloyRpcHeader;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -51,6 +51,15 @@ pub(crate) trait L2Provider: Send + Sync {
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>>;
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let _ = tx_lists;
+        self.batch_witnesses(block_numbers).await
+    }
 }
 
 #[derive(Clone)]
@@ -132,6 +141,15 @@ impl L2Provider for RethL2Provider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
+    }
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
     }
 }
 
@@ -344,6 +362,16 @@ impl Provider for NetworkProvider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.l2_provider.batch_witnesses(block_numbers).await
+    }
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.l2_provider
+            .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
     }
 
     async fn batch_l1_headers(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Header>> {

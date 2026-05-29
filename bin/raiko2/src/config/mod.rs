@@ -310,6 +310,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
@@ -329,6 +330,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("http://localhost:9545".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -350,6 +352,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -377,6 +380,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -399,6 +403,7 @@ mod tests {
                 network: "taiko_mainnet".to_string(),
                 l1_network: "ethereum".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -689,6 +694,77 @@ maintenance_interval_ms = 200
             config.prover.route(),
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_loads_pair_beacon_rpc_override() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", beacon_rpc = "https://beacon.example.test", l2_rpc = "https://l2.example.test" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_dev", "taiko_dev_l1")
+            .expect("resolved pair");
+        assert_eq!(
+            pair.l1_spec.beacon_rpc.as_deref(),
+            Some("https://beacon.example.test")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_config_rejects_invalid_pair_beacon_rpc_override() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", beacon_rpc = "not-a-url", l2_rpc = "https://l2.example.test" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let err = Config::load(&cli).expect_err("invalid beacon rpc should fail");
+        assert!(format!("{err:#}").contains("beacon_rpc"));
 
         let _ = std::fs::remove_file(path);
     }

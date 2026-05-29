@@ -19,6 +19,8 @@ port = 8080
 # Canonical configs should declare RPC endpoints here.
 pairs = [
   { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", l2_provider = "geth_local_witness" },
+  # Optional: override the L1 beacon endpoint from the built-in chain spec for blob sidecars.
+  # { network = "taiko_dev", l1_network = "taiko_dev_l1", l1_rpc = "https://l1.example.test", beacon_rpc = "https://beacon.example.test", l2_rpc = "https://l2.example.test" },
   # Optional: route witness/debug traffic to a dedicated L2 endpoint.
   # l2_provider defaults to "reth". Set l2_provider = "geth" for geth native debug_executionWitness.
   # Set l2_provider = "geth_local_witness" for a regular geth endpoint with locally assembled witnesses.

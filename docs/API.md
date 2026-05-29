@@ -481,6 +481,8 @@ All API errors use the Hoodi-style envelope:
 ## Configuration Notes
 
 - `rpc.pairs` is the canonical configuration for allowed `(network, l1_network)` combinations.
+- `rpc.pairs[*].beacon_rpc` optionally overrides the built-in L1 chain spec beacon endpoint
+  used to fetch blob sidecars during Shasta preflight.
 - `rpc.pairs[*].l2_rpc` is the canonical read/state RPC used for blocks and account/state proofs.
 - `rpc.pairs[*].l2_provider` selects the L2 execution-client family. It defaults to `reth`;
   set it to `geth` when `l2_rpc`/`l2_witness_rpc` points at a geth endpoint with native

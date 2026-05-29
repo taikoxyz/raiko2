@@ -19,9 +19,11 @@ use raiko2_primitives_shasta::{
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData,
+    ParentBlockContext, ProposalMetadata, ShastaEventData,
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
     decode_proposal_id_from_extra_data,
+    manifest::BlockManifest,
+    prepare_source_manifest_with_max_blocks,
 };
 use raiko2_provider::{Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -45,6 +47,7 @@ sol! {
 
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
 const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
+const ANCHOR_GAS_LIMIT: u64 = 1_000_000;
 #[cfg(not(test))]
 const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
@@ -109,7 +112,7 @@ where
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
-        let witnesses = fetch_preflight_witnesses(
+        let mut witnesses = fetch_preflight_witnesses(
             provider,
             &chain_spec,
             ctx.request.proposal_id,
@@ -122,6 +125,13 @@ where
             .collect::<Vec<_>>();
         let manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        if let Some(expected_blocks) =
+            derive_preflight_expected_shasta_blocks(&manifest, &witnesses, &chain_spec)?
+        {
+            provider
+                .supplement_shasta_candidate_witnesses(&expected_blocks, &mut witnesses)
+                .await?;
+        }
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
         if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
@@ -260,6 +270,118 @@ async fn build_preflight_manifest<P: Provider>(
             .await?;
     }
     Ok(manifest)
+}
+
+fn derive_preflight_expected_shasta_blocks(
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    witnesses: &[StatelessInput],
+    chain_spec: &ChainSpec,
+) -> RaikoResult<Option<Vec<BlockManifest>>> {
+    let proposal = &manifest.proposal_event.proposal;
+    if proposal.sources.is_empty() {
+        return Ok(None);
+    }
+    if proposal
+        .sources
+        .last()
+        .is_none_or(|source| source.isForcedInclusion)
+    {
+        return Err(RaikoError::Preflight(
+            "last Shasta derivation source must be a normal source".to_string(),
+        ));
+    }
+
+    let first_witness = witnesses.first().ok_or_else(|| {
+        RaikoError::Preflight("cannot derive Shasta source blocks without witnesses".to_string())
+    })?;
+    let parent_header = first_witness
+        .witness
+        .headers
+        .last()
+        .and_then(raiko2_primitives::WitnessHeader::full_header)
+        .ok_or_else(|| {
+            RaikoError::Preflight(
+                "cannot derive Shasta source blocks without parent header".to_string(),
+            )
+        })?;
+    let fork_timestamp = chain_spec
+        .hard_forks
+        .get(&ForkId::Taiko(TaikoFork::Shasta))
+        .and_then(|fork| match fork {
+            ForkCondition::Timestamp(timestamp) => Some(*timestamp),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            RaikoError::Preflight(
+                "unsupported Shasta fork activation while deriving source blocks".to_string(),
+            )
+        })?;
+    let proposal_timestamp = proposal.timestamp.to::<u64>();
+    let mut parent = ParentBlockContext {
+        timestamp: parent_header.timestamp,
+        gas_limit: parent_header.gas_limit,
+        block_number: parent_header.number,
+        anchor_block_number: manifest
+            .prover_data
+            .last_anchor_block_number
+            .unwrap_or_default(),
+    };
+    let meta = ProposalMetadata {
+        proposal_timestamp,
+        origin_block_number: proposal.originBlockNumber.to::<u64>(),
+        proposer: proposal.proposer,
+        chain_id: manifest.chain_spec.chain_id,
+    };
+    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
+        chain_spec,
+        parent.block_number.saturating_add(1),
+        proposal_timestamp,
+    );
+    let mut blocks = Vec::with_capacity(witnesses.len());
+
+    if manifest.data_sources.len() != proposal.sources.len() {
+        return Err(RaikoError::Preflight(format!(
+            "data source count ({}) does not match proposal source count ({})",
+            manifest.data_sources.len(),
+            proposal.sources.len()
+        )));
+    }
+
+    for (source_index, source) in proposal.sources.iter().enumerate() {
+        let source_manifest = prepare_source_manifest_with_max_blocks(
+            source,
+            manifest.data_sources.get(source_index),
+            parent,
+            meta,
+            fork_timestamp,
+            max_blocks,
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to prepare Shasta derivation source {source_index}: {err}"
+            ))
+        })?;
+
+        for block in source_manifest.blocks {
+            parent = ParentBlockContext {
+                timestamp: block.timestamp,
+                gas_limit: block.gas_limit.saturating_add(ANCHOR_GAS_LIMIT),
+                block_number: parent.block_number + 1,
+                anchor_block_number: block.anchor_block_number,
+            };
+            blocks.push(block);
+        }
+    }
+
+    if blocks.len() != witnesses.len() {
+        return Err(RaikoError::Preflight(format!(
+            "witness count ({}) does not match derived manifest block count ({})",
+            witnesses.len(),
+            blocks.len()
+        )));
+    }
+
+    Ok(Some(blocks))
 }
 
 fn build_preflight_guest_input(
@@ -1022,7 +1144,7 @@ mod tests {
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
         ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
-        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
+        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs, WitnessHeader,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -1073,7 +1195,16 @@ mod tests {
             {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
-            Ok(vec![ExecutionWitness::default()])
+            let parent_header = Header {
+                number: self.block.header.number.saturating_sub(1),
+                timestamp: self.block.header.timestamp.saturating_sub(1),
+                gas_limit: self.block.header.gas_limit,
+                ..Default::default()
+            };
+            Ok(vec![ExecutionWitness {
+                headers: vec![WitnessHeader::from_header(parent_header)],
+                ..Default::default()
+            }])
         }
 
         async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -1518,7 +1649,7 @@ mod tests {
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
             blobSlice: BlobSlice {
-                blobHashes: vec![B256::from([0x44; 32])],
+                blobHashes: Vec::new(),
                 offset: 0u32.try_into().expect("fits in uint24"),
                 timestamp: 777u64.try_into().expect("fits in uint48"),
             },

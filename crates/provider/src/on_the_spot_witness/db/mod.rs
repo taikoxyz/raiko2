@@ -105,6 +105,12 @@ impl<D> PreflightDb<D> {
             .map(|(address, keys)| (*address, keys.iter().copied().collect()))
             .collect()
     }
+
+    /// Returns true when execution accessed historical block hashes.
+    #[must_use]
+    pub fn has_block_hash_accesses(&self) -> bool {
+        !self.block_hash_numbers.is_empty()
+    }
 }
 
 impl<N: Network, P: Provider<N>> PreflightDb<ProviderDb<N, P>> {

@@ -1,26 +1,45 @@
-use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_block::{
+    config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
+    derived_block::{DerivedBlockExecutionOutcome, execute_derived_block},
+};
 use alethia_reth_primitives::addresses::{TAIKO_GOLDEN_TOUCH_ADDRESS, get_treasury_address};
 use alloy::{
-    consensus::Header,
+    consensus::{
+        Header,
+        proofs::{calculate_ommers_root, calculate_transaction_root, calculate_withdrawals_root},
+        transaction::{Recovered, SignerRecoverable},
+    },
     eips::BlockNumberOrTag,
     primitives::{Address, B256, Bytes},
     providers::Provider as AlloyProvider,
 };
+use anyhow::Context;
 use futures::{StreamExt, stream};
 use raiko2_primitives::{
-    ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessHeader, WitnessStateNode,
-    chain_spec::SupportedChainSpecs,
+    ChainSpec, ExecutionWitness, RaikoError, RaikoResult, StatelessInput, WitnessHeader,
+    WitnessStateNode, chain_spec::SupportedChainSpecs,
 };
+use raiko2_protocol_shasta::shasta::manifest::BlockManifest;
+use reth_ethereum_primitives::{Block as RethBlock, BlockBody as RethBlockBody, TransactionSigned};
+use reth_evm::{ConfigureEvm, execute::Executor};
+use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use serde::{Deserialize, Deserializer};
-use std::{sync::Arc, time::Instant};
-use tracing::info;
+use std::{collections::HashSet, sync::Arc, time::Instant};
+use tracing::{debug, info};
 
-use crate::on_the_spot_witness::execution_witness;
+use crate::on_the_spot_witness::{PreflightDb, ProviderConfig, ProviderDb, execution_witness};
 
 use super::{GethL2Provider, GethLocalWitnessL2Provider, RethL2Provider, RpcL2Provider};
 
 const DEFAULT_WITNESS_BATCH_SIZE: usize = 2;
 const DEFAULT_SYSTEM_PROOF_BATCH_SIZE: usize = 64;
+
+type CandidateDb = PreflightDb<ProviderDb<alloy::network::Ethereum, alloy::providers::DynProvider>>;
+
+#[derive(Debug, Default)]
+struct CandidateSupplement {
+    ancestor_headers: Vec<WitnessHeader>,
+}
 
 #[derive(Debug, Clone, Default)]
 struct TaikoSystemProofTargets {
@@ -158,6 +177,357 @@ fn system_proof_batch_size() -> usize {
         .unwrap_or(DEFAULT_SYSTEM_PROOF_BATCH_SIZE)
 }
 
+fn decode_manifest_transactions(
+    expected_block: &BlockManifest,
+) -> RaikoResult<Vec<TransactionSigned>> {
+    expected_block
+        .transactions
+        .iter()
+        .map(|transaction| {
+            alloy_rlp::decode_exact(alloy_rlp::encode(transaction)).map_err(|err| {
+                RaikoError::Provider(format!(
+                    "failed to decode Shasta manifest transaction: {err}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn recovered_manifest_transactions(
+    transactions: Vec<TransactionSigned>,
+) -> Vec<Recovered<TransactionSigned>> {
+    transactions
+        .into_iter()
+        .map(|transaction| {
+            let signer = transaction.recover_signer().unwrap_or(Address::ZERO);
+            Recovered::new_unchecked(transaction, signer)
+        })
+        .collect()
+}
+
+fn parent_header_from_witness(input: &StatelessInput) -> RaikoResult<SealedHeader> {
+    input
+        .witness
+        .headers
+        .last()
+        .and_then(|header| {
+            header
+                .full_header()
+                .cloned()
+                .map(|full_header| SealedHeader::new(full_header, header.hash))
+        })
+        .ok_or_else(|| {
+            RaikoError::Provider(format!(
+                "missing parent header while supplementing Shasta witness for block {}",
+                input.block.header.number
+            ))
+        })
+}
+
+fn canonical_anchor_tx(input: &StatelessInput) -> RaikoResult<Recovered<TransactionSigned>> {
+    let anchor_tx = input
+        .block
+        .body
+        .transactions()
+        .next()
+        .cloned()
+        .ok_or_else(|| {
+            RaikoError::Provider(format!(
+                "missing anchor transaction while supplementing Shasta witness for block {}",
+                input.block.header.number
+            ))
+        })?;
+    reth_primitives_traits::SignedTransaction::try_into_recovered(anchor_tx).map_err(|_| {
+        RaikoError::Provider(format!(
+            "failed to recover anchor transaction for block {}",
+            input.block.header.number
+        ))
+    })
+}
+
+fn candidate_block_env(input: &StatelessInput) -> RaikoResult<TaikoNextBlockEnvAttributes> {
+    Ok(TaikoNextBlockEnvAttributes {
+        timestamp: input.block.header.timestamp,
+        suggested_fee_recipient: input.block.header.beneficiary,
+        prev_randao: input.block.header.mix_hash,
+        gas_limit: input.block.header.gas_limit,
+        extra_data: input.block.header.extra_data.clone(),
+        base_fee_per_gas: input.block.header.base_fee_per_gas.ok_or_else(|| {
+            RaikoError::Provider(format!(
+                "missing base fee while supplementing Shasta witness for block {}",
+                input.block.header.number
+            ))
+        })?,
+    })
+}
+
+fn build_candidate_block(
+    parent_header: &SealedHeader,
+    anchor_tx: Recovered<TransactionSigned>,
+    transactions: Vec<TransactionSigned>,
+    block_env: TaikoNextBlockEnvAttributes,
+) -> RecoveredBlock<RethBlock> {
+    let mut block_transactions = Vec::with_capacity(transactions.len() + 1);
+    let mut senders = Vec::with_capacity(block_transactions.capacity());
+
+    senders.push(anchor_tx.signer());
+    block_transactions.push(anchor_tx.into_inner());
+
+    for recovered in recovered_manifest_transactions(transactions) {
+        senders.push(recovered.signer());
+        block_transactions.push(recovered.into_inner());
+    }
+
+    let body = RethBlockBody {
+        transactions: block_transactions,
+        ommers: Vec::default(),
+        withdrawals: Some(Vec::default().into()),
+    };
+    let header = Header {
+        parent_hash: parent_header.hash(),
+        number: parent_header.number + 1,
+        timestamp: block_env.timestamp,
+        beneficiary: block_env.suggested_fee_recipient,
+        gas_limit: block_env.gas_limit,
+        base_fee_per_gas: Some(block_env.base_fee_per_gas),
+        mix_hash: block_env.prev_randao,
+        extra_data: block_env.extra_data,
+        transactions_root: calculate_transaction_root(body.transactions.as_slice()),
+        ommers_hash: calculate_ommers_root(body.ommers.as_slice()),
+        withdrawals_root: body
+            .withdrawals
+            .as_ref()
+            .map(|withdrawals| calculate_withdrawals_root(withdrawals.as_slice())),
+        ..Default::default()
+    };
+
+    RecoveredBlock::new_unhashed(RethBlock { header, body }, senders)
+}
+
+fn transaction_sequences_match(
+    left: &[Recovered<TransactionSigned>],
+    right: &[TransactionSigned],
+) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| alloy_rlp::encode(left.inner()) == alloy_rlp::encode(right))
+}
+
+async fn merge_candidate_witness(
+    witness: &mut ExecutionWitness,
+    mut candidate: CandidateDb,
+    parent_hash: B256,
+) -> RaikoResult<CandidateSupplement> {
+    let ancestor_headers = if candidate.has_block_hash_accesses() {
+        candidate
+            .ancestor_proof(parent_hash)
+            .await
+            .map_err(|err| {
+                RaikoError::Provider(format!("failed to build candidate ancestor proof: {err:#}"))
+            })?
+            .into_iter()
+            .map(|header| WitnessHeader::from_header(header.into()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let (state_trie, storage_tries) = candidate.state_proof().await.map_err(|err| {
+        RaikoError::Provider(format!("failed to build candidate state proof: {err:#}"))
+    })?;
+
+    let mut state = std::mem::take(&mut witness.state);
+    state.extend(
+        state_trie
+            .rlp_nodes()
+            .into_iter()
+            .map(WitnessStateNode::from_bytes),
+    );
+    for storage_trie in storage_tries.values() {
+        state.extend(
+            storage_trie
+                .rlp_nodes()
+                .into_iter()
+                .map(WitnessStateNode::from_bytes),
+        );
+    }
+    witness.state = ExecutionWitness::canonicalize_state_nodes(state);
+
+    let mut codes = std::mem::take(&mut witness.codes);
+    codes.extend(candidate.contracts().values().cloned());
+    let mut seen = HashSet::new();
+    codes.retain(|code| seen.insert(alloy::primitives::keccak256(code.as_ref())));
+    witness.codes = codes;
+
+    Ok(CandidateSupplement { ancestor_headers })
+}
+
+fn merge_witness_headers(
+    witness: &mut ExecutionWitness,
+    headers: impl IntoIterator<Item = WitnessHeader>,
+) -> RaikoResult<usize> {
+    let mut added = 0usize;
+    let mut witness_headers = std::mem::take(&mut witness.headers);
+
+    for header in headers {
+        match witness_headers
+            .iter_mut()
+            .find(|existing| existing.number == header.number)
+        {
+            Some(existing) if existing.hash != header.hash => {
+                return Err(RaikoError::Provider(format!(
+                    "conflicting ancestor header for block {} while supplementing Shasta witness",
+                    header.number
+                )));
+            }
+            Some(existing) => {
+                if existing.full_header().is_none() && header.full_header().is_some() {
+                    *existing = header;
+                }
+            }
+            None => {
+                witness_headers.push(header);
+                added += 1;
+            }
+        }
+    }
+
+    witness.headers = ExecutionWitness::canonicalize_headers(witness_headers);
+    Ok(added)
+}
+
+fn new_candidate_db(provider: alloy::providers::DynProvider, parent_hash: B256) -> CandidateDb {
+    PreflightDb::new(ProviderDb::new(
+        provider,
+        ProviderConfig::default(),
+        parent_hash,
+    ))
+}
+
+async fn execute_candidate_block(
+    evm_config: Arc<TaikoEvmConfig>,
+    provider: alloy::providers::DynProvider,
+    parent_header: SealedHeader,
+    derived_block: RecoveredBlock<RethBlock>,
+    block_number: u64,
+) -> RaikoResult<DerivedBlockExecutionOutcome> {
+    let parent_hash = parent_header.hash();
+    let db = new_candidate_db(provider, parent_hash);
+    tokio::task::spawn_blocking(move || {
+        execute_derived_block(evm_config.as_ref(), &parent_header, &derived_block, db)
+    })
+    .await
+    .map_err(|err| {
+        RaikoError::Provider(format!(
+            "candidate execution join failed for block {block_number}: {err}",
+        ))
+    })?
+    .map_err(|err| {
+        RaikoError::Provider(format!(
+            "candidate execution failed for block {block_number}: {err}",
+        ))
+    })
+}
+
+async fn replay_candidate_db(
+    evm_config: Arc<TaikoEvmConfig>,
+    provider: alloy::providers::DynProvider,
+    parent_hash: B256,
+    derived_block: RecoveredBlock<RethBlock>,
+    block_number: u64,
+) -> RaikoResult<CandidateDb> {
+    let db = new_candidate_db(provider, parent_hash);
+    tokio::task::spawn_blocking(move || {
+        let executor = evm_config.executor(db);
+        let mut database_capture = None;
+        let result = executor.execute_with_state_closure(&derived_block, |state| {
+            database_capture = Some(state.database.clone());
+        });
+        result.map(|_| database_capture)
+    })
+    .await
+    .map_err(|err| {
+        RaikoError::Provider(format!(
+            "candidate witness replay join failed for block {block_number}: {err}",
+        ))
+    })?
+    .map_err(|err| {
+        RaikoError::Provider(format!(
+            "candidate witness replay failed for block {block_number}: {err}",
+        ))
+    })?
+    .context("candidate witness replay did not capture preflight db")
+    .map_err(|err| {
+        RaikoError::Provider(format!(
+            "candidate witness replay failed for block {block_number}: {err}",
+        ))
+    })
+}
+
+async fn supplement_shasta_candidate_witness(
+    provider: alloy::providers::DynProvider,
+    evm_config: Arc<TaikoEvmConfig>,
+    expected_block: &BlockManifest,
+    input: &mut StatelessInput,
+    chain_id: u64,
+) -> RaikoResult<Option<CandidateSupplement>> {
+    let candidate_tx_count = expected_block.transactions.len().saturating_add(1);
+    let canonical_transactions = input.block.body.transactions().cloned().collect::<Vec<_>>();
+    let canonical_tx_count = canonical_transactions.len();
+    if candidate_tx_count < canonical_tx_count {
+        return Err(RaikoError::Provider(format!(
+            "Shasta manifest has fewer candidate transactions ({candidate_tx_count}) than canonical block {} ({canonical_tx_count})",
+            input.block.header.number
+        )));
+    }
+    if candidate_tx_count == canonical_tx_count {
+        return Ok(None);
+    }
+
+    let parent_header = parent_header_from_witness(input)?;
+    let parent_hash = parent_header.hash();
+    let anchor_tx = canonical_anchor_tx(input)?;
+    let block_env = candidate_block_env(input)?;
+    let transactions = decode_manifest_transactions(expected_block)?;
+    let derived_block = build_candidate_block(&parent_header, anchor_tx, transactions, block_env);
+    let block_number = input.block.header.number;
+
+    let outcome = execute_candidate_block(
+        Arc::clone(&evm_config),
+        provider.clone(),
+        parent_header,
+        derived_block.clone(),
+        block_number,
+    )
+    .await?;
+    if !transaction_sequences_match(&outcome.committed_transactions, &canonical_transactions) {
+        return Err(RaikoError::Provider(format!(
+            "candidate execution for block {block_number} did not reproduce canonical transactions: committed={}, canonical={canonical_tx_count}",
+            outcome.committed_transactions.len(),
+        )));
+    }
+
+    let candidate_db = replay_candidate_db(
+        evm_config,
+        provider,
+        parent_hash,
+        derived_block,
+        block_number,
+    )
+    .await?;
+    let supplement = merge_candidate_witness(&mut input.witness, candidate_db, parent_hash).await?;
+    debug!(
+        chain_id,
+        block_number,
+        candidate_tx_count,
+        canonical_tx_count,
+        "supplemented Shasta candidate witness"
+    );
+    Ok(Some(supplement))
+}
+
 impl RpcL2Provider {
     fn resolved_l2_chain_spec(&self, chain_id: u64) -> Option<ChainSpec> {
         self.chain_spec
@@ -216,6 +586,87 @@ impl RpcL2Provider {
             .into_iter()
             .map(|(_, witness)| witness)
             .collect())
+    }
+
+    pub(super) async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        if expected_blocks.len() != inputs.len() {
+            return Err(RaikoError::Provider(format!(
+                "expected block count ({}) does not match witness count ({})",
+                expected_blocks.len(),
+                inputs.len()
+            )));
+        }
+
+        let chain_id = self.witness_provider.get_chain_id().await.map_err(|e| {
+            RaikoError::RPC(format!(
+                "eth_chainId failed while supplementing Shasta candidate witnesses: {e}"
+            ))
+        })?;
+        let taiko_chain_spec = self
+            .resolved_l2_chain_spec(chain_id)
+            .filter(ChainSpec::is_taiko)
+            .ok_or_else(|| {
+                RaikoError::Provider(format!(
+                    "cannot supplement Shasta candidate witnesses for unsupported chain_id {chain_id}"
+                ))
+            })?
+            .to_taiko_chain_spec()
+            .map_err(|e| {
+                RaikoError::Provider(format!(
+                    "cannot build Taiko EVM config for chain_id {chain_id}: {e}"
+                ))
+            })?;
+        let evm_config = Arc::new(TaikoEvmConfig::new(taiko_chain_spec));
+        let started_at = Instant::now();
+        let mut supplemented_blocks = 0usize;
+        let mut supplemented_ancestor_headers = 0usize;
+        let first_block_number = inputs.first().map(|input| input.block.header.number);
+        let mut initial_ancestor_headers = Vec::new();
+
+        for (expected_block, input) in expected_blocks.iter().zip(inputs.iter_mut()) {
+            let Some(supplement) = supplement_shasta_candidate_witness(
+                self.witness_provider.clone(),
+                Arc::clone(&evm_config),
+                expected_block,
+                input,
+                chain_id,
+            )
+            .await?
+            else {
+                continue;
+            };
+
+            if let Some(first_block_number) = first_block_number {
+                initial_ancestor_headers.extend(
+                    supplement
+                        .ancestor_headers
+                        .into_iter()
+                        .filter(|header| header.number < first_block_number),
+                );
+            }
+            supplemented_blocks += 1;
+        }
+
+        if let Some(first_input) = inputs.first_mut() {
+            supplemented_ancestor_headers =
+                merge_witness_headers(&mut first_input.witness, initial_ancestor_headers)?;
+        }
+
+        if supplemented_blocks > 0 {
+            info!(
+                chain_id,
+                block_count = inputs.len(),
+                supplemented_blocks,
+                supplemented_ancestor_headers,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "supplemented Shasta source-only candidate witnesses"
+            );
+        }
+        Ok(())
     }
 
     fn build_system_proof_requests(
@@ -737,5 +1188,61 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn merge_witness_headers_preserves_full_headers_without_duplicates() {
+        let full_header = sample_header(7);
+        let compact_header = WitnessHeader::from_compact_header(&full_header);
+        let mut witness = ExecutionWitness {
+            headers: vec![compact_header],
+            ..Default::default()
+        };
+
+        let added = merge_witness_headers(
+            &mut witness,
+            vec![
+                WitnessHeader::from_header(full_header),
+                WitnessHeader::from_header(sample_header(6)),
+            ],
+        )
+        .expect("merge headers");
+
+        assert_eq!(added, 1);
+        assert_eq!(
+            witness
+                .headers
+                .iter()
+                .map(|header| header.number)
+                .collect::<Vec<_>>(),
+            vec![6, 7]
+        );
+        assert!(
+            witness
+                .headers
+                .iter()
+                .find(|header| header.number == 7)
+                .expect("header 7")
+                .full_header()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn merge_witness_headers_rejects_conflicting_hashes() {
+        let mut witness = ExecutionWitness {
+            headers: vec![WitnessHeader::from_header(sample_header(7))],
+            ..Default::default()
+        };
+        let mut conflicting_header = sample_header(7);
+        conflicting_header.parent_hash = B256::repeat_byte(0x22);
+
+        let err = merge_witness_headers(
+            &mut witness,
+            vec![WitnessHeader::from_header(conflicting_header)],
+        )
+        .expect_err("conflicting header should fail");
+
+        assert!(err.to_string().contains("conflicting ancestor header"));
     }
 }

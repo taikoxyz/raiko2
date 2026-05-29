@@ -5,9 +5,9 @@ use alloy::{
 };
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_rpc_types_eth::Header as AlloyRpcHeader;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult, StatelessInput};
 use raiko2_protocol::{BlobProofType, InputDataSource};
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::shasta::{ShastaEventData, manifest::BlockManifest};
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
@@ -51,6 +51,12 @@ pub(crate) trait L2Provider: Send + Sync {
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>>;
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()>;
 }
 
 #[derive(Clone)]
@@ -133,6 +139,16 @@ impl L2Provider for RethL2Provider {
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
     }
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        self.rpc
+            .supplement_shasta_candidate_witnesses(expected_blocks, inputs)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -152,6 +168,16 @@ impl L2Provider for GethL2Provider {
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
     }
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        self.rpc
+            .supplement_shasta_candidate_witnesses(expected_blocks, inputs)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -170,6 +196,16 @@ impl L2Provider for GethLocalWitnessL2Provider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
+    }
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        self.rpc
+            .supplement_shasta_candidate_witnesses(expected_blocks, inputs)
+            .await
     }
 }
 
@@ -367,6 +403,16 @@ impl Provider for NetworkProvider {
         blob_proof_type: BlobProofType,
     ) -> RaikoResult<Vec<InputDataSource>> {
         self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
+            .await
+    }
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        self.l2_provider
+            .supplement_shasta_candidate_witnesses(expected_blocks, inputs)
             .await
     }
 }

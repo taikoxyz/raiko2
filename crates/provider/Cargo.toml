@@ -15,6 +15,7 @@ alloy-primitives.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-rlp.workspace = true
 alloy-trie.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true

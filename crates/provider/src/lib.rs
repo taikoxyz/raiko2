@@ -9,9 +9,9 @@ pub mod rpc;
 use alloy::consensus::Header;
 use alloy_primitives::{Address, map::AddressMap};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult, StatelessInput};
 use raiko2_protocol::{BlobProofType, InputDataSource};
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::shasta::{ShastaEventData, manifest::BlockManifest};
 use reth_ethereum_primitives::Block;
 
 pub use network::{L2ProviderKind, NetworkProvider, fetch_l2_blocks, fetch_l2_headers};
@@ -64,6 +64,33 @@ pub trait Provider: Send + Sync {
         Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
             "provider does not support canonical Shasta data source lookup".to_string(),
         ))
+    }
+
+    async fn supplement_shasta_candidate_witnesses(
+        &self,
+        expected_blocks: &[BlockManifest],
+        inputs: &mut [StatelessInput],
+    ) -> RaikoResult<()> {
+        if expected_blocks.len() != inputs.len() {
+            return Err(RaikoError::Provider(format!(
+                "expected block count ({}) does not match witness count ({})",
+                expected_blocks.len(),
+                inputs.len()
+            )));
+        }
+        if expected_blocks
+            .iter()
+            .zip(inputs.iter())
+            .any(|(expected_block, input)| {
+                expected_block.transactions.len().saturating_add(1)
+                    != input.block.body.transactions.len()
+            })
+        {
+            return Err(RaikoError::Provider(
+                "provider does not support Shasta candidate witness supplementation".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

@@ -4,7 +4,7 @@ use alloy_primitives::B256;
 use std::sync::Arc;
 
 use crate::ProofType;
-use crate::chain_spec::TaikoChainSpec;
+use crate::chain_spec::{ChainSpec, TaikoChainSpec};
 use crate::proof::ProverConfig;
 use reth_chainspec::ChainSpec as RethChainSpec;
 use serde::{Deserialize, Serialize};
@@ -86,8 +86,10 @@ impl Default for ProofRequest {
 }
 
 /// Optional preflight-time settings that are not part of the public proof request.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PreflightOptions {
+    /// Resolved L1 chain spec from the host configuration.
+    pub l1_chain_spec: Option<ChainSpec>,
     /// When set, preflight cross-checks proposal boundary blocks against this L2 RPC.
     pub verify_checkpoint_l2_rpc: Option<String>,
     /// RPC client settings to reuse for checkpoint verification.

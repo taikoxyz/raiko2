@@ -95,9 +95,14 @@ impl NetworkProvider {
         })?;
 
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|err| format!("<failed to read response body: {err}>"));
+            let body = body.chars().take(512).collect::<String>();
             return Err(RaikoError::RPC(format!(
-                "beacon blob sidecars request failed for slot {slot}: {}",
-                response.status()
+                "beacon blob sidecars request failed for slot {slot} at {url}: {status}: {body}"
             )));
         }
 

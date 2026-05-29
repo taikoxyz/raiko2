@@ -27,6 +27,7 @@ pub(crate) fn build_context(
         raiko2_primitives::ProverConfig::default(),
     );
     context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
+    context.preflight.l1_chain_spec = Some(pair.l1_spec.clone());
     if !context.config.is_object() {
         context.config = serde_json::json!({});
     }
@@ -352,6 +353,26 @@ mod tests {
                 .as_ref()
                 .map(|cfg| cfg.retry.max_attempts),
             Some(9)
+        );
+    }
+
+    #[test]
+    fn build_context_carries_resolved_l1_chain_spec() {
+        let config = Config::default();
+        let mut pair = resolved_pair("taiko_dev", "taiko_dev_l1");
+        pair.l1_spec.beacon_rpc = Some("https://l1beacon.internal.taiko.xyz/".to_string());
+
+        let context = build_context(&config, &pair, ProofType::Sp1).expect("context");
+
+        let l1_spec = context
+            .preflight
+            .l1_chain_spec
+            .as_ref()
+            .expect("resolved l1 chain spec");
+        assert_eq!(l1_spec.chain_id, pair.l1_spec.chain_id);
+        assert_eq!(
+            l1_spec.beacon_rpc.as_deref(),
+            Some("https://l1beacon.internal.taiko.xyz/")
         );
     }
 }

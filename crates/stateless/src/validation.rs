@@ -5,14 +5,14 @@ use crate::{
 };
 use alethia_reth_block::{
     config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
-    derived_block::{assemble_filtered_block, execute_derived_block},
+    derived_block::{assemble_filtered_block, execute_derived_block_with_expected_difficulty},
 };
 use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
 use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
-use alloy_primitives::{B256, map::AddressMap};
+use alloy_primitives::{B256, U256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -233,6 +233,7 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     callers: AddressMap<TrieAccount>,
     chain_spec: &Arc<TaikoChainSpec>,
     evm_config: &TaikoEvmConfig,
+    expected_difficulty: Option<U256>,
 ) -> Result<FilteredBlockExecutionOutcome, StatelessValidationError> {
     let parent_header = sealed_parent_header(ancestor_headers)?;
     let pre_state_root = determine_pre_state_root(ancestor_headers)?;
@@ -244,8 +245,14 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
     trie.append_callers(callers);
 
     let db = WitnessDatabase::new(&trie, bytecode, ancestor_hashes);
-    let execution_outcome = execute_derived_block(evm_config, &parent_header, &derived_block, db)
-        .map_err(|err| map_block_execution_error(&err))?;
+    let execution_outcome = execute_derived_block_with_expected_difficulty(
+        evm_config,
+        &parent_header,
+        &derived_block,
+        expected_difficulty,
+        db,
+    )
+    .map_err(|err| map_block_execution_error(&err))?;
     let state_root = trie.calculate_state_root(execution_outcome.hashed_state.clone())?;
     let filtered_block = assemble_filtered_block(
         evm_config,
@@ -770,6 +777,7 @@ mod tests {
             Default::default(),
             &chain_spec,
             &evm_config,
+            None,
         )
         .expect("reconstruction should succeed while skipping invalid nonce tx");
 
@@ -842,6 +850,7 @@ mod tests {
             Default::default(),
             &chain_spec,
             &evm_config,
+            None,
         )
         .expect("reconstruction should succeed while skipping unrecoverable tx");
 

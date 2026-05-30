@@ -882,6 +882,7 @@ pub fn prove_shasta_proposal_for_proof_type(
                 stateless_input.accounts.clone(),
                 &runtime.chain_spec,
                 &runtime.evm_config,
+                Some(stateless_input.block.header.difficulty),
             )
             .map_err(|e| anyhow::anyhow!(e))
             .with_context(|| format!("failed to reconstruct Shasta block at index {index}"))?;

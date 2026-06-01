@@ -106,7 +106,7 @@
                 "RISC0": "0x0000000000000000000000000000000000000000"
             }
         },
-        "genesis_time": 1777785000,
+        "genesis_time": 1779670900,
         "seconds_per_slot": 12,
         "is_taiko": false
     },
@@ -148,6 +148,9 @@
         "chain_id": 167001,
         "max_spec_id": "UNZEN",
         "hard_forks": {
+            "SHASTA": {
+                "Timestamp": 0
+            },
             "UNZEN": {
                 "Timestamp": 1777787739
             },

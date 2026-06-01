@@ -2,11 +2,9 @@ use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
-use alloy_consensus::{
-    Header,
-    transaction::{SignerRecoverable, Transaction as _},
-};
-use alloy_primitives::{B256, Bytes};
+use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
+use alloy_consensus::{Header, transaction::Transaction as _};
+use alloy_primitives::{Address, B256, Bytes};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
@@ -115,6 +113,12 @@ where
         let manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
         let tx_lists = derive_preflight_tx_lists(&chain_spec, &manifest, &blocks)?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            block_count = block_numbers.len(),
+            tx_list_count = tx_lists.as_ref().map(Vec::len).unwrap_or_default(),
+            "derived shasta tx-list witness inputs"
+        );
         let witnesses = fetch_preflight_witnesses(
             provider,
             &chain_spec,
@@ -123,8 +127,22 @@ where
             tx_lists.as_deref(),
         )
         .await?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            witness_count = witnesses.len(),
+            first_witness_block = witnesses.first().map(|witness| witness.block.header.number),
+            last_witness_block = witnesses.last().map(|witness| witness.block.header.number),
+            "shasta tx-list witnesses ready"
+        );
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            witness_count = input.witnesses.len(),
+            proposal_ancestor_headers = input.proposal_ancestor_headers.len(),
+            proposal_state_nodes = input.proposal_state_nodes.len(),
+            "shasta guest input ready after tx-list preflight"
+        );
         if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
             let rpc_client_config = ctx
                 .preflight
@@ -404,16 +422,8 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-fn collect_block_signers(
-    block: &reth_ethereum_primitives::Block,
-) -> Vec<alloy_primitives::Address> {
-    let mut signers = Vec::new();
-    for tx in block.body.transactions() {
-        if let Ok(signer) = tx.recover_signer() {
-            signers.push(signer);
-        }
-    }
-    signers
+fn collect_preflight_account_targets(_block: &reth_ethereum_primitives::Block) -> Vec<Address> {
+    vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]
 }
 
 async fn fetch_preflight_chunk<P: Provider>(
@@ -446,11 +456,14 @@ async fn fetch_preflight_chunk<P: Provider>(
         }?;
         Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
     };
-    let all_signers = blocks.iter().map(collect_block_signers).collect::<Vec<_>>();
+    let account_targets = blocks
+        .iter()
+        .map(collect_preflight_account_targets)
+        .collect::<Vec<_>>();
     let accounts = async {
         let started_at = Instant::now();
         let accounts = provider
-            .batch_accounts(&block_numbers, &all_signers)
+            .batch_accounts(&block_numbers, &account_targets)
             .await?;
         Ok::<_, RaikoError>((accounts, started_at.elapsed().as_millis()))
     };
@@ -635,6 +648,10 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = &ctx.preflight.resolved_l1_chain_spec {
+        return Ok(chain_spec.clone());
+    }
+
     SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
         .ok_or_else(|| {
@@ -1159,7 +1176,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AnchorV4Checkpoint, Preflight, ShastaSpec, anchorV4Call};
+    use super::{
+        AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call,
+    };
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
     use alloy_eips::eip4844::BYTES_PER_BLOB;
     use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
@@ -1193,6 +1212,7 @@ mod tests {
         witness_calls: Arc<AtomicUsize>,
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
+        account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
     }
 
     #[async_trait::async_trait]
@@ -1207,8 +1227,9 @@ mod tests {
         async fn batch_accounts(
             &self,
             _blocks: &[u64],
-            _accounts: &[Vec<Address>],
+            accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
+            *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
             Ok(vec![AddressMap::default()])
         }
 
@@ -1379,6 +1400,7 @@ mod tests {
             witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
+            account_inputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1462,6 +1484,27 @@ mod tests {
             .expect("tx list witness inputs lock");
         assert_eq!(tx_lists.len(), 1);
         assert!(!tx_lists[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn preflight_fetches_only_anchor_account_state() {
+        let mut provider = sample_provider();
+        add_inline_shasta_source(&mut provider);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let account_inputs = provider.account_inputs.lock().expect("account inputs lock");
+        assert_eq!(
+            &*account_inputs,
+            &[vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]]
+        );
     }
 
     #[tokio::test]

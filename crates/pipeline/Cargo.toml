@@ -19,6 +19,7 @@ raiko2-provider.workspace = true
 reth-ethereum-primitives.workspace = true
 alethia-reth-block.workspace = true
 alethia-reth-consensus.workspace = true
+alethia-reth-primitives.workspace = true
 
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true

@@ -38,6 +38,7 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         network: "taiko_hoodi".to_string(),
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
+        beacon_rpc: None,
         l2_rpc: None,
         l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
@@ -63,6 +64,8 @@ pub struct NetworkPairConfig {
     pub l1_network: String,
     #[serde(default)]
     pub l1_rpc: Option<String>,
+    #[serde(default)]
+    pub beacon_rpc: Option<String>,
     #[serde(default)]
     pub l2_rpc: Option<String>,
     #[serde(default)]
@@ -251,6 +254,18 @@ impl RpcConfig {
                     pair.l1_rpc
                 );
             }
+            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc {
+                if !is_valid_url(beacon_rpc) {
+                    bail!(
+                        "{}: beacon_rpc = '{}'",
+                        validation::INVALID_RPC_URL,
+                        beacon_rpc
+                    );
+                }
+            }
+            if pair.l1_spec.seconds_per_slot == 0 {
+                bail!("{}: L1 chain spec seconds_per_slot must be > 0", pair.key);
+            }
             if !is_valid_url(&pair.l2_rpc) {
                 bail!(
                     "{}: l2_rpc = '{}'",
@@ -350,9 +365,12 @@ fn resolve_pair(
     let l2_spec = known_specs
         .get_chain_spec(&pair.network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L2 network '{}'", pair.network))?;
-    let l1_spec = known_specs
+    let mut l1_spec = known_specs
         .get_chain_spec(&pair.l1_network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
+    if let Some(beacon_rpc) = &pair.beacon_rpc {
+        l1_spec.beacon_rpc = Some(beacon_rpc.clone());
+    }
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 
     Ok(ResolvedNetworkPair {

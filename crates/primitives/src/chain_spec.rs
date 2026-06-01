@@ -425,6 +425,13 @@ impl<'de> Deserialize<'de> for ChainSpec {
 }
 
 impl ChainSpec {
+    /// Removes a verifier proof type from every configured fork.
+    pub fn remove_fork_verifier_proof_type(&mut self, proof_type: ProofType) {
+        for fork_verifier in self.verifier_address_forks.values_mut() {
+            fork_verifier.remove(&proof_type);
+        }
+    }
+
     /// Creates a new configuration consisting of only one specification ID.
     #[must_use]
     pub fn new_single(

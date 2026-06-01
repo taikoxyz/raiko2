@@ -142,9 +142,9 @@ impl GuestInput {
 
 fn remove_guest_incompatible_verifiers(witnesses: &mut [StatelessInput]) {
     for witness in witnesses {
-        for verifiers in witness.chain_spec.verifier_address_forks.values_mut() {
-            verifiers.remove(&ProofType::SgxGeth);
-        }
+        witness
+            .chain_spec
+            .remove_fork_verifier_proof_type(ProofType::SgxGeth);
     }
 }
 

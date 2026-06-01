@@ -14,10 +14,24 @@ raiko2-primitives.workspace = true
 raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 
+# L1 precompile cache + context globals — depended on by the scaffold module
+# `l1_precompiles`. After ports are completed, this is used to populate the
+# precompile caches before EVM re-execution in both host and guest paths.
+alethia-reth-evm.workspace = true
+
 reth-ethereum-primitives.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
+
+# L1STATICCALL re-execution: WitnessDb adapter built on raiko2's SparseState (MPT walks)
+# + reth_revm::Database (for revm execution) + revm crates for re-execution machinery.
+raiko2-stateless.workspace = true
+reth-revm.workspace = true
+reth-errors.workspace = true
+revm.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
@@ -26,3 +40,10 @@ bincode.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+serial_test = "3"
+# Test-only MPT builder for the L1STATICCALL revm re-execution fixtures (7 ported tests).
+# Reuses raiko2's pinned risc0_ethereum_trie via CachedTrie so the witness state nodes we
+# construct in tests share the exact byte format SparseState materializes from at runtime.
+risc0-ethereum-trie.workspace = true

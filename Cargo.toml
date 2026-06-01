@@ -87,6 +87,7 @@ alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev
     "full",
 ] }
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "7679835db47b3fbb859dd2c73423256fd42ebff5", default-features = false }
+alethia-reth-evm = { git = "https://github.com/taikoxyz/alethia-reth", rev = "7679835db47b3fbb859dd2c73423256fd42ebff5", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
 reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
@@ -212,3 +213,13 @@ c-kzg = { version = "2.1.7", default-features = false, features = [
     "std",
 ] }
 kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", default-features = false }
+
+# Temporary: redirect the alethia-reth deps to the companion PR branch
+# (taikoxyz/alethia-reth#195) until it merges. Drop this patch and bump the revs above to
+# the merge commit once it lands.
+[patch."https://github.com/taikoxyz/alethia-reth"]
+alethia-reth-block = { git = "https://github.com/jmadibekov/alethia-reth", rev = "83659a1a2442c071cff0c276146f9459de7bb42f" }
+alethia-reth-chainspec = { git = "https://github.com/jmadibekov/alethia-reth", rev = "83659a1a2442c071cff0c276146f9459de7bb42f" }
+alethia-reth-consensus = { git = "https://github.com/jmadibekov/alethia-reth", rev = "83659a1a2442c071cff0c276146f9459de7bb42f" }
+alethia-reth-evm = { git = "https://github.com/jmadibekov/alethia-reth", rev = "83659a1a2442c071cff0c276146f9459de7bb42f" }
+alethia-reth-primitives = { git = "https://github.com/jmadibekov/alethia-reth", rev = "83659a1a2442c071cff0c276146f9459de7bb42f" }

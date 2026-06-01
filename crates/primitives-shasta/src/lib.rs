@@ -9,6 +9,7 @@ mod blob;
 mod fixture;
 mod input;
 pub mod instance;
+pub mod l1_precompiles;
 mod proof;
 
 pub use anchor::{

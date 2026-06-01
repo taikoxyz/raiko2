@@ -21,8 +21,11 @@ async-trait.workspace = true
 futures.workspace = true
 itertools.workspace = true
 raiko2-primitives = { workspace = true, features = ["kzg-host"] }
+raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
+hex.workspace = true
+serde_json.workspace = true
 reth-chainspec.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-evm.workspace = true
@@ -45,6 +48,4 @@ alethia-reth-primitives.workspace = true
 
 [dev-dependencies]
 clap.workspace = true
-raiko2-primitives-shasta.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -72,8 +72,7 @@ impl<T: alloy_rlp::Decodable + alloy_rlp::Encodable> RlpTrie<T> {
 /// Represents a sparse version of the Ethereum world state.
 /// This is significantly more performant than the Reth default.
 #[derive(Debug, Clone)]
-#[allow(clippy::redundant_pub_crate)]
-pub(super) struct SparseState {
+pub struct SparseState {
     /// state MPT containing all used accounts
     state: RlpTrie<TrieAccount>,
     /// storage MPTs sorted by the hashed address of their account

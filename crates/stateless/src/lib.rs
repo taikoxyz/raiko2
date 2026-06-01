@@ -15,6 +15,7 @@ mod validation;
 mod witness_db;
 
 pub use crate::analysis::{WitnessMaterializationStats, analyze_block_with_witness_resources};
+pub use crate::sparse::SparseState;
 pub use crate::trie::StatelessTrie;
 pub use raiko2_primitives::{ExecutionWitness, StatelessValidationError};
 pub use validation::{

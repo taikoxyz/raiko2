@@ -7,9 +7,12 @@ pub mod on_the_spot_witness;
 pub mod rpc;
 
 use alloy::consensus::Header;
-use alloy_primitives::{Address, Bytes, map::AddressMap};
+use alloy_primitives::{Address, B256, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::l1_precompiles::{
+    L1StaticCallRecord, L1StaticCallWitness, L1StorageProof,
+};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
@@ -53,6 +56,30 @@ pub trait Provider: Send + Sync {
     }
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
+
+    /// Fetch EIP-1186 storage proofs for `(block, contract, slots)` requests (L1SLOAD).
+    async fn batch_l1_storage_proofs(
+        &self,
+        _requests: &[(u64, Address, Vec<B256>)],
+    ) -> RaikoResult<Vec<L1StorageProof>> {
+        Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
+            "provider does not support L1 storage proof fetching".to_string(),
+        ))
+    }
+
+    /// Fetch L1STATICCALL execution witnesses via `proof_call` for the given served-call records.
+    async fn batch_l1_staticcall_witnesses(
+        &self,
+        _records: &[L1StaticCallRecord],
+    ) -> RaikoResult<Vec<L1StaticCallWitness>> {
+        Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
+            "provider does not support L1 staticcall witness fetching".to_string(),
+        ))
+    }
+
+    /// Install live L1 fetchers (`eth_getStorageAt` / `debug_traceCall`) into the precompile
+    /// globals for the host discovery pass. No-op for providers without an L1 endpoint.
+    fn install_l1_precompile_fetchers(&self) {}
 
     async fn shasta_proposal_event(
         &self,

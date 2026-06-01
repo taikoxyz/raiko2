@@ -4,8 +4,11 @@ use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{Header, transaction::Transaction as _};
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_consensus::{
+    Header,
+    transaction::{SignerRecoverable, Transaction as _},
+};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
@@ -15,7 +18,13 @@ use raiko2_primitives::{
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{
-    GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
+    GuestInput,
+    l1_precompiles::{
+        acquire_l1_precompile_lock, clear_l1_rpc_fetcher, clear_l1_staticcall_rpc_fetcher,
+        reset_l1_precompile_state, set_l1_origin_block_id, take_l1_rpc_served_calls,
+        take_l1_staticcall_rpc_served_calls,
+    },
+    roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
@@ -28,6 +37,7 @@ use raiko2_protocol_shasta::shasta::{
 use raiko2_provider::{Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
+    collections::{HashMap, HashSet},
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     time::{Duration, Instant},
@@ -140,12 +150,15 @@ where
             "shasta tx-list witnesses ready"
         );
         validate_block_range(&witnesses, expected_proposal_id)?;
-        let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
+        let mut input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
+        discover_and_fetch_l1_precompile_data(provider, &mut input).await?;
         info!(
             proposal_id = ctx.request.proposal_id,
             witness_count = input.witnesses.len(),
             proposal_ancestor_headers = input.proposal_ancestor_headers.len(),
             proposal_state_nodes = input.proposal_state_nodes.len(),
+            l1_storage_proofs = input.l1_storage_proofs.len(),
+            l1_staticcall_witnesses = input.l1_staticcall_witnesses.len(),
             "shasta guest input ready after tx-list preflight"
         );
         if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
@@ -179,6 +192,113 @@ const fn preflight_rpc_client_config(config: &PreflightRpcClientConfig) -> RpcCl
             compute_units_per_second: config.retry.compute_units_per_second,
         },
     }
+}
+
+/// Host L1-precompile preflight: re-execute the proposal's blocks with live L1 fetchers installed
+/// to discover which L1 reads they make, fetch the matching storage proofs (`eth_getProof`) and
+/// execution witnesses (`proof_call`), and attach them to the guest input for the guest to verify.
+/// No-op when no block touches the L1 precompiles.
+///
+/// Runtime note: the discovery re-execution drives the precompile fetchers, which bridge sync→async
+/// via `block_in_place` — requires a multi-thread tokio runtime worker. The proof/witness fetch is
+/// async and runs after the precompile lock is released so the future stays `Send`.
+async fn discover_and_fetch_l1_precompile_data<P: Provider>(
+    provider: &P,
+    input: &mut GuestInput,
+) -> RaikoResult<()> {
+    let origin_block_number = input.taiko.l1_header.number;
+
+    // Discovery pass under the precompile lock (no `.await` inside, so the guard never crosses an
+    // await point). Re-execution with the fetchers installed records every L1 read.
+    let (l1sload_served, l1staticcall_served) = {
+        let _guard = acquire_l1_precompile_lock();
+        reset_l1_precompile_state();
+        set_l1_origin_block_id(origin_block_number);
+        provider.install_l1_precompile_fetchers();
+        let discovery = validate_shasta_guest_input(input);
+        clear_l1_rpc_fetcher();
+        clear_l1_staticcall_rpc_fetcher();
+        let served = (
+            take_l1_rpc_served_calls(),
+            take_l1_staticcall_rpc_served_calls(),
+        );
+        reset_l1_precompile_state();
+        discovery?;
+        served
+    };
+
+    if l1sload_served.is_empty() && l1staticcall_served.is_empty() {
+        return Ok(());
+    }
+
+    // Ensure the L1 ancestor-header window covers every block the precompiles read.
+    let min_served = l1sload_served
+        .iter()
+        .map(|(_, _, block)| U256::from_be_bytes(block.0).saturating_to::<u64>())
+        .chain(l1staticcall_served.iter().map(|record| record.block_number))
+        .min();
+    if let Some(min_served) = min_served {
+        extend_l1_ancestor_headers(provider, input, min_served, origin_block_number).await?;
+    }
+
+    if !l1sload_served.is_empty() {
+        let requests = build_l1_storage_proof_requests(&l1sload_served);
+        input.l1_storage_proofs = provider.batch_l1_storage_proofs(&requests).await?;
+    }
+    if !l1staticcall_served.is_empty() {
+        input.l1_staticcall_witnesses = provider
+            .batch_l1_staticcall_witnesses(&l1staticcall_served)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Group L1Sload served calls `(contract, slot, block)` into per-`(block, contract)` proof requests.
+fn build_l1_storage_proof_requests(
+    served: &HashSet<(Address, B256, B256)>,
+) -> Vec<(u64, Address, Vec<B256>)> {
+    let mut grouped: HashMap<(u64, Address), Vec<B256>> = HashMap::new();
+    for (contract, slot, block) in served {
+        let block_n = U256::from_be_bytes(block.0).saturating_to::<u64>();
+        grouped.entry((block_n, *contract)).or_default().push(*slot);
+    }
+    grouped
+        .into_iter()
+        .map(|((block, contract), slots)| (block, contract, slots))
+        .collect()
+}
+
+/// Prepend any missing older L1 headers so `[min_served ..= origin]` is covered; the guest's
+/// backward state-root walk validates the parent-hash chain.
+async fn extend_l1_ancestor_headers<P: Provider>(
+    provider: &P,
+    input: &mut GuestInput,
+    min_served: u64,
+    origin_block_number: u64,
+) -> RaikoResult<()> {
+    // `l1_ancestor_headers` is ordered oldest→newest (the guest's backward state-root walk and
+    // the trailing-origin dedup in guest-common both depend on it), so `.first()` is the floor.
+    debug_assert!(
+        input
+            .taiko
+            .l1_ancestor_headers
+            .windows(2)
+            .all(|w| w[0].number <= w[1].number),
+        "l1_ancestor_headers must be ordered oldest→newest"
+    );
+    let current_floor = input
+        .taiko
+        .l1_ancestor_headers
+        .first()
+        .map_or(origin_block_number, |header| header.number);
+    if min_served >= current_floor {
+        return Ok(());
+    }
+    let missing: Vec<u64> = (min_served..current_floor).collect();
+    let mut headers = provider.batch_l1_headers(&missing).await?;
+    headers.extend(std::mem::take(&mut input.taiko.l1_ancestor_headers));
+    input.taiko.l1_ancestor_headers = headers;
+    Ok(())
 }
 
 async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
@@ -327,6 +447,9 @@ fn build_preflight_guest_input(
         proof_carry_data: raiko2_protocol_shasta::shasta::ProofCarryData::default(),
         proposal_ancestor_headers: Vec::new(),
         proposal_state_nodes: Vec::new(),
+        // Populated by `discover_and_fetch_l1_precompile_data` after the input is built.
+        l1_storage_proofs: Vec::new(),
+        l1_staticcall_witnesses: Vec::new(),
     };
     input.compact_proposal_witness_data();
     input.proof_carry_data = raiko2_primitives_shasta::build_proof_carry_data(&input, proof_type)?;

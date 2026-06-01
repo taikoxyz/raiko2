@@ -3,9 +3,12 @@ use alloy::{
     providers::{DynProvider, Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
 };
-use alloy_primitives::{Address, Bytes, map::AddressMap};
+use alloy_primitives::{Address, B256, Bytes, map::AddressMap};
 use alloy_rpc_types_eth::Header as AlloyRpcHeader;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
+use raiko2_primitives_shasta::l1_precompiles::{
+    L1StaticCallRecord, L1StaticCallWitness, L1StorageProof,
+};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -19,6 +22,7 @@ mod accounts;
 mod blobs;
 mod blocks;
 mod headers;
+mod l1_precompiles;
 mod witness;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +198,7 @@ impl L2Provider for GethLocalWitnessL2Provider {
 
 #[derive(Clone)]
 pub struct NetworkProvider {
-    _l1_client: RpcClient,
+    l1_client: RpcClient,
     l1_provider: DynProvider,
     l2_provider: Arc<dyn L2Provider>,
     http_client: reqwest::Client,
@@ -301,7 +305,7 @@ impl NetworkProvider {
         })?;
 
         Ok(Self {
-            _l1_client: l1_client,
+            l1_client,
             l1_provider,
             l2_provider,
             http_client,
@@ -377,6 +381,24 @@ impl Provider for NetworkProvider {
 
     async fn batch_l1_headers(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Header>> {
         self.fetch_l1_headers(block_numbers).await
+    }
+
+    async fn batch_l1_storage_proofs(
+        &self,
+        requests: &[(u64, Address, Vec<B256>)],
+    ) -> RaikoResult<Vec<L1StorageProof>> {
+        self.fetch_l1_storage_proofs(requests).await
+    }
+
+    async fn batch_l1_staticcall_witnesses(
+        &self,
+        records: &[L1StaticCallRecord],
+    ) -> RaikoResult<Vec<L1StaticCallWitness>> {
+        self.fetch_l1_staticcall_witnesses(records).await
+    }
+
+    fn install_l1_precompile_fetchers(&self) {
+        self.install_live_l1_fetchers();
     }
 
     async fn shasta_proposal_event(

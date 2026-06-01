@@ -10,6 +10,8 @@ use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::l1_precompiles::{L1StaticCallWitness, L1StorageProof};
+
 pub const ANCESTOR_HEADER_WINDOW_LIMIT: usize = 256;
 
 /// Shasta guest program input.
@@ -25,6 +27,12 @@ pub struct GuestInput {
     pub proposal_state_nodes: Vec<WitnessStateNode>,
     /// Carry data required by proposal proof verification.
     pub proof_carry_data: ProofCarryData,
+    /// L1SLOAD storage proofs the guest verifies against the trusted L1 state root before
+    /// populating the precompile cache. Discovered + fetched by the host preflight.
+    pub l1_storage_proofs: Vec<L1StorageProof>,
+    /// L1STATICCALL execution witnesses the guest re-executes and verifies before populating
+    /// the precompile cache. Discovered + fetched (via `proof_call`) by the host preflight.
+    pub l1_staticcall_witnesses: Vec<L1StaticCallWitness>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -37,6 +45,10 @@ struct GuestInputSerde {
     proposal_state_nodes: Vec<WitnessStateNode>,
     #[serde(default)]
     proof_carry_data: ProofCarryData,
+    #[serde(default)]
+    l1_storage_proofs: Vec<L1StorageProof>,
+    #[serde(default)]
+    l1_staticcall_witnesses: Vec<L1StaticCallWitness>,
 }
 
 impl GuestInput {
@@ -177,6 +189,8 @@ impl From<GuestInputSerde> for GuestInput {
             proposal_ancestor_headers: value.proposal_ancestor_headers,
             proposal_state_nodes: value.proposal_state_nodes,
             proof_carry_data: value.proof_carry_data,
+            l1_storage_proofs: value.l1_storage_proofs,
+            l1_staticcall_witnesses: value.l1_staticcall_witnesses,
         };
         if !input.proposal_ancestor_headers.is_empty() {
             input.proposal_ancestor_headers =
@@ -201,6 +215,8 @@ impl Serialize for GuestInput {
             proposal_ancestor_headers: self.initial_proposal_ancestor_headers(),
             proposal_state_nodes: Vec::new(),
             proof_carry_data: self.proof_carry_data.clone(),
+            l1_storage_proofs: self.l1_storage_proofs.clone(),
+            l1_staticcall_witnesses: self.l1_staticcall_witnesses.clone(),
         };
         let (proposal_state_nodes, witness_state_indices) = self.initial_proposal_state_pool();
         guest_input.proposal_state_nodes = proposal_state_nodes;

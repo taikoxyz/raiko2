@@ -1,15 +1,18 @@
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
+use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{
     Header,
     transaction::{SignerRecoverable, Transaction as _},
 };
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256, map::AddressMap};
 use alloy_sol_types::{SolCall, sol};
+use alloy_trie::TrieAccount;
 use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
-    ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
+    ChainSpec, ExecutionWitness, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
     SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
@@ -18,9 +21,11 @@ use raiko2_primitives_shasta::{
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData,
+    ParentBlockContext, ProposalMetadata, ShastaEventData,
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
     decode_proposal_id_from_extra_data,
+    manifest::BlockManifest,
+    prepare_source_manifest_with_max_blocks,
 };
 use raiko2_provider::Provider;
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -108,19 +113,25 @@ where
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
-        let witnesses = fetch_preflight_witnesses(
-            provider,
-            &chain_spec,
-            ctx.request.proposal_id,
-            &block_numbers,
-        )
-        .await?;
-        let blocks = witnesses
+        let block_materials =
+            fetch_preflight_block_materials(provider, ctx.request.proposal_id, &block_numbers)
+                .await?;
+        let blocks = block_materials
             .iter()
-            .map(|witness| witness.block.clone())
+            .map(|material| material.block.clone())
             .collect::<Vec<_>>();
         let manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        let account_signers =
+            collect_preflight_account_signers(&chain_spec, &manifest, &block_materials)?;
+        let accounts = fetch_preflight_accounts(
+            provider,
+            ctx.request.proposal_id,
+            &block_numbers,
+            &account_signers,
+        )
+        .await?;
+        let witnesses = build_preflight_witnesses(chain_spec.clone(), block_materials, accounts)?;
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
 
@@ -160,12 +171,17 @@ async fn resolve_preflight_block_range_and_proposal_event<P: Provider>(
     Ok((block_numbers, expected_proposal_id, proposal_event))
 }
 
-async fn fetch_preflight_witnesses<P: Provider>(
+#[derive(Debug)]
+struct PreflightBlockMaterial {
+    block: reth_ethereum_primitives::Block,
+    witness: ExecutionWitness,
+}
+
+async fn fetch_preflight_block_materials<P: Provider>(
     provider: &P,
-    chain_spec: &ChainSpec,
     proposal_id: u64,
     block_numbers: &[u64],
-) -> RaikoResult<Vec<StatelessInput>> {
+) -> RaikoResult<Vec<PreflightBlockMaterial>> {
     let chunk_size = preflight_chunk_size();
     let chunk_concurrency = preflight_chunk_concurrency();
     info!(
@@ -179,27 +195,67 @@ async fn fetch_preflight_witnesses<P: Provider>(
         .chunks(chunk_size)
         .map(<[u64]>::to_vec)
         .collect::<Vec<_>>();
-    let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
+    let mut chunk_results: Vec<(usize, Vec<PreflightBlockMaterial>)> =
         stream::iter(chunked_block_numbers.into_iter().enumerate())
-            .map(|(chunk_index, chunk_block_numbers)| {
-                let chain_spec = chain_spec.clone();
-                async move {
-                    let operation = format!("shasta preflight chunk {chunk_index}");
-                    retry_shasta_preflight_operation(&operation, || {
-                        let chain_spec = chain_spec.clone();
-                        async {
-                            fetch_preflight_chunk(
-                                provider,
-                                chunk_index,
-                                &chunk_block_numbers,
-                                chain_spec,
-                            )
-                            .await
-                        }
+            .map(|(chunk_index, chunk_block_numbers)| async move {
+                let operation = format!("shasta preflight chunk {chunk_index}");
+                retry_shasta_preflight_operation(&operation, || async {
+                    fetch_preflight_chunk(provider, chunk_index, &chunk_block_numbers).await
+                })
+                .await
+            })
+            .buffer_unordered(chunk_concurrency)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<RaikoResult<Vec<_>>>()?;
+    chunk_results.sort_by_key(|(chunk_index, _)| *chunk_index);
+    Ok(chunk_results
+        .into_iter()
+        .flat_map(|(_, chunk)| chunk)
+        .collect())
+}
+
+async fn fetch_preflight_accounts<P: Provider>(
+    provider: &P,
+    proposal_id: u64,
+    block_numbers: &[u64],
+    account_signers: &[Vec<Address>],
+) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
+    if block_numbers.len() != account_signers.len() {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "account signer count ({}) does not match block count ({})",
+            account_signers.len(),
+            block_numbers.len()
+        )));
+    }
+
+    let chunk_size = preflight_chunk_size();
+    let chunk_concurrency = preflight_chunk_concurrency();
+    let chunked = block_numbers
+        .chunks(chunk_size)
+        .zip(account_signers.chunks(chunk_size))
+        .map(|(blocks, signers)| (blocks.to_vec(), signers.to_vec()))
+        .collect::<Vec<_>>();
+
+    let mut chunk_results: Vec<(usize, Vec<AddressMap<TrieAccount>>)> =
+        stream::iter(chunked.into_iter().enumerate())
+            .map(
+                |(chunk_index, (chunk_block_numbers, chunk_account_signers))| async move {
+                    let operation = format!("shasta preflight account chunk {chunk_index}");
+                    retry_shasta_preflight_operation(&operation, || async {
+                        fetch_preflight_account_chunk(
+                            provider,
+                            proposal_id,
+                            chunk_index,
+                            &chunk_block_numbers,
+                            &chunk_account_signers,
+                        )
+                        .await
                     })
                     .await
-                }
-            })
+                },
+            )
             .buffer_unordered(chunk_concurrency)
             .collect::<Vec<_>>()
             .await
@@ -344,24 +400,187 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-fn collect_block_signers(
-    block: &reth_ethereum_primitives::Block,
-) -> Vec<alloy_primitives::Address> {
+fn collect_block_signers(block: &reth_ethereum_primitives::Block) -> Vec<Address> {
     let mut signers = Vec::new();
+    push_unique_signer(&mut signers, Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS));
     for tx in block.body.transactions() {
         if let Ok(signer) = tx.recover_signer() {
-            signers.push(signer);
+            push_unique_signer(&mut signers, signer);
         }
     }
     signers
+}
+
+fn collect_source_block_signers(block: &BlockManifest) -> Vec<Address> {
+    let mut signers = Vec::with_capacity(block.transactions.len() + 1);
+    push_unique_signer(&mut signers, Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS));
+    for tx in &block.transactions {
+        if let Some(signer) = recover_manifest_tx_signer(tx) {
+            push_unique_signer(&mut signers, signer);
+        }
+    }
+    signers
+}
+
+fn recover_manifest_tx_signer<T>(tx: &T) -> Option<Address>
+where
+    T: alloy_rlp::Encodable,
+{
+    let signed: reth_ethereum_primitives::TransactionSigned =
+        alloy_rlp::decode_exact(alloy_rlp::encode(tx)).ok()?;
+    signed.recover_signer().ok()
+}
+
+fn push_unique_signer(signers: &mut Vec<Address>, signer: Address) {
+    if !signers.contains(&signer) {
+        signers.push(signer);
+    }
+}
+
+fn collect_preflight_account_signers(
+    chain_spec: &ChainSpec,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    block_materials: &[PreflightBlockMaterial],
+) -> RaikoResult<Vec<Vec<Address>>> {
+    if let Some(source_blocks) =
+        derive_preflight_source_blocks(chain_spec, manifest, block_materials)?
+    {
+        return Ok(source_blocks
+            .iter()
+            .map(collect_source_block_signers)
+            .collect());
+    }
+
+    Ok(block_materials
+        .iter()
+        .map(|material| collect_block_signers(&material.block))
+        .collect())
+}
+
+fn derive_preflight_source_blocks(
+    chain_spec: &ChainSpec,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    block_materials: &[PreflightBlockMaterial],
+) -> RaikoResult<Option<Vec<BlockManifest>>> {
+    let proposal = &manifest.proposal_event.proposal;
+    if proposal.sources.is_empty() {
+        return Ok(None);
+    }
+    if !proposal
+        .sources
+        .last()
+        .is_some_and(|source| !source.isForcedInclusion)
+    {
+        return Err(RaikoError::Preflight(
+            "last Shasta derivation source must be a normal source".to_string(),
+        ));
+    }
+    if manifest.data_sources.len() != proposal.sources.len() {
+        return Err(RaikoError::Preflight(format!(
+            "data source count ({}) does not match proposal source count ({})",
+            manifest.data_sources.len(),
+            proposal.sources.len()
+        )));
+    }
+
+    let parent_header = preflight_parent_header(block_materials)?;
+    let mut parent = ParentBlockContext {
+        timestamp: parent_header.timestamp,
+        gas_limit: parent_header.gas_limit,
+        block_number: parent_header.number,
+        anchor_block_number: manifest
+            .prover_data
+            .last_anchor_block_number
+            .unwrap_or_default(),
+    };
+    let proposal_timestamp = proposal.timestamp.to::<u64>();
+    let meta = ProposalMetadata {
+        proposal_timestamp,
+        origin_block_number: proposal.originBlockNumber.to::<u64>(),
+        proposer: proposal.proposer,
+        chain_id: manifest.chain_spec.chain_id,
+    };
+    let fork_timestamp = shasta_fork_timestamp(chain_spec)?;
+    let first_block_number = block_materials
+        .first()
+        .map(|material| material.block.header.number)
+        .ok_or_else(|| {
+            RaikoError::Preflight("cannot derive source signers without fetched blocks".to_string())
+        })?;
+    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
+        chain_spec,
+        first_block_number,
+        proposal_timestamp,
+    );
+
+    let mut blocks = Vec::new();
+    for (source_index, source) in proposal.sources.iter().enumerate() {
+        let source_manifest = prepare_source_manifest_with_max_blocks(
+            source,
+            manifest.data_sources.get(source_index),
+            parent,
+            meta,
+            fork_timestamp,
+            max_blocks,
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to prepare derivation source {source_index}: {err}"
+            ))
+        })?;
+
+        for block in source_manifest.blocks {
+            parent = ParentBlockContext {
+                timestamp: block.timestamp,
+                gas_limit: block.gas_limit.saturating_add(ANCHOR_V3_V4_GAS_LIMIT),
+                block_number: parent.block_number + 1,
+                anchor_block_number: block.anchor_block_number,
+            };
+            blocks.push(block);
+        }
+    }
+
+    if blocks.len() != block_materials.len() {
+        return Err(RaikoError::Preflight(format!(
+            "witness count ({}) does not match derived manifest block count ({})",
+            block_materials.len(),
+            blocks.len()
+        )));
+    }
+
+    Ok(Some(blocks))
+}
+
+fn preflight_parent_header(block_materials: &[PreflightBlockMaterial]) -> RaikoResult<Header> {
+    let first = block_materials.first().ok_or_else(|| {
+        RaikoError::Preflight("cannot derive source signers without fetched blocks".to_string())
+    })?;
+    ExecutionWitness::canonicalize_headers(first.witness.headers.clone())
+        .iter()
+        .rev()
+        .find_map(|header| header.full_header().cloned())
+        .ok_or_else(|| {
+            RaikoError::Preflight("missing parent header in proposal ancestor headers".to_string())
+        })
+}
+
+fn shasta_fork_timestamp(chain_spec: &ChainSpec) -> RaikoResult<u64> {
+    match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)) {
+        Some(ForkCondition::Timestamp(timestamp)) => Ok(*timestamp),
+        Some(other) => Err(RaikoError::Preflight(format!(
+            "unsupported Shasta fork activation condition: {other:?}"
+        ))),
+        None => Err(RaikoError::Preflight(
+            "missing Shasta fork activation condition".to_string(),
+        )),
+    }
 }
 
 async fn fetch_preflight_chunk<P: Provider>(
     provider: &P,
     chunk_index: usize,
     block_numbers: &[u64],
-    chain_spec: ChainSpec,
-) -> RaikoResult<(usize, Vec<StatelessInput>)> {
+) -> RaikoResult<(usize, Vec<PreflightBlockMaterial>)> {
     let chunk_started_at = Instant::now();
     info!(
         chunk_index,
@@ -381,28 +600,17 @@ async fn fetch_preflight_chunk<P: Provider>(
     .await?;
     let blocks_and_witnesses_elapsed_ms = blocks_and_witnesses_started_at.elapsed().as_millis();
 
-    let all_signers = blocks.iter().map(collect_block_signers).collect::<Vec<_>>();
-    let accounts_started_at = Instant::now();
-    let accounts = provider.batch_accounts(block_numbers, &all_signers).await?;
-    let accounts_elapsed_ms = accounts_started_at.elapsed().as_millis();
-
-    if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
+    if blocks.len() != witnesses.len() {
         return Err(RaikoError::InvalidRequestConfig(
             "Provider returned mismatched input lengths".to_string(),
         ));
     }
     validate_fetched_block_numbers(block_numbers, &blocks)?;
 
-    let witnesses = blocks
+    let materials = blocks
         .into_iter()
         .zip(witnesses)
-        .zip(accounts)
-        .map(|((block, witness), accounts)| StatelessInput {
-            block,
-            chain_spec: chain_spec.clone(),
-            witness,
-            accounts,
-        })
+        .map(|(block, witness)| PreflightBlockMaterial { block, witness })
         .collect::<Vec<_>>();
 
     info!(
@@ -411,11 +619,64 @@ async fn fetch_preflight_chunk<P: Provider>(
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
         blocks_and_witnesses_elapsed_ms,
-        accounts_elapsed_ms,
         total_elapsed_ms = chunk_started_at.elapsed().as_millis(),
         "completed shasta preflight chunk"
     );
-    Ok((chunk_index, witnesses))
+    Ok((chunk_index, materials))
+}
+
+async fn fetch_preflight_account_chunk<P: Provider>(
+    provider: &P,
+    proposal_id: u64,
+    chunk_index: usize,
+    block_numbers: &[u64],
+    account_signers: &[Vec<Address>],
+) -> RaikoResult<(usize, Vec<AddressMap<TrieAccount>>)> {
+    let started_at = Instant::now();
+    let accounts = provider
+        .batch_accounts(block_numbers, account_signers)
+        .await?;
+    if accounts.len() != block_numbers.len() {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "provider returned {} account maps for {} requested blocks",
+            accounts.len(),
+            block_numbers.len()
+        )));
+    }
+    info!(
+        proposal_id,
+        chunk_index,
+        first_block = block_numbers.first().copied(),
+        last_block = block_numbers.last().copied(),
+        block_count = block_numbers.len(),
+        total_signers = account_signers.iter().map(Vec::len).sum::<usize>(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "completed shasta preflight account chunk"
+    );
+    Ok((chunk_index, accounts))
+}
+
+fn build_preflight_witnesses(
+    chain_spec: ChainSpec,
+    block_materials: Vec<PreflightBlockMaterial>,
+    accounts: Vec<AddressMap<TrieAccount>>,
+) -> RaikoResult<Vec<StatelessInput>> {
+    if block_materials.len() != accounts.len() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "Provider returned mismatched input lengths".to_string(),
+        ));
+    }
+
+    Ok(block_materials
+        .into_iter()
+        .zip(accounts)
+        .map(|(material, accounts)| StatelessInput {
+            block: material.block,
+            chain_spec: chain_spec.clone(),
+            witness: material.witness,
+            accounts,
+        })
+        .collect())
 }
 
 async fn fetch_preflight_proposal_block<P: Provider>(
@@ -993,20 +1254,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::{AnchorV4Checkpoint, Preflight, ShastaSpec, anchorV4Call};
-    use alloy_consensus::{Header, SignableTransaction, TxEip1559};
+    use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
+    use alloy_consensus::{Header, SignableTransaction, TxEip1559, transaction::SignerRecoverable};
     use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
         ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
-        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
+        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs, WitnessHeader,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
-    use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
+    use raiko2_protocol_shasta::shasta::{
+        BlobSlice, DerivationSource, ShastaEventData,
+        manifest::{BlockManifest, DerivationSourceManifest},
+    };
     use raiko2_provider::Provider;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1018,8 +1283,10 @@ mod tests {
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        witness: ExecutionWitness,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
+        account_requests: Arc<Mutex<Vec<Vec<Address>>>>,
     }
 
     #[async_trait::async_trait]
@@ -1034,8 +1301,12 @@ mod tests {
         async fn batch_accounts(
             &self,
             _blocks: &[u64],
-            _accounts: &[Vec<Address>],
+            accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
+            self.account_requests
+                .lock()
+                .expect("account request recorder lock")
+                .extend(accounts.iter().cloned());
             Ok(vec![AddressMap::default()])
         }
 
@@ -1050,7 +1321,7 @@ mod tests {
             {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
-            Ok(vec![ExecutionWitness::default()])
+            Ok(vec![self.witness.clone()])
         }
 
         async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -1140,6 +1411,7 @@ mod tests {
         let mut block = reth_ethereum_primitives::Block::default();
         block.header.number = 1;
         block.header.timestamp = u64::MAX / 2;
+        block.header.gas_limit = 31_000_000;
         block.header.extra_data = shasta_extra_data(proposal_id);
         block.body.transactions.push(anchor_tx(&AnchorV4Checkpoint {
             blockNumber: anchor_block_number.try_into().expect("fits in uint48"),
@@ -1147,6 +1419,31 @@ mod tests {
             stateRoot: anchor_state_root,
         }));
         block
+    }
+
+    fn source_tx(nonce: u64) -> reth_ethereum_primitives::TransactionSigned {
+        TxEip1559 {
+            chain_id: 167_013,
+            nonce,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::repeat_byte(0x42)),
+            value: U256::ZERO,
+            access_list: Vec::default().into(),
+            input: Bytes::default(),
+        }
+        .into_signed(Signature::test_signature())
+        .into()
+    }
+
+    fn sample_parent_header(timestamp: u64) -> Header {
+        Header {
+            number: 0,
+            timestamp,
+            gas_limit: 31_000_000,
+            ..Default::default()
+        }
     }
 
     fn sample_context(
@@ -1186,8 +1483,13 @@ mod tests {
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            witness: ExecutionWitness {
+                headers: vec![WitnessHeader::from_header(sample_parent_header(0))],
+                ..Default::default()
+            },
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
+            account_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1222,6 +1524,64 @@ mod tests {
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_fetches_source_tx_signer_accounts() {
+        let mut provider = sample_provider();
+        let proposal_timestamp = 1_770_296_500;
+        provider.proposal_event.proposal.timestamp =
+            proposal_timestamp.try_into().expect("fits in uint48");
+        provider.witness = ExecutionWitness {
+            headers: vec![WitnessHeader::from_header(sample_parent_header(
+                proposal_timestamp - 2,
+            ))],
+            ..Default::default()
+        };
+
+        let source_tx = source_tx(7);
+        let source_signer = source_tx.recover_signer().expect("source tx signer");
+        let source_manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: proposal_timestamp - 1,
+                coinbase: provider.proposal_event.proposal.proposer,
+                anchor_block_number: 10,
+                gas_limit: 31_000_000,
+                transactions: vec![
+                    alloy_rlp::decode_exact(alloy_rlp::encode(&source_tx))
+                        .expect("decode source tx into manifest tx"),
+                ],
+            }],
+        };
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            blobSlice: BlobSlice::default(),
+            ..Default::default()
+        }];
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: source_manifest
+                .encode_and_compress()
+                .expect("encode source manifest"),
+            ..Default::default()
+        }];
+
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let requests = provider
+            .account_requests
+            .lock()
+            .expect("account request recorder lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].len(), 2);
+        assert!(requests[0].contains(&Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)));
+        assert!(requests[0].contains(&source_signer));
     }
 
     #[tokio::test]
@@ -1495,7 +1855,7 @@ mod tests {
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
             blobSlice: BlobSlice {
-                blobHashes: vec![B256::from([0x44; 32])],
+                blobHashes: Vec::new(),
                 offset: 0u32.try_into().expect("fits in uint24"),
                 timestamp: 777u64.try_into().expect("fits in uint48"),
             },

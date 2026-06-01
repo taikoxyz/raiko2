@@ -23,6 +23,7 @@ mod tests {
         let elves = load_shasta_guest_elves()?;
         let expected_risc0_proposal = elves.risc0.proposal.clone();
         let expected_risc0_agg = elves.risc0.aggregation.clone();
+        let expected_risc0_boundless_agg = elves.risc0.boundless_aggregation.clone();
         let expected_sp1_proposal = elves.sp1.proposal.clone();
         let expected_sp1_agg = elves.sp1.aggregation.clone();
         let backends = shasta_backends_from_elves(elves);
@@ -35,7 +36,7 @@ mod tests {
         let boundless_proposal = backends.risc0_boundless.elf(ProofStage::Proposal)?;
         let boundless_agg = backends.risc0_boundless.elf(ProofStage::Aggregation)?;
         assert_eq!(boundless_proposal, expected_risc0_proposal.as_ref());
-        assert_eq!(boundless_agg, expected_risc0_agg.as_ref());
+        assert_eq!(boundless_agg, expected_risc0_boundless_agg.as_ref());
 
         let sp1_proposal = backends.sp1.elf(ProofStage::Proposal)?;
         let sp1_agg = backends.sp1.elf(ProofStage::Aggregation)?;

@@ -19,10 +19,13 @@ raiko2-provider.workspace = true
 reth-ethereum-primitives.workspace = true
 alethia-reth-block.workspace = true
 alethia-reth-consensus.workspace = true
+alethia-reth-primitives.workspace = true
 
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-rlp.workspace = true
 alloy-sol-types.workspace = true
+alloy-trie.workspace = true
 
 tracing.workspace = true
 async-trait.workspace = true
@@ -32,5 +35,4 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-alloy-trie.workspace = true
 alloy-primitives.workspace = true

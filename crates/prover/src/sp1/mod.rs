@@ -19,13 +19,9 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use serde::Deserialize;
 use sp1_sdk::{
-    HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
-    blocking::{
-        CpuProver as BlockingCpuProver, MockProver as BlockingMockProver, ProveRequest as _,
-        Prover as BlockingProver, ProverClient as BlockingProverClient,
-    },
-    network::{Error as Sp1NetworkError, NetworkMode as Sp1SdkNetworkMode, signer::NetworkSigner},
+    CpuProver, HashableKey, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
+    network::Error as Sp1NetworkError,
 };
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -41,8 +37,6 @@ use crate::{
 
 const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
 const SP1_NETWORK_REQUEST_RETRY_DELAY: Duration = Duration::from_secs(15);
-const SP1_MAINNET_RPC_URL: &str = "https://rpc.mainnet.succinct.xyz";
-const SP1_RESERVED_RPC_URL: &str = "https://rpc.production.succinct.xyz";
 
 sol!(
     #[sol(rpc)]
@@ -206,14 +200,8 @@ impl Sp1Prover {
         }
 
         let elf = backend.elf(stage)?;
-        let client = BlockingProverClient::builder().cpu().build();
-        let pk = client.setup(elf.into()).map_err(|err| {
-            RaikoError::Guest(format!(
-                "Failed to initialize SP1 {} setup: {err}",
-                sp1_stage_name(stage)
-            ))
-        })?;
-        let vk = pk.verifying_key().clone();
+        let client = ProverClient::builder().cpu().build();
+        let (pk, vk) = client.setup(elf);
         let setup = Arc::new(Sp1ProgramSetup { pk, vk });
 
         match cell.set(Arc::clone(&setup)) {
@@ -339,7 +327,7 @@ where
                     ProverMode::Network => {
                         let mut stdin = SP1Stdin::new();
                         stdin.write(&guest_input);
-                        let client = build_network_prover(&effective_config).await?;
+                        let client = build_network_prover(&effective_config)?;
                         prove_proposal_with_network_client(
                             &client,
                             setup.as_ref(),
@@ -394,7 +382,7 @@ where
                 // The guest reads ShastaZkAggregationGuestInput via sp1_zkvm::io::read().
                 let mut stdin = SP1Stdin::new();
                 stdin.write(&aggregation_input);
-                let client = build_network_prover(&effective_config).await?;
+                let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
                     proposal_setup.as_ref(),
@@ -444,7 +432,7 @@ where
             ProverMode::Network => {
                 let mut stdin = SP1Stdin::new();
                 stdin.write(&aggregation_input);
-                let client = build_network_prover(&effective_config).await?;
+                let client = build_network_prover(&effective_config)?;
                 aggregate_with_network_client(
                     &client,
                     proposal_setup.as_ref(),
@@ -675,66 +663,11 @@ fn blocking_sp1_join_error(operation: &str, err: &tokio::task::JoinError) -> Rai
     RaikoError::Guest(format!("SP1 {operation} task join failed: {err}"))
 }
 
-enum LocalSp1Client {
-    Mock(BlockingMockProver),
-    Cpu(BlockingCpuProver),
-}
-
-impl LocalSp1Client {
-    fn new(prover_mode: ProverMode) -> Self {
-        match prover_mode {
-            ProverMode::Mock => Self::Mock(BlockingProverClient::builder().mock().build()),
-            ProverMode::Local => Self::Cpu(BlockingProverClient::builder().cpu().build()),
-            ProverMode::Network => unreachable!("network prover is handled by the network path"),
-        }
-    }
-
-    fn execute(
-        &self,
-        elf: Vec<u8>,
-        stdin: SP1Stdin,
-    ) -> Result<(sp1_sdk::SP1PublicValues, sp1_sdk::ExecutionReport), String> {
-        match self {
-            Self::Mock(client) => client
-                .execute(elf.into(), stdin)
-                .run()
-                .map_err(|err| err.to_string()),
-            Self::Cpu(client) => client
-                .execute(elf.into(), stdin)
-                .run()
-                .map_err(|err| err.to_string()),
-        }
-    }
-
-    fn prove(
-        &self,
-        pk: &SP1ProvingKey,
-        stdin: SP1Stdin,
-        proof_mode: SP1ProofMode,
-    ) -> Result<SP1ProofWithPublicValues, String> {
-        match self {
-            Self::Mock(client) => client
-                .prove(pk, stdin)
-                .mode(proof_mode)
-                .run()
-                .map_err(|err| err.to_string()),
-            Self::Cpu(client) => client
-                .prove(pk, stdin)
-                .mode(proof_mode)
-                .run()
-                .map_err(|err| err.to_string()),
-        }
-    }
-
-    fn verify(&self, proof: &SP1ProofWithPublicValues, vk: &SP1VerifyingKey) -> Result<(), String> {
-        match self {
-            Self::Mock(client) => client
-                .verify(proof, vk, None)
-                .map_err(|err| err.to_string()),
-            Self::Cpu(client) => client
-                .verify(proof, vk, None)
-                .map_err(|err| err.to_string()),
-        }
+fn local_sp1_client(prover_mode: ProverMode) -> CpuProver {
+    match prover_mode {
+        ProverMode::Mock => ProverClient::builder().mock().build(),
+        ProverMode::Local => ProverClient::builder().cpu().build(),
+        ProverMode::Network => unreachable!("network prover is handled by the network path"),
     }
 }
 
@@ -747,11 +680,12 @@ async fn execute_proposal_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&guest_input);
 
-        let client = LocalSp1Client::new(prover_mode);
-        let (public_values, execution_report) = client.execute(elf, stdin).map_err(|e| {
-            tracing::error!("Failed to execute SP1 proposal: {:?}", e);
-            RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
-        })?;
+        let client = local_sp1_client(prover_mode);
+        let (public_values, execution_report) =
+            client.execute(&elf, &stdin).run().map_err(|e| {
+                tracing::error!("Failed to execute SP1 proposal: {:?}", e);
+                RaikoError::Guest(format!("SP1 proposal execute failed: {e}"))
+            })?;
         let public_values_raw = public_values.raw();
         let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
         let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
@@ -791,11 +725,11 @@ async fn prove_proposal_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&guest_input);
 
-        let client = LocalSp1Client::new(prover_mode);
+        let client = local_sp1_client(prover_mode);
         prove_proposal_with_client(
             &client,
             setup.as_ref(),
-            stdin,
+            &stdin,
             proof_mode,
             verify,
             &guest_input,
@@ -806,17 +740,21 @@ async fn prove_proposal_with_local_client(
 }
 
 fn prove_proposal_with_client(
-    client: &LocalSp1Client,
+    client: &CpuProver,
     setup: &Sp1ProgramSetup,
-    stdin: SP1Stdin,
+    stdin: &SP1Stdin,
     proof_mode: SP1ProofMode,
     verify: bool,
     guest_input: &GuestInput,
 ) -> RaikoResult<Proof> {
-    let proof = client.prove(&setup.pk, stdin, proof_mode).map_err(|e| {
-        tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
-        RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
-    })?;
+    let proof = client
+        .prove(&setup.pk, stdin)
+        .mode(proof_mode)
+        .run()
+        .map_err(|e| {
+            tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
+        })?;
 
     if verify {
         client.verify(&proof, &setup.vk).map_err(|e| {
@@ -891,7 +829,7 @@ async fn aggregate_with_local_client(
         let mut stdin = SP1Stdin::new();
         stdin.write(&aggregation_input);
 
-        let client = LocalSp1Client::new(prover_mode);
+        let client = local_sp1_client(prover_mode);
         aggregate_with_client(
             &client,
             proposal_setup.as_ref(),
@@ -907,7 +845,7 @@ async fn aggregate_with_local_client(
 }
 
 fn aggregate_with_client(
-    client: &LocalSp1Client,
+    client: &CpuProver,
     proposal_setup: &Sp1ProgramSetup,
     aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
@@ -929,7 +867,9 @@ fn aggregate_with_client(
     }
 
     let proof = client
-        .prove(&aggregation_setup.pk, stdin, proof_mode)
+        .prove(&aggregation_setup.pk, &stdin)
+        .mode(proof_mode)
+        .run()
         .map_err(|e| {
             tracing::error!("Failed to generate SP1 aggregation proof: {:?}", e);
             RaikoError::Guest(format!("SP1 aggregation proof generation failed: {e}"))
@@ -1019,7 +959,7 @@ async fn aggregate_with_network_client(
     .into())
 }
 
-async fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
+fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> {
     let private_key = std::env::var("NETWORK_PRIVATE_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1028,16 +968,16 @@ async fn build_network_prover(config: &Sp1Config) -> RaikoResult<NetworkProver> 
                 "NETWORK_PRIVATE_KEY must be set for sp1.prover=network".to_string(),
             )
         })?;
-    let signer = NetworkSigner::local(&private_key).map_err(|err| {
-        RaikoError::InvalidRequestConfig(format!(
-            "NETWORK_PRIVATE_KEY is not a valid SP1 network signer: {err}"
-        ))
-    })?;
-    let rpc_url = sp1_network_rpc_url(config)?;
-    Ok(NetworkProver::new(signer, &rpc_url, sp1_sdk_network_mode(config.network_mode)).await)
+    let builder = ProverClient::builder().network().private_key(&private_key);
+    let builder = if let Some(rpc_url) = sp1_network_rpc_url(config)? {
+        builder.rpc_url(&rpc_url)
+    } else {
+        builder
+    };
+    Ok(builder.build())
 }
 
-fn sp1_network_rpc_url(config: &Sp1Config) -> RaikoResult<String> {
+fn sp1_network_rpc_url(config: &Sp1Config) -> RaikoResult<Option<String>> {
     let env_rpc_url = std::env::var("NETWORK_RPC_URL").ok();
     resolve_sp1_network_rpc_url(config, env_rpc_url.as_deref())
 }
@@ -1045,14 +985,15 @@ fn sp1_network_rpc_url(config: &Sp1Config) -> RaikoResult<String> {
 fn resolve_sp1_network_rpc_url(
     config: &Sp1Config,
     env_rpc_url: Option<&str>,
-) -> RaikoResult<String> {
-    let rpc_url = config.rpc_url.clone().unwrap_or_else(|| {
-        env_rpc_url
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| default_sp1_network_rpc_url(config.network_mode))
-            .to_string()
-    });
+) -> RaikoResult<Option<String>> {
+    let rpc_url = if let Some(rpc_url) = config.rpc_url.clone() {
+        rpc_url
+    } else {
+        let Some(rpc_url) = env_rpc_url.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(None);
+        };
+        rpc_url.to_string()
+    };
     if rpc_url != rpc_url.trim() {
         return Err(RaikoError::InvalidRequestConfig(
             "SP1 network RPC URL must not include leading or trailing whitespace".to_string(),
@@ -1061,21 +1002,7 @@ fn resolve_sp1_network_rpc_url(
     Url::parse(&rpc_url).map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("SP1 network RPC URL is invalid: {err}"))
     })?;
-    Ok(rpc_url)
-}
-
-const fn default_sp1_network_rpc_url(mode: Sp1NetworkMode) -> &'static str {
-    match mode {
-        Sp1NetworkMode::Mainnet => SP1_MAINNET_RPC_URL,
-        Sp1NetworkMode::Reserved => SP1_RESERVED_RPC_URL,
-    }
-}
-
-const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
-    match mode {
-        Sp1NetworkMode::Mainnet => Sp1SdkNetworkMode::Mainnet,
-        Sp1NetworkMode::Reserved => Sp1SdkNetworkMode::Reserved,
-    }
+    Ok(Some(rpc_url))
 }
 
 const fn sp1_network_submission_progress(
@@ -1118,7 +1045,6 @@ async fn request_network_proof(
     stage: &str,
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
-    let auction_timeout = config.auction_timeout_secs.map(Duration::from_secs);
     let mut stored_request_id = if let Some(observer) = observer.as_ref() {
         observer.load_sp1_network_request_id().await
     } else {
@@ -1153,21 +1079,19 @@ async fn request_network_proof(
                 "Submitting SP1 network proof request"
             );
 
-            let mut request = client
-                .prove(pk, stdin.clone())
+            let request_id = client
+                .prove(pk, &stdin)
                 .mode(proof_mode)
                 .strategy(config.fulfillment_strategy.into())
                 .skip_simulation(config.skip_simulation)
                 .cycle_limit(config.cycle_limit)
-                .timeout(timeout);
-            if let Some(max_price_per_pgu) = config.max_price_per_pgu {
-                request = request.max_price_per_pgu(max_price_per_pgu);
-            }
-
-            let request_id = request.request().await.map_err(|e| {
-                tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
-                RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
-            })?;
+                .timeout(timeout)
+                .request_async()
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to request SP1 {stage} proof: {:?}", e);
+                    RaikoError::Guest(format!("SP1 {stage} proof request failed: {e}"))
+                })?;
 
             let request_id_string = request_id.to_string();
             notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
@@ -1186,20 +1110,12 @@ async fn request_network_proof(
         let request_id = B256::from_str(&request_id_string).map_err(|e| {
             RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
         })?;
-        match wait_sp1_network_proof(
-            client,
-            request_id,
-            timeout,
-            auction_timeout,
-            stage,
-            &request_id_string,
-        )
-        .await?
+        match wait_sp1_network_proof(client, request_id, timeout, stage, &request_id_string).await?
         {
             Sp1NetworkWaitOutcome::Fulfilled(proof) => {
                 return Ok(NetworkProofRequestResult {
                     request_id: request_id_string,
-                    proof: *proof,
+                    proof,
                 });
             }
             Sp1NetworkWaitOutcome::RetryRequest(reason) => {
@@ -1218,7 +1134,7 @@ async fn request_network_proof(
 }
 
 enum Sp1NetworkWaitOutcome {
-    Fulfilled(Box<SP1ProofWithPublicValues>),
+    Fulfilled(SP1ProofWithPublicValues),
     RetryRequest(String),
 }
 
@@ -1226,17 +1142,13 @@ async fn wait_sp1_network_proof(
     client: &NetworkProver,
     request_id: B256,
     timeout: Duration,
-    auction_timeout: Option<Duration>,
     stage: &str,
     request_id_string: &str,
 ) -> RaikoResult<Sp1NetworkWaitOutcome> {
     let mut attempt = 1_u64;
     loop {
         let wait_started = std::time::Instant::now();
-        match client
-            .wait_proof(request_id, Some(timeout), auction_timeout)
-            .await
-        {
+        match client.wait_proof(request_id, Some(timeout), None).await {
             Ok(proof) => {
                 tracing::info!(
                     stage,
@@ -1246,7 +1158,7 @@ async fn wait_sp1_network_proof(
                     elapsed_ms = wait_started.elapsed().as_millis(),
                     "SP1 network proof received"
                 );
-                return Ok(Sp1NetworkWaitOutcome::Fulfilled(Box::new(proof)));
+                return Ok(Sp1NetworkWaitOutcome::Fulfilled(proof));
             }
             Err(error) => {
                 if let Some(network_error) = error.downcast_ref::<Sp1NetworkError>() {
@@ -1296,9 +1208,9 @@ fn insert_sp1_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
+        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
         remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
-        sp1_sdk_network_mode, sp1_vk_uuid,
+        sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1307,19 +1219,13 @@ mod tests {
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use sp1_sdk::{
-        HashableKey, ProvingKey as _, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey,
+        HashableKey, Prover as _, ProverClient, SP1ProofMode, SP1ProofWithPublicValues,
         SP1VerifyingKey,
-        blocking::{Prover as _, ProverClient},
-        network::NetworkMode as Sp1SdkNetworkMode,
     };
     use std::str::FromStr;
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
-    }
-
-    fn setup_sp1_pk(client: &sp1_sdk::blocking::MockProver, elf: &[u8]) -> SP1ProvingKey {
-        client.setup(elf.into()).expect("setup SP1 test ELF")
     }
 
     fn legacy_raiko_sp1_aggregation_payload(
@@ -1361,37 +1267,22 @@ mod tests {
     }
 
     #[test]
-    fn sp1_network_mode_maps_to_sdk_mode_explicitly() {
-        assert_eq!(
-            sp1_sdk_network_mode(super::Sp1NetworkMode::Mainnet),
-            Sp1SdkNetworkMode::Mainnet
-        );
-        assert_eq!(
-            sp1_sdk_network_mode(super::Sp1NetworkMode::Reserved),
-            Sp1SdkNetworkMode::Reserved
-        );
-    }
-
-    #[test]
-    fn default_sp1_network_rpc_url_follows_configured_mode() {
-        assert_eq!(
-            default_sp1_network_rpc_url(super::Sp1NetworkMode::Mainnet),
-            super::SP1_MAINNET_RPC_URL
-        );
-        assert_eq!(
-            default_sp1_network_rpc_url(super::Sp1NetworkMode::Reserved),
-            super::SP1_RESERVED_RPC_URL
-        );
-    }
-
-    #[test]
     fn sp1_network_rpc_url_trims_and_validates_env_override() {
         let config = super::Sp1Config::default();
 
         let rpc_url = resolve_sp1_network_rpc_url(&config, Some(" https://example.invalid/rpc "))
             .expect("valid env rpc url");
 
-        assert_eq!(rpc_url, "https://example.invalid/rpc");
+        assert_eq!(rpc_url.as_deref(), Some("https://example.invalid/rpc"));
+    }
+
+    #[test]
+    fn sp1_network_rpc_url_uses_sdk_default_without_override() {
+        let config = super::Sp1Config::default();
+
+        let rpc_url = resolve_sp1_network_rpc_url(&config, None).expect("optional rpc url");
+
+        assert_eq!(rpc_url, None);
     }
 
     #[test]
@@ -1404,7 +1295,10 @@ mod tests {
         let rpc_url = resolve_sp1_network_rpc_url(&config, Some("https://env.example.invalid/rpc"))
             .expect("valid config rpc url");
 
-        assert_eq!(rpc_url, "https://config.example.invalid/rpc");
+        assert_eq!(
+            rpc_url.as_deref(),
+            Some("https://config.example.invalid/rpc")
+        );
     }
 
     #[test]
@@ -1437,8 +1331,7 @@ mod tests {
     fn remote_verifier_program_vkey_matches_contract_bytes32_encoding() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let pk = setup_sp1_pk(&client, elves.proposal.as_ref());
-        let vk = pk.verifying_key().clone();
+        let (_, vk) = client.setup(elves.proposal.as_ref());
 
         let expected = B256::from_str(&vk.bytes32()).expect("valid bytes32 encoding");
         let old_buggy = B256::from_slice(&vk.hash_bytes());
@@ -1459,8 +1352,7 @@ mod tests {
     fn sp1_vkey_words_match_contract_block_program_encoding() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let pk = setup_sp1_pk(&client, elves.proposal.as_ref());
-        let vk = pk.verifying_key().clone();
+        let (_, vk) = client.setup(elves.proposal.as_ref());
         let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&vk)).expect("image id");
 
         assert_eq!(words, vk.hash_u32());
@@ -1478,12 +1370,8 @@ mod tests {
     fn sp1_aggregation_public_input_matches_contract_payload_program_id() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let block_vk = setup_sp1_pk(&client, elves.proposal.as_ref())
-            .verifying_key()
-            .clone();
-        let aggregation_vk = setup_sp1_pk(&client, elves.aggregation.as_ref())
-            .verifying_key()
-            .clone();
+        let (_, block_vk) = client.setup(elves.proposal.as_ref());
+        let (_, aggregation_vk) = client.setup(elves.aggregation.as_ref());
         let words = super::sp1_image_id_words_from_uuid(&sp1_vk_uuid(&block_vk)).expect("image id");
         let proof_bytes = [0xaa, 0xbb, 0xcc];
 
@@ -1506,22 +1394,22 @@ mod tests {
     fn remote_verifier_proof_bytes_matches_legacy_raiko_semantics() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let pk = setup_sp1_pk(&client, elves.proposal.as_ref());
+        let (pk, _) = client.setup(elves.proposal.as_ref());
 
         let core = SP1ProofWithPublicValues::create_mock_proof(
-            pk.verifying_key(),
+            &pk,
             sp1_sdk::SP1PublicValues::new(),
             SP1ProofMode::Core,
             sp1_sdk::SP1_CIRCUIT_VERSION,
         );
         let compressed = SP1ProofWithPublicValues::create_mock_proof(
-            pk.verifying_key(),
+            &pk,
             sp1_sdk::SP1PublicValues::new(),
             SP1ProofMode::Compressed,
             sp1_sdk::SP1_CIRCUIT_VERSION,
         );
         let plonk = SP1ProofWithPublicValues::create_mock_proof(
-            pk.verifying_key(),
+            &pk,
             sp1_sdk::SP1PublicValues::new(),
             SP1ProofMode::Plonk,
             sp1_sdk::SP1_CIRCUIT_VERSION,
@@ -1536,12 +1424,8 @@ mod tests {
     fn sp1_aggregation_payload_layout_matches_legacy_raiko() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let block_vk = setup_sp1_pk(&client, elves.proposal.as_ref())
-            .verifying_key()
-            .clone();
-        let aggregation_vk = setup_sp1_pk(&client, elves.aggregation.as_ref())
-            .verifying_key()
-            .clone();
+        let (_, block_vk) = client.setup(elves.proposal.as_ref());
+        let (_, aggregation_vk) = client.setup(elves.aggregation.as_ref());
         let proof_bytes = [0xaa, 0xbb, 0xcc];
 
         let payload = encode_sp1_onchain_payload(
@@ -1562,9 +1446,9 @@ mod tests {
     fn load_sp1_subproof_for_aggregation_prefers_quote() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let pk = setup_sp1_pk(&client, elves.proposal.as_ref());
+        let (pk, _) = client.setup(elves.proposal.as_ref());
         let compressed = SP1ProofWithPublicValues::create_mock_proof(
-            pk.verifying_key(),
+            &pk,
             sp1_sdk::SP1PublicValues::new(),
             SP1ProofMode::Compressed,
             sp1_sdk::SP1_CIRCUIT_VERSION,
@@ -1583,9 +1467,9 @@ mod tests {
     fn load_sp1_subproof_for_aggregation_accepts_legacy_bincode_payload() {
         let client = ProverClient::builder().mock().build();
         let elves = sp1_test_elves();
-        let pk = setup_sp1_pk(&client, elves.proposal.as_ref());
+        let (pk, _) = client.setup(elves.proposal.as_ref());
         let compressed = SP1ProofWithPublicValues::create_mock_proof(
-            pk.verifying_key(),
+            &pk,
             sp1_sdk::SP1PublicValues::new(),
             SP1ProofMode::Compressed,
             sp1_sdk::SP1_CIRCUIT_VERSION,

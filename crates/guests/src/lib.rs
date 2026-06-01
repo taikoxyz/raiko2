@@ -15,6 +15,7 @@ pub const GUEST_ELF_DIR_ENV: &str = "RAIKO2_GUEST_ELF_DIR";
 
 pub const RISC0_SHASTA_PROPOSAL_ELF: &str = "risc0_shasta_proposal.elf";
 pub const RISC0_SHASTA_AGGREGATION_ELF: &str = "risc0_shasta_aggregation.elf";
+pub const RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF: &str = "risc0_shasta_boundless_aggregation.elf";
 pub const SP1_SHASTA_PROPOSAL_ELF: &str = "sp1_shasta_proposal.elf";
 pub const SP1_SHASTA_AGGREGATION_ELF: &str = "sp1_shasta_aggregation.elf";
 
@@ -28,6 +29,7 @@ pub struct ShastaGuestElves {
 pub struct Risc0ShastaGuestElves {
     pub proposal: Arc<[u8]>,
     pub aggregation: Arc<[u8]>,
+    pub boundless_aggregation: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +96,7 @@ pub fn load_risc0_shasta_guest_elves_from_dir(
     Ok(Risc0ShastaGuestElves {
         proposal: read_elf(dir, RISC0_SHASTA_PROPOSAL_ELF)?,
         aggregation: read_elf(dir, RISC0_SHASTA_AGGREGATION_ELF)?,
+        boundless_aggregation: read_elf(dir, RISC0_SHASTA_BOUNDLESS_AGGREGATION_ELF)?,
     })
 }
 

@@ -11,10 +11,7 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{
-    HashableKey, ProvingKey as _,
-    blocking::{Prover as _, ProverClient},
-};
+use sp1_sdk::{HashableKey, Prover as _, ProverClient};
 
 use crate::util;
 
@@ -84,7 +81,7 @@ pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
 
     let mut digests = Vec::new();
     digests.extend(risc0_digest_entries(&risc0_elves)?);
-    digests.extend(sp1_digest_entries(&sp1_elves)?);
+    digests.extend(sp1_digest_entries(&sp1_elves));
     digests.sort();
 
     Ok(GuestDigestSummary {
@@ -120,21 +117,20 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
             Stage::Aggregation,
             elves.aggregation.as_ref(),
         )?,
+        risc0_digest_entry(
+            "risc0_shasta_boundless_aggregation",
+            Stage::Aggregation,
+            elves.boundless_aggregation.as_ref(),
+        )?,
     ])
 }
 
-fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
+fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Vec<GuestDigestEntry> {
     let client = ProverClient::builder().cpu().build();
-    let proposal_pk = client
-        .setup(elves.proposal.as_ref().into())
-        .context("failed to setup SP1 proposal ELF")?;
-    let aggregation_pk = client
-        .setup(elves.aggregation.as_ref().into())
-        .context("failed to setup SP1 aggregation ELF")?;
-    let proposal_vk = proposal_pk.verifying_key();
-    let aggregation_vk = aggregation_pk.verifying_key();
+    let proposal_vk = client.setup(elves.proposal.as_ref()).1;
+    let aggregation_vk = client.setup(elves.aggregation.as_ref()).1;
 
-    Ok(vec![
+    vec![
         sp1_digest_entry(
             "sp1_shasta_proposal",
             Stage::Proposal,
@@ -159,7 +155,7 @@ fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntr
             DigestSource::VkHashBytes,
             hex::encode_prefixed(aggregation_vk.hash_bytes()),
         ),
-    ])
+    ]
 }
 
 fn risc0_digest_entry(object_name: &str, stage: Stage, elf: &[u8]) -> Result<GuestDigestEntry> {
@@ -234,6 +230,13 @@ mod tests {
         assert_eq!(
             counts.get(&(
                 "risc0_shasta_aggregation".to_string(),
+                "ImageId".to_string()
+            )),
+            Some(&1)
+        );
+        assert_eq!(
+            counts.get(&(
+                "risc0_shasta_boundless_aggregation".to_string(),
                 "ImageId".to_string()
             )),
             Some(&1)

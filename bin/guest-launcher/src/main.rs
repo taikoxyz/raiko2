@@ -25,12 +25,8 @@ use raiko2_prover::sp1::{
 use serde::Serialize;
 use sp1_sdk::utils::setup_logger;
 use sp1_sdk::{
-    ExecutionReport, NetworkProver, ProveRequest as _, Prover as _, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
-    blocking::{ProveRequest as _, Prover as BlockingProver, ProverClient as BlockingProverClient},
-    network::{
-        NetworkMode as Sp1SdkNetworkMode, get_default_rpc_url_for_mode, signer::NetworkSigner,
-    },
+    CpuProver, ExecutionReport, NetworkProver, Prover as _, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
 };
 
 #[derive(Parser)]
@@ -311,8 +307,8 @@ fn record_memory_snapshot(report: &mut BenchReport, label: &'static str) {
 }
 
 fn apply_execution_metadata(report: &mut BenchReport, execution_report: &ExecutionReport) {
-    report.exit_code = Some(execution_report.exit_code);
-    report.gas = execution_report.gas();
+    report.exit_code = Some(0);
+    report.gas = execution_report.gas;
     report.total_instruction_count = Some(execution_report.total_instruction_count());
     report.total_syscall_count = Some(execution_report.total_syscall_count());
     report.touched_memory_addresses = Some(execution_report.touched_memory_addresses);
@@ -428,9 +424,9 @@ async fn run_aggregation(args: Args) -> Result<()> {
     let start = Instant::now();
     let (proof, proposal_vk) = match sp1_config.prover {
         Sp1ProverMode::Mock => {
-            let prover = BlockingProverClient::builder().mock().build();
+            let prover = ProverClient::builder().mock().build();
             let proposal_pk = setup_sp1_pk(&prover, proposal_elf, "proposal")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let proposal_vk = proposal_pk.vk.clone();
             for proof in sp1_proofs {
                 match proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -445,9 +441,9 @@ async fn run_aggregation(args: Args) -> Result<()> {
             )
         }
         Sp1ProverMode::Local => {
-            let prover = BlockingProverClient::builder().cpu().build();
+            let prover = ProverClient::builder().cpu().build();
             let proposal_pk = setup_sp1_pk(&prover, proposal_elf, "proposal")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let proposal_vk = proposal_pk.vk.clone();
             for proof in sp1_proofs {
                 match proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -462,12 +458,8 @@ async fn run_aggregation(args: Args) -> Result<()> {
             )
         }
         Sp1ProverMode::Network => {
-            let prover = build_sp1_network_prover(&sp1_config).await?;
-            let proposal_pk = prover
-                .setup(proposal_elf.into())
-                .await
-                .context("setup SP1 proposal ELF")?;
-            let proposal_vk = proposal_pk.verifying_key().clone();
+            let prover = build_sp1_network_prover(&sp1_config)?;
+            let (_, proposal_vk) = prover.setup(proposal_elf);
             for proof in sp1_proofs {
                 match proof {
                     SP1Proof::Compressed(reduce_proof) => {
@@ -476,10 +468,7 @@ async fn run_aggregation(args: Args) -> Result<()> {
                     _ => anyhow::bail!("aggregation requires compressed proofs"),
                 }
             }
-            let pk = prover
-                .setup(elf.into())
-                .await
-                .context("setup SP1 aggregation ELF")?;
+            let (pk, _) = prover.setup(elf);
             (
                 request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)
                     .await
@@ -590,43 +579,33 @@ impl Sp1ProofOutput {
     }
 }
 
-fn setup_sp1_pk<P>(prover: &P, elf: &[u8], label: &str) -> Result<SP1ProvingKey>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
-    prover
-        .setup(elf.into())
-        .map_err(|err| anyhow::anyhow!("setup SP1 {label} ELF: {err:?}"))
+fn setup_sp1_pk(prover: &CpuProver, elf: &[u8], _label: &str) -> Result<SP1ProvingKey> {
+    let (pk, _) = prover.setup(elf);
+    Ok(pk)
 }
 
-fn prove_sp1_local<P>(
-    prover: &P,
+fn prove_sp1_local(
+    prover: &CpuProver,
     elf: &[u8],
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     cycle_limit: Option<u64>,
     label: &str,
-) -> Result<Sp1ProofOutput>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
+) -> Result<Sp1ProofOutput> {
     let pk = setup_sp1_pk(prover, elf, label)?;
-    let vkey = pk.verifying_key().clone();
+    let vkey = pk.vk.clone();
     prove_sp1_with_pk(prover, &pk, vkey, stdin, proof_mode, cycle_limit)
 }
 
-fn prove_sp1_with_pk<P>(
-    prover: &P,
+fn prove_sp1_with_pk(
+    prover: &CpuProver,
     pk: &SP1ProvingKey,
     vkey: SP1VerifyingKey,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
     cycle_limit: Option<u64>,
-) -> Result<Sp1ProofOutput>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
-    let mut request = prover.prove(pk, stdin).mode(proof_mode);
+) -> Result<Sp1ProofOutput> {
+    let mut request = prover.prove(pk, &stdin).mode(proof_mode);
     if let Some(cycle_limit) = cycle_limit {
         request = request.cycle_limit(cycle_limit);
     }
@@ -636,16 +615,13 @@ where
     Ok(Sp1ProofOutput { proof, vkey })
 }
 
-fn execute_sp1_local<P>(
-    prover: &P,
+fn execute_sp1_local(
+    prover: &CpuProver,
     elf: &[u8],
     stdin: SP1Stdin,
-) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)>
-where
-    P: BlockingProver<ProvingKey = SP1ProvingKey>,
-{
+) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
     prover
-        .execute(elf.into(), stdin)
+        .execute(elf, &stdin)
         .run()
         .map_err(|err| anyhow::anyhow!("execute failed: {err:?}"))
 }
@@ -657,11 +633,11 @@ async fn execute_sp1_blocking(
 ) -> Result<(sp1_sdk::SP1PublicValues, ExecutionReport)> {
     tokio::task::spawn_blocking(move || match prover_mode {
         Sp1ProverMode::Mock => {
-            let prover = BlockingProverClient::builder().mock().build();
+            let prover = ProverClient::builder().mock().build();
             execute_sp1_local(&prover, &elf, stdin)
         }
         Sp1ProverMode::Local => {
-            let prover = BlockingProverClient::builder().cpu().build();
+            let prover = ProverClient::builder().cpu().build();
             execute_sp1_local(&prover, &elf, stdin)
         }
         Sp1ProverMode::Network => {
@@ -672,26 +648,18 @@ async fn execute_sp1_blocking(
     .context("join SP1 blocking execute task")?
 }
 
-async fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
+fn build_sp1_network_prover(config: &Sp1Config) -> Result<NetworkProver> {
     let private_key = std::env::var("NETWORK_PRIVATE_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .context("NETWORK_PRIVATE_KEY must be set for sp1 network proving")?;
-    let signer = NetworkSigner::local(&private_key)
-        .context("NETWORK_PRIVATE_KEY is not a valid SP1 network signer")?;
-    let network_mode = sp1_sdk_network_mode(config.network_mode);
-    let rpc_url = config
-        .rpc_url
-        .clone()
-        .unwrap_or_else(|| get_default_rpc_url_for_mode(network_mode).to_string());
-    Ok(NetworkProver::new(signer, &rpc_url, network_mode).await)
-}
-
-const fn sp1_sdk_network_mode(mode: Sp1NetworkMode) -> Sp1SdkNetworkMode {
-    match mode {
-        Sp1NetworkMode::Mainnet => Sp1SdkNetworkMode::Mainnet,
-        Sp1NetworkMode::Reserved => Sp1SdkNetworkMode::Reserved,
-    }
+    let builder = ProverClient::builder().network().private_key(&private_key);
+    let builder = if let Some(rpc_url) = config.rpc_url.as_deref() {
+        builder.rpc_url(rpc_url)
+    } else {
+        builder
+    };
+    Ok(builder.build())
 }
 
 async fn request_network_proof(
@@ -702,18 +670,14 @@ async fn request_network_proof(
     config: &Sp1Config,
 ) -> Result<Sp1ProofOutput> {
     let timeout = Duration::from_secs(config.timeout_secs);
-    let mut request = prover
-        .prove(pk, stdin)
+    let request_id = prover
+        .prove(pk, &stdin)
         .mode(proof_mode)
         .strategy(config.fulfillment_strategy.into())
         .skip_simulation(config.skip_simulation)
         .cycle_limit(config.cycle_limit)
-        .timeout(timeout);
-    if let Some(max_price_per_pgu) = config.max_price_per_pgu {
-        request = request.max_price_per_pgu(max_price_per_pgu);
-    }
-    let request_id = request
-        .request()
+        .timeout(timeout)
+        .request_async()
         .await
         .context("request SP1 network proof")?;
     eprintln!("sp1 request_id: {request_id}");
@@ -723,7 +687,7 @@ async fn request_network_proof(
         .context("wait for SP1 network proof")?;
     Ok(Sp1ProofOutput {
         proof,
-        vkey: pk.verifying_key().clone(),
+        vkey: pk.vk.clone(),
     })
 }
 
@@ -774,10 +738,10 @@ async fn run_sp1_proposal(
             let start = Instant::now();
             match sp1_config.prover {
                 Sp1ProverMode::Mock => {
-                    let prover = BlockingProverClient::builder().mock().build();
+                    let prover = ProverClient::builder().mock().build();
                     record_memory_snapshot(&mut report, "proposal:before_setup");
                     let pk = setup_sp1_pk(&prover, elf, "proposal")?;
-                    let vkey = pk.verifying_key().clone();
+                    let vkey = pk.vk.clone();
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output = prove_sp1_with_pk(
                         &prover,
@@ -803,10 +767,10 @@ async fn run_sp1_proposal(
                     }
                 }
                 Sp1ProverMode::Local => {
-                    let prover = BlockingProverClient::builder().cpu().build();
+                    let prover = ProverClient::builder().cpu().build();
                     record_memory_snapshot(&mut report, "proposal:before_setup");
                     let pk = setup_sp1_pk(&prover, elf, "proposal")?;
-                    let vkey = pk.verifying_key().clone();
+                    let vkey = pk.vk.clone();
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output = prove_sp1_with_pk(
                         &prover,
@@ -832,12 +796,9 @@ async fn run_sp1_proposal(
                     }
                 }
                 Sp1ProverMode::Network => {
-                    let prover = build_sp1_network_prover(&sp1_config).await?;
+                    let prover = build_sp1_network_prover(&sp1_config)?;
                     record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = prover
-                        .setup(elf.into())
-                        .await
-                        .context("setup SP1 proposal ELF")?;
+                    let (pk, _) = prover.setup(elf);
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output =
                         request_network_proof(&prover, &pk, stdin, proof_mode.into(), &sp1_config)

@@ -60,12 +60,30 @@ pub(crate) struct RegisterTdxArgs {
 
     /// PCR bitmap (24-bit mask of TPM PCR indices to bind into trusted params).
     /// Default `0xBA10` = PCRs 4, 9, 11, 12, 13, 15 (matches the Azure paravisor
-    /// reference set).
+    /// reference set). When `--release-url` is set, the bitmap from the release
+    /// `measurements.json` takes precedence unless the user passes this flag
+    /// explicitly.
     #[arg(long, default_value_t = 0xBA10)]
     pcr_bitmap: u32,
 
+    /// GitHub release page URL (e.g.
+    /// `https://github.com/NethermindEth/nethermind-tdx/releases/tag/v0.1.0`)
+    /// or direct URL to a `*.measurements.json` asset. When set, the script
+    /// downloads the release-blessed measurements, uses its PCR bitmap, and
+    /// cross-checks the live VM's PCR digests against the release's expected
+    /// values before broadcasting `setTrustedParams` / `registerInstance`.
+    #[arg(long, env = "TDX_RELEASE_URL")]
+    release_url: Option<String>,
+
+    /// When `--release-url` points to a release page that has multiple
+    /// `*.measurements.json` assets (one per chain / image variant), pick the
+    /// one whose filename matches this substring. Required when more than one
+    /// matching asset exists; ignored otherwise.
+    #[arg(long, env = "TDX_RELEASE_ASSET")]
+    release_asset: Option<String>,
+
     /// Owner-only: also call `setTrustedParams` with the measurements extracted
-    /// from this VM.
+    /// from the live VM's attestation quote.
     #[arg(long)]
     trust: bool,
 
@@ -181,9 +199,37 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         );
     }
 
+    // When --release-url is set, the release-blessed measurements determine
+    // which PCR bitmap we bind and which expected PCR digests the live VM
+    // must match. The release-supplied bitmap wins so we can never end up
+    // committing on-chain to a PCR set that the release wasn't built for.
+    let release = match &args.release_url {
+        Some(url) => {
+            println!("loading release measurements from {url}");
+            let r = load_release_measurements(url, args.release_asset.as_deref())
+                .await
+                .context("failed to load release measurements")?;
+            println!("  asset:      {}", r.asset_name);
+            println!("  pcr_bitmap: {:#x}", r.pcr_bitmap);
+            println!("  pcrs:       {} expected entries", r.expected_pcrs.len());
+            Some(r)
+        }
+        None => None,
+    };
+
+    let effective_pcr_bitmap = release
+        .as_ref()
+        .map(|r| r.pcr_bitmap)
+        .unwrap_or(args.pcr_bitmap);
+
     println!(
-        "register-tdx: verifier={:?} index={} trust={} register={} dry_run={}",
-        args.verifier, args.trusted_params_index, do_trust, do_register, args.dry_run
+        "register-tdx: verifier={:?} index={} trust={} register={} dry_run={} pcr_bitmap={:#x}",
+        args.verifier,
+        args.trusted_params_index,
+        do_trust,
+        do_register,
+        args.dry_run,
+        effective_pcr_bitmap
     );
 
     let bootstrap = match &args.reth_tdx_url {
@@ -198,6 +244,28 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         "loaded bootstrap data (issuer={} public_key={})",
         bootstrap.issuer_type, bootstrap.public_key
     );
+
+    // Cross-check the live VM's reported PCRs against the release's expected
+    // values before we sign anything. Applies to both --trust and --register.
+    println!();
+    match release.as_ref() {
+        Some(r) => {
+            cross_check_release_pcrs(metadata, r)
+                .context("PCR cross-check against release measurements failed")?;
+            println!(
+                "✓ Image verified against release asset '{}' — PCR cross-check passed",
+                r.asset_name
+            );
+        }
+        None => {
+            println!(
+                "⚠ WARNING: --release-url not provided — VM image authenticity NOT verified \
+                 against a release. Pass --release-url to confirm this VM is running the \
+                 expected image before trusting or registering."
+            );
+        }
+    }
+    println!();
 
     let attestation = parse_verify_params(metadata, &bootstrap.quote, &bootstrap.nonce)
         .context("failed to parse attestation document from bootstrap metadata")?;
@@ -220,7 +288,7 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
     let contract = AzureTdxVerifier::new(args.verifier, provider);
 
     if do_trust {
-        let params = extract_trusted_params(metadata, &bootstrap.quote, args.pcr_bitmap)
+        let params = extract_trusted_params(metadata, &bootstrap.quote, effective_pcr_bitmap)
             .context("failed to extract trusted params from attestation report")?;
 
         println!(
@@ -347,6 +415,278 @@ fn read_bootstrap_from_disk() -> Result<BootstrapData> {
 fn bootstrap_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("failed to get home directory"))?;
     Ok(home.join(".config").join("reth-tdx").join("bootstrap.json"))
+}
+
+// ---------------------------------------------------------------
+// Release measurements (cross-check against live VM)
+//
+// `nethermind-tdx`'s release workflow attaches `<image>.measurements.json`
+// to each GitHub release. The file looks like:
+//
+// {
+//   "measurements": { "4": {"expected": "<hex>"}, "9": {"expected": "<hex>"}, ... },
+//   "registration": { "pcr_bitmap": "0xBA10", "pcrs_covered": [4,9,11,12,13,15], ... }
+// }
+//
+// When the operator passes `--release-url`, we download the asset and use:
+//   * `registration.pcr_bitmap` to decide which PCRs to bind on-chain
+//   * `measurements[i].expected` to verify the live VM's PCRs match before
+//     we sign anything
+//
+// This way the release is the trust anchor: the operator only has to verify
+// the URL/tag once, and the script handles the byte-level cross-check.
+// ---------------------------------------------------------------
+
+struct ReleaseMeasurements {
+    asset_name: String,
+    pcr_bitmap: u32,
+    expected_pcrs: std::collections::HashMap<usize, [u8; 32]>,
+}
+
+/// Convert a release page URL to the GitHub REST API URL that returns the
+/// release JSON. Returns `None` if the URL is not a `github.com/.../releases/tag/...`
+/// page (the caller then assumes it's a direct asset URL).
+fn github_release_to_api(url: &str) -> Option<String> {
+    let trimmed = url
+        .trim_end_matches('/')
+        .strip_prefix("https://")
+        .or_else(|| url.trim_end_matches('/').strip_prefix("http://"))?;
+    let rest = trimmed.strip_prefix("github.com/")?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next()? != "releases" {
+        return None;
+    }
+    if parts.next()? != "tag" {
+        return None;
+    }
+    let tag = parts.next()?.split('?').next()?.split('#').next()?;
+    if owner.is_empty() || repo.is_empty() || tag.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+    ))
+}
+
+async fn http_get_json(client: &reqwest::Client, url: &str) -> Result<Value> {
+    client
+        .get(url)
+        // GitHub's REST API rejects requests without a User-Agent.
+        .header("User-Agent", "raiko2-xtask-register-tdx")
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .with_context(|| format!("GET {url} failed"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url} returned error status"))?
+        .json::<Value>()
+        .await
+        .with_context(|| format!("failed to parse JSON from {url}"))
+}
+
+/// Download a `*.measurements.json` from a release URL or direct asset URL.
+///
+/// * Release page (`.../releases/tag/<tag>`): resolves the assets list,
+///   filters to entries whose name ends with `measurements.json`, then —
+///   if more than one survives — narrows further by `--release-asset`.
+/// * Anything else: treated as a direct URL to the JSON asset.
+async fn load_release_measurements(
+    url: &str,
+    asset_filter: Option<&str>,
+) -> Result<ReleaseMeasurements> {
+    let client = reqwest::Client::builder()
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let (asset_name, doc) = if let Some(api_url) = github_release_to_api(url) {
+        let release = http_get_json(&client, &api_url)
+            .await
+            .with_context(|| format!("failed to fetch release info from {api_url}"))?;
+        let assets = release
+            .get("assets")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("release JSON has no 'assets' array"))?;
+
+        let mut candidates: Vec<(&str, &str)> = assets
+            .iter()
+            .filter_map(|a| {
+                let name = a.get("name").and_then(Value::as_str)?;
+                let dl = a.get("browser_download_url").and_then(Value::as_str)?;
+                if name.ends_with("measurements.json") {
+                    Some((name, dl))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            bail!("release has no '*.measurements.json' assets");
+        }
+        if let Some(filter) = asset_filter {
+            candidates.retain(|(name, _)| name.contains(filter));
+            if candidates.is_empty() {
+                bail!("no measurements asset matches --release-asset='{filter}'");
+            }
+        }
+        if candidates.len() > 1 {
+            let names: Vec<&str> = candidates.iter().map(|(n, _)| *n).collect();
+            bail!(
+                "release has multiple measurements assets — pass --release-asset to disambiguate: {names:?}"
+            );
+        }
+        let (name, dl) = candidates[0];
+        let doc = http_get_json(&client, dl)
+            .await
+            .with_context(|| format!("failed to download asset {dl}"))?;
+
+        return parse_release_measurements(name, &doc);
+    } else {
+        let doc = http_get_json(&client, url)
+            .await
+            .with_context(|| format!("failed to fetch measurements directly from {url}"))?;
+        let asset_name = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("measurements.json")
+            .to_string();
+        (asset_name, doc)
+    };
+
+    parse_release_measurements(&asset_name, &doc)
+}
+
+fn parse_release_measurements(asset_name: &str, doc: &Value) -> Result<ReleaseMeasurements> {
+    // `registration.pcr_bitmap` is the authoritative bitmap for this release.
+    // Older measurements.json files (pre-release-workflow) won't have it; in
+    // that case we synthesise the bitmap from whichever PCR indices have an
+    // `expected` digest, so legacy files still work.
+    let registration = doc.get("registration");
+    let pcr_bitmap = match registration.and_then(|r| r.get("pcr_bitmap")) {
+        Some(Value::String(s)) => parse_u32_hex_or_dec(s)
+            .with_context(|| format!("invalid registration.pcr_bitmap '{s}'"))?,
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| anyhow!("registration.pcr_bitmap out of range"))?,
+        Some(other) => bail!("registration.pcr_bitmap must be string or number, got {other:?}"),
+        None => 0, // filled below from the measurements keys
+    };
+
+    let measurements_obj = doc
+        .get("measurements")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("measurements file has no 'measurements' object"))?;
+
+    let mut expected_pcrs = std::collections::HashMap::new();
+    let mut derived_bitmap: u32 = 0;
+    for (k, v) in measurements_obj {
+        let idx: usize = k
+            .parse()
+            .with_context(|| format!("measurements key '{k}' is not a PCR index"))?;
+        if idx >= 24 {
+            continue;
+        }
+        let expected = v
+            .get("expected")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("measurements[{k}].expected missing or not a string"))?;
+        let bytes = hex::decode(expected.trim_start_matches("0x"))
+            .with_context(|| format!("measurements[{k}].expected is not valid hex"))?;
+        let arr: [u8; 32] = bytes.try_into().map_err(|b: Vec<u8>| {
+            anyhow!(
+                "measurements[{k}].expected must be 32 bytes, got {}",
+                b.len()
+            )
+        })?;
+        expected_pcrs.insert(idx, arr);
+        derived_bitmap |= 1u32 << idx;
+    }
+
+    let pcr_bitmap = if pcr_bitmap == 0 {
+        derived_bitmap
+    } else {
+        pcr_bitmap
+    };
+    if pcr_bitmap >= (1u32 << 24) {
+        bail!(
+            "release pcr_bitmap {:#x} exceeds 24-bit range — not safe to pack into uint24",
+            pcr_bitmap
+        );
+    }
+
+    Ok(ReleaseMeasurements {
+        asset_name: asset_name.to_string(),
+        pcr_bitmap,
+        expected_pcrs,
+    })
+}
+
+fn parse_u32_hex_or_dec(s: &str) -> Result<u32> {
+    let s = s.trim();
+    if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Ok(u32::from_str_radix(h, 16)?)
+    } else {
+        Ok(s.parse::<u32>()?)
+    }
+}
+
+/// Verify that every PCR index set in the release's bitmap has the same digest
+/// in the live VM's bootstrap metadata. Returns an error listing all mismatches
+/// (so the operator sees the full picture, not just the first wrong PCR).
+fn cross_check_release_pcrs(metadata: &Value, release: &ReleaseMeasurements) -> Result<()> {
+    let live = metadata
+        .get("pcrs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("live bootstrap metadata.pcrs missing or not an object"))?;
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for i in 0..24 {
+        if release.pcr_bitmap & (1u32 << i) == 0 {
+            continue;
+        }
+        let expected = match release.expected_pcrs.get(&i) {
+            Some(e) => e,
+            None => {
+                mismatches.push(format!(
+                    "PCR[{i}]: release bitmap bit set but no expected digest in measurements"
+                ));
+                continue;
+            }
+        };
+        let live_val = match live.get(&i.to_string()).and_then(Value::as_str) {
+            Some(s) => s,
+            None => {
+                mismatches.push(format!("PCR[{i}]: missing in live bootstrap metadata"));
+                continue;
+            }
+        };
+        let live_bytes = match hex::decode(live_val.trim_start_matches("0x")) {
+            Ok(b) => b,
+            Err(e) => {
+                mismatches.push(format!("PCR[{i}]: live digest is not valid hex: {e}"));
+                continue;
+            }
+        };
+        if live_bytes.as_slice() != expected.as_slice() {
+            mismatches.push(format!(
+                "PCR[{i}]: live=0x{} release=0x{}",
+                hex::encode(&live_bytes),
+                hex::encode(expected)
+            ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        bail!(
+            "live VM does not match release '{}'\n  {}",
+            release.asset_name,
+            mismatches.join("\n  ")
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------

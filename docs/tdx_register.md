@@ -68,20 +68,43 @@ You need it any time:
 
 ## Common flows
 
-### First TDX prover on a fresh `TdxVerifier`
+### 1. Trust + register (first-time or new image)
 
-Owner key required (uses `--trust`):
+Requires the `TdxVerifier` **owner key** and a running VM. `--release-url`
+cross-checks the VM's PCRs against the release's `measurements.json` before
+broadcasting — use it to confirm the VM is running the expected image.
 
 ```bash
 cargo run -p xtask -- register-tdx \
-  --verifier 0x<TdxVerifier proxy> \
+  --verifier 0x<TdxVerifier proxy>  \
   --rpc http://<L1 RPC>             \
   --private-key 0x<owner key>       \
-  --reth-tdx-url http://<VM_IP>:8080   \
+  --reth-tdx-url http://<VM_IP>:8080 \
+  --release-url https://github.com/NethermindEth/nethermind-tdx/releases/tag/<TAG> \
   --trust --register
 ```
 
-On success the xtask prints a clear summary banner:
+> `--trusted-params-index` defaults to `0`. Pass `--trusted-params-index 1`
+> when rolling out a new image while keeping the old policy in slot 0.
+
+### 2. Register only (admit a new VM against an existing policy)
+
+Use when the trusted-params slot already holds the right policy. **Any funded
+account works** — the contract verifies the attestation autonomously. No
+`--release-url` needed.
+
+```bash
+cargo run -p xtask -- register-tdx \
+  --verifier 0x<TdxVerifier proxy>  \
+  --rpc http://<L1 RPC>             \
+  --private-key 0x<any funded key>  \
+  --reth-tdx-url http://<VM_IP>:8080 \
+  --register
+```
+
+---
+
+On success the xtask prints a summary banner:
 
 ```
 =======================================
@@ -94,46 +117,27 @@ On success the xtask prints a clear summary banner:
 =======================================
 ```
 
-### Second prover on the same image
+### Dry-run (preview without broadcasting)
 
-No `--trust` needed; any funded key works:
-
-```bash
-cargo run -p xtask -- register-tdx \
-  --verifier 0x<TdxVerifier proxy> \
-  --rpc http://<L1 RPC>             \
-  --private-key 0x<funded key>      \
-  --reth-tdx-url http://<NEW_VM_IP>:8080 \
-  --register
-```
-
-### New VM image (measurements changed)
-
-Owner key, fresh `--trusted-params-index`. Old instances remain valid against slot 0 until
-they expire:
+Add `--dry-run` to any of the above:
 
 ```bash
 cargo run -p xtask -- register-tdx \
-  --verifier 0x<TdxVerifier proxy>  \
-  --rpc http://<L1 RPC>              \
-  --private-key 0x<owner key>        \
-  --reth-tdx-url http://<VM_IP>:8080    \
-  --trusted-params-index 1           \
-  --trust --register
+  --verifier 0x... --rpc http://... --private-key 0x... \
+  --reth-tdx-url http://... \
+  --trust --register --dry-run
 ```
 
-### Dry-run (no broadcast)
+### Multi-asset release
 
-Useful for previewing what would be sent:
+If a release contains assets for multiple chains, use `--release-asset`:
 
 ```bash
-cargo run -p xtask -- register-tdx \
-  --verifier 0x...                 \
-  --rpc http://...                 \
-  --private-key 0x...              \
-  --reth-tdx-url http://...        \
-  --register --dry-run
+  --release-url https://github.com/NethermindEth/nethermind-tdx/releases/tag/<TAG> \
+  --release-asset taiko-tdx-prover-dev_2026-05-29
 ```
+
+`--release-asset` is matched as a substring against asset names.
 
 ## All flags
 
@@ -144,9 +148,11 @@ cargo run -p xtask -- register-tdx \
 | `--private-key` | `PRIVATE_KEY` | — | Hex key (with or without `0x`). Owner for `--trust`, any funded key for `--register` alone |
 | `--reth-tdx-url` | `TDX_RETH_URL` | — | Fetch bootstrap from `GET <url>/bootstrap` (on the `reth-tdx` HTTP server inside the TDX VM). If unset, reads `~/.config/reth-tdx/bootstrap.json` |
 | `--trusted-params-index` | — | `0` | Slot to read/write |
-| `--pcr-bitmap` | — | `0xBA10` | 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set) |
-| `--trust` | — | `false` | Also call `setTrustedParams` (owner-only) |
-| `--register` | — | `true` if no flags given | Call `registerInstance` |
+| `--pcr-bitmap` | — | `0xBA10` | 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set). Overridden by the release's bitmap when `--release-url` is set |
+| `--release-url` | `TDX_RELEASE_URL` | — | GitHub release page URL or direct `*.measurements.json` URL. When set, downloads the release-blessed measurements, uses its PCR bitmap, and cross-checks the live VM's PCR digests against it before broadcasting |
+| `--release-asset` | `TDX_RELEASE_ASSET` | — | Substring filter when the release page has multiple `*.measurements.json` assets. Required when more than one matches |
+| `--trust` | — | `false` | Call `setTrustedParams` (owner-only). Extracts `mrSeam`, `mrTd`, `teeTcbSvn`, and PCRs from the live VM's attestation quote |
+| `--register` | — | `true` if no flags given | Call `registerInstance`. Submits the live VM's attestation for on-chain verification |
 | `--dry-run` | — | `false` | Print transactions without broadcasting |
 
 ## Where the bootstrap comes from

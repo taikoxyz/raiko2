@@ -9,7 +9,7 @@ pub mod rpc;
 use alloy::consensus::Header;
 use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
@@ -44,10 +44,12 @@ pub trait Provider: Send + Sync {
 
     async fn batch_witnesses_with_tx_lists(
         &self,
-        blocks: &[u64],
+        _blocks: &[u64],
         _tx_lists: &[Bytes],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.batch_witnesses(blocks).await
+        Err(RaikoError::FeatureNotSupportedError(
+            "provider does not support tx-list execution witnesses".to_string(),
+        ))
     }
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
@@ -158,14 +160,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_provider_tx_list_witnesses_fall_back()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_mock_provider_tx_list_witnesses_fail_fast_when_unsupported() {
         let provider = MockProvider { blocks: vec![] };
-        let witnesses = provider
+        let err = provider
             .batch_witnesses_with_tx_lists(&[1], &[Bytes::from_static(&[0xc0])])
-            .await?;
-        assert!(witnesses.is_empty());
-        Ok(())
+            .await
+            .expect_err("default tx-list witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("provider does not support tx-list execution witnesses"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

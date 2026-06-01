@@ -5,7 +5,7 @@ use alloy::{
 };
 use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_rpc_types_eth::Header as AlloyRpcHeader;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -54,11 +54,12 @@ pub(crate) trait L2Provider: Send + Sync {
 
     async fn batch_witnesses_with_tx_lists(
         &self,
-        block_numbers: &[u64],
-        tx_lists: &[Bytes],
+        _block_numbers: &[u64],
+        _tx_lists: &[Bytes],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        let _ = tx_lists;
-        self.batch_witnesses(block_numbers).await
+        Err(RaikoError::FeatureNotSupportedError(
+            "L2 provider does not support tx-list execution witnesses".to_string(),
+        ))
     }
 }
 
@@ -396,5 +397,50 @@ impl Provider for NetworkProvider {
     ) -> RaikoResult<Vec<InputDataSource>> {
         self.fetch_shasta_data_sources(l1_chain_spec, proposal_event, blob_proof_type)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnsupportedTxListL2Provider;
+
+    #[async_trait::async_trait]
+    impl L2Provider for UnsupportedTxListL2Provider {
+        async fn batch_blocks(&self, _block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+            Ok(Vec::new())
+        }
+
+        async fn batch_accounts(
+            &self,
+            _block_numbers: &[u64],
+            _addresses: &[Vec<Address>],
+        ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+            Ok(Vec::new())
+        }
+
+        async fn batch_witnesses(
+            &self,
+            _block_numbers: &[u64],
+        ) -> RaikoResult<Vec<ExecutionWitness>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_l2_provider_tx_list_witnesses_fail_fast() {
+        let provider = UnsupportedTxListL2Provider;
+
+        let err = provider
+            .batch_witnesses_with_tx_lists(&[1], &[Bytes::from_static(&[0xc0])])
+            .await
+            .expect_err("default tx-list witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("L2 provider does not support tx-list execution witnesses"),
+            "{err}"
+        );
     }
 }

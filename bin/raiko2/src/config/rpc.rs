@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
+use raiko2_prover::boundless_config::{BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,

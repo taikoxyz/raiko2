@@ -29,21 +29,22 @@
 
 #[cfg(feature = "boundless")]
 pub mod boundless;
+pub mod boundless_config;
 pub mod gaiko2;
 pub mod native;
 pub mod remote_prover;
 #[cfg(feature = "risc0")]
 pub mod risc0;
-#[cfg(any(feature = "risc0", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 mod risc0_aggregation;
 #[cfg(feature = "sp1")]
 pub mod sp1;
-#[cfg(feature = "sp1")]
-pub use sp1::{
+pub mod sp1_config;
+pub use sp1_config::{
     Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
 };
 
-#[cfg(any(feature = "risc0", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 use alloy::sol_types::SolValue;
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 use alloy_primitives::B256;
@@ -93,7 +94,6 @@ pub struct BoundlessSubmissionResume {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProverProgress {
     BoundlessSubmission(BoundlessSubmissionProgress),
-    #[cfg(feature = "sp1")]
     Sp1NetworkSubmission(Sp1NetworkSubmissionProgress),
 }
 
@@ -139,7 +139,7 @@ pub(crate) fn parse_shasta_aggregation_input_hash(public_values: &[u8]) -> Raiko
     }
 }
 
-#[cfg(any(feature = "risc0", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) -> String {
     let proof: Vec<u8> = (seal.to_vec(), image_id)
         .abi_encode()
@@ -149,7 +149,7 @@ pub(crate) fn encode_risc0_proposal_seal_payload(seal: &[u8], image_id: B256) ->
     alloy_primitives::hex::encode_prefixed(proof)
 }
 
-#[cfg(any(feature = "risc0", feature = "boundless", test))]
+#[cfg(any(feature = "risc0", feature = "boundless"))]
 pub(crate) fn encode_risc0_aggregation_seal_payload(
     seal: &[u8],
     block_image_id: B256,
@@ -433,12 +433,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "risc0", feature = "boundless"))]
     use super::{
-        decode_hex_payload, encode_proof_carry_data, encode_risc0_aggregation_seal_payload,
-        encode_risc0_proposal_seal_payload, parse_shasta_aggregation_input_hash,
+        decode_hex_payload, encode_risc0_aggregation_seal_payload,
+        encode_risc0_proposal_seal_payload,
+    };
+    use super::{
+        encode_proof_carry_data, parse_shasta_aggregation_input_hash,
         parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
+    #[cfg(any(feature = "risc0", feature = "boundless"))]
     use alloy_sol_types::SolValue;
     use raiko2_pipeline::PipelineRoute;
     use raiko2_primitives::Proof;
@@ -617,6 +622,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "risc0", feature = "boundless"))]
     fn risc0_proposal_payload_encodes_seal_and_image_id() {
         let seal = vec![0x11, 0x22, 0x33];
         let image_id = B256::repeat_byte(0xaa);
@@ -629,6 +635,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "risc0", feature = "boundless"))]
     fn risc0_aggregation_payload_encodes_seal_and_both_image_ids() {
         let seal = vec![0x44, 0x55, 0x66];
         let block_image_id = B256::repeat_byte(0xbb);

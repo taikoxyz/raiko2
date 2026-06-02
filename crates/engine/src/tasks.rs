@@ -1,7 +1,7 @@
 use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineKey, PipelineStageResult};
 use raiko2_primitives::{L2BlockRange, Proof, ShastaCheckpoint};
-use raiko2_prover::sp1::{Sp1ConfigOverrides, Sp1SystemConfig};
+use raiko2_prover::sp1_config::{Sp1ConfigOverrides, Sp1SystemConfig};
 use raiko2_queue::{ReadyQueueSort, TaskId};
 use serde::{Deserialize, Serialize};
 

@@ -5,12 +5,12 @@
 
 mod types;
 
-pub use types::{
+pub use crate::sp1_config::{
     ExecutionMode, ProverMode, RecursionMode, Sp1Config, Sp1ConfigError, Sp1ConfigOverrides,
-    Sp1ExecutionMetadata, Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode,
-    Sp1NetworkSubmissionProgress, Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1Response,
-    Sp1SystemConfig,
+    Sp1FulfillmentStrategy, Sp1NetworkMetadata, Sp1NetworkMode, Sp1NetworkSubmissionProgress,
+    Sp1RemoteVerifyConfig, Sp1RequestContext, Sp1SystemConfig,
 };
+pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
 use alloy::{providers::ProviderBuilder, sol};
 use alloy_primitives::{Address, B256, Bytes};
@@ -25,7 +25,10 @@ use sp1_sdk::{
         CpuProver as BlockingCpuProver, MockProver as BlockingMockProver, ProveRequest as _,
         Prover as BlockingProver, ProverClient as BlockingProverClient,
     },
-    network::{Error as Sp1NetworkError, NetworkMode as Sp1SdkNetworkMode, signer::NetworkSigner},
+    network::{
+        Error as Sp1NetworkError, FulfillmentStrategy, NetworkMode as Sp1SdkNetworkMode,
+        signer::NetworkSigner,
+    },
 };
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
@@ -55,6 +58,26 @@ sol!(
         ) external view;
     }
 );
+
+impl From<RecursionMode> for SP1ProofMode {
+    fn from(value: RecursionMode) -> Self {
+        match value {
+            RecursionMode::Core => Self::Core,
+            RecursionMode::Compressed => Self::Compressed,
+            RecursionMode::Plonk => Self::Plonk,
+        }
+    }
+}
+
+impl From<Sp1FulfillmentStrategy> for FulfillmentStrategy {
+    fn from(value: Sp1FulfillmentStrategy) -> Self {
+        match value {
+            Sp1FulfillmentStrategy::Reserved => Self::Reserved,
+            Sp1FulfillmentStrategy::Hosted => Self::Hosted,
+            Sp1FulfillmentStrategy::Auction => Self::Auction,
+        }
+    }
+}
 
 /// SP1 Prover for Shasta proposal proofs.
 #[derive(Clone)]

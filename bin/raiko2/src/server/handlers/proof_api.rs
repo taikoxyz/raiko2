@@ -12,7 +12,7 @@ use raiko2_engine::{
 use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
 use raiko2_primitives_shasta::instance::SHASTA_PROPOSAL_ID_MAX;
-use raiko2_prover::sp1::{
+use raiko2_prover::sp1_config::{
     ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1RemoteVerifyConfig,
     Sp1RequestContext, Sp1SystemConfig,
 };
@@ -590,7 +590,7 @@ fn validate_aggregate_route_specific_request(
 
 fn validate_hosted_sp1_posture(
     pair: &ResolvedNetworkPair,
-    config: &raiko2_prover::sp1::Sp1Config,
+    config: &raiko2_prover::sp1_config::Sp1Config,
 ) -> Result<(), ApiError> {
     if matches!(config.mode, Sp1ExecutionMode::Prove) && !config.verify {
         return Err(ApiError::bad_request(
@@ -598,7 +598,10 @@ fn validate_hosted_sp1_posture(
         ));
     }
     if matches!(config.mode, Sp1ExecutionMode::Prove)
-        && matches!(config.prover, raiko2_prover::sp1::ProverMode::Network)
+        && matches!(
+            config.prover,
+            raiko2_prover::sp1_config::ProverMode::Network
+        )
         && config.remote_verify.is_none()
     {
         return Err(ApiError::bad_request(format!(

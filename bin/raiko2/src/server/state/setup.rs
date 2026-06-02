@@ -84,6 +84,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -110,6 +111,7 @@ fn task_lease_duration(config: &Config) -> Duration {
     Duration::from_millis(lease_ms.max(60_000))
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
@@ -122,11 +124,13 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     config.prover.sp1.clone()
 }
 
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,

@@ -11,6 +11,7 @@ use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
+const HOST_BIN_FEATURES: &str = "--no-default-features --features remote-sgx-host";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageBackend {
@@ -116,7 +117,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
-        .args(build_metadata_flags(&source_revision))
+        .args(build_image_flags(args.backend, &source_revision))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
@@ -205,6 +206,17 @@ fn build_metadata_flags(source_revision: &str) -> Vec<String> {
         "--build-arg".to_string(),
         format!("VCS_REF={source_revision}"),
     ]
+}
+
+fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<String> {
+    let mut flags = build_metadata_flags(source_revision);
+    if matches!(image_backend, ImageBackend::Host) {
+        flags.extend([
+            "--build-arg".to_string(),
+            format!("BIN_FEATURES={HOST_BIN_FEATURES}"),
+        ]);
+    }
+    flags
 }
 
 fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
@@ -319,8 +331,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        ImageBackend, build_metadata_flags, release_summary_lines, resolve_guest_refresh_backend,
-        write_release_summary,
+        ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
+        resolve_guest_refresh_backend, write_release_summary,
     };
     use xtask_build_guest::Backend;
 
@@ -347,6 +359,21 @@ mod tests {
         assert_eq!(
             flags,
             vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
+        );
+    }
+
+    #[test]
+    fn host_image_flags_select_remote_sgx_host_features() {
+        let flags = build_image_flags(ImageBackend::Host, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--build-arg".to_string(),
+                "BIN_FEATURES=--no-default-features --features remote-sgx-host".to_string(),
+            ]
         );
     }
 

@@ -444,7 +444,7 @@ mod tests {
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.offer_params.batch =
-            Some(raiko2_prover::boundless::BoundlessOfferParams {
+            Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeout_ms_per_mcycle: 100,
                 lock_timeout_ms_per_mcycle: 100,
                 ..config.prover.boundless.offer_params.batch.clone()
@@ -709,7 +709,7 @@ maintenance_interval_ms = 200
         );
         assert_eq!(
             config.prover.sp1.prover,
-            raiko2_prover::sp1::ProverMode::Network
+            raiko2_prover::sp1_config::ProverMode::Network
         );
     }
 
@@ -724,7 +724,7 @@ maintenance_interval_ms = 200
         );
         assert_eq!(
             config.prover.sp1.prover,
-            raiko2_prover::sp1::ProverMode::Local
+            raiko2_prover::sp1_config::ProverMode::Local
         );
     }
 

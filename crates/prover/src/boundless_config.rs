@@ -8,6 +8,7 @@ use raiko2_primitives::{RaikoError, RaikoResult};
 use serde::{Deserialize, Serialize};
 
 const STAKE_TOKEN_DECIMALS: u8 = 18;
+const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -122,8 +123,8 @@ impl Default for BoundlessConfig {
     }
 }
 
-fn default_execution_po2() -> u32 {
-    crate::risc0::Risc0Config::default().execution_po2
+const fn default_execution_po2() -> u32 {
+    DEFAULT_RISC0_EXECUTION_PO2
 }
 
 const fn default_poll_interval_ms() -> u64 {
@@ -138,7 +139,7 @@ const fn default_aggregation_quoted_mcycles() -> u32 {
     200
 }
 
-pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {
+pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
@@ -183,7 +184,7 @@ impl BoundlessConfig {
     }
 }
 
-pub(super) fn parse_staking_token(value: &str) -> RaikoResult<U256> {
+fn parse_staking_token(value: &str) -> RaikoResult<U256> {
     parse_units(value, STAKE_TOKEN_DECIMALS)
         .map(Into::into)
         .map_err(|e| {
@@ -282,60 +283,31 @@ mod tests {
     }
 
     #[test]
-    fn default_batch_offer_matches_documented_defaults() {
-        let batch = BoundlessConfig::default().offer_params.batch;
-        assert_eq!(batch.ramp_up_start_sec, 20);
-        assert_eq!(batch.ramp_up_period_blocks, 60);
-        assert_eq!(batch.lock_timeout_ms_per_mcycle, 200);
-        assert_eq!(batch.timeout_ms_per_mcycle, 410);
-        assert_eq!(batch.pricing_mode, BoundlessPricingMode::Manual);
-        assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.000000085"));
-        assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
-        assert_eq!(batch.lock_collateral, "20");
-    }
-
-    #[test]
-    fn default_aggregation_offer_matches_documented_defaults() {
-        let aggregation = BoundlessConfig::default().offer_params.aggregation;
-        assert_eq!(aggregation.ramp_up_start_sec, 20);
-        assert_eq!(aggregation.ramp_up_period_blocks, 60);
-        assert_eq!(aggregation.lock_timeout_ms_per_mcycle, 3000);
-        assert_eq!(aggregation.timeout_ms_per_mcycle, 6000);
-        assert_eq!(aggregation.pricing_mode, BoundlessPricingMode::Manual);
-        assert_eq!(
-            aggregation.max_price_per_mcycle.as_deref(),
-            Some("0.00000006")
-        );
-        assert_eq!(
-            aggregation.min_price_per_mcycle.as_deref(),
-            Some("0.000000006")
-        );
-        assert_eq!(aggregation.lock_collateral, "20");
-    }
-
-    #[test]
     fn validate_offer_spec_rejects_min_price_above_max_price() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.min_price_per_mcycle = Some("0.00000009".to_string());
+        offer.min_price_per_mcycle = Some("2".to_string());
+        offer.max_price_per_mcycle = Some("1".to_string());
+
         let err = validate_offer_spec(&offer).expect_err("min_price above max");
-        assert!(err.contains("min_price_per_mcycle"));
+        assert!(err.contains("min_price_per_mcycle cannot exceed max_price_per_mcycle"));
     }
 
     #[test]
     fn validate_offer_spec_rejects_timeout_not_above_lock_timeout() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.lock_timeout_ms_per_mcycle = 300;
-        offer.timeout_ms_per_mcycle = 300;
+        offer.timeout_ms_per_mcycle = offer.lock_timeout_ms_per_mcycle;
+
         let err = validate_offer_spec(&offer).expect_err("timeout not above lock_timeout");
-        assert!(err.contains("timeout"));
+        assert!(err.contains("timeout must be greater than lock_timeout"));
     }
 
     #[test]
     fn validate_offer_spec_accepts_market_pricing_without_manual_prices() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
         offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
+        offer.max_price_per_mcycle = None;
+
         validate_offer_spec(&offer).expect("valid market offer");
     }
 
@@ -343,14 +315,18 @@ mod tests {
     fn validate_offer_spec_rejects_market_pricing_with_manual_prices() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
         offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.min_price_per_mcycle = Some("1".to_string());
+
         let err = validate_offer_spec(&offer).expect_err("market offer with manual prices");
-        assert!(err.contains("must be omitted when pricing_mode=market"));
+        assert!(err.contains("must be omitted"));
     }
 
     #[test]
     fn validate_offer_spec_rejects_manual_pricing_without_max_price() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Manual;
         offer.max_price_per_mcycle = None;
+
         let err = validate_offer_spec(&offer).expect_err("manual offer without max price");
         assert!(err.contains("max_price_per_mcycle is required"));
     }

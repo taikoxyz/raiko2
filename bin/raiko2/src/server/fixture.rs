@@ -502,7 +502,7 @@ pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
     config.prover.guest_system = GuestSystem::Risc0;
     config.prover.runner = RunnerKind::Local;
-    config.prover.sp1.prover = raiko2_prover::sp1::ProverMode::Local;
+    config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),

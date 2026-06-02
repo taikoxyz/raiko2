@@ -5,7 +5,6 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
-use xtask_build_guest::Backend;
 
 use crate::util;
 
@@ -22,6 +21,13 @@ pub(crate) enum ImageBackend {
     /// Runtime image with SP1 guest ELF release refresh.
     Sp1,
     /// Runtime image with all guest ELF release refreshes.
+    All,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestBackend {
+    Risc0,
+    Sp1,
     All,
 }
 
@@ -44,7 +50,7 @@ pub(crate) struct ReleaseImageArgs {
 
     /// For backend=host, optionally refresh checked-in guest ELFs before building the host image.
     #[arg(long, value_enum)]
-    pub(crate) refresh_guest_elves: Option<Backend>,
+    pub(crate) refresh_guest_elves: Option<GuestBackend>,
 }
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
@@ -80,9 +86,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
         );
         if args.force_rebuild_guests {
             println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
-            xtask_build_guest::build(root, guest_backend, false, None)?;
+            refresh_guest_elves(root, guest_backend, true)?;
         } else {
-            xtask_build_guest::ensure_release_guest_elves(root, guest_backend, false, None)?;
+            refresh_guest_elves(root, guest_backend, false)?;
         }
         ensure_clean_source_tree(
             root,
@@ -144,11 +150,11 @@ const fn image_backend_name(backend: ImageBackend) -> &'static str {
     }
 }
 
-const fn guest_backend_name(backend: Backend) -> &'static str {
+const fn guest_backend_name(backend: GuestBackend) -> &'static str {
     match backend {
-        Backend::Risc0 => "risc0",
-        Backend::Sp1 => "sp1",
-        Backend::All => "all",
+        GuestBackend::Risc0 => "risc0",
+        GuestBackend::Sp1 => "sp1",
+        GuestBackend::All => "all",
     }
 }
 
@@ -156,8 +162,8 @@ fn resolve_guest_refresh_backend(
     image_backend: ImageBackend,
     force_rebuild_guests: bool,
     skip_guest_refresh: bool,
-    refresh_guest_elves: Option<Backend>,
-) -> Result<Option<Backend>> {
+    refresh_guest_elves: Option<GuestBackend>,
+) -> Result<Option<GuestBackend>> {
     if skip_guest_refresh && force_rebuild_guests {
         bail!("--skip-guest-refresh cannot be combined with --force-rebuild-guests");
     }
@@ -180,14 +186,33 @@ fn resolve_guest_refresh_backend(
                 Ok(None)
             } else {
                 Ok(Some(match image_backend {
-                    ImageBackend::Risc0 => Backend::Risc0,
-                    ImageBackend::Sp1 => Backend::Sp1,
-                    ImageBackend::All => Backend::All,
+                    ImageBackend::Risc0 => GuestBackend::Risc0,
+                    ImageBackend::Sp1 => GuestBackend::Sp1,
+                    ImageBackend::All => GuestBackend::All,
                     ImageBackend::Host => unreachable!("host handled above"),
                 }))
             }
         }
     }
+}
+
+#[cfg(feature = "guest-tools")]
+fn refresh_guest_elves(root: &Path, backend: GuestBackend, force_rebuild: bool) -> Result<()> {
+    let backend = match backend {
+        GuestBackend::Risc0 => xtask_build_guest::Backend::Risc0,
+        GuestBackend::Sp1 => xtask_build_guest::Backend::Sp1,
+        GuestBackend::All => xtask_build_guest::Backend::All,
+    };
+    if force_rebuild {
+        xtask_build_guest::build(root, backend, false, None)
+    } else {
+        xtask_build_guest::ensure_release_guest_elves(root, backend, false, None)
+    }
+}
+
+#[cfg(not(feature = "guest-tools"))]
+fn refresh_guest_elves(_root: &Path, _backend: GuestBackend, _force_rebuild: bool) -> Result<()> {
+    bail!("guest ELF refresh requires building xtask with the `guest-tools` feature");
 }
 
 fn ensure_non_empty(name: &str, value: &str) -> Result<()> {
@@ -331,10 +356,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
+        GuestBackend, ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
         resolve_guest_refresh_backend, write_release_summary,
     };
-    use xtask_build_guest::Backend;
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
@@ -387,11 +411,15 @@ mod tests {
 
     #[test]
     fn host_image_can_refresh_selected_guest_elves() {
-        let refresh =
-            resolve_guest_refresh_backend(ImageBackend::Host, false, false, Some(Backend::All))
-                .expect("host image should accept an explicit guest refresh backend");
+        let refresh = resolve_guest_refresh_backend(
+            ImageBackend::Host,
+            false,
+            false,
+            Some(GuestBackend::All),
+        )
+        .expect("host image should accept an explicit guest refresh backend");
 
-        assert_eq!(refresh, Some(Backend::All));
+        assert_eq!(refresh, Some(GuestBackend::All));
     }
 
     #[test]
@@ -408,7 +436,7 @@ mod tests {
     #[test]
     fn non_host_image_rejects_explicit_refresh_backend() {
         let err =
-            resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(Backend::All))
+            resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(GuestBackend::All))
                 .expect_err("non-host backend owns its guest refresh backend already");
 
         assert!(

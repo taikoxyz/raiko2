@@ -29,7 +29,11 @@ bench-guest backend="sp1" *args:
     cargo run -r -p xtask -- bench-guest {{backend}} {{args}}
 
 release-image backend tag repository="us-docker.pkg.dev/evmchain/images/raiko2" *args:
-    cargo run -r -p xtask -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}
+    @if [ "{{backend}}" = "host" ]; then \
+        cargo run -r -p xtask --no-default-features --features image-release -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}; \
+    else \
+        cargo run -r -p xtask -- release-image {{backend}} --tag {{tag}} --repository {{repository}} {{args}}; \
+    fi
 
 update-alethia-reth:
     cargo update -p alethia-reth-block

@@ -11,8 +11,8 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use futures::{StreamExt, TryStreamExt, stream};
 use raiko2_primitives::{RaikoError, RaikoResult};
 use raiko2_primitives_shasta::l1_precompiles::{
-    L1ExecutionWitness, L1STATICCALL_GAS_CAP, L1StaticCallRecord, L1StaticCallWitness,
-    L1StorageProof, set_l1_rpc_fetcher, set_l1_staticcall_rpc_fetcher,
+    L1_PRECOMPILE_CALLER, L1ExecutionWitness, L1STATICCALL_GAS_CAP, L1StaticCallRecord,
+    L1StaticCallWitness, L1StorageProof, set_l1_rpc_fetcher, set_l1_staticcall_rpc_fetcher,
 };
 use serde::Deserialize;
 
@@ -63,7 +63,7 @@ impl NetworkProvider {
             tokio::task::block_in_place(move || {
                 handle.block_on(async move {
                     let call = serde_json::json!({
-                        "from": format!("{:?}", Address::ZERO),
+                        "from": format!("{L1_PRECOMPILE_CALLER:?}"),
                         "to": format!("{target:?}"),
                         "data": format!("0x{}", hex::encode(&calldata)),
                         "gas": format!("0x{:x}", gas_limit.min(L1STATICCALL_GAS_CAP)),
@@ -80,7 +80,11 @@ impl NetworkProvider {
                         .await
                         .map_err(|e| format!("debug_traceCall failed: {e}"))?;
                     if resp.failed {
-                        return Ok((resp.gas.min(gas_limit), Vec::new(), true));
+                        // NMC `GethLikeTxTracer.MarkAsFailed` contract: reverted calls report
+                        // gas=0 and empty data. The guest verifier rejects any reverted record
+                        // with non-zero gas or non-empty data, so normalize here regardless of
+                        // what the upstream L1 EL chose to report.
+                        return Ok((0, Vec::new(), true));
                     }
                     let hex_str = resp
                         .return_value
@@ -101,8 +105,19 @@ impl NetworkProvider {
 #[derive(Debug, Deserialize)]
 struct ProofCallResponse {
     #[serde(default)]
-    error: Option<serde_json::Value>,
+    error: Option<ProofCallError>,
     witness: L1ExecutionWitness,
+}
+
+/// In-VM error envelope from `proof_call` — matches NMC's `CallErrorEnvelope` shape (codes
+/// `ExecutionReverted = 3`, `ExecutionError = -32003`). Typed so the surfaced error message
+/// carries the structured code/message instead of an opaque JSON blob.
+#[derive(Debug, Deserialize)]
+struct ProofCallError {
+    code: i32,
+    message: String,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 impl NetworkProvider {
@@ -160,6 +175,11 @@ impl NetworkProvider {
     /// `debug_traceCall`; `proof_call` only supplies the `execution_witness`. Distinct
     /// `(target, block, calldata)` lookups are deduplicated, then replicated back across the
     /// original record sequence.
+    ///
+    /// Reverted records are skipped — the guest verifier doesn't need a witness for them (it
+    /// only enforces NMC's `gas == 0 && empty-data` contract), and `proof_call` on a reverted
+    /// call returns a non-null `error` which `fetch_proof_call_witness` would surface as an RPC
+    /// failure. Reverted records get a default empty witness instead.
     pub(crate) async fn fetch_l1_staticcall_witnesses(
         &self,
         records: &[L1StaticCallRecord],
@@ -167,6 +187,9 @@ impl NetworkProvider {
         let mut unique: Vec<(Address, u64, Vec<u8>)> = Vec::new();
         let mut index_of: HashMap<(Address, u64, Vec<u8>), usize> = HashMap::new();
         for r in records {
+            if r.is_reverted {
+                continue;
+            }
             let key = (r.target, r.block_number, r.calldata.clone());
             index_of.entry(key.clone()).or_insert_with(|| {
                 unique.push(key);
@@ -192,9 +215,11 @@ impl NetworkProvider {
                 return_data: Bytes::from(r.return_data.clone()),
                 gas_used: r.gas_used,
                 is_reverted: r.is_reverted,
-                execution_witness: witnesses
-                    [index_of[&(r.target, r.block_number, r.calldata.clone())]]
-                    .clone(),
+                execution_witness: if r.is_reverted {
+                    L1ExecutionWitness::default()
+                } else {
+                    witnesses[index_of[&(r.target, r.block_number, r.calldata.clone())]].clone()
+                },
             })
             .collect())
     }
@@ -212,7 +237,7 @@ impl NetworkProvider {
         // aligning all three is a devnet follow-up (code-review-2026-06-01 R3). Non-gas-sensitive
         // callees are unaffected.
         let call = serde_json::json!({
-            "from": format!("{:?}", Address::ZERO),
+            "from": format!("{L1_PRECOMPILE_CALLER:?}"),
             "to": format!("{target:?}"),
             "data": format!("0x{}", hex::encode(calldata)),
             "gas": format!("0x{:x}", L1STATICCALL_GAS_CAP),
@@ -229,7 +254,9 @@ impl NetworkProvider {
             })?;
         if let Some(error) = resp.error {
             return Err(RaikoError::RPC(format!(
-                "proof_call reported an in-VM error for target={target:?} block={block}: {error}"
+                "proof_call reported in-VM error for target={target:?} block={block} \
+                 (code={}, message={}, data={:?})",
+                error.code, error.message, error.data,
             )));
         }
         Ok(resp.witness)

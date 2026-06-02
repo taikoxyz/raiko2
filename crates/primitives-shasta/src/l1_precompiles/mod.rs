@@ -33,9 +33,13 @@ pub use l1sload::{
 };
 
 pub use l1staticcall::{
-    L1STATICCALL_GAS_CAP, verify_and_populate_l1_staticcall_witnesses,
+    verify_and_populate_l1_staticcall_witnesses,
     verify_and_populate_l1_staticcall_witnesses_with_headers,
 };
+
+/// Re-export shared constants so downstream raiko2 consumers can import them from this module
+/// without adding `alethia-reth-evm` as a direct dependency.
+pub use alethia_reth_evm::precompiles::l1staticcall::{L1_PRECOMPILE_CALLER, L1STATICCALL_GAS_CAP};
 
 /// Re-export L1 RPC fallback functions for L1SLOAD support
 pub use alethia_reth_evm::precompiles::l1sload::{
@@ -128,11 +132,20 @@ pub fn acquire_l1_precompile_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Reset all L1 precompile global state to a clean baseline. Sweeps both halves (the L1STATICCALL
-/// fetcher + served-calls included) so a panic mid-cycle can't leak a stale fetcher into the next
+/// Reset all L1 precompile global state to a clean baseline. Sweeps **both halves** of every
+/// precompile (cache + RPC fetcher slot + served-calls list for L1SLOAD and L1STATICCALL) plus
+/// the shared origin context — so a panic mid-cycle can't leak a stale fetcher into the next
 /// task recovered via [`acquire_l1_precompile_lock`].
 pub fn reset_l1_precompile_state() {
+    // L1SLOAD: cache + origin context (shared) + fetcher slot + served-calls list.
+    // `clear_l1sload_cache` already calls `clear_l1_origin_context` + `clear_l1_rpc_fetcher` +
+    // `clear_l1_rpc_served_calls` via `alethia_reth_evm::precompiles::l1sload::clear_l1_storage`,
+    // but we spell the latter two out explicitly so a future refactor of `clear_l1_storage`
+    // can't silently drop them.
     clear_l1sload_cache();
+    clear_l1_rpc_fetcher();
+    clear_l1_rpc_served_calls();
+    // L1STATICCALL: cache + fetcher slot + served-calls list.
     clear_l1_staticcall_cache();
     clear_l1_staticcall_rpc_fetcher();
     clear_l1_staticcall_rpc_served_calls();

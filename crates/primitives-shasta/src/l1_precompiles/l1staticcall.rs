@@ -8,7 +8,9 @@
 //! `GethLikeTxTracer.MarkAsFailed` contract — so a malicious prover cannot
 //! fabricate non-zero gas for reverted invocations.
 
-use alethia_reth_evm::precompiles::l1staticcall::set_l1_staticcall_value;
+use alethia_reth_evm::precompiles::l1staticcall::{
+    L1_PRECOMPILE_CALLER, L1STATICCALL_GAS_CAP, set_l1_staticcall_value,
+};
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, U256};
 use anyhow::{Result, anyhow, ensure};
@@ -24,14 +26,6 @@ use super::witness_db::WitnessDb;
 
 /// Maximum number of L1 blocks to look back from L1 origin. Matches the L2 precompile.
 const L1STATICCALL_MAX_BLOCK_LOOKBACK: u64 = 256;
-
-/// Gas cap for any single L1STATICCALL re-execution. Single source of truth shared
-/// between the guest re-executor (`TxEnv::gas_limit`), the host preflight's
-/// `debug_traceCall` budget, and the witness-fetch RPC payload. Keeping these in
-/// lockstep prevents sequencer↔prover OOM divergence: if the sequencer can run a
-/// 30M-gas L1 view but the prover budgets less, the guest halts mid-execution
-/// against an honest witness and the proof aborts.
-pub const L1STATICCALL_GAS_CAP: u64 = 30_000_000;
 
 /// Verify and populate L1STATICCALL results from execution witnesses.
 ///
@@ -263,7 +257,7 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
         //    gas_price is left at 0 so revm doesn't charge the zero-address caller fees
         //    (which would fail since Address::ZERO has no balance in the witness).
         let tx = TxEnv::builder()
-            .caller(Address::ZERO)
+            .caller(L1_PRECOMPILE_CALLER)
             .kind(TxKind::Call(w.target_address))
             .data(w.calldata.clone())
             .gas_limit(L1STATICCALL_GAS_CAP)

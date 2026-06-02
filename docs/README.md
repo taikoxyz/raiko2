@@ -9,6 +9,7 @@ This directory contains the contributor- and operator-facing documentation for `
 - [Precompile status](precompile-status.md)
 - [Development guide](development.md)
 - [Operations guide](operations.md)
+- [Hoodi tx-list witness rollout](hoodi-txlist-witness-rollout.md)
 - [Regression harness](../scripts/regression/README.md)
 - [Gaiko2 remote prover integration](gaiko2-remote-prover-integration.md)
 - [Configuration example](../config.example.toml)

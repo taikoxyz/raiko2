@@ -10,7 +10,7 @@ use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
-const HOST_BIN_FEATURES: &str = "--no-default-features --features remote-sgx-host";
+const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageBackend {
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn host_image_flags_select_remote_sgx_host_features() {
+    fn host_image_flags_select_host_features() {
         let flags = build_image_flags(ImageBackend::Host, "26eff23");
 
         assert_eq!(
@@ -396,7 +396,7 @@ mod tests {
                 "--build-arg".to_string(),
                 "VCS_REF=26eff23".to_string(),
                 "--build-arg".to_string(),
-                "BIN_FEATURES=--no-default-features --features remote-sgx-host".to_string(),
+                "BIN_FEATURES=--no-default-features --features host".to_string(),
             ]
         );
     }

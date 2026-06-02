@@ -171,7 +171,7 @@ async fn register_pair_pipelines(
 
     #[cfg(not(feature = "local-provers"))]
     {
-        anyhow::bail!("non-remote-sgx prover routes require building raiko2 with `local-provers`");
+        anyhow::bail!("local prover routes require building raiko2 with `local-provers`");
     }
 
     #[cfg(feature = "local-provers")]
@@ -222,7 +222,7 @@ async fn register_pair_pipelines(
             registration
                 .sp1_prover
                 .clone()
-                .expect("sp1 prover must be initialized for non-remote-sgx hosts"),
+                .expect("sp1 prover must be initialized for local prover hosts"),
             registration.shasta_backends.sp1.clone(),
             registration.scheduler_config.clone(),
             Arc::clone(&runtime_observer),

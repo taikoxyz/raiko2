@@ -2,6 +2,7 @@ use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
+use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{Header, transaction::Transaction as _};
 use alloy_primitives::{Address, B256, Bytes};
@@ -18,10 +19,11 @@ use raiko2_primitives_shasta::{
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData,
+    ParentBlockContext, ProposalMetadata, ShastaEventData,
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
-    decode_proposal_id_from_extra_data, decode_source_manifest_for_tx_list,
+    decode_proposal_id_from_extra_data,
     manifest::BlockManifest,
+    prepare_source_manifest_with_max_blocks,
 };
 use raiko2_provider::{Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -112,7 +114,10 @@ where
         let blocks = fetch_preflight_blocks(provider, &block_numbers).await?;
         let manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
-        let tx_lists = derive_preflight_tx_lists(&chain_spec, &manifest, &blocks)?;
+        let parent_block =
+            fetch_preflight_parent_block_for_tx_lists(provider, &manifest, &blocks).await?;
+        let tx_lists =
+            derive_preflight_tx_lists(&chain_spec, &manifest, parent_block.as_ref(), &blocks)?;
         info!(
             proposal_id = ctx.request.proposal_id,
             block_count = block_numbers.len(),
@@ -505,6 +510,7 @@ async fn fetch_preflight_chunk<P: Provider>(
 fn derive_preflight_tx_lists(
     chain_spec: &ChainSpec,
     manifest: &raiko2_protocol_shasta::TaikoManifest,
+    parent_block: Option<&reth_ethereum_primitives::Block>,
     blocks: &[reth_ethereum_primitives::Block],
 ) -> RaikoResult<Option<Vec<Bytes>>> {
     let sources = &manifest.proposal_event.proposal.sources;
@@ -528,12 +534,32 @@ fn derive_preflight_tx_lists(
         first_block.header.number,
         proposal_timestamp,
     );
+    let fork_timestamp = shasta_fork_timestamp_for_chain_spec(chain_spec)?;
+    let mut parent = preflight_parent_context(
+        parent_block.ok_or_else(|| {
+            RaikoError::Preflight("cannot derive Shasta tx lists without parent block".to_string())
+        })?,
+        manifest,
+    );
+    let meta = ProposalMetadata {
+        proposal_timestamp,
+        origin_block_number: manifest
+            .proposal_event
+            .proposal
+            .originBlockNumber
+            .to::<u64>(),
+        proposer: manifest.proposal_event.proposal.proposer,
+        chain_id: chain_spec.chain_id,
+    };
 
     let mut manifest_blocks = Vec::new();
     for (source_index, source) in sources.iter().enumerate() {
-        let source_manifest = decode_source_manifest_for_tx_list(
+        let source_manifest = prepare_source_manifest_with_max_blocks(
             source,
             manifest.data_sources.get(source_index),
+            parent,
+            meta,
+            fork_timestamp,
             max_blocks,
         )
         .map_err(|err| {
@@ -541,7 +567,15 @@ fn derive_preflight_tx_lists(
                 "failed to decode Shasta tx-list source {source_index}: {err}"
             ))
         })?;
-        manifest_blocks.extend(source_manifest.blocks);
+        for block in source_manifest.blocks {
+            parent = ParentBlockContext {
+                timestamp: block.timestamp,
+                gas_limit: block.gas_limit.saturating_add(ANCHOR_V3_V4_GAS_LIMIT),
+                block_number: parent.block_number + 1,
+                anchor_block_number: block.anchor_block_number,
+            };
+            manifest_blocks.push(block);
+        }
     }
 
     if manifest_blocks.len() != blocks.len() {
@@ -558,6 +592,64 @@ fn derive_preflight_tx_lists(
         .map(|(block, manifest_block)| encode_replay_tx_list(block, manifest_block))
         .collect::<RaikoResult<Vec<_>>>()
         .map(Some)
+}
+
+async fn fetch_preflight_parent_block_for_tx_lists<P: Provider>(
+    provider: &P,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<Option<reth_ethereum_primitives::Block>> {
+    if manifest.proposal_event.proposal.sources.is_empty() {
+        return Ok(None);
+    }
+    let first_block = blocks.first().ok_or_else(|| {
+        RaikoError::Preflight("cannot fetch Shasta tx-list parent without blocks".to_string())
+    })?;
+    let parent_block_number = first_block.header.number.checked_sub(1).ok_or_else(|| {
+        RaikoError::Preflight("cannot derive Shasta tx-list parent for block 0".to_string())
+    })?;
+    let parent_blocks =
+        retry_shasta_preflight_operation("fetch shasta tx-list parent block", || async {
+            let requested = [parent_block_number];
+            let parent_blocks = provider.batch_blocks(&requested).await?;
+            validate_fetched_block_numbers(&requested, &parent_blocks)?;
+            Ok(parent_blocks)
+        })
+        .await?;
+    parent_blocks.into_iter().next().map_or_else(
+        || {
+            Err(RaikoError::Preflight(format!(
+                "provider returned no Shasta tx-list parent block {parent_block_number}"
+            )))
+        },
+        |block| Ok(Some(block)),
+    )
+}
+
+fn shasta_fork_timestamp_for_chain_spec(chain_spec: &ChainSpec) -> RaikoResult<u64> {
+    match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)) {
+        Some(ForkCondition::Timestamp(timestamp)) => Ok(*timestamp),
+        Some(other) => Err(RaikoError::InvalidRequestConfig(format!(
+            "unsupported Shasta fork condition for chain {}: {other:?}",
+            chain_spec.name
+        ))),
+        None => Ok(0),
+    }
+}
+
+fn preflight_parent_context(
+    parent_block: &reth_ethereum_primitives::Block,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+) -> ParentBlockContext {
+    ParentBlockContext {
+        timestamp: parent_block.header.timestamp,
+        gas_limit: parent_block.header.gas_limit,
+        block_number: parent_block.header.number,
+        anchor_block_number: manifest
+            .prover_data
+            .last_anchor_block_number
+            .unwrap_or_default(),
+    }
 }
 
 fn encode_replay_tx_list(
@@ -1211,6 +1303,7 @@ mod tests {
     #[derive(Clone)]
     struct TestProvider {
         block: reth_ethereum_primitives::Block,
+        parent_block: reth_ethereum_primitives::Block,
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
@@ -1225,9 +1318,18 @@ mod tests {
     impl Provider for TestProvider {
         async fn batch_blocks(
             &self,
-            _blocks: &[u64],
+            blocks: &[u64],
         ) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
-            Ok(vec![self.block.clone()])
+            Ok(blocks
+                .iter()
+                .map(|block_number| {
+                    if *block_number == self.parent_block.header.number {
+                        self.parent_block.clone()
+                    } else {
+                        self.block.clone()
+                    }
+                })
+                .collect())
         }
 
         async fn batch_accounts(
@@ -1421,6 +1523,10 @@ mod tests {
     fn sample_provider() -> TestProvider {
         let origin_header = sample_l1_header(10, B256::from([0x66; 32]));
         let block = sample_block(42, 10, origin_header.hash_slow(), origin_header.state_root);
+        let mut parent_block = reth_ethereum_primitives::Block::default();
+        parent_block.header.number = block.header.number.saturating_sub(1);
+        parent_block.header.timestamp = block.header.timestamp.saturating_sub(1);
+        parent_block.header.gas_limit = block.header.gas_limit;
         let mut proposal_event = ShastaEventData::default();
         proposal_event.proposal.id = 42u64.try_into().expect("fits in uint48");
         proposal_event.proposal.proposer = Address::from([0x11; 20]);
@@ -1431,6 +1537,7 @@ mod tests {
 
         TestProvider {
             block,
+            parent_block,
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
@@ -1458,6 +1565,39 @@ mod tests {
                 anchor_block_number: 10,
                 gas_limit: provider.block.header.gas_limit,
                 transactions: Vec::new(),
+            }],
+        };
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: manifest.encode_and_compress().expect("encode manifest"),
+            is_forced_inclusion: false,
+            ..Default::default()
+        }];
+    }
+
+    fn add_invalid_inline_shasta_source_with_transaction(provider: &mut TestProvider) {
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: Vec::new(),
+                offset: 0usize.try_into().expect("fits in uint24"),
+                timestamp: 0u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        let anchor_tx = provider
+            .block
+            .body
+            .transactions()
+            .next()
+            .expect("sample block has anchor transaction");
+        let manifest_tx = alloy_rlp::decode_exact(alloy_rlp::encode(anchor_tx))
+            .expect("anchor transaction decodes as manifest transaction");
+        let manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: 0,
+                coinbase: Address::ZERO,
+                anchor_block_number: 0,
+                gas_limit: 0,
+                transactions: vec![manifest_tx],
             }],
         };
         provider.data_sources = vec![InputDataSource {
@@ -1522,6 +1662,39 @@ mod tests {
             .expect("tx list witness inputs lock");
         assert_eq!(tx_lists.len(), 1);
         assert!(!tx_lists[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn preflight_defaults_invalid_manifest_before_tx_list_witness() {
+        let mut provider = sample_provider();
+        add_invalid_inline_shasta_source_with_transaction(&mut provider);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let tx_lists = provider
+            .tx_list_witness_inputs
+            .lock()
+            .expect("tx list witness inputs lock");
+        assert_eq!(tx_lists.len(), 1);
+        let expected_anchor_only = super::encode_replay_tx_list(
+            &provider.block,
+            &BlockManifest {
+                timestamp: provider.block.header.timestamp,
+                coinbase: provider.block.header.beneficiary,
+                anchor_block_number: 10,
+                gas_limit: provider.block.header.gas_limit,
+                transactions: Vec::new(),
+            },
+        )
+        .expect("encode anchor-only tx list");
+        assert_eq!(tx_lists[0], expected_anchor_only);
     }
 
     #[tokio::test]

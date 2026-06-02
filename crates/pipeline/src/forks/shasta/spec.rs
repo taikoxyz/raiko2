@@ -649,6 +649,12 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
     if let Some(chain_spec) = &ctx.preflight.resolved_l1_chain_spec {
+        if chain_spec.chain_id != ctx.request.l1_chain_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "preflight l1 chain spec chain_id {} does not match request l1_chain_id {}",
+                chain_spec.chain_id, ctx.request.l1_chain_id
+            )));
+        }
         return Ok(chain_spec.clone());
     }
 
@@ -1378,6 +1384,38 @@ mod tests {
             ..Default::default()
         };
         ProofContext::new(request, ProverConfig::default())
+    }
+
+    #[test]
+    fn l1_chain_spec_from_context_uses_preflight_override() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut l1_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+            .expect("known l1 chain");
+        l1_spec.beacon_rpc = Some("https://override.example/beacon".to_string());
+        ctx.preflight.resolved_l1_chain_spec = Some(l1_spec.clone());
+
+        let resolved = super::l1_chain_spec_from_context(&ctx).expect("l1 chain spec");
+
+        assert_eq!(resolved.chain_id, l1_spec.chain_id);
+        assert_eq!(
+            resolved.beacon_rpc.as_deref(),
+            Some("https://override.example/beacon")
+        );
+    }
+
+    #[test]
+    fn l1_chain_spec_from_context_rejects_mismatched_preflight_override() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut l1_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+            .expect("known l1 chain");
+        l1_spec.chain_id += 1;
+        ctx.preflight.resolved_l1_chain_spec = Some(l1_spec);
+
+        let err = super::l1_chain_spec_from_context(&ctx).expect_err("chain id mismatch");
+
+        assert!(matches!(err, RaikoError::InvalidRequestConfig(_)));
     }
 
     fn sample_provider() -> TestProvider {

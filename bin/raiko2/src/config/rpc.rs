@@ -419,4 +419,58 @@ mod tests {
                 .contains("aggregation_quoted_mcycles")
         );
     }
+
+    #[test]
+    fn rpc_pair_beacon_rpc_overrides_l1_chain_spec() {
+        let beacon_rpc = "https://beacon.example.test/".to_string();
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_dev".to_string(),
+                l1_network: "taiko_dev_l1".to_string(),
+                l1_rpc: Some("https://l1.example.test/".to_string()),
+                beacon_rpc: Some(beacon_rpc.clone()),
+                l2_rpc: Some("https://l2.example.test/".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+
+        let pair = config
+            .resolve_pair("taiko_dev", "taiko_dev_l1")
+            .expect("pair should resolve");
+
+        assert_eq!(
+            pair.l1_spec.beacon_rpc.as_deref(),
+            Some(beacon_rpc.as_str())
+        );
+    }
+
+    #[test]
+    fn rpc_config_rejects_invalid_beacon_rpc_url() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_dev".to_string(),
+                l1_network: "taiko_dev_l1".to_string(),
+                l1_rpc: Some("https://l1.example.test/".to_string()),
+                beacon_rpc: Some("not-a-valid-url".to_string()),
+                l2_rpc: Some("https://l2.example.test/".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("invalid beacon rpc should fail");
+
+        assert!(err.to_string().contains("beacon_rpc"));
+    }
 }

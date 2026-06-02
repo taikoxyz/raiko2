@@ -358,4 +358,24 @@ mod tests {
             Some(9)
         );
     }
+
+    #[test]
+    fn build_context_carries_resolved_l1_chain_spec() {
+        let config = Config::default();
+        let mut pair = resolved_pair("taiko_dev", "taiko_dev_l1");
+        pair.l1_spec.beacon_rpc = Some("https://beacon.example.test/".to_string());
+
+        let context = build_context(&config, &pair, ProofType::Sp1).expect("context");
+        let l1_spec = context
+            .preflight
+            .resolved_l1_chain_spec
+            .as_ref()
+            .expect("resolved l1 chain spec");
+
+        assert_eq!(l1_spec.chain_id, pair.l1_spec.chain_id);
+        assert_eq!(
+            l1_spec.beacon_rpc.as_deref(),
+            Some("https://beacon.example.test/")
+        );
+    }
 }

@@ -344,7 +344,7 @@ fn default_aggregation_quoted_mcycles() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
+    use super::{ProverConfig, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig};
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {

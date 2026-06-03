@@ -408,18 +408,14 @@ impl RethL2Provider {
         let mut witness_chunk = Vec::with_capacity(block_numbers.len());
         let batch_size = witness_batch_size();
 
-        for indexed_chunk in block_numbers
-            .iter()
-            .copied()
-            .zip(tx_lists.iter().cloned())
-            .enumerate()
-            .collect::<Vec<_>>()
-            .chunks(batch_size)
-        {
+        for chunk_start in (0..block_numbers.len()).step_by(batch_size) {
+            let chunk_end = (chunk_start + batch_size).min(block_numbers.len());
             let mut batch = self.rpc.witness_client.new_batch();
-            let mut pending = Vec::with_capacity(indexed_chunk.len());
+            let mut pending = Vec::with_capacity(chunk_end - chunk_start);
 
-            for &(index, (block_number, ref tx_list)) in indexed_chunk {
+            for index in chunk_start..chunk_end {
+                let block_number = block_numbers[index];
+                let tx_list = tx_lists[index].clone();
                 pending.push((
                     index,
                     block_number,
@@ -427,7 +423,7 @@ impl RethL2Provider {
                         batch
                             .add_call::<_, alloy_rpc_types_debug::ExecutionWitness>(
                                 "debug_executionWitnessForTxList",
-                                &(BlockId::number(block_number), tx_list.clone()),
+                                &(BlockId::number(block_number), tx_list),
                             )
                             .map_err(|_| {
                                 RaikoError::RPC(
@@ -440,10 +436,7 @@ impl RethL2Provider {
             }
 
             batch.send().await.map_err(|e| {
-                let blocks = indexed_chunk
-                    .iter()
-                    .map(|(_, (block_number, _))| *block_number)
-                    .collect::<Vec<_>>();
+                let blocks = &block_numbers[chunk_start..chunk_end];
                 RaikoError::RPC(format!(
                     "error sending debug_executionWitnessForTxList batch for blocks {blocks:?}: {e}"
                 ))

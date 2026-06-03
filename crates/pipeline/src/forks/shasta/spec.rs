@@ -236,23 +236,17 @@ async fn fetch_preflight_witnesses<P: Provider>(
             blocks.len()
         )));
     }
-    let chunked_inputs = blocks
-        .chunks(chunk_size)
+    let chunked_inputs = (0..blocks.len())
+        .step_by(chunk_size)
         .enumerate()
-        .map(|(chunk_index, chunk_blocks)| {
-            let start = chunk_index * chunk_size;
-            let end = start + chunk_blocks.len();
-            (
-                chunk_index,
-                chunk_blocks.to_vec(),
-                tx_lists.map(|tx_lists| tx_lists[start..end].to_vec()),
-            )
-        })
+        .map(|(chunk_index, start)| (chunk_index, start, (start + chunk_size).min(blocks.len())))
         .collect::<Vec<_>>();
     let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
         stream::iter(chunked_inputs.into_iter())
-            .map(|(chunk_index, chunk_blocks, chunk_tx_lists)| {
+            .map(|(chunk_index, start, end)| {
                 let chain_spec = chain_spec.clone();
+                let chunk_blocks = &blocks[start..end];
+                let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
                 async move {
                     let operation = format!("shasta preflight chunk {chunk_index}");
                     retry_shasta_preflight_operation(&operation, || {
@@ -261,8 +255,8 @@ async fn fetch_preflight_witnesses<P: Provider>(
                             fetch_preflight_chunk(
                                 provider,
                                 chunk_index,
-                                &chunk_blocks,
-                                chunk_tx_lists.as_deref(),
+                                chunk_blocks,
+                                chunk_tx_lists,
                                 chain_spec,
                             )
                             .await

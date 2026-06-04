@@ -232,11 +232,12 @@ fn validate_manual_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 }
 
 fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
-    if offer_spec.max_price_per_mcycle.is_some() || offer_spec.min_price_per_mcycle.is_some() {
-        return Err(
-            "max_price_per_mcycle and min_price_per_mcycle must be omitted when pricing_mode=market"
-                .to_string(),
-        );
+    if offer_spec.min_price_per_mcycle.is_some() {
+        return Err("min_price_per_mcycle must be omitted when pricing_mode=market".to_string());
+    }
+    if let Some(max_price_value) = offer_spec.max_price_per_mcycle.as_deref() {
+        parse_ether(max_price_value)
+            .map_err(|e| format!("Failed to parse max_price_per_mcycle {max_price_value}: {e}"))?;
     }
     Ok(())
 }
@@ -340,11 +341,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_spec_rejects_market_pricing_with_manual_prices() {
+    fn validate_offer_spec_accepts_market_pricing_with_max_cap() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
         offer.pricing_mode = BoundlessPricingMode::Market;
-        let err = validate_offer_spec(&offer).expect_err("market offer with manual prices");
-        assert!(err.contains("must be omitted when pricing_mode=market"));
+        offer.max_price_per_mcycle = Some("0.000000060".to_string());
+        offer.min_price_per_mcycle = None;
+        validate_offer_spec(&offer).expect("valid market offer with max cap");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_market_pricing_with_min_price() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        let err = validate_offer_spec(&offer).expect_err("market offer with min price");
+        assert!(err.contains("min_price_per_mcycle must be omitted"));
     }
 
     #[test]

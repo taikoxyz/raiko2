@@ -221,6 +221,58 @@ If the underlying image changes (rebuilt mkosi image, new kernel, new init), the
 changes and the bootstrap key changes too — you need a fresh `--register` (and a fresh
 `--trust` if `mrTd` / `mrSeam` / PCRs changed).
 
+## Verifying a proof on-chain
+
+Once an instance is registered you can confirm a real proof verifies against the verifier
+contract. `IProofVerifier.verifyProof(uint256 _proposalAge, bytes32 _commitmentHash, bytes _proof)`
+is a **`view`** function that **reverts** on an invalid proof — so a non-reverting `cast call`
+means "verified". This is identical for `AzureTdxVerifier` and `GcpTdxVerifier`.
+
+The catch is computing `_commitmentHash`. The proof response (`/v3/proof/batch/shasta`) gives:
+- `data.proof.proof` — the 89-byte proof: `instance_id(4) || instance(20) || signature(65)`.
+- `data.proof.input` — the **already-signed** hash. Do **not** pass this to `verifyProof`.
+- `data.proof.extra_data.shasta.proof_carry_data` (single) or `proof_carry_data_vec` (aggregate).
+
+`reth-tdx` (in `sign_proposal` / `sign_aggregation`, even for one proposal) signs:
+
+```
+input = hash_public_input( hash_commitment(Commitment), chainId, verifier, instance )
+```
+
+so `_commitmentHash = hash_commitment(Commitment)`, where
+`Commitment = build_shasta_commitment_from_proof_carry_data_vec(proof_carry_data_vec)`:
+
+| Commitment field | from carry |
+|---|---|
+| `firstProposalId` | `carry[0].transition_input.proposal_id` |
+| `firstProposalParentBlockHash` | `carry[0].transition_input.parent_block_hash` |
+| `lastProposalHash` | `carry[last].transition_input.proposal_hash` |
+| `actualProver` | `carry[0].transition_input.actual_prover` |
+| `endBlockNumber` / `endStateRoot` | `carry[last].transition_input.checkpoint.{blockNumber,stateRoot}` |
+| `transitions[i]` | `{proposer, timestamp, checkpoint.blockHash}` from `carry[i]` |
+
+`hash_commitment` = `keccak256` over the Solidity buffer (32-byte words):
+`0x20, firstProposalId, firstProposalParentBlockHash, lastProposalHash, actualProver,
+endBlockNumber, endStateRoot, 0xe0, transitionsLen, then (proposer, timestamp, blockHash)×N`.
+`hash_public_input(C, chainId, verifier, instance)` =
+`keccak256(bytes32("VERIFY_PROOF") || uint256(chainId) || uint160(verifier) || C || uint160(instance))`.
+
+> Note: `_commitmentHash` is **not** `hash_shasta_subproof_input` — that's the SGX/zk
+> single-proof hash. The reth-tdx TDX verifier always uses the **Commitment** (aggregation)
+> hash above. Source: `crates/primitives-shasta/src/instance.rs`
+> (`shasta_aggregation_output`, `build_shasta_commitment_from_proof_carry_data_vec`).
+
+You usually don't need to do this by hand — the **`verify-tdx-proof`** skill fetches the proof,
+computes `_commitmentHash`, and calls `verifyProof` for you (Azure or GCP):
+
+```bash
+~/.claude/skills/verify-tdx-proof/verify.sh \
+  --verifier 0x<verifier proxy> --rpc <L1 RPC> --raiko-url <raiko2 base url> \
+  --proposal-id <N> --l1 <l1 inclusion block> --l2 <l2 block> --anchor <last anchor block> [--aggregate]
+```
+
+It prints `✅ VERIFIED` or `❌ verifyProof REVERTED` (with the revert selector).
+
 ## Troubleshooting
 
 ### `TDX_INVALID_TRUSTED_PARAMS()` (`0xff79a3c9`) on `registerInstance`
@@ -245,9 +297,14 @@ same key.
 The signer recovered from the proof's ECDSA signature doesn't match the instance encoded in
 the proof bytes, **for the given `_commitmentHash`**. Usually one of:
 
-- Wrong `_commitmentHash` passed in — it must be the **pre-hash** of `LibPublicInput`
-  (i.e. `hash_shasta_subproof_input(proof_carry_data)`), not the already-hashed
-  `signing_hash` that raiko2 returns as the `input` field of `/v3/proof/batch/shasta`.
+- Wrong `_commitmentHash` passed in. It is **`hash_commitment(Commitment)`** — the
+  pre-hash that `LibPublicInput.hashPublicInputs` wraps — **not** the already-hashed
+  `input` field that `/v3/proof/batch/shasta` returns (that one is the signed hash, i.e.
+  `hashPublicInputs(commitment, …)`, and passing it makes `ecrecover` resolve to a junk
+  address). It is also **not** `hash_shasta_subproof_input` — that's the SGX/zk
+  single-proof path; the reth-tdx TDX verifier always uses the **Commitment** hash (built
+  from `proof_carry_data[_vec]` via `build_shasta_commitment_from_proof_carry_data_vec`),
+  even for a single proposal. See [Verifying a proof on-chain](#verifying-a-proof-on-chain).
 - `TdxVerifier`'s `taikoChainId` (set at construction) doesn't match the L2 chain the
   prover was configured against (`reth-tdx`'s `--l2-chain-id` env var).
 - The verifier address the prover signed for doesn't match the contract address being

@@ -2,11 +2,11 @@ use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
-use alloy_consensus::{
-    Header,
-    transaction::{SignerRecoverable, Transaction as _},
-};
-use alloy_primitives::B256;
+use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
+use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
+use alloy_consensus::{Header, transaction::Transaction as _};
+use alloy_primitives::{Address, B256, Bytes};
+use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
@@ -19,9 +19,11 @@ use raiko2_primitives_shasta::{
     validate_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
-    ShastaEventData,
+    ParentBlockContext, ProposalMetadata, ShastaEventData,
     constants::{DERIVATION_SOURCE_MAX_BLOCKS, UNZEN_DERIVATION_SOURCE_MAX_BLOCKS},
     decode_proposal_id_from_extra_data,
+    manifest::BlockManifest,
+    prepare_source_manifest_with_max_blocks,
 };
 use raiko2_provider::{Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
@@ -109,21 +111,43 @@ where
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
+        let blocks = fetch_preflight_blocks(provider, &block_numbers).await?;
+        let manifest =
+            build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        let parent_block =
+            fetch_preflight_parent_block_for_tx_lists(provider, &manifest, &blocks).await?;
+        let tx_lists =
+            derive_preflight_tx_lists(&chain_spec, &manifest, parent_block.as_ref(), &blocks)?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            block_count = block_numbers.len(),
+            tx_list_count = tx_lists.as_ref().map(Vec::len).unwrap_or_default(),
+            "derived shasta tx-list witness inputs"
+        );
         let witnesses = fetch_preflight_witnesses(
             provider,
             &chain_spec,
             ctx.request.proposal_id,
-            &block_numbers,
+            &blocks,
+            tx_lists.as_deref(),
         )
         .await?;
-        let blocks = witnesses
-            .iter()
-            .map(|witness| witness.block.clone())
-            .collect::<Vec<_>>();
-        let manifest =
-            build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            witness_count = witnesses.len(),
+            first_witness_block = witnesses.first().map(|witness| witness.block.header.number),
+            last_witness_block = witnesses.last().map(|witness| witness.block.header.number),
+            "shasta tx-list witnesses ready"
+        );
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
+        info!(
+            proposal_id = ctx.request.proposal_id,
+            witness_count = input.witnesses.len(),
+            proposal_ancestor_headers = input.proposal_ancestor_headers.len(),
+            proposal_state_nodes = input.proposal_state_nodes.len(),
+            "shasta guest input ready after tx-list preflight"
+        );
         if let Some(verify_rpc) = ctx.preflight.verify_checkpoint_l2_rpc.as_deref() {
             let rpc_client_config = ctx
                 .preflight
@@ -187,8 +211,13 @@ async fn fetch_preflight_witnesses<P: Provider>(
     provider: &P,
     chain_spec: &ChainSpec,
     proposal_id: u64,
-    block_numbers: &[u64],
+    blocks: &[reth_ethereum_primitives::Block],
+    tx_lists: Option<&[Bytes]>,
 ) -> RaikoResult<Vec<StatelessInput>> {
+    let block_numbers = blocks
+        .iter()
+        .map(|block| block.header.number)
+        .collect::<Vec<_>>();
     let chunk_size = preflight_chunk_size();
     let chunk_concurrency = preflight_chunk_concurrency();
     info!(
@@ -198,14 +227,26 @@ async fn fetch_preflight_witnesses<P: Provider>(
         chunk_concurrency,
         "starting shasta preflight"
     );
-    let chunked_block_numbers = block_numbers
-        .chunks(chunk_size)
-        .map(<[u64]>::to_vec)
+    if let Some(tx_lists) = tx_lists
+        && tx_lists.len() != blocks.len()
+    {
+        return Err(RaikoError::Preflight(format!(
+            "tx list count ({}) does not match block count ({})",
+            tx_lists.len(),
+            blocks.len()
+        )));
+    }
+    let chunked_inputs = (0..blocks.len())
+        .step_by(chunk_size)
+        .enumerate()
+        .map(|(chunk_index, start)| (chunk_index, start, (start + chunk_size).min(blocks.len())))
         .collect::<Vec<_>>();
     let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
-        stream::iter(chunked_block_numbers.into_iter().enumerate())
-            .map(|(chunk_index, chunk_block_numbers)| {
+        stream::iter(chunked_inputs.into_iter())
+            .map(|(chunk_index, start, end)| {
                 let chain_spec = chain_spec.clone();
+                let chunk_blocks = &blocks[start..end];
+                let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
                 async move {
                     let operation = format!("shasta preflight chunk {chunk_index}");
                     retry_shasta_preflight_operation(&operation, || {
@@ -214,7 +255,8 @@ async fn fetch_preflight_witnesses<P: Provider>(
                             fetch_preflight_chunk(
                                 provider,
                                 chunk_index,
-                                &chunk_block_numbers,
+                                chunk_blocks,
+                                chunk_tx_lists,
                                 chain_spec,
                             )
                             .await
@@ -233,6 +275,18 @@ async fn fetch_preflight_witnesses<P: Provider>(
         .into_iter()
         .flat_map(|(_, chunk)| chunk)
         .collect())
+}
+
+async fn fetch_preflight_blocks<P: Provider>(
+    provider: &P,
+    block_numbers: &[u64],
+) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
+    retry_shasta_preflight_operation("fetch shasta preflight blocks", || async {
+        let blocks = provider.batch_blocks(block_numbers).await?;
+        validate_fetched_block_numbers(block_numbers, &blocks)?;
+        Ok(blocks)
+    })
+    .await
 }
 
 async fn build_preflight_manifest<P: Provider>(
@@ -367,24 +421,21 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-fn collect_block_signers(
-    block: &reth_ethereum_primitives::Block,
-) -> Vec<alloy_primitives::Address> {
-    let mut signers = Vec::new();
-    for tx in block.body.transactions() {
-        if let Ok(signer) = tx.recover_signer() {
-            signers.push(signer);
-        }
-    }
-    signers
+fn collect_preflight_account_targets(_block: &reth_ethereum_primitives::Block) -> Vec<Address> {
+    vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]
 }
 
 async fn fetch_preflight_chunk<P: Provider>(
     provider: &P,
     chunk_index: usize,
-    block_numbers: &[u64],
+    blocks: &[reth_ethereum_primitives::Block],
+    tx_lists: Option<&[Bytes]>,
     chain_spec: ChainSpec,
 ) -> RaikoResult<(usize, Vec<StatelessInput>)> {
+    let block_numbers = blocks
+        .iter()
+        .map(|block| block.header.number)
+        .collect::<Vec<_>>();
     let chunk_started_at = Instant::now();
     info!(
         chunk_index,
@@ -393,31 +444,40 @@ async fn fetch_preflight_chunk<P: Provider>(
         block_count = block_numbers.len(),
         "starting shasta preflight chunk"
     );
-    let blocks_and_witnesses_started_at = Instant::now();
-    let (blocks, witnesses): (
-        Vec<reth_ethereum_primitives::Block>,
-        Vec<raiko2_primitives::ExecutionWitness>,
-    ) = try_join(
-        provider.batch_blocks(block_numbers),
-        provider.batch_witnesses(block_numbers),
-    )
-    .await?;
-    let blocks_and_witnesses_elapsed_ms = blocks_and_witnesses_started_at.elapsed().as_millis();
-
-    let all_signers = blocks.iter().map(collect_block_signers).collect::<Vec<_>>();
-    let accounts_started_at = Instant::now();
-    let accounts = provider.batch_accounts(block_numbers, &all_signers).await?;
-    let accounts_elapsed_ms = accounts_started_at.elapsed().as_millis();
+    let witnesses = async {
+        let started_at = Instant::now();
+        let witnesses = if let Some(tx_lists) = tx_lists {
+            provider
+                .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
+                .await
+        } else {
+            provider.batch_witnesses(&block_numbers).await
+        }?;
+        Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
+    };
+    let account_targets = blocks
+        .iter()
+        .map(collect_preflight_account_targets)
+        .collect::<Vec<_>>();
+    let accounts = async {
+        let started_at = Instant::now();
+        let accounts = provider
+            .batch_accounts(&block_numbers, &account_targets)
+            .await?;
+        Ok::<_, RaikoError>((accounts, started_at.elapsed().as_millis()))
+    };
+    let ((witnesses, witnesses_elapsed_ms), (accounts, accounts_elapsed_ms)) =
+        try_join(witnesses, accounts).await?;
 
     if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
         return Err(RaikoError::InvalidRequestConfig(
             "Provider returned mismatched input lengths".to_string(),
         ));
     }
-    validate_fetched_block_numbers(block_numbers, &blocks)?;
 
     let witnesses = blocks
-        .into_iter()
+        .iter()
+        .cloned()
         .zip(witnesses)
         .zip(accounts)
         .map(|((block, witness), accounts)| StatelessInput {
@@ -433,12 +493,195 @@ async fn fetch_preflight_chunk<P: Provider>(
         first_block = block_numbers.first().copied(),
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
-        blocks_and_witnesses_elapsed_ms,
+        witnesses_elapsed_ms,
         accounts_elapsed_ms,
         total_elapsed_ms = chunk_started_at.elapsed().as_millis(),
         "completed shasta preflight chunk"
     );
     Ok((chunk_index, witnesses))
+}
+
+fn derive_preflight_tx_lists(
+    chain_spec: &ChainSpec,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    parent_block: Option<&reth_ethereum_primitives::Block>,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<Option<Vec<Bytes>>> {
+    let sources = &manifest.proposal_event.proposal.sources;
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    if sources.len() != manifest.data_sources.len() {
+        return Err(RaikoError::Preflight(format!(
+            "data source count ({}) does not match proposal source count ({})",
+            manifest.data_sources.len(),
+            sources.len()
+        )));
+    }
+
+    let first_block = blocks.first().ok_or_else(|| {
+        RaikoError::Preflight("cannot derive Shasta tx lists without blocks".to_string())
+    })?;
+    let proposal_timestamp = manifest.proposal_event.proposal.timestamp.to::<u64>();
+    let max_blocks = derivation_source_max_blocks_for_chain_spec_at(
+        chain_spec,
+        first_block.header.number,
+        proposal_timestamp,
+    );
+    let fork_timestamp = shasta_fork_timestamp_for_chain_spec(chain_spec)?;
+    let mut parent = preflight_parent_context(
+        parent_block.ok_or_else(|| {
+            RaikoError::Preflight("cannot derive Shasta tx lists without parent block".to_string())
+        })?,
+        manifest,
+    );
+    let meta = ProposalMetadata {
+        proposal_timestamp,
+        origin_block_number: manifest
+            .proposal_event
+            .proposal
+            .originBlockNumber
+            .to::<u64>(),
+        proposer: manifest.proposal_event.proposal.proposer,
+        chain_id: chain_spec.chain_id,
+    };
+
+    let mut manifest_blocks = Vec::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let source_manifest = prepare_source_manifest_with_max_blocks(
+            source,
+            manifest.data_sources.get(source_index),
+            parent,
+            meta,
+            fork_timestamp,
+            max_blocks,
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to decode Shasta tx-list source {source_index}: {err}"
+            ))
+        })?;
+        for block in source_manifest.blocks {
+            parent = ParentBlockContext {
+                timestamp: block.timestamp,
+                gas_limit: block.gas_limit.saturating_add(ANCHOR_V3_V4_GAS_LIMIT),
+                block_number: parent.block_number + 1,
+                anchor_block_number: block.anchor_block_number,
+            };
+            manifest_blocks.push(block);
+        }
+    }
+
+    if manifest_blocks.len() != blocks.len() {
+        return Err(RaikoError::Preflight(format!(
+            "derived tx-list block count ({}) does not match fetched block count ({})",
+            manifest_blocks.len(),
+            blocks.len()
+        )));
+    }
+
+    blocks
+        .iter()
+        .zip(manifest_blocks.iter())
+        .map(|(block, manifest_block)| encode_replay_tx_list(block, manifest_block))
+        .collect::<RaikoResult<Vec<_>>>()
+        .map(Some)
+}
+
+async fn fetch_preflight_parent_block_for_tx_lists<P: Provider>(
+    provider: &P,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<Option<reth_ethereum_primitives::Block>> {
+    if manifest.proposal_event.proposal.sources.is_empty() {
+        return Ok(None);
+    }
+    let first_block = blocks.first().ok_or_else(|| {
+        RaikoError::Preflight("cannot fetch Shasta tx-list parent without blocks".to_string())
+    })?;
+    let parent_block_number = first_block.header.number.checked_sub(1).ok_or_else(|| {
+        RaikoError::Preflight("cannot derive Shasta tx-list parent for block 0".to_string())
+    })?;
+    let parent_blocks =
+        retry_shasta_preflight_operation("fetch shasta tx-list parent block", || async {
+            let requested = [parent_block_number];
+            let parent_blocks = provider.batch_blocks(&requested).await?;
+            validate_fetched_block_numbers(&requested, &parent_blocks)?;
+            Ok(parent_blocks)
+        })
+        .await?;
+    parent_blocks.into_iter().next().map_or_else(
+        || {
+            Err(RaikoError::Preflight(format!(
+                "provider returned no Shasta tx-list parent block {parent_block_number}"
+            )))
+        },
+        |block| Ok(Some(block)),
+    )
+}
+
+fn shasta_fork_timestamp_for_chain_spec(chain_spec: &ChainSpec) -> RaikoResult<u64> {
+    match chain_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)) {
+        Some(ForkCondition::Timestamp(timestamp)) => Ok(*timestamp),
+        Some(other) => Err(RaikoError::InvalidRequestConfig(format!(
+            "unsupported Shasta fork condition for chain {}: {other:?}",
+            chain_spec.name
+        ))),
+        None => Ok(0),
+    }
+}
+
+fn preflight_parent_context(
+    parent_block: &reth_ethereum_primitives::Block,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+) -> ParentBlockContext {
+    ParentBlockContext {
+        timestamp: parent_block.header.timestamp,
+        gas_limit: parent_block.header.gas_limit,
+        block_number: parent_block.header.number,
+        anchor_block_number: manifest
+            .prover_data
+            .last_anchor_block_number
+            .unwrap_or_default(),
+    }
+}
+
+fn encode_replay_tx_list(
+    block: &reth_ethereum_primitives::Block,
+    manifest_block: &BlockManifest,
+) -> RaikoResult<Bytes> {
+    let anchor_tx = block.body.transactions().next().ok_or_else(|| {
+        RaikoError::Preflight(format!(
+            "cannot build tx-list witness input: block {} has no anchor transaction",
+            block.header.number
+        ))
+    })?;
+    let mut encoded_txs = Vec::with_capacity(manifest_block.transactions.len() + 1);
+    encoded_txs.push(encode_tx_for_rlp_list(anchor_tx));
+    encoded_txs.extend(
+        manifest_block
+            .transactions
+            .iter()
+            .map(encode_tx_for_rlp_list),
+    );
+
+    let payload_length = encoded_txs.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(payload_length);
+    RlpHeader {
+        list: true,
+        payload_length,
+    }
+    .encode(&mut out);
+    for tx in encoded_txs {
+        out.extend_from_slice(&tx);
+    }
+    Ok(out.into())
+}
+
+fn encode_tx_for_rlp_list(tx: &impl Encodable) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tx.length());
+    tx.encode(&mut out);
+    out
 }
 
 async fn fetch_preflight_proposal_block<P: Provider>(
@@ -491,6 +734,16 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = &ctx.preflight.resolved_l1_chain_spec {
+        if chain_spec.chain_id != ctx.request.l1_chain_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "preflight l1 chain spec chain_id {} does not match request l1_chain_id {}",
+                chain_spec.chain_id, ctx.request.l1_chain_id
+            )));
+        }
+        return Ok(chain_spec.clone());
+    }
+
     SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
         .ok_or_else(|| {
@@ -1015,8 +1268,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AnchorV4Checkpoint, Preflight, ShastaSpec, anchorV4Call};
+    use super::{
+        AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call,
+    };
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
+    use alloy_eips::eip4844::BYTES_PER_BLOB;
     use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
@@ -1026,10 +1282,13 @@ mod tests {
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
-    use raiko2_protocol_shasta::shasta::{BlobSlice, DerivationSource, ShastaEventData};
+    use raiko2_protocol_shasta::shasta::{
+        BlobSlice, DerivationSource, ShastaEventData,
+        manifest::{BlockManifest, DerivationSourceManifest},
+    };
     use raiko2_provider::Provider;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -1038,27 +1297,41 @@ mod tests {
     #[derive(Clone)]
     struct TestProvider {
         block: reth_ethereum_primitives::Block,
+        parent_block: reth_ethereum_primitives::Block,
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
+        tx_list_witness_calls: Arc<AtomicUsize>,
+        tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
+        account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
     }
 
     #[async_trait::async_trait]
     impl Provider for TestProvider {
         async fn batch_blocks(
             &self,
-            _blocks: &[u64],
+            blocks: &[u64],
         ) -> RaikoResult<Vec<reth_ethereum_primitives::Block>> {
-            Ok(vec![self.block.clone()])
+            Ok(blocks
+                .iter()
+                .map(|block_number| {
+                    if *block_number == self.parent_block.header.number {
+                        self.parent_block.clone()
+                    } else {
+                        self.block.clone()
+                    }
+                })
+                .collect())
         }
 
         async fn batch_accounts(
             &self,
             _blocks: &[u64],
-            _accounts: &[Vec<Address>],
+            accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
+            *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
             Ok(vec![AddressMap::default()])
         }
 
@@ -1074,6 +1347,22 @@ mod tests {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
             Ok(vec![ExecutionWitness::default()])
+        }
+
+        async fn batch_witnesses_with_tx_lists(
+            &self,
+            _blocks: &[u64],
+            tx_lists: &[Bytes],
+        ) -> RaikoResult<Vec<ExecutionWitness>> {
+            self.tx_list_witness_calls.fetch_add(1, Ordering::SeqCst);
+            *self
+                .tx_list_witness_inputs
+                .lock()
+                .expect("tx list witness inputs lock") = tx_lists.to_vec();
+            Ok(tx_lists
+                .iter()
+                .map(|_| ExecutionWitness::default())
+                .collect())
         }
 
         async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -1193,9 +1482,45 @@ mod tests {
         ProofContext::new(request, ProverConfig::default())
     }
 
+    #[test]
+    fn l1_chain_spec_from_context_uses_preflight_override() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut l1_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+            .expect("known l1 chain");
+        l1_spec.beacon_rpc = Some("https://override.example/beacon".to_string());
+        ctx.preflight.resolved_l1_chain_spec = Some(l1_spec.clone());
+
+        let resolved = super::l1_chain_spec_from_context(&ctx).expect("l1 chain spec");
+
+        assert_eq!(resolved.chain_id, l1_spec.chain_id);
+        assert_eq!(
+            resolved.beacon_rpc.as_deref(),
+            Some("https://override.example/beacon")
+        );
+    }
+
+    #[test]
+    fn l1_chain_spec_from_context_rejects_mismatched_preflight_override() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut l1_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
+            .expect("known l1 chain");
+        l1_spec.chain_id += 1;
+        ctx.preflight.resolved_l1_chain_spec = Some(l1_spec);
+
+        let err = super::l1_chain_spec_from_context(&ctx).expect_err("chain id mismatch");
+
+        assert!(matches!(err, RaikoError::InvalidRequestConfig(_)));
+    }
+
     fn sample_provider() -> TestProvider {
         let origin_header = sample_l1_header(10, B256::from([0x66; 32]));
         let block = sample_block(42, 10, origin_header.hash_slow(), origin_header.state_root);
+        let mut parent_block = reth_ethereum_primitives::Block::default();
+        parent_block.header.number = block.header.number.saturating_sub(1);
+        parent_block.header.timestamp = block.header.timestamp.saturating_sub(1);
+        parent_block.header.gas_limit = block.header.gas_limit;
         let mut proposal_event = ShastaEventData::default();
         proposal_event.proposal.id = 42u64.try_into().expect("fits in uint48");
         proposal_event.proposal.proposer = Address::from([0x11; 20]);
@@ -1206,12 +1531,74 @@ mod tests {
 
         TestProvider {
             block,
+            parent_block,
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
+            tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
+            tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
+            account_inputs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn add_inline_shasta_source(provider: &mut TestProvider) {
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: Vec::new(),
+                offset: 0usize.try_into().expect("fits in uint24"),
+                timestamp: 0u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        let manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: provider.block.header.timestamp,
+                coinbase: provider.block.header.beneficiary,
+                anchor_block_number: 10,
+                gas_limit: provider.block.header.gas_limit,
+                transactions: Vec::new(),
+            }],
+        };
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: manifest.encode_and_compress().expect("encode manifest"),
+            is_forced_inclusion: false,
+            ..Default::default()
+        }];
+    }
+
+    fn add_invalid_inline_shasta_source_with_transaction(provider: &mut TestProvider) {
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: Vec::new(),
+                offset: 0usize.try_into().expect("fits in uint24"),
+                timestamp: 0u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        let anchor_tx = provider
+            .block
+            .body
+            .transactions()
+            .next()
+            .expect("sample block has anchor transaction");
+        let manifest_tx = alloy_rlp::decode_exact(alloy_rlp::encode(anchor_tx))
+            .expect("anchor transaction decodes as manifest transaction");
+        let manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: 0,
+                coinbase: Address::ZERO,
+                anchor_block_number: 0,
+                gas_limit: 0,
+                transactions: vec![manifest_tx],
+            }],
+        };
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: manifest.encode_and_compress().expect("encode manifest"),
+            is_forced_inclusion: false,
+            ..Default::default()
+        }];
     }
 
     #[tokio::test]
@@ -1244,6 +1631,84 @@ mod tests {
             SupportedChainSpecs::default()
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_uses_tx_list_witnesses_for_shasta_sources() {
+        let mut provider = sample_provider();
+        add_inline_shasta_source(&mut provider);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+        let tx_lists = provider
+            .tx_list_witness_inputs
+            .lock()
+            .expect("tx list witness inputs lock");
+        assert_eq!(tx_lists.len(), 1);
+        assert!(!tx_lists[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn preflight_defaults_invalid_manifest_before_tx_list_witness() {
+        let mut provider = sample_provider();
+        add_invalid_inline_shasta_source_with_transaction(&mut provider);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let tx_lists = provider
+            .tx_list_witness_inputs
+            .lock()
+            .expect("tx list witness inputs lock");
+        assert_eq!(tx_lists.len(), 1);
+        let expected_anchor_only = super::encode_replay_tx_list(
+            &provider.block,
+            &BlockManifest {
+                timestamp: provider.block.header.timestamp,
+                coinbase: provider.block.header.beneficiary,
+                anchor_block_number: 10,
+                gas_limit: provider.block.header.gas_limit,
+                transactions: Vec::new(),
+            },
+        )
+        .expect("encode anchor-only tx list");
+        assert_eq!(tx_lists[0], expected_anchor_only);
+    }
+
+    #[tokio::test]
+    async fn preflight_fetches_only_anchor_account_state() {
+        let mut provider = sample_provider();
+        add_inline_shasta_source(&mut provider);
+        let ctx = sample_context(42, 11, 9);
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let account_inputs = provider.account_inputs.lock().expect("account inputs lock");
+        assert_eq!(
+            &*account_inputs,
+            &[vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]]
         );
     }
 
@@ -1515,6 +1980,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_hydrates_canonical_shasta_data_sources() {
         let mut provider = sample_provider();
+        let blob_bytes = vec![0; BYTES_PER_BLOB];
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
             blobSlice: BlobSlice {
@@ -1525,7 +1991,7 @@ mod tests {
         }];
         provider.data_sources = vec![InputDataSource {
             tx_data_from_calldata: Vec::new(),
-            tx_data_from_blob: vec![vec![1, 2, 3]],
+            tx_data_from_blob: vec![blob_bytes.clone()],
             blob_commitments: vec![vec![4; 48]],
             blob_proofs: vec![vec![5; 48]],
             is_forced_inclusion: false,
@@ -1543,7 +2009,7 @@ mod tests {
         assert_eq!(input.taiko.data_sources.len(), 1);
         assert_eq!(
             input.taiko.data_sources[0].tx_data_from_blob,
-            vec![vec![1, 2, 3]]
+            vec![blob_bytes]
         );
         assert_eq!(
             input.taiko.data_sources[0].blob_commitments,

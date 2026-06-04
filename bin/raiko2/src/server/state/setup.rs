@@ -26,6 +26,7 @@ pub(crate) fn build_context(
         },
         raiko2_primitives::ProverConfig::default(),
     );
+    context.preflight.resolved_l1_chain_spec = Some(pair.l1_spec.clone());
     context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
     if !context.config.is_object() {
         context.config = serde_json::json!({});
@@ -83,6 +84,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -109,6 +111,7 @@ fn task_lease_duration(config: &Config) -> Duration {
     Duration::from_millis(lease_ms.max(60_000))
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
@@ -121,11 +124,13 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     config.prover.sp1.clone()
 }
 
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -351,6 +356,26 @@ mod tests {
                 .as_ref()
                 .map(|cfg| cfg.retry.max_attempts),
             Some(9)
+        );
+    }
+
+    #[test]
+    fn build_context_carries_resolved_l1_chain_spec() {
+        let config = Config::default();
+        let mut pair = resolved_pair("taiko_dev", "taiko_dev_l1");
+        pair.l1_spec.beacon_rpc = Some("https://beacon.example.test/".to_string());
+
+        let context = build_context(&config, &pair, ProofType::Sp1).expect("context");
+        let l1_spec = context
+            .preflight
+            .resolved_l1_chain_spec
+            .as_ref()
+            .expect("resolved l1 chain spec");
+
+        assert_eq!(l1_spec.chain_id, pair.l1_spec.chain_id);
+        assert_eq!(
+            l1_spec.beacon_rpc.as_deref(),
+            Some("https://beacon.example.test/")
         );
     }
 }

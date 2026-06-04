@@ -1,9 +1,8 @@
 #![allow(missing_docs)]
 
 pub mod aggregation;
-mod config;
 
-pub use config::{
+pub use crate::boundless_config::{
     BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
     DeploymentConfig, DeploymentType, OfferParamsConfig, validate_offer_spec,
 };
@@ -1197,12 +1196,12 @@ fn validate_offer_params(
 
 #[cfg(test)]
 mod tests {
-    use super::config::default_batch_offer_params;
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, parse_env_bool, parse_env_url,
         quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
+    use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::address;
     use boundless_market::price_oracle::Asset;
     use raiko2_primitives::Proof;

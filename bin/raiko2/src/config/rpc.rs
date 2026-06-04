@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
+use raiko2_prover::boundless_config::{BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
@@ -38,6 +38,7 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         network: "taiko_hoodi".to_string(),
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
+        beacon_rpc: None,
         l2_rpc: None,
         l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
@@ -63,6 +64,8 @@ pub struct NetworkPairConfig {
     pub l1_network: String,
     #[serde(default)]
     pub l1_rpc: Option<String>,
+    #[serde(default)]
+    pub beacon_rpc: Option<String>,
     #[serde(default)]
     pub l2_rpc: Option<String>,
     #[serde(default)]
@@ -251,6 +254,18 @@ impl RpcConfig {
                     pair.l1_rpc
                 );
             }
+            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc {
+                if !is_valid_url(beacon_rpc) {
+                    bail!(
+                        "{}: beacon_rpc = '{}'",
+                        validation::INVALID_RPC_URL,
+                        beacon_rpc
+                    );
+                }
+            }
+            if pair.l1_spec.seconds_per_slot == 0 {
+                bail!("{}: L1 chain spec seconds_per_slot must be > 0", pair.key);
+            }
             if !is_valid_url(&pair.l2_rpc) {
                 bail!(
                     "{}: l2_rpc = '{}'",
@@ -350,9 +365,12 @@ fn resolve_pair(
     let l2_spec = known_specs
         .get_chain_spec(&pair.network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L2 network '{}'", pair.network))?;
-    let l1_spec = known_specs
+    let mut l1_spec = known_specs
         .get_chain_spec(&pair.l1_network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
+    if let Some(beacon_rpc) = &pair.beacon_rpc {
+        l1_spec.beacon_rpc = Some(beacon_rpc.clone());
+    }
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 
     Ok(ResolvedNetworkPair {
@@ -400,5 +418,59 @@ mod tests {
                 .to_string()
                 .contains("aggregation_quoted_mcycles")
         );
+    }
+
+    #[test]
+    fn rpc_pair_beacon_rpc_overrides_l1_chain_spec() {
+        let beacon_rpc = "https://beacon.example.test/".to_string();
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_dev".to_string(),
+                l1_network: "taiko_dev_l1".to_string(),
+                l1_rpc: Some("https://l1.example.test/".to_string()),
+                beacon_rpc: Some(beacon_rpc.clone()),
+                l2_rpc: Some("https://l2.example.test/".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+
+        let pair = config
+            .resolve_pair("taiko_dev", "taiko_dev_l1")
+            .expect("pair should resolve");
+
+        assert_eq!(
+            pair.l1_spec.beacon_rpc.as_deref(),
+            Some(beacon_rpc.as_str())
+        );
+    }
+
+    #[test]
+    fn rpc_config_rejects_invalid_beacon_rpc_url() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_dev".to_string(),
+                l1_network: "taiko_dev_l1".to_string(),
+                l1_rpc: Some("https://l1.example.test/".to_string()),
+                beacon_rpc: Some("not-a-valid-url".to_string()),
+                l2_rpc: Some("https://l2.example.test/".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("invalid beacon rpc should fail");
+
+        assert!(err.to_string().contains("beacon_rpc"));
     }
 }

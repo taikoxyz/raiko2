@@ -502,11 +502,12 @@ pub(crate) fn base_config() -> Config {
     let mut config = Config::default();
     config.prover.guest_system = GuestSystem::Risc0;
     config.prover.runner = RunnerKind::Local;
-    config.prover.sp1.prover = raiko2_prover::sp1::ProverMode::Local;
+    config.prover.sp1.prover = raiko2_prover::sp1_config::ProverMode::Local;
     config.rpc.pairs = vec![NetworkPairConfig {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         l1_rpc: Some("http://localhost:8545".to_string()),
+        beacon_rpc: None,
         l2_rpc: Some("http://localhost:9545".to_string()),
         l2_provider: raiko2_provider::L2ProviderKind::Reth,
         l2_witness_rpc: None,

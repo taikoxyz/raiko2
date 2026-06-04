@@ -10,20 +10,30 @@ alloy-rpc-types-eth = { workspace = true }
 alloy-sol-types = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-raiko2-guests = { workspace = true }
+raiko2-guests = { workspace = true, optional = true }
 raiko2-pipeline = { workspace = true }
 raiko2-primitives = { workspace = true }
 raiko2-primitives-shasta = { workspace = true }
 raiko2-provider = { workspace = true }
 raiko2-protocol-shasta = { workspace = true }
 reth-ethereum-primitives = { workspace = true }
-risc0-zkvm = { workspace = true }
+risc0-zkvm = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-sp1-sdk = { workspace = true }
+sp1-sdk = { workspace = true, optional = true }
 tempfile = "3.27.0"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { workspace = true }
 toml = "0.9.8"
-xtask-build-guest = { path = "./build-guest" }
+xtask-build-guest = { path = "./build-guest", optional = true }
+
+[features]
+default = ["guest-tools"]
+guest-tools = [
+    "dep:raiko2-guests",
+    "dep:risc0-zkvm",
+    "dep:sp1-sdk",
+    "dep:xtask-build-guest",
+]
+image-release = []

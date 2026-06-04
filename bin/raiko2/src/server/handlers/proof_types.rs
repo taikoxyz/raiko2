@@ -1,5 +1,5 @@
 use raiko2_primitives::{Proof, ShastaCheckpoint};
-use raiko2_prover::sp1::Sp1ConfigOverrides;
+use raiko2_prover::sp1_config::Sp1ConfigOverrides;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

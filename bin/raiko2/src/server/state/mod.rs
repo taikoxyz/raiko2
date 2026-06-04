@@ -14,16 +14,10 @@ pub use types::{EngineStatusView, ProofStatus};
 use crate::config::{Config, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
-use raiko2_pipeline::{
-    NativeBackend, PipelineKey, Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{ShastaBackends, ShastaSpec, load_shasta_backends},
-};
+use raiko2_pipeline::{NativeBackend, PipelineKey, forks::shasta::ShastaSpec};
 use raiko2_primitives::{Proof, ProofType};
+use raiko2_prover::gaiko2::Gaiko2Prover;
 use raiko2_prover::validate_external_aggregate_proofs;
-use raiko2_prover::{
-    boundless::BoundlessProver, gaiko2::Gaiko2Prover, native::NativeProver, risc0::Risc0Prover,
-    sp1::Sp1Prover,
-};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -41,10 +35,24 @@ use raiko2_engine::tasks::EngineTask;
 #[cfg(feature = "redis-queue")]
 type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 
+#[cfg(feature = "local-provers")]
+use raiko2_pipeline::{
+    Risc0ShastaBackend, Sp1ShastaBackend,
+    forks::shasta::{ShastaBackends, load_shasta_backends},
+};
+#[cfg(feature = "local-provers")]
+use raiko2_prover::{
+    boundless::BoundlessProver, native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover,
+};
+
+#[cfg(feature = "local-provers")]
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
+#[cfg(feature = "local-provers")]
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
+#[cfg(feature = "local-provers")]
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
+#[cfg(feature = "local-provers")]
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
@@ -74,7 +82,9 @@ impl AppState {
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
+        #[cfg(feature = "local-provers")]
         let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "local-provers")]
         let sp1_prover = if should_eagerly_initialize_sp1(&config) {
             let sp1_config = setup::sp1_prover_config(&config);
             let sp1_backend = shasta_backends.sp1.clone();
@@ -98,7 +108,9 @@ impl AppState {
                     config: &config,
                     pair,
                     runtime: Arc::clone(&runtime),
+                    #[cfg(feature = "local-provers")]
                     shasta_backends: &shasta_backends,
+                    #[cfg(feature = "local-provers")]
                     sp1_prover: sp1_prover.clone(),
                     scheduler_config: scheduler_config.clone(),
                     workers,
@@ -130,13 +142,16 @@ struct PairPipelineRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
+    #[cfg(feature = "local-provers")]
     shasta_backends: &'a ShastaBackends,
+    #[cfg(feature = "local-provers")]
     sp1_prover: Option<Sp1Prover>,
     scheduler_config: SchedulerConfig,
     workers: usize,
     maintenance_interval: Duration,
 }
 
+#[cfg(feature = "local-provers")]
 const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
     !config.prover.is_remote_sgx_route()
 }
@@ -154,87 +169,95 @@ async fn register_pair_pipelines(
         return Ok(());
     }
 
-    let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-        Arc::clone(&registration.runtime),
-        registration.pair.key.clone(),
-    ));
-    let risc0_engine = build_risc0_engine(
-        registration.config,
-        registration.pair,
-        registration.shasta_backends.risc0.clone(),
-        registration.scheduler_config.clone(),
-        Arc::clone(&runtime_observer),
-    )
-    .await?;
-    risc0_engine.start_workers_with_maintenance_interval(
-        registration.workers,
-        registration.maintenance_interval,
-    );
-    factory.insert(
-        registration.pair.key.clone(),
-        PipelineKey::ShastaRisc0,
-        Arc::new(risc0_engine),
-    );
+    #[cfg(not(feature = "local-provers"))]
+    {
+        anyhow::bail!("local prover routes require building raiko2 with `local-provers`");
+    }
 
-    let boundless_engine = build_boundless_engine(
-        registration.config,
-        registration.pair,
-        registration.shasta_backends.risc0_boundless.clone(),
-        setup::boundless_scheduler_config(registration.config),
-        Arc::clone(&runtime_observer),
-    )
-    .await?;
-    boundless_engine.start_workers_with_maintenance_interval(
-        registration.workers,
-        registration.maintenance_interval,
-    );
-    factory.insert(
-        registration.pair.key.clone(),
-        PipelineKey::ShastaRisc0Network,
-        Arc::new(boundless_engine),
-    );
+    #[cfg(feature = "local-provers")]
+    {
+        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+        ));
+        let risc0_engine = build_risc0_engine(
+            registration.config,
+            registration.pair,
+            registration.shasta_backends.risc0.clone(),
+            registration.scheduler_config.clone(),
+            Arc::clone(&runtime_observer),
+        )
+        .await?;
+        risc0_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaRisc0,
+            Arc::new(risc0_engine),
+        );
 
-    let sp1_engine = build_sp1_engine(
-        registration.config,
-        registration.pair,
-        registration
-            .sp1_prover
-            .clone()
-            .expect("sp1 prover must be initialized for non-remote-sgx hosts"),
-        registration.shasta_backends.sp1.clone(),
-        registration.scheduler_config.clone(),
-        Arc::clone(&runtime_observer),
-    )
-    .await?;
-    sp1_engine.start_workers_with_maintenance_interval(
-        registration.workers,
-        registration.maintenance_interval,
-    );
-    factory.insert(
-        registration.pair.key.clone(),
-        PipelineKey::ShastaSp1,
-        Arc::new(sp1_engine),
-    );
+        let boundless_engine = build_boundless_engine(
+            registration.config,
+            registration.pair,
+            registration.shasta_backends.risc0_boundless.clone(),
+            setup::boundless_scheduler_config(registration.config),
+            Arc::clone(&runtime_observer),
+        )
+        .await?;
+        boundless_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaRisc0Network,
+            Arc::new(boundless_engine),
+        );
 
-    let native_engine = build_native_engine(
-        registration.config,
-        registration.pair,
-        registration.scheduler_config.clone(),
-        Arc::clone(&runtime_observer),
-    )
-    .await?;
-    native_engine.start_workers_with_maintenance_interval(
-        registration.workers,
-        registration.maintenance_interval,
-    );
-    factory.insert(
-        registration.pair.key.clone(),
-        PipelineKey::ShastaNative,
-        Arc::new(native_engine),
-    );
+        let sp1_engine = build_sp1_engine(
+            registration.config,
+            registration.pair,
+            registration
+                .sp1_prover
+                .clone()
+                .expect("sp1 prover must be initialized for local prover hosts"),
+            registration.shasta_backends.sp1.clone(),
+            registration.scheduler_config.clone(),
+            Arc::clone(&runtime_observer),
+        )
+        .await?;
+        sp1_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaSp1,
+            Arc::new(sp1_engine),
+        );
 
-    register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
-    Ok(())
+        let native_engine = build_native_engine(
+            registration.config,
+            registration.pair,
+            registration.scheduler_config.clone(),
+            Arc::clone(&runtime_observer),
+        )
+        .await?;
+        native_engine.start_workers_with_maintenance_interval(
+            registration.workers,
+            registration.maintenance_interval,
+        );
+        factory.insert(
+            registration.pair.key.clone(),
+            PipelineKey::ShastaNative,
+            Arc::new(native_engine),
+        );
+
+        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        Ok(())
+    }
 }
 
 async fn register_remote_sgx_pipelines(
@@ -502,6 +525,7 @@ fn push_restored_ref(
     refs.push((proof_ref, kind));
 }
 
+#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_risc0_engine(
     config: &Config,
@@ -574,6 +598,7 @@ async fn build_risc0_engine(
     Ok(engine)
 }
 
+#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_sp1_engine(
     config: &Config,
@@ -635,6 +660,7 @@ async fn build_sp1_engine(
     Ok(engine)
 }
 
+#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_native_engine(
     config: &Config,
@@ -707,6 +733,7 @@ async fn build_native_engine(
     Ok(engine)
 }
 
+#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_boundless_engine(
     config: &Config,

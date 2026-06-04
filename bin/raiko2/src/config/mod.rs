@@ -310,6 +310,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
@@ -329,6 +330,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("http://localhost:9545".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -350,6 +352,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -377,6 +380,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -399,6 +403,7 @@ mod tests {
                 network: "taiko_mainnet".to_string(),
                 l1_network: "ethereum".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -439,7 +444,7 @@ mod tests {
     fn test_config_rejects_invalid_pair_specific_boundless_offer() {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.offer_params.batch =
-            Some(raiko2_prover::boundless::BoundlessOfferParams {
+            Some(raiko2_prover::boundless_config::BoundlessOfferParams {
                 timeout_ms_per_mcycle: 100,
                 lock_timeout_ms_per_mcycle: 100,
                 ..config.prover.boundless.offer_params.batch.clone()
@@ -704,7 +709,7 @@ maintenance_interval_ms = 200
         );
         assert_eq!(
             config.prover.sp1.prover,
-            raiko2_prover::sp1::ProverMode::Network
+            raiko2_prover::sp1_config::ProverMode::Network
         );
     }
 
@@ -719,7 +724,7 @@ maintenance_interval_ms = 200
         );
         assert_eq!(
             config.prover.sp1.prover,
-            raiko2_prover::sp1::ProverMode::Local
+            raiko2_prover::sp1_config::ProverMode::Local
         );
     }
 

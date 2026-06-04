@@ -773,10 +773,14 @@ mod tests {
             l1_spec.beacon_rpc.as_deref(),
             Some("https://example.com/taiko-dev-l1-beacon")
         );
-        assert_eq!(l1_spec.genesis_time, 1_777_785_000);
+        assert_eq!(l1_spec.genesis_time, 1_779_670_900);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
+        assert_eq!(
+            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(0))
+        );
         assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
             Some(&ForkCondition::Timestamp(unzen_timestamp))

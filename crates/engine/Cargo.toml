@@ -13,7 +13,7 @@ raiko2-provider.workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
 raiko2-queue.workspace = true
-raiko2-prover.workspace = true
+raiko2-prover = { path = "../prover", default-features = false }
 
 alloy-primitives.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -30,3 +30,7 @@ alloy-trie.workspace = true
 reth-ethereum-primitives.workspace = true
 bincode.workspace = true
 raiko2-primitives-shasta.workspace = true
+
+[features]
+default = ["local-provers"]
+local-provers = ["raiko2-prover/risc0", "raiko2-prover/sp1", "raiko2-prover/boundless"]

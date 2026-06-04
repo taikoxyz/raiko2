@@ -2,9 +2,11 @@ use anyhow::{Context, Result, bail};
 use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
-    boundless::{BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec},
+    boundless_config::{
+        BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec,
+    },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
-    sp1::{ProverMode as Sp1ProverMode, Sp1Config},
+    sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
 };
 use serde::{Deserialize, Serialize};
 
@@ -114,7 +116,7 @@ impl ProverConfig {
             }
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
-        if matches!(self.sp1.mode, raiko2_prover::sp1::ExecutionMode::Prove) && !self.sp1.verify {
+        if matches!(self.sp1.mode, Sp1ExecutionMode::Prove) && !self.sp1.verify {
             bail!("prover.sp1.verify must be true when prover.sp1.mode=prove");
         }
         self.zk_any.validate()?;
@@ -241,7 +243,7 @@ impl Default for Risc0Config {
 }
 
 fn default_risc0_execution_po2() -> u32 {
-    raiko2_prover::risc0::Risc0Config::default().execution_po2
+    20
 }
 
 /// Boundless configuration.
@@ -270,16 +272,16 @@ pub struct BoundlessConfig {
 impl Default for BoundlessConfig {
     fn default() -> Self {
         Self {
-            offchain: raiko2_prover::boundless::BoundlessConfig::default().offchain,
-            rpc_url: raiko2_prover::boundless::BoundlessConfig::default().rpc_url,
+            offchain: raiko2_prover::boundless_config::BoundlessConfig::default().offchain,
+            rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
             signer_key: String::new(),
-            deployment: raiko2_prover::boundless::BoundlessConfig::default().deployment,
-            batch_quoted_mcycles: raiko2_prover::boundless::BoundlessConfig::default()
+            deployment: raiko2_prover::boundless_config::BoundlessConfig::default().deployment,
+            batch_quoted_mcycles: raiko2_prover::boundless_config::BoundlessConfig::default()
                 .batch_quoted_mcycles,
-            batch_quote_strategy: raiko2_prover::boundless::BoundlessConfig::default()
+            batch_quote_strategy: raiko2_prover::boundless_config::BoundlessConfig::default()
                 .batch_quote_strategy,
             aggregation_quoted_mcycles: default_aggregation_quoted_mcycles(),
-            offer_params: raiko2_prover::boundless::BoundlessConfig::default().offer_params,
+            offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
         }
@@ -337,12 +339,12 @@ const fn default_boundless_timeout_ms() -> u64 {
 }
 
 fn default_aggregation_quoted_mcycles() -> u32 {
-    raiko2_prover::boundless::BoundlessConfig::default().aggregation_quoted_mcycles
+    raiko2_prover::boundless_config::BoundlessConfig::default().aggregation_quoted_mcycles
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProverConfig, ZkAnyConfig, ZkAnyTargetConfig};
+    use super::{ProverConfig, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig};
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {
@@ -419,7 +421,7 @@ mod tests {
     #[test]
     fn prover_config_rejects_sp1_prove_without_verification() {
         let mut config = ProverConfig::default();
-        config.sp1.mode = raiko2_prover::sp1::ExecutionMode::Prove;
+        config.sp1.mode = Sp1ExecutionMode::Prove;
         config.sp1.verify = false;
 
         assert!(

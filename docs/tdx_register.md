@@ -15,6 +15,24 @@ For the broader pipeline (image build, VM deploy, smart-contract deploy) see
 [`taiko-mono/.../tdx_deployment.md`](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/docs/tdx_deployment.md).
 For the runtime architecture (what runs inside the image and how the pieces talk) see
 [`tdx_architecture.md`](./tdx_architecture.md).
+For VM deployment on Azure and GCP see the
+[nethermind-tdx README](https://github.com/NethermindEth/nethermind-tdx/blob/main/README.md).
+
+> **Two verifier flavours — the xtask auto-detects which.** The flow it runs is
+> chosen from the prover's bootstrap `issuer_type`:
+> - **`azure`** → the Azure vTPM flow against **`AzureTdxVerifier`**. The Azure
+>   paravisor binds the TDX quote into a vTPM quote; measurements are vTPM **PCRs**
+>   (`--pcr-bitmap`, default `0xBA10`).
+> - **`tdx`** (GCP Confidential VMs, bare-metal TDX) → the native-DCAP flow against
+>   **`GcpTdxVerifier`**
+>   ([`taiko-mono/.../GcpTdxVerifier.sol`](https://github.com/taikoxyz/taiko-mono/blob/main/packages/protocol/contracts/layer1/verifiers/GcpTdxVerifier.sol)).
+>   The prover emits a raw Intel TDX DCAP quote (read from `/dev/tdx_guest` via
+>   configfs-tsm); measurements are the quote's **RTMR0..3** (`--rtmr-mask`,
+>   default `0b0111` = RTMR0,1,2). No vTPM.
+>
+> `--verifier` must point at the matching contract for the prover's issuer. The
+> image's issuer is fixed by its build profile (`make build AZURE=true` → azure,
+> `GCP=true` / bare-metal → tdx), not by env.json.
 
 ## What the command does
 
@@ -102,6 +120,33 @@ cargo run -p xtask -- register-tdx \
   --register
 ```
 
+### 3. Native TDX (GCP Confidential VM / bare-metal)
+
+Identical command shape — the xtask detects `issuer_type == "tdx"` from the
+bootstrap and automatically uses the **`GcpTdxVerifier`** native-DCAP flow
+(raw quote + RTMRs, no vTPM). Point `--verifier` at the deployed `GcpTdxVerifier`
+proxy. Measurements are bound from the quote's RTMRs per `--rtmr-mask`.
+
+```bash
+cargo run -p xtask -- register-tdx \
+  --verifier 0x<GcpTdxVerifier proxy> \
+  --rpc http://<L1 RPC>               \
+  --private-key 0x<owner key>         \
+  --reth-tdx-url http://<VM_IP>:8080  \
+  --rtmr-mask 0b0111                  \
+  --trust --register
+```
+
+Under the hood the native path unwraps tdxs's attestation document
+(`hex(JSON {RawQuote, UserData})`) to the raw DCAP quote, parses
+`teeTcbSvn`/`mrSeam`/`mrTd`/`RTMR0-3` from it for `setTrustedParams`, and submits
+`registerInstance(idx, rawQuote, userData, nonce)` — the prover address is bound
+on-chain via `reportData == sha256(userData || nonce)`.
+
+> The `GcpTdxVerifier` must be deployed against the **same Automata DCAP** the
+> Azure verifier uses (see `DeployGcpTdxVerifier.s.sol`). `--release-url` RTMR
+> cross-check is not yet implemented for the native flow.
+
 ---
 
 On success the xtask prints a summary banner:
@@ -148,7 +193,8 @@ If a release contains assets for multiple chains, use `--release-asset`:
 | `--private-key` | `PRIVATE_KEY` | — | Hex key (with or without `0x`). Owner for `--trust`, any funded key for `--register` alone |
 | `--reth-tdx-url` | `TDX_RETH_URL` | — | Fetch bootstrap from `GET <url>/bootstrap` (on the `reth-tdx` HTTP server inside the TDX VM). If unset, reads `~/.config/reth-tdx/bootstrap.json` |
 | `--trusted-params-index` | — | `0` | Slot to read/write |
-| `--pcr-bitmap` | — | `0xBA10` | 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set). Overridden by the release's bitmap when `--release-url` is set |
+| `--pcr-bitmap` | — | `0xBA10` | **Azure issuer only.** 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set). Overridden by the release's bitmap when `--release-url` is set |
+| `--rtmr-mask` | — | `0b0111` | **Native (tdx) issuer only.** 4-bit mask of RTMRs to bind into `GcpTdxVerifier` trusted params. Default = RTMR0,1,2 (image/boot measurements); RTMR3 is excluded because it is typically extended by the runtime |
 | `--release-url` | `TDX_RELEASE_URL` | — | GitHub release page URL or direct `*.measurements.json` URL. When set, downloads the release-blessed measurements, uses its PCR bitmap, and cross-checks the live VM's PCR digests against it before broadcasting |
 | `--release-asset` | `TDX_RELEASE_ASSET` | — | Substring filter when the release page has multiple `*.measurements.json` assets. Required when more than one matches |
 | `--trust` | — | `false` | Call `setTrustedParams` (owner-only). Extracts `mrSeam`, `mrTd`, `teeTcbSvn`, and PCRs from the live VM's attestation quote |

@@ -494,8 +494,9 @@ All API errors use the Hoodi-style envelope:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` delegates price selection to the Boundless SDK price provider and optionally accepts
-  `max_price_per_mcycle` as a hard cap for the resulting SDK `maxPrice`. `market` must omit
-  `min_price_per_mcycle`.
+  `max_price_per_mcycle` as a per-mcycle hard cap. The configured value is multiplied by the
+  quoted mcycle count; SDK autoprice offers whose resulting `maxPrice` exceeds that total cap fail
+  before submission. `market` must omit `min_price_per_mcycle`.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

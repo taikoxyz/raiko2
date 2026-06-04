@@ -528,7 +528,7 @@ impl BoundlessProver {
         request_params = request_params
             .with_input_url(input_url)
             .expect("with_input_url is infallible for valid URLs");
-        let mut request = retry_external("build boundless request", || {
+        let request = retry_external("build boundless request", || {
             let request_params = request_params.clone();
             async move {
                 Box::pin(client.build_request(request_params))
@@ -541,8 +541,8 @@ impl BoundlessProver {
             }
         })
         .await?;
-        apply_market_max_price_cap(
-            &mut request,
+        enforce_market_max_price_cap(
+            U256::from(request.offer.maxPrice),
             max_price_cap.as_ref(),
             mcycles_count,
             offer_spec.pricing_mode,
@@ -1145,14 +1145,8 @@ fn parse_request_amount(
     Ok(amount)
 }
 
-fn capped_market_max_price(max_price: U256, max_price_cap: Option<&Amount>) -> U256 {
-    max_price_cap
-        .map(|cap| max_price.min(cap.value))
-        .unwrap_or(max_price)
-}
-
-fn apply_market_max_price_cap(
-    request: &mut ProofRequest,
+fn enforce_market_max_price_cap(
+    autoprice_max_price: U256,
     max_price_cap: Option<&Amount>,
     mcycles_count: u32,
     pricing_mode: BoundlessPricingMode,
@@ -1164,22 +1158,18 @@ fn apply_market_max_price_cap(
         return Ok(());
     };
 
-    let autoprice_max_price = U256::from(request.offer.maxPrice);
-    let effective_max_price = capped_market_max_price(autoprice_max_price, Some(max_price_cap));
-    let was_capped = effective_max_price < autoprice_max_price;
-    request.offer.maxPrice = effective_max_price;
-    request.validate().map_err(|err| {
-        RaikoError::InvalidRequestConfig(format!(
-            "Boundless request invalid after applying market max price cap: {err}"
-        ))
-    })?;
-    tracing::info!(
+    if autoprice_max_price > max_price_cap.value {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "Boundless market autoprice maxPrice {} wei exceeds configured max_price_per_mcycle cap {} wei for {} mcycles",
+            autoprice_max_price, max_price_cap.value, mcycles_count
+        )));
+    }
+
+    tracing::debug!(
         mcycles_count,
         autoprice_max_price_wei = %autoprice_max_price,
         cap_max_price_wei = %max_price_cap.value,
-        effective_max_price_wei = %effective_max_price,
-        was_capped,
-        "Applied Boundless market max price cap"
+        "Boundless market max price cap accepted"
     );
     Ok(())
 }
@@ -1261,7 +1251,7 @@ fn validate_offer_params(
 mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
-        DeploymentConfig, DeploymentType, ElfType, capped_market_max_price, parse_env_bool,
+        DeploymentConfig, DeploymentType, ElfType, enforce_market_max_price_cap, parse_env_bool,
         parse_env_url, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
@@ -1429,22 +1419,40 @@ mod tests {
     }
 
     #[test]
-    fn capped_market_max_price_keeps_autoprice_below_cap() {
+    fn market_max_price_cap_accepts_autoprice_at_or_below_cap() {
         let max_price_cap = Amount::new(U256::from(100), Asset::ETH);
 
-        assert_eq!(
-            capped_market_max_price(U256::from(80), Some(&max_price_cap)),
-            U256::from(80)
-        );
+        enforce_market_max_price_cap(
+            U256::from(80),
+            Some(&max_price_cap),
+            1_000,
+            BoundlessPricingMode::Market,
+        )
+        .expect("autoprice below cap");
+        enforce_market_max_price_cap(
+            U256::from(100),
+            Some(&max_price_cap),
+            1_000,
+            BoundlessPricingMode::Market,
+        )
+        .expect("autoprice at cap");
     }
 
     #[test]
-    fn capped_market_max_price_clamps_autoprice_above_cap() {
+    fn market_max_price_cap_rejects_autoprice_above_cap() {
         let max_price_cap = Amount::new(U256::from(100), Asset::ETH);
 
-        assert_eq!(
-            capped_market_max_price(U256::from(120), Some(&max_price_cap)),
-            U256::from(100)
+        let err = enforce_market_max_price_cap(
+            U256::from(120),
+            Some(&max_price_cap),
+            1_000,
+            BoundlessPricingMode::Market,
+        )
+        .expect_err("autoprice above cap");
+
+        assert!(
+            err.to_string()
+                .contains("exceeds configured max_price_per_mcycle cap")
         );
     }
 

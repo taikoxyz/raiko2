@@ -156,20 +156,32 @@ impl Database for WitnessDb {
 
     /// `BLOCKHASH` opcode semantics:
     ///   * `Some(hash)` → return it.
-    ///   * `None` → return `B256::ZERO`. Geth/EVM return zero for any block outside the
-    ///     last-256 window or otherwise unknown to the node, so a sequencer-trace witness
-    ///     that didn't record a particular block hash is treated as the same "unknown"
-    ///     case rather than as a soundness fault. Storage- and code-trie misses still
-    ///     hard-error (see `storage` / `code_by_hash` above) — those *are* soundness-
-    ///     critical because the witness explicitly claimed the call read them.
+    ///   * `None` → **hard error**. revm only calls `block_hash` for lookups inside the
+    ///     EVM 256-block window relative to the call's block (`current_block`); blocks
+    ///     outside that window are answered at the opcode level with zero, without ever
+    ///     consulting the database. Therefore any `block_hash` lookup that reaches this
+    ///     accessor MUST have been part of the live L1 EL's execution and the witness
+    ///     MUST include the corresponding header. A missing entry indicates one of:
+    ///       * a prover omitting a required header to forge a divergent BLOCKHASH path
+    ///         that produces the prover's claimed `return_data` (the 3-way assertion
+    ///         then passes but the L2 block's state diverges from the live sequencer),
+    ///       * or an honest witness fetched without the BLOCKHASH header (a bug in the
+    ///         L1 EL's `proof_call` implementation).
+    ///
+    ///   Either way the safe answer is to fail loudly. Mirrors the same hard-error stance
+    ///   `code_by_hash` and `storage` already enforce for the same reason.
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         match self.block_hashes.get(&number).copied() {
             Some(hash) => Ok(hash),
             None => {
                 debug!(
-                    "WitnessDb::block_hash: block {number} not in witness, returning zero per BLOCKHASH semantics"
+                    "WitnessDb::block_hash: block {number} not in witness — revm should only ask \
+                     for in-window blocks, so a miss is a soundness fault (prover omission?)"
                 );
-                Ok(B256::ZERO)
+                Err(ProviderError::TrieWitnessError(format!(
+                    "block_hash {number} not in witness (in-window BLOCKHASH requires a witness \
+                     header; rejecting to prevent prover-omission soundness gap)"
+                )))
             }
         }
     }
@@ -183,21 +195,22 @@ mod tests {
         L1ExecutionWitness::default()
     }
 
+    /// Regression for the codex P1 finding (2026-06-04): a missing BLOCKHASH header MUST
+    /// be a hard error, not silently zeroed. revm only calls `block_hash` for in-window
+    /// lookups, so a miss is either (a) a prover omitting a required header to forge a
+    /// divergent BLOCKHASH path with consistent `return_data`, or (b) an honest fetch
+    /// bug. Either way, fail loudly.
     #[test]
-    fn test_block_hash_returns_zero_for_missing_block() {
-        // Regression guard: the `block_hash` accessor must NOT error on a missing block —
-        // BLOCKHASH semantics return zero for any block outside the last-256 window or
-        // otherwise unknown to the node. A sequencer-trace witness that doesn't record
-        // a particular block hash must round-trip under the same semantics.
+    fn test_block_hash_missing_returns_error() {
         let mut db =
             WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
-        let result = db
+        let err = db
             .block_hash(42)
-            .expect("block_hash on a missing block must NOT error");
-        assert_eq!(
-            result,
-            B256::ZERO,
-            "missing block must return B256::ZERO per BLOCKHASH semantics"
+            .expect_err("missing block must surface as hard error (prover-omission guard)");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("TrieWitnessError") || msg.contains("not in witness"),
+            "expected TrieWitnessError, got: {msg}"
         );
     }
 
@@ -222,7 +235,7 @@ mod tests {
         // real call for the same block could be silently accepted.
         let mut db =
             WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
-        let _ = db.block_hash(123).unwrap();
+        let _ = db.block_hash(123); // expect Err now, ignored
         assert!(
             db.block_hashes.get(&123).is_none(),
             "missing-block lookup must not poison the cache"

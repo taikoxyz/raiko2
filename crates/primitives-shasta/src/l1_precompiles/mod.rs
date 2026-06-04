@@ -161,6 +161,79 @@ pub fn reset_l1_precompile_state() {
     clear_l1_staticcall_rpc_served_calls();
 }
 
+/// Trim the trailing origin-header duplicate from `l1_ancestor_headers` if present.
+///
+/// `hydrate_shasta_l1_headers` (host preflight) stores the fetched range INCLUDING the
+/// origin as the last entry of `l1_ancestor_headers`, while
+/// [`l1sload::build_verified_state_root_map`] expects the slice to end strictly **below**
+/// origin (it walks backward starting from `origin - 1`). Centralizing the trim here
+/// keeps every consumer in sync — preflight verify, guest proving, and any future caller.
+pub fn l1_ancestors_below_origin<'a>(
+    l1_header: &alloy_consensus::Header,
+    l1_ancestor_headers: &'a [alloy_consensus::Header],
+) -> &'a [alloy_consensus::Header] {
+    match l1_ancestor_headers.last() {
+        Some(last) if last.number == l1_header.number => {
+            &l1_ancestor_headers[..l1_ancestor_headers.len() - 1]
+        }
+        _ => l1_ancestor_headers,
+    }
+}
+
+/// Set up the L1 precompile globals from a `GuestInput` so any block re-execution can hit
+/// `L1Sload` / `L1Staticcall` reads against the verified caches. Used by both the ZK
+/// guest's proving path and the pipeline's `Validation::validate` (which re-runs blocks
+/// without going through the guest).
+///
+/// Steps:
+/// 1. Acquire the global precompile lock — single-threaded contract for the caches.
+/// 2. Reset state so a prior task's globals can't leak in.
+/// 3. Install the origin context (`originBlockNumber`).
+/// 4. MPT-verify the L1Sload proofs against the trusted state-root map.
+/// 5. Verify the L1Staticcall execution witnesses (header binding + revm re-exec).
+///
+/// Returns the held `MutexGuard` so the caller keeps single-threaded access through the
+/// subsequent block re-execution. Drop it after the last L1-precompile-touching block
+/// completes.
+pub fn populate_l1_precompile_caches_for_proving(
+    guest_input: &crate::GuestInput,
+) -> anyhow::Result<MutexGuard<'static, ()>> {
+    let proposal = &guest_input.taiko.proposal_event.proposal;
+    let l1_origin_block_number = proposal.originBlockNumber.to::<u64>();
+    let l1_ancestors = l1_ancestors_below_origin(
+        &guest_input.taiko.l1_header,
+        &guest_input.taiko.l1_ancestor_headers,
+    );
+
+    let guard = acquire_l1_precompile_lock();
+    reset_l1_precompile_state();
+    // Install the origin context first so the precompile range-check has a window even if
+    // the storage-proof slice is empty. Cache population happens only after MPT
+    // verification (S4) — `verify_and_populate_l1sload_proofs` is the sole writer.
+    set_l1sload_origin(l1_origin_block_number);
+    verify_and_populate_l1sload_proofs(
+        &guest_input.l1_storage_proofs,
+        &guest_input.taiko.l1_header,
+        l1_ancestors,
+    )?;
+    let l1_state_root_map =
+        build_verified_state_root_map(&guest_input.taiko.l1_header, l1_ancestors)?;
+    let l1_header_map: std::collections::HashMap<u64, &alloy_consensus::Header> =
+        std::iter::once((
+            guest_input.taiko.l1_header.number,
+            &guest_input.taiko.l1_header,
+        ))
+        .chain(l1_ancestors.iter().map(|h| (h.number, h)))
+        .collect();
+    verify_and_populate_l1_staticcall_witnesses_with_headers(
+        &guest_input.l1_staticcall_witnesses,
+        &l1_state_root_map,
+        Some(&l1_header_map),
+        l1_origin_block_number,
+    )?;
+    Ok(guard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

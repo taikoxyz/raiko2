@@ -4,10 +4,7 @@ use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{
-    Header,
-    transaction::{SignerRecoverable, Transaction as _},
-};
+use alloy_consensus::{Header, transaction::Transaction as _};
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
@@ -21,6 +18,7 @@ use raiko2_primitives_shasta::{
     GuestInput,
     l1_precompiles::{
         acquire_l1_precompile_lock, clear_l1_rpc_fetcher, clear_l1_staticcall_rpc_fetcher,
+        l1_ancestors_below_origin, populate_l1_precompile_caches_for_proving,
         reset_l1_precompile_state, set_l1_origin_block_id, take_l1_rpc_served_calls,
         take_l1_staticcall_rpc_served_calls, verify_l1sload_proofs,
     },
@@ -270,10 +268,15 @@ async fn discover_and_fetch_l1_precompile_data<P: Provider>(
         // them. If the L1 EL reorged between discovery and fetch (or returned bogus proofs),
         // surface the mismatch here with a clear preflight error rather than as a generic
         // "verification failed" deep inside the ZK guest.
+        //
+        // `hydrate_shasta_l1_headers` stores the origin as the last entry of
+        // `l1_ancestor_headers`; `build_verified_state_root_map` (inside `verify_l1sload_proofs`)
+        // expects ancestors strictly below origin, so trim the trailing duplicate with the
+        // same helper the guest uses.
         verify_l1sload_proofs(
             &input.l1_storage_proofs,
             &input.taiko.l1_header,
-            &input.taiko.l1_ancestor_headers,
+            l1_ancestors_below_origin(&input.taiko.l1_header, &input.taiko.l1_ancestor_headers),
         )
         .map_err(|e| {
             RaikoError::Preflight(format!(
@@ -1317,8 +1320,9 @@ fn validate_block_range(
 ///
 /// # Dual-purpose (D19)
 ///
-/// This function is invoked from two distinct contexts and the invariants each requires on
-/// the L1 precompile globals differ:
+/// This function is invoked from two distinct contexts. Both re-execute every block; the
+/// precompile machinery branches on which fetcher (if any) is installed and whether the
+/// caches are pre-populated:
 ///
 /// 1. **Preflight discovery** (`discover_and_fetch_l1_precompile_data` above). Live RPC
 ///    fetchers are installed; `RECORD_L1_SERVED_CALLS` is on (default). Cache misses fire
@@ -1327,14 +1331,15 @@ fn validate_block_range(
 ///    fetches.
 ///
 /// 2. **Prover stateless validation** (`<ShastaSpec as Validation>::validate` below + guest
-///    `prove_shasta_proposal_with_block_verifier`). The cache is pre-populated from
-///    verified witnesses; no live fetcher is installed. Cache hits are deterministic and
-///    don't go through `RECORD_L1_SERVED_CALLS`, so the function works correctly even
-///    though recording is still on.
+///    `prove_shasta_proposal_with_block_verifier`). The caches are pre-populated from
+///    verified witnesses via `populate_l1_precompile_caches_for_proving`, which acquires
+///    the precompile lock and verifies `input.l1_storage_proofs` + `input.l1_staticcall_witnesses`
+///    against the trusted state root before writing the cache. No live fetcher is
+///    installed. The lock guard is held through the block re-execution loop so concurrent
+///    proofs don't race on the process globals.
 ///
-/// Both contexts re-execute every block; the precompile machinery branches on which fetcher
-/// (if any) is installed. Don't loosen the recording rules without re-evaluating both call
-/// sites: a future flag change could silently break either consumer.
+/// Don't loosen the recording rules without re-evaluating both call sites: a future flag
+/// change could silently break either consumer.
 ///
 /// # Errors
 ///
@@ -1420,6 +1425,14 @@ where
     type Input = GuestInput;
 
     fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
+        // Set up the L1 precompile caches from `input.l1_storage_proofs` +
+        // `input.l1_staticcall_witnesses` before block re-execution. Without this, any block
+        // touching `L1SLOAD` / `L1STATICCALL` would halt with "context unset" / "value not
+        // found in cache" because the caches are process-global and the post-preflight
+        // reset clears them before validation runs. The guard is held through the block loop
+        // for single-threaded access.
+        let _l1_precompile_guard = populate_l1_precompile_caches_for_proving(input)
+            .map_err(|e| RaikoError::Preflight(format!("L1 precompile setup: {e}")))?;
         validate_shasta_guest_input(input)
     }
 }

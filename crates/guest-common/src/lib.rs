@@ -19,11 +19,7 @@ use raiko2_primitives_shasta::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
         shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
-    l1_precompiles::{
-        acquire_l1_precompile_lock, build_verified_state_root_map, reset_l1_precompile_state,
-        set_l1sload_origin, verify_and_populate_l1_staticcall_witnesses_with_headers,
-        verify_and_populate_l1sload_proofs,
-    },
+    l1_precompiles::populate_l1_precompile_caches_for_proving,
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, verify_proposal_mode_blob_usage, GuestInput,
     ShastaZkAggregationGuestInput,
@@ -767,41 +763,7 @@ where
     // Verify + populate the L1 precompile caches before any block re-executes: the L1Sload /
     // L1Staticcall precompiles read these caches during the stateless validation loop below. The
     // lock guard is held across the loop so concurrent proofs don't race on the process globals.
-    let l1_origin_block_number = proposal.originBlockNumber.to::<u64>();
-    // `hydrate_shasta_l1_headers` appends the origin header as the last ancestor; the backward
-    // state-root walk expects ancestors strictly below origin, so drop the trailing duplicate.
-    let l1_ancestors: &[Header] = match guest_input.taiko.l1_ancestor_headers.last() {
-        Some(last) if last.number == guest_input.taiko.l1_header.number => {
-            &guest_input.taiko.l1_ancestor_headers
-                [..guest_input.taiko.l1_ancestor_headers.len() - 1]
-        }
-        _ => &guest_input.taiko.l1_ancestor_headers,
-    };
-    let _l1_precompile_guard = acquire_l1_precompile_lock();
-    reset_l1_precompile_state();
-    // Install the origin context FIRST so the precompile range-check has a window even if
-    // the storage-proof slice is empty. Cache population happens only after MPT verification
-    // (S4) — `verify_and_populate_l1sload_proofs` is the sole writer.
-    set_l1sload_origin(l1_origin_block_number);
-    verify_and_populate_l1sload_proofs(
-        &guest_input.l1_storage_proofs,
-        &guest_input.taiko.l1_header,
-        l1_ancestors,
-    )?;
-    let l1_state_root_map =
-        build_verified_state_root_map(&guest_input.taiko.l1_header, l1_ancestors)?;
-    let l1_header_map: std::collections::HashMap<u64, &Header> = std::iter::once((
-        guest_input.taiko.l1_header.number,
-        &guest_input.taiko.l1_header,
-    ))
-    .chain(l1_ancestors.iter().map(|h| (h.number, h)))
-    .collect();
-    verify_and_populate_l1_staticcall_witnesses_with_headers(
-        &guest_input.l1_staticcall_witnesses,
-        &l1_state_root_map,
-        Some(&l1_header_map),
-        l1_origin_block_number,
-    )?;
+    let _l1_precompile_guard = populate_l1_precompile_caches_for_proving(guest_input)?;
 
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {

@@ -120,7 +120,7 @@ order_stream_url = "https://base-mainnet.boundless.network"
 
 [prover.boundless.offer_params.batch]
 pricing_mode = "market"
-# Optional in market mode: cap the SDK autoprice maxPrice after cycle and gas estimation.
+# Optional in market mode: reject SDK autoprice offers above this per-mcycle hard cap.
 max_price_per_mcycle = "0.000000060"
 ramp_up_start_sec = 20
 ramp_up_period_blocks = 60

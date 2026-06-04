@@ -11,7 +11,8 @@ suffix transactions.
 
 - `alethia-reth` L2 node with `debug_executionWitnessForTxList`.
 - Proof-history storage enabled and covering the target proposal block range.
-- `raiko2` image built from a commit that requests tx-list witnesses for Shasta source manifests.
+- `raiko2` image built from #70 or a later commit that requests tx-list witnesses for Shasta source
+  manifests.
 - Remote SGX providers:
   - `raiko2-sgx` for `proof_type = "sgx"`.
   - `gaiko2-sgxgeth` for `proof_type = "sgxgeth"`.

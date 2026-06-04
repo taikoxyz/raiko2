@@ -1,13 +1,26 @@
 # Shasta Zk Path Does Not Rebuild Block From Derived Txlist
 
-## Summary
+## Status
 
-The current Shasta zk proposal path in `raiko2` does include blob sidecars in `GuestInput`, and the
-guest does execute a complete `blob -> manifest -> txlist` derivation.
+Resolved / historical.
 
-However, the proof path stops short of the older `raiko` semantics.
+The original guest-path gap described below was closed by moving proposal reconstruction onto the
+derived-block helper path and validating the assembled filtered block against the expected block.
+The 2026-04-23 append log records the final dependency state and regression coverage.
 
-Today the guest:
+The later host-preflight witness-materialization gap for non-canonical or invalid suffix
+transactions was handled separately by the tx-list witness path merged in #70. That path requests
+`debug_executionWitnessForTxList` when Shasta source manifests are present.
+
+## Original Summary
+
+At the time this issue was opened, the Shasta zk proposal path in `raiko2` did include blob
+sidecars in `GuestInput`, and the guest did execute a complete `blob -> manifest -> txlist`
+derivation.
+
+However, the proof path stopped short of the older `raiko` semantics.
+
+At that point, the guest:
 
 - verifies blob usage and blob proofs
 - derives the expected transaction list from blob-backed data sources

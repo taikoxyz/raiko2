@@ -95,6 +95,13 @@ pub(crate) struct RegisterTdxArgs {
     /// Print the transactions without broadcasting.
     #[arg(long)]
     dry_run: bool,
+
+    /// Native TDX (GcpTdxVerifier) only: 4-bit mask of RTMRs to bind into
+    /// trusted params. Default `0b0111` = RTMR0,1,2 (image/boot measurements);
+    /// RTMR3 is left out by default because it is typically extended by the
+    /// runtime. Ignored for the Azure issuer (which binds vTPM PCRs instead).
+    #[arg(long, default_value_t = 0b0111)]
+    rtmr_mask: u8,
 }
 
 // ---------------------------------------------------------------
@@ -184,6 +191,31 @@ sol! {
     }
 }
 
+sol! {
+    #[sol(rpc)]
+    contract GcpTdxVerifier {
+        struct TrustedParams {
+            bytes16 teeTcbSvn;
+            uint8 rtmrMask;
+            bytes mrSeam;
+            bytes mrTd;
+            bytes[] rtmrs;
+        }
+
+        function setTrustedParams(uint256 index, TrustedParams calldata params) external;
+        function registerInstance(
+            uint256 trustedParamsIdx,
+            bytes calldata rawQuote,
+            bytes calldata userData,
+            bytes calldata nonce
+        ) external returns (uint256);
+        function trustedParams(uint256 index)
+            external
+            view
+            returns (bytes16, uint8, bytes memory, bytes memory);
+    }
+}
+
 // ---------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------
@@ -191,6 +223,25 @@ sol! {
 pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
     let do_trust = args.trust;
     let do_register = args.register || !args.trust;
+
+    // Fetch the bootstrap first so we can pick the verifier flow from its issuer.
+    let bootstrap = match &args.reth_tdx_url {
+        Some(url) => fetch_bootstrap(url)
+            .await
+            .context("failed to fetch TDX bootstrap data from reth-tdx")?,
+        None => read_bootstrap_from_disk()
+            .context("failed to read TDX bootstrap data — has reth-tdx booted?")?,
+    };
+    println!(
+        "loaded bootstrap data (issuer={} public_key={})",
+        bootstrap.issuer_type, bootstrap.public_key
+    );
+
+    // Native Intel TDX (GCP / bare-metal) uses the GcpTdxVerifier (raw DCAP
+    // quote, RTMR measurements). Only the `azure` issuer takes the vTPM path.
+    if !bootstrap.issuer_type.eq_ignore_ascii_case("azure") {
+        return run_native(&args, &bootstrap, do_trust, do_register).await;
+    }
 
     if args.pcr_bitmap >= (1u32 << 24) {
         anyhow::bail!(
@@ -232,18 +283,7 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         effective_pcr_bitmap
     );
 
-    let bootstrap = match &args.reth_tdx_url {
-        Some(url) => fetch_bootstrap(url)
-            .await
-            .context("failed to fetch TDX bootstrap data from reth-tdx")?,
-        None => read_bootstrap_from_disk()
-            .context("failed to read TDX bootstrap data — has reth-tdx booted?")?,
-    };
     let metadata = &bootstrap.metadata;
-    println!(
-        "loaded bootstrap data (issuer={} public_key={})",
-        bootstrap.issuer_type, bootstrap.public_key
-    );
 
     // Cross-check the live VM's reported PCRs against the release's expected
     // values before we sign anything. Applies to both --trust and --register.
@@ -382,6 +422,246 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------
+// Native TDX flow (GcpTdxVerifier)
+//
+// For the native `tdx` issuer (GCP Confidential VMs, bare-metal TDX) the
+// bootstrap carries a raw Intel TDX DCAP quote — no Azure vTPM envelope. The
+// prover is admitted by `GcpTdxVerifier`, which verifies the quote through
+// Automata DCAP and checks RTMR0..3 (instead of vTPM PCRs) plus mrSeam/mrTd/
+// teeTcbSvn. The prover address is bound by the quote's reportData
+// (== sha256(userData||nonce)), so we submit the raw quote + userData + nonce.
+// ---------------------------------------------------------------
+
+async fn run_native(
+    args: &RegisterTdxArgs,
+    bootstrap: &BootstrapData,
+    do_trust: bool,
+    do_register: bool,
+) -> Result<()> {
+    if args.rtmr_mask >= 16 {
+        bail!(
+            "--rtmr-mask={:#b} exceeds 4 bits (RTMR0..3)",
+            args.rtmr_mask
+        );
+    }
+
+    println!(
+        "register-tdx (native): verifier={:?} index={} trust={} register={} dry_run={} rtmr_mask={:#06b}",
+        args.verifier,
+        args.trusted_params_index,
+        do_trust,
+        do_register,
+        args.dry_run,
+        args.rtmr_mask
+    );
+
+    // The /bootstrap `quote` field is a hex-encoded JSON document
+    // {"RawQuote": "<b64>", "UserData": "<b64>"} produced by tdxs. Unwrap it to
+    // the raw DCAP quote bytes and the attested user data (the prover address).
+    let (raw_quote, user_data) = unwrap_native_quote(&bootstrap.quote)
+        .context("failed to unwrap native TDX quote from bootstrap")?;
+    let nonce = hex::decode(bootstrap.nonce.trim_start_matches("0x"))
+        .context("bootstrap nonce: not valid hex")?;
+
+    println!(
+        "  raw quote: {} bytes, userData: {} bytes, nonce: {} bytes",
+        raw_quote.len(),
+        user_data.len(),
+        nonce.len()
+    );
+    if user_data.len() < 20 {
+        bail!(
+            "attested userData is {} bytes; need >= 20 for the prover address",
+            user_data.len()
+        );
+    }
+
+    if args.release_url.is_some() {
+        println!(
+            "⚠ WARNING: --release-url RTMR cross-check is not yet implemented for the native \
+             TDX flow; the quote's measurements are still bound on-chain via --trust, but they \
+             are not pre-checked against a release here."
+        );
+    }
+
+    let signer: PrivateKeySigner = args
+        .private_key
+        .trim_start_matches("0x")
+        .parse()
+        .context("invalid --private-key value")?;
+    let rpc_url = if args.rpc.starts_with("http://") || args.rpc.starts_with("https://") {
+        args.rpc.clone()
+    } else {
+        format!("http://{}", args.rpc)
+    };
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(rpc_url.parse().context("invalid --rpc URL")?);
+    let contract = GcpTdxVerifier::new(args.verifier, provider);
+
+    if do_trust {
+        let params = extract_native_trusted_params(&raw_quote, args.rtmr_mask)
+            .context("failed to extract trusted params from raw TDX quote")?;
+        println!(
+            "setTrustedParams(index={}, teeTcbSvn=0x{}, mrSeam=0x{}, mrTd=0x{}, rtmrMask={:#06b}, rtmrs=[{} entries])",
+            args.trusted_params_index,
+            hex::encode(params.teeTcbSvn.0),
+            hex::encode(&params.mrSeam[..]),
+            hex::encode(&params.mrTd[..]),
+            params.rtmrMask,
+            params.rtmrs.len()
+        );
+
+        if args.dry_run {
+            println!("dry-run: skipping setTrustedParams broadcast");
+        } else {
+            let receipt = contract
+                .setTrustedParams(U256::from(args.trusted_params_index), params)
+                .send()
+                .await
+                .context("setTrustedParams send failed")?
+                .get_receipt()
+                .await
+                .context("setTrustedParams receipt failed")?;
+            if !receipt.status() {
+                bail!("setTrustedParams transaction reverted (status=0)");
+            }
+            println!(
+                "setTrustedParams OK — block {:?} tx {:?}",
+                receipt.block_number.unwrap_or_default(),
+                receipt.transaction_hash
+            );
+        }
+    } else if !args.dry_run {
+        let on_chain = contract
+            .trustedParams(U256::from(args.trusted_params_index))
+            .call()
+            .await
+            .context("failed to read on-chain trustedParams")?;
+        if on_chain._2.is_empty() && on_chain._3.is_empty() {
+            bail!(
+                "trustedParams[{}] not set on-chain — run with --trust (as contract owner) first",
+                args.trusted_params_index
+            );
+        }
+    }
+
+    if do_register {
+        println!(
+            "registerInstance(trustedParamsIdx={}) — instance address = {}",
+            args.trusted_params_index, bootstrap.public_key
+        );
+        let call = contract.registerInstance(
+            U256::from(args.trusted_params_index),
+            Bytes::from(raw_quote),
+            Bytes::from(user_data),
+            Bytes::from(nonce),
+        );
+        println!("registerInstance calldata: {} bytes", call.calldata().len());
+
+        if args.dry_run {
+            println!("dry-run: skipping registerInstance broadcast");
+        } else {
+            let receipt = call
+                .send()
+                .await
+                .context("registerInstance send failed")?
+                .get_receipt()
+                .await
+                .context("registerInstance receipt failed")?;
+            if !receipt.status() {
+                bail!("registerInstance transaction reverted (status=0)");
+            }
+            println!();
+            println!("=======================================");
+            println!("  TDX PROVER REGISTERED (native DCAP)");
+            println!("  GcpTdxVerifier:     {}", args.verifier);
+            println!("  Instance address:   {}", bootstrap.public_key);
+            println!("  trustedParamsIndex: {}", args.trusted_params_index);
+            println!(
+                "  Block:              {:?}",
+                receipt.block_number.unwrap_or_default()
+            );
+            println!("  Tx:                 {:?}", receipt.transaction_hash);
+            println!("=======================================");
+        }
+    }
+
+    Ok(())
+}
+
+/// Unwrap tdxs's attestation document — the bootstrap `quote` field is
+/// `hex(JSON {"RawQuote": "<b64>", "UserData": "<b64>"})`. Returns
+/// `(raw_dcap_quote, user_data)`.
+fn unwrap_native_quote(bootstrap_quote: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let quote_hex = bootstrap_quote.trim_start_matches("0x");
+    let doc_bytes = hex::decode(quote_hex).context("bootstrap quote: not valid hex")?;
+    let doc: Value =
+        serde_json::from_slice(&doc_bytes).context("bootstrap quote: not valid JSON")?;
+
+    let raw_quote = decode_b64(
+        doc.get("RawQuote")
+            .ok_or_else(|| anyhow!("native quote doc missing RawQuote"))?,
+        "RawQuote",
+    )?;
+    let user_data = decode_b64(
+        doc.get("UserData")
+            .ok_or_else(|| anyhow!("native quote doc missing UserData"))?,
+        "UserData",
+    )?;
+    Ok((raw_quote, user_data))
+}
+
+/// Parse a raw TDX V4 DCAP quote and build `GcpTdxVerifier::TrustedParams`
+/// (teeTcbSvn, mrSeam, mrTd, and the RTMRs selected by `rtmr_mask`).
+fn extract_native_trusted_params(
+    raw_quote: &[u8],
+    rtmr_mask: u8,
+) -> Result<GcpTdxVerifier::TrustedParams> {
+    let min_len = TDX_QUOTE_HEADER_LEN + TDX_BODY_RTMR0 + 4 * TDX_RTMR_LEN;
+    if raw_quote.len() < min_len {
+        bail!(
+            "raw quote too short ({} bytes, need >= {}); not a TDX V4 quote",
+            raw_quote.len(),
+            min_len
+        );
+    }
+    // TDX V4 quote version is 0x0004 little-endian (bytes 0x04 0x00).
+    if raw_quote[0..2] != [0x04, 0x00] {
+        bail!(
+            "raw quote version is 0x{:02x}{:02x} — expected TDX V4 (0x04 0x00)",
+            raw_quote[0],
+            raw_quote[1]
+        );
+    }
+
+    let body = &raw_quote[TDX_QUOTE_HEADER_LEN..];
+    let tee_tcb_svn: [u8; 16] = body[TDX_BODY_TEE_TCB_SVN..TDX_BODY_TEE_TCB_SVN + 16]
+        .try_into()
+        .map_err(|_| anyhow!("teeTcbSvn slice"))?;
+    let mr_seam = body[TDX_BODY_MR_SEAM..TDX_BODY_MR_SEAM + 48].to_vec();
+    let mr_td = body[TDX_BODY_MR_TD..TDX_BODY_MR_TD + 48].to_vec();
+
+    // One 48-byte RTMR per set bit in rtmr_mask, in ascending index order — the
+    // order GcpTdxVerifier expects.
+    let mut rtmrs: Vec<Bytes> = Vec::new();
+    for i in 0..4usize {
+        if rtmr_mask & (1 << i) != 0 {
+            let off = TDX_BODY_RTMR0 + TDX_RTMR_LEN * i;
+            rtmrs.push(Bytes::from(body[off..off + TDX_RTMR_LEN].to_vec()));
+        }
+    }
+
+    Ok(GcpTdxVerifier::TrustedParams {
+        teeTcbSvn: FixedBytes::<16>::from(tee_tcb_svn),
+        rtmrMask: rtmr_mask,
+        mrSeam: Bytes::from(mr_seam),
+        mrTd: Bytes::from(mr_td),
+        rtmrs,
+    })
 }
 
 // ---------------------------------------------------------------
@@ -974,6 +1254,8 @@ const TDX_QUOTE_HEADER_LEN: usize = 48;
 const TDX_BODY_TEE_TCB_SVN: usize = 0; // 16 bytes
 const TDX_BODY_MR_SEAM: usize = 16; // 48 bytes
 const TDX_BODY_MR_TD: usize = 136; // 48 bytes
+const TDX_BODY_RTMR0: usize = 328; // 48 bytes; RTMR_i = TDX_BODY_RTMR0 + 48*i (rtmr1@376, rtmr2@424, rtmr3@472)
+const TDX_RTMR_LEN: usize = 48;
 
 fn extract_trusted_params(
     metadata: &Value,

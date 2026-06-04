@@ -218,8 +218,8 @@ kzg-rs = { git = "https://github.com/taikoxyz/kzg-rs", branch = "feat/raiko2", d
 # (taikoxyz/alethia-reth#195) until it merges. Drop this patch and bump the revs above to
 # the merge commit once it lands.
 [patch."https://github.com/taikoxyz/alethia-reth"]
-alethia-reth-block = { git = "https://github.com/jmadibekov/alethia-reth", rev = "a066500c207831f3061003fde2cbb40564cb4611" }
-alethia-reth-chainspec = { git = "https://github.com/jmadibekov/alethia-reth", rev = "a066500c207831f3061003fde2cbb40564cb4611" }
-alethia-reth-consensus = { git = "https://github.com/jmadibekov/alethia-reth", rev = "a066500c207831f3061003fde2cbb40564cb4611" }
-alethia-reth-evm = { git = "https://github.com/jmadibekov/alethia-reth", rev = "a066500c207831f3061003fde2cbb40564cb4611" }
-alethia-reth-primitives = { git = "https://github.com/jmadibekov/alethia-reth", rev = "a066500c207831f3061003fde2cbb40564cb4611" }
+alethia-reth-block = { git = "https://github.com/jmadibekov/alethia-reth", rev = "d80f8780868ef7fdb28a9776b357f5812a556696" }
+alethia-reth-chainspec = { git = "https://github.com/jmadibekov/alethia-reth", rev = "d80f8780868ef7fdb28a9776b357f5812a556696" }
+alethia-reth-consensus = { git = "https://github.com/jmadibekov/alethia-reth", rev = "d80f8780868ef7fdb28a9776b357f5812a556696" }
+alethia-reth-evm = { git = "https://github.com/jmadibekov/alethia-reth", rev = "d80f8780868ef7fdb28a9776b357f5812a556696" }
+alethia-reth-primitives = { git = "https://github.com/jmadibekov/alethia-reth", rev = "d80f8780868ef7fdb28a9776b357f5812a556696" }

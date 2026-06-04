@@ -31,7 +31,10 @@ alloy-trie.workspace = true
 raiko2-stateless.workspace = true
 reth-revm.workspace = true
 reth-errors.workspace = true
-revm.workspace = true
+# `optional_no_base_fee` exposes `CfgEnv.disable_base_fee` — required so the zero-address
+# caller used by the L1STATICCALL guest re-executor passes validation when we populate the
+# real base fee from the verified header (S3).
+revm = { workspace = true, features = ["optional_no_base_fee"] }
 
 serde.workspace = true
 serde_json.workspace = true
@@ -40,6 +43,11 @@ bincode.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 tracing.workspace = true
+
+[features]
+# Exposes test-only helpers (e.g. `populate_cache_skipping_revm_for_tests`) for downstream
+# crates' integration tests. Production builds never enable this.
+test-fixtures = []
 
 [dev-dependencies]
 serial_test = "3"

@@ -590,6 +590,7 @@ mod tests {
                 gas_limit: 30_000_000,
                 extra_data: Bytes::new(),
                 base_fee_per_gas: 25_000_000,
+            l1_origin_block_number: None,
             },
         );
 
@@ -763,6 +764,7 @@ mod tests {
                 gas_limit: 30_000_000,
                 extra_data: Bytes::new(),
                 base_fee_per_gas: 25_000_000,
+            l1_origin_block_number: None,
             },
             &witness,
             &witness.headers,
@@ -822,6 +824,7 @@ mod tests {
             gas_limit: 30_000_000,
             extra_data: Bytes::new(),
             base_fee_per_gas: 25_000_000,
+            l1_origin_block_number: None,
         };
 
         let derived_block = build_derived_block(

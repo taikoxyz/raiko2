@@ -51,21 +51,24 @@ pub fn verify_and_populate_l1_staticcall_witnesses(
     verify_and_populate_l1_staticcall_witnesses_with_headers(
         witnesses,
         state_root_map,
-        &HashMap::new(),
+        None,
         l1_origin_block_number,
     )
 }
 
 /// Richer entrypoint that can also populate the revm block-env with fields from the
 /// verified L1 header (timestamp, base_fee, coinbase, prevrandao, blob_base_fee). When
-/// `header_map` is empty, those fields fall back to revm defaults — honest L1 view
-/// functions that don't read block-env opcodes still verify successfully, but contracts
-/// that read `TIMESTAMP` / `COINBASE` / `BASEFEE` / `BLOBBASEFEE` / `PREVRANDAO` must
-/// be proved with populated headers or they'll diverge from the sequencer's run.
+/// `header_map` is `None` (or empty), those fields fall back to revm defaults — honest L1
+/// view functions that don't read block-env opcodes still verify successfully, but
+/// contracts that read `TIMESTAMP` / `COINBASE` / `BASEFEE` / `BLOBBASEFEE` / `PREVRANDAO`
+/// must be proved with populated headers or they'll diverge from the sequencer's run.
+///
+/// `header_map` is `Option<&HashMap<...>>` rather than a separate function (D14) so callers
+/// who don't have headers don't have to materialize an empty map at the call site.
 pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
     witnesses: &[L1StaticCallWitness],
     state_root_map: &HashMap<u64, B256>,
-    header_map: &HashMap<u64, &Header>,
+    header_map: Option<&HashMap<u64, &Header>>,
     l1_origin_block_number: u64,
 ) -> Result<()> {
     if witnesses.is_empty() {
@@ -133,7 +136,8 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
                 w.gas_used,
                 w.return_data.to_vec(),
                 true,
-            );
+            )
+            .map_err(|e| anyhow!("L1STATICCALL #{i}: cache write rejected for reverted witness: {e}"))?;
             continue;
         }
 
@@ -160,30 +164,14 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
             continue;
         }
 
-        // Test-only fast path for unit tests that construct `L1ExecutionWitness::default()` —
-        // skips state-root verification and revm re-execution entirely. This branch is
-        // compiled *only* under `cfg(test)`; production guest builds never include it.
-        #[cfg(test)]
-        if w.execution_witness.state.is_empty() {
-            tracing::warn!(
-                "L1STATICCALL: witness #{i} has empty state — test-only fast path (cfg(test))"
-            );
-            set_l1_staticcall_value(
-                w.target_address,
-                w.block_number,
-                &w.calldata,
-                w.gas_used,
-                w.return_data.to_vec(),
-                false,
-            );
-            continue;
-        }
-
-        // Production invariant: a non-reverted witness must carry state to re-execute against.
-        #[cfg(not(test))]
+        // Production invariant: a non-reverted witness must carry state to re-execute
+        // against. The previous `cfg(test)` fast-path that bypassed verification when state
+        // was empty has been removed (D5) so the production verifier carries no test-only
+        // branches. Tests that need to populate the cache without revm re-execution call
+        // [`populate_cache_skipping_revm_for_tests`] directly.
         ensure!(
             !w.execution_witness.state.is_empty(),
-            "L1STATICCALL: witness #{i} has empty state — not permitted in production proving"
+            "L1STATICCALL: witness #{i} has empty state — not permitted in proving"
         );
 
         // 1a. Bind witness.headers to the trusted L1 chain before WitnessDb sees them.
@@ -208,12 +196,14 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
                 alloy_rlp::Decodable::decode(&mut hdr_bytes.as_ref()).map_err(|e| {
                     anyhow!("L1STATICCALL #{i}: witness header #{h_idx} decode failed: {e}")
                 })?;
-            let trusted = header_map.get(&hdr.number).ok_or_else(|| {
-                anyhow!(
-                "L1STATICCALL #{i}: witness header #{h_idx} at block {} not in trusted L1 chain",
-                hdr.number,
-            )
-            })?;
+            let trusted = header_map
+                .and_then(|m| m.get(&hdr.number))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "L1STATICCALL #{i}: witness header #{h_idx} at block {} not in trusted L1 chain",
+                        hdr.number,
+                    )
+                })?;
             let witness_hash = alloy_primitives::keccak256(hdr_bytes.as_ref());
             let trusted_hash = trusted.hash_slow();
             ensure!(
@@ -229,11 +219,11 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
         // already-decoded block_hashes map to avoid a second RLP-decode pass over
         // the witness headers.
         let db =
-            WitnessDb::build_with_block_hashes(&w.execution_witness, *state_root, block_hashes)
+            WitnessDb::build(&w.execution_witness, *state_root, Some(block_hashes))
                 .map_err(|e| anyhow!("L1STATICCALL #{i}: WitnessDb build: {e}"))?;
 
         let block_number = w.block_number;
-        let header = header_map.get(&w.block_number).copied();
+        let header = header_map.and_then(|m| m.get(&w.block_number).copied());
 
         trace!(
             "L1STATICCALL #{i}: target={:?}, block={}, calldata_len={}, state_root={}, \
@@ -264,14 +254,16 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
             .build()
             .map_err(|e| anyhow!("L1STATICCALL #{i}: TxEnv build: {e:?}"))?;
 
-        // 3. Construct a mainnet EVM over the witness. We pin block.number and pass the
-        //    verified header's timestamp/beneficiary/prevrandao for correct BLOCK_TIMESTAMP /
-        //    COINBASE / DIFFICULTY opcodes. We deliberately do NOT set basefee or
-        //    blob_excess_gas_and_price here: both require CfgEnv-gated opt-outs to keep the
-        //    zero-address caller viable (basefee forces gas_price >= basefee, and
-        //    set_blob_excess_gas_and_price with a non-zero update fraction panics in
-        //    feature-constrained revm builds). Targets that rely on BASEFEE/BLOBBASEFEE
-        //    will see 0 — documented trade-off.
+        // 3. Construct a mainnet EVM over the witness. Populate the **full** block env from
+        //    the verified L1 header so opcodes like BASEFEE / GASLIMIT / DIFFICULTY /
+        //    BLOBBASEFEE return the same values revm sees as the live L1 EL did (S3). Without
+        //    this, any L1 contract reading those opcodes would diverge from the witnessed
+        //    output and fail the 3-way assertion as `gas_used mismatch` — silently rejecting
+        //    proposals from common patterns (Uniswap quoters, gas-refund logic).
+        //
+        //    The zero-address caller has no balance, so `gas_price >= basefee` would normally
+        //    fail validation. `cfg.disable_base_fee` lifts that check (we're already running
+        //    `gas_price = 0`).
         let mut evm = revm::Context::mainnet()
             .with_db(db)
             .modify_block_chained(|blk| {
@@ -280,6 +272,21 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
                     blk.timestamp = U256::from(h.timestamp);
                     blk.beneficiary = h.beneficiary;
                     blk.prevrandao = Some(h.mix_hash);
+                    blk.gas_limit = h.gas_limit;
+                    blk.difficulty = h.difficulty;
+                    if let Some(bf) = h.base_fee_per_gas {
+                        blk.basefee = bf;
+                    }
+                    // EIP-4844 blob basefee. Compute from `excess_blob_gas` per the spec
+                    // formula when the header carries the field; otherwise leave revm's
+                    // default. Use the Prague update fraction so the computed price matches
+                    // L1's post-Prague semantics.
+                    if let Some(excess) = h.excess_blob_gas {
+                        blk.set_blob_excess_gas_and_price(
+                            excess,
+                            revm::primitives::eip4844::BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE,
+                        );
+                    }
                 }
             })
             .modify_cfg_chained(|cfg| {
@@ -288,6 +295,9 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
                 // at 16,777,216 and re-execution rejects the witness with TxGasLimitGreaterThanCap
                 // even when the actual on-L1 call used less gas.
                 cfg.tx_gas_limit_cap = Some(L1STATICCALL_GAS_CAP);
+                // S3: lift the base-fee check so the zero-address caller (`gas_price = 0`)
+                // still passes when we populate the real basefee from the header.
+                cfg.disable_base_fee = true;
                 // NOTE: revm uses its default (latest) mainnet spec here. The `gas_used` assertion
                 // below requires that spec's gas schedule to match the L1 EL's at `block_number`
                 // — i.e. L1's active hardfork. They align today (devnet/Hoodi/mainnet run the
@@ -392,13 +402,55 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
             w.gas_used,
             output.to_vec(),
             false,
-        );
+        )
+        .map_err(|e| anyhow!("L1STATICCALL #{i}: cache write rejected: {e}"))?;
     }
 
     debug!(
         "L1STATICCALL: verified and cached {} execution witnesses",
         witnesses.len()
     );
+    Ok(())
+}
+
+/// Test-only helper that populates the L1STATICCALL cache from a slice of witnesses
+/// **without** running revm re-execution or state-root verification. Lets unit tests that
+/// only care about cache key/value behavior (dedup, calldata-key uniqueness, cache hit on
+/// the precompile) skip the heavy revm setup. Production code MUST go through
+/// [`verify_and_populate_l1_staticcall_witnesses_with_headers`].
+///
+/// Gated behind `cfg(any(test, feature = "test-fixtures"))` so the production guest binary
+/// never carries it (D5).
+#[cfg(any(test, feature = "test-fixtures"))]
+pub fn populate_cache_skipping_revm_for_tests(
+    witnesses: &[L1StaticCallWitness],
+    l1_origin_block_number: u64,
+) -> Result<()> {
+    let window_floor = l1_origin_block_number.saturating_sub(L1STATICCALL_MAX_BLOCK_LOOKBACK);
+    for (i, w) in witnesses.iter().enumerate() {
+        ensure!(
+            w.block_number >= window_floor && w.block_number <= l1_origin_block_number,
+            "L1STATICCALL: witness #{i} at block {} outside lookback window [{}, {}]",
+            w.block_number,
+            window_floor,
+            l1_origin_block_number,
+        );
+        if w.is_reverted {
+            ensure!(
+                w.gas_used == 0 && w.return_data.is_empty(),
+                "L1STATICCALL: witness #{i} reverted with non-canonical gas/data",
+            );
+        }
+        set_l1_staticcall_value(
+            w.target_address,
+            w.block_number,
+            &w.calldata,
+            w.gas_used,
+            w.return_data.to_vec(),
+            w.is_reverted,
+        )
+        .map_err(|e| anyhow!("L1STATICCALL #{i}: test cache write rejected: {e}"))?;
+    }
     Ok(())
 }
 
@@ -428,6 +480,13 @@ mod tests {
         state_root_map: &HashMap<u64, B256>,
     ) -> Result<()> {
         verify_and_populate_l1_staticcall_witnesses(witnesses, state_root_map, TEST_L1_ORIGIN)
+    }
+
+    /// Test-only wrapper that populates the cache directly from witnesses, skipping the revm
+    /// re-execution path. Used by tests that exercise cache-population behavior (dedup,
+    /// calldata-key uniqueness, cache lookup) without needing real MPT fixtures.
+    fn populate_test_cache(witnesses: &[L1StaticCallWitness]) -> Result<()> {
+        populate_cache_skipping_revm_for_tests(witnesses, TEST_L1_ORIGIN)
     }
 
     fn make_witness(
@@ -496,9 +555,9 @@ mod tests {
         let return_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let witness = make_witness(target, 100, &calldata, &return_data);
 
-        let state_root_map: HashMap<u64, B256> = HashMap::from([(100, B256::from([0x22u8; 32]))]);
+        let _state_root_map: HashMap<u64, B256> = HashMap::from([(100, B256::from([0x22u8; 32]))]);
 
-        let result = verify_test(&[witness], &state_root_map);
+        let result = populate_test_cache(&[witness]);
         assert!(
             result.is_ok(),
             "Single valid witness should succeed: {:?}",
@@ -576,13 +635,13 @@ mod tests {
         let witness_b = make_witness(target_b, 101, &[0x02], &[0x33, 0x44]);
         let witness_c = make_witness(target_a, 102, &[0x03], &[0x55]);
 
-        let state_root_map: HashMap<u64, B256> = HashMap::from([
+        let _state_root_map: HashMap<u64, B256> = HashMap::from([
             (100, B256::from([0x01u8; 32])),
             (101, B256::from([0x02u8; 32])),
             (102, B256::from([0x03u8; 32])),
         ]);
 
-        let result = verify_test(&[witness_a, witness_b, witness_c], &state_root_map);
+        let result = populate_test_cache(&[witness_a, witness_b, witness_c]);
         assert!(
             result.is_ok(),
             "Multiple valid witnesses should all succeed: {:?}",
@@ -637,9 +696,9 @@ mod tests {
         let return_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
         let witness = make_witness(target, 200, &calldata, &return_data);
 
-        let state_root_map: HashMap<u64, B256> = HashMap::from([(200, B256::from([0x44u8; 32]))]);
+        let _state_root_map: HashMap<u64, B256> = HashMap::from([(200, B256::from([0x44u8; 32]))]);
 
-        let result = verify_test(&[witness], &state_root_map);
+        let result = populate_test_cache(&[witness]);
         assert!(
             result.is_ok(),
             "Verification should succeed: {:?}",
@@ -675,9 +734,9 @@ mod tests {
         let witness_1 = make_witness(target, 100, &calldata_1, &return_data_1);
         let witness_2 = make_witness(target, 100, &calldata_2, &return_data_2);
 
-        let state_root_map: HashMap<u64, B256> = HashMap::from([(100, B256::from([0x55u8; 32]))]);
+        let _state_root_map: HashMap<u64, B256> = HashMap::from([(100, B256::from([0x55u8; 32]))]);
 
-        let result = verify_test(&[witness_1, witness_2], &state_root_map);
+        let result = populate_test_cache(&[witness_1, witness_2]);
         assert!(
             result.is_ok(),
             "Two witnesses for same target should succeed: {:?}",
@@ -899,12 +958,8 @@ mod tests {
         let calldata = vec![0x12, 0x34];
         let return_data = vec![0x77, 0x88, 0x99];
         let witness = make_witness(target, 150, &calldata, &return_data);
-        let state_root_map: HashMap<u64, B256> = HashMap::from([(150, B256::from([0x55u8; 32]))]);
 
-        let result = verify_test(
-            &[witness.clone(), witness.clone(), witness],
-            &state_root_map,
-        );
+        let result = populate_test_cache(&[witness.clone(), witness.clone(), witness]);
         assert!(
             result.is_ok(),
             "duplicate witnesses must not error: {:?}",
@@ -1079,6 +1134,7 @@ mod tests {
             mix_hash: B256::from([0x11u8; 32]),
             base_fee_per_gas: Some(1_000_000_000),
             excess_blob_gas: Some(0),
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let header_map: HashMap<u64, &Header> = HashMap::from([(150, &header)]);
@@ -1086,7 +1142,7 @@ mod tests {
         let err = verify_and_populate_l1_staticcall_witnesses_with_headers(
             &[witness],
             &state_root_map,
-            &header_map,
+            Some(&header_map),
             TEST_L1_ORIGIN,
         )
         .expect_err("gas_used=0 placeholder must fail the gas assertion");
@@ -1156,6 +1212,7 @@ mod tests {
         let rogue_header = Header {
             number: 50,
             timestamp: 1_000,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let (mut witness, state_root, _) = sload_target_witness(target, 100, U256::from(42u64));
@@ -1164,6 +1221,7 @@ mod tests {
         // Trusted header map contains block 100 (the call's target) but NOT block 50.
         let trusted_header = Header {
             number: 100,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let header_map: HashMap<u64, &Header> = HashMap::from([(100, &trusted_header)]);
@@ -1171,7 +1229,7 @@ mod tests {
         let err = verify_and_populate_l1_staticcall_witnesses_with_headers(
             &[witness],
             &state_root_map,
-            &header_map,
+            Some(&header_map),
             TEST_L1_ORIGIN,
         )
         .expect_err("witness header outside trusted chain must be rejected");
@@ -1193,6 +1251,7 @@ mod tests {
         let witness_header = Header {
             number: 99,
             timestamp: 0xAAA,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let (mut witness, state_root, _) = sload_target_witness(target, 100, U256::from(42u64));
@@ -1202,10 +1261,12 @@ mod tests {
         let trusted_99 = Header {
             number: 99,
             timestamp: 0xBBB,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let trusted_100 = Header {
             number: 100,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let header_map: HashMap<u64, &Header> =
@@ -1214,7 +1275,7 @@ mod tests {
         let err = verify_and_populate_l1_staticcall_witnesses_with_headers(
             &[witness],
             &state_root_map,
-            &header_map,
+            Some(&header_map),
             TEST_L1_ORIGIN,
         )
         .expect_err("witness header hash mismatch must be rejected");
@@ -1236,6 +1297,7 @@ mod tests {
         let ancestor = Header {
             number: 99,
             timestamp: 0xCCC,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let (mut witness, state_root, _) = sload_target_witness(target, 100, U256::from(42u64));
@@ -1243,6 +1305,7 @@ mod tests {
         let state_root_map: HashMap<u64, B256> = HashMap::from([(100, state_root)]);
         let trusted_100 = Header {
             number: 100,
+            gas_limit: 30_000_000,
             ..Default::default()
         };
         let header_map: HashMap<u64, &Header> =
@@ -1251,7 +1314,7 @@ mod tests {
         let err = verify_and_populate_l1_staticcall_witnesses_with_headers(
             &[witness],
             &state_root_map,
-            &header_map,
+            Some(&header_map),
             TEST_L1_ORIGIN,
         )
         .expect_err("gas_used=0 placeholder forces revm gas-check failure");

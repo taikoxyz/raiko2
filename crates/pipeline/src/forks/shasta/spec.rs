@@ -22,7 +22,7 @@ use raiko2_primitives_shasta::{
     l1_precompiles::{
         acquire_l1_precompile_lock, clear_l1_rpc_fetcher, clear_l1_staticcall_rpc_fetcher,
         reset_l1_precompile_state, set_l1_origin_block_id, take_l1_rpc_served_calls,
-        take_l1_staticcall_rpc_served_calls,
+        take_l1_staticcall_rpc_served_calls, verify_l1sload_proofs,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression,
@@ -208,20 +208,42 @@ async fn discover_and_fetch_l1_precompile_data<P: Provider>(
 ) -> RaikoResult<()> {
     let origin_block_number = input.taiko.l1_header.number;
 
-    // Discovery pass under the precompile lock (no `.await` inside, so the guard never crosses an
-    // await point). Re-execution with the fetchers installed records every L1 read.
+    // Discovery pass under the precompile lock (no `.await` inside, so the guard never crosses
+    // an await point). Re-execution with the fetchers installed records every L1 read.
+    //
+    // D17: wrap discovery in `catch_unwind` so a panic mid-discovery surfaces as a clean
+    // `RaikoError::Preflight` instead of poisoning the lock + leaking globals to the next
+    // acquirer (the lock recovers via `into_inner()`, but defense-in-depth).
+    //
+    // The fetcher/served-call clears + `reset_l1_precompile_state` happen regardless of
+    // discovery success so the next acquirer always sees a clean baseline.
     let (l1sload_served, l1staticcall_served) = {
         let _guard = acquire_l1_precompile_lock();
         reset_l1_precompile_state();
         set_l1_origin_block_id(origin_block_number);
         provider.install_l1_precompile_fetchers();
-        let discovery = validate_shasta_guest_input(input);
+        let discovery = catch_unwind(AssertUnwindSafe(|| validate_shasta_guest_input(input)))
+            .map_err(|payload| {
+                let reason = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                RaikoError::Preflight(format!(
+                    "L1 precompile discovery panicked: {reason}"
+                ))
+            })
+            .and_then(|res| res);
         clear_l1_rpc_fetcher();
         clear_l1_staticcall_rpc_fetcher();
         let served = (
             take_l1_rpc_served_calls(),
             take_l1_staticcall_rpc_served_calls(),
         );
+        // Lock released after this block ends; `served` and the host-owned fetcher/witness
+        // fetches below capture by value, so subsequent `.await`s touch no globals.
         reset_l1_precompile_state();
         discovery?;
         served
@@ -244,11 +266,46 @@ async fn discover_and_fetch_l1_precompile_data<P: Provider>(
     if !l1sload_served.is_empty() {
         let requests = build_l1_storage_proof_requests(&l1sload_served);
         input.l1_storage_proofs = provider.batch_l1_storage_proofs(&requests).await?;
+        // S7: verify storage proofs against the trusted state roots NOW, before the guest sees
+        // them. If the L1 EL reorged between discovery and fetch (or returned bogus proofs),
+        // surface the mismatch here with a clear preflight error rather than as a generic
+        // "verification failed" deep inside the ZK guest.
+        verify_l1sload_proofs(
+            &input.l1_storage_proofs,
+            &input.taiko.l1_header,
+            &input.taiko.l1_ancestor_headers,
+        )
+        .map_err(|e| {
+            RaikoError::Preflight(format!(
+                "L1Sload proofs failed preflight verification — likely an L1 EL reorg or stale \
+                 head between discovery and proof fetch: {e}"
+            ))
+        })?;
     }
     if !l1staticcall_served.is_empty() {
         input.l1_staticcall_witnesses = provider
             .batch_l1_staticcall_witnesses(&l1staticcall_served)
             .await?;
+        // S2: an L1Staticcall callee can invoke BLOCKHASH(x) for any x ∈ [block-256, block-1].
+        // Witness headers cover those ancestors but are cross-checked by the guest against the
+        // trusted L1 chain. If `min_served` didn't reach far enough back to cover the witness
+        // headers, the guest rejects the proposal with "header not in trusted L1 chain" —
+        // an opaque liveness DoS. Walk every witness's headers and extend if needed.
+        let witness_min = input
+            .l1_staticcall_witnesses
+            .iter()
+            .flat_map(|w| w.execution_witness.headers.iter())
+            .filter_map(|header_bytes| {
+                let header: alloy_consensus::Header =
+                    alloy_rlp::Decodable::decode(&mut header_bytes.as_ref()).ok()?;
+                Some(header.number)
+            })
+            .min();
+        if let Some(witness_min) = witness_min
+            && witness_min < min_served.unwrap_or(origin_block_number)
+        {
+            extend_l1_ancestor_headers(provider, input, witness_min, origin_block_number).await?;
+        }
     }
     Ok(())
 }
@@ -295,9 +352,9 @@ async fn extend_l1_ancestor_headers<P: Provider>(
         return Ok(());
     }
     let missing: Vec<u64> = (min_served..current_floor).collect();
-    let mut headers = provider.batch_l1_headers(&missing).await?;
-    headers.extend(std::mem::take(&mut input.taiko.l1_ancestor_headers));
-    input.taiko.l1_ancestor_headers = headers;
+    let headers = provider.batch_l1_headers(&missing).await?;
+    // D15: single splice instead of take + extend + reassign — one allocation.
+    input.taiko.l1_ancestor_headers.splice(0..0, headers);
     Ok(())
 }
 
@@ -1258,6 +1315,27 @@ fn validate_block_range(
 
 /// Validates a Shasta guest input with the same stateless checks used by preflight.
 ///
+/// # Dual-purpose (D19)
+///
+/// This function is invoked from two distinct contexts and the invariants each requires on
+/// the L1 precompile globals differ:
+///
+/// 1. **Preflight discovery** (`discover_and_fetch_l1_precompile_data` above). Live RPC
+///    fetchers are installed; `RECORD_L1_SERVED_CALLS` is on (default). Cache misses fire
+///    the fetchers which populate the cache AND push a record into the served-calls list.
+///    The host drains those records to drive subsequent `eth_getProof` / `proof_call`
+///    fetches.
+///
+/// 2. **Prover stateless validation** (`<ShastaSpec as Validation>::validate` below + guest
+///    `prove_shasta_proposal_with_block_verifier`). The cache is pre-populated from
+///    verified witnesses; no live fetcher is installed. Cache hits are deterministic and
+///    don't go through `RECORD_L1_SERVED_CALLS`, so the function works correctly even
+///    though recording is still on.
+///
+/// Both contexts re-execute every block; the precompile machinery branches on which fetcher
+/// (if any) is installed. Don't loosen the recording rules without re-evaluating both call
+/// sites: a future flag change could silently break either consumer.
+///
 /// # Errors
 ///
 /// Returns an error when the input is empty, has inconsistent witness chain specs, is missing
@@ -2139,5 +2217,54 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+    }
+
+    // ─── T2: preflight helper tests ─────────────────────────────────────
+
+    use std::collections::HashSet;
+
+    /// Multiple slots requested for the same `(block, contract)` must be batched into a
+    /// single `eth_getProof` request (one entry with the slot vec).
+    #[test]
+    fn build_l1_storage_proof_requests_batches_slots_per_block_contract() {
+        let contract = Address::from([0x11; 20]);
+        let mut served: HashSet<(Address, B256, B256)> = HashSet::new();
+        let block = B256::from(U256::from(100u64));
+        served.insert((contract, B256::from([0x01; 32]), block));
+        served.insert((contract, B256::from([0x02; 32]), block));
+        served.insert((contract, B256::from([0x03; 32]), block));
+        let requests = super::build_l1_storage_proof_requests(&served);
+        assert_eq!(requests.len(), 1, "all three slots batched into one (block, contract)");
+        assert_eq!(requests[0].0, 100, "block");
+        assert_eq!(requests[0].1, contract, "contract");
+        assert_eq!(requests[0].2.len(), 3, "three slots");
+    }
+
+    /// Different blocks for the same contract produce separate requests (one per block).
+    #[test]
+    fn build_l1_storage_proof_requests_splits_per_block() {
+        let contract = Address::from([0x22; 20]);
+        let slot = B256::from([0x09; 32]);
+        let mut served: HashSet<(Address, B256, B256)> = HashSet::new();
+        served.insert((contract, slot, B256::from(U256::from(100u64))));
+        served.insert((contract, slot, B256::from(U256::from(200u64))));
+        let mut requests = super::build_l1_storage_proof_requests(&served);
+        requests.sort_by_key(|r| r.0);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, 100);
+        assert_eq!(requests[1].0, 200);
+    }
+
+    /// Different contracts at the same block produce separate requests (one per contract).
+    #[test]
+    fn build_l1_storage_proof_requests_splits_per_contract() {
+        let block = B256::from(U256::from(50u64));
+        let slot = B256::from([0x0A; 32]);
+        let mut served: HashSet<(Address, B256, B256)> = HashSet::new();
+        served.insert((Address::from([0xAA; 20]), slot, block));
+        served.insert((Address::from([0xBB; 20]), slot, block));
+        let requests = super::build_l1_storage_proof_requests(&served);
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|r| r.0 == 50));
     }
 }

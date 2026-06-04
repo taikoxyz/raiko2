@@ -42,29 +42,27 @@ pub struct WitnessDb {
 impl WitnessDb {
     /// Build a `WitnessDb` from a raw `L1ExecutionWitness`, verifying the state root.
     ///
-    /// Falls back to RLP-decoding `witness.headers` to populate the BLOCKHASH-opcode lookup
-    /// table. Prefer [`Self::build_with_block_hashes`] when the caller has already decoded
-    /// the headers (e.g. the L1STATICCALL verifier does so during its trusted-chain binding
-    /// check) to avoid the redundant second decode pass.
-    pub fn build(witness: &L1ExecutionWitness, state_root: B256) -> Result<Self> {
-        let mut block_hashes: HashMap<u64, B256> = HashMap::new();
-        for header_bytes in &witness.headers {
-            let header: Header = alloy_rlp::Decodable::decode(&mut header_bytes.as_ref())
-                .context("Failed to RLP-decode witness header")?;
-            let header_hash = alloy_primitives::keccak256(header_bytes.as_ref());
-            block_hashes.insert(header.number, header_hash);
-        }
-        Self::build_with_block_hashes(witness, state_root, block_hashes)
-    }
-
-    /// Like [`Self::build`] but takes the (already-decoded) `block_number → header_hash`
-    /// map from the caller. Used by the L1STATICCALL verifier to avoid decoding each
-    /// witness header twice (once for the trusted-chain binding check, once here).
-    pub fn build_with_block_hashes(
+    /// Pass `Some(block_hashes)` when the caller has already decoded the witness headers
+    /// (the L1STATICCALL verifier does so during its trusted-chain binding check) to skip
+    /// the redundant second decode pass (D11). Pass `None` to decode the headers internally.
+    pub fn build(
         witness: &L1ExecutionWitness,
         state_root: B256,
-        block_hashes: HashMap<u64, B256>,
+        block_hashes: Option<HashMap<u64, B256>>,
     ) -> Result<Self> {
+        let block_hashes = match block_hashes {
+            Some(m) => m,
+            None => {
+                let mut m: HashMap<u64, B256> = HashMap::new();
+                for header_bytes in &witness.headers {
+                    let header: Header = alloy_rlp::Decodable::decode(&mut header_bytes.as_ref())
+                        .context("Failed to RLP-decode witness header")?;
+                    let header_hash = alloy_primitives::keccak256(header_bytes.as_ref());
+                    m.insert(header.number, header_hash);
+                }
+                m
+            }
+        };
         // Lift our flat `L1ExecutionWitness` into the raiko2 `ExecutionWitness` shape that
         // `SparseState::new` consumes. `state_indices` is empty (no shared pool); `headers`
         // is empty (we manage block hashes ourselves to preserve surge's lenient semantics).
@@ -191,7 +189,8 @@ mod tests {
         // BLOCKHASH semantics return zero for any block outside the last-256 window or
         // otherwise unknown to the node. A sequencer-trace witness that doesn't record
         // a particular block hash must round-trip under the same semantics.
-        let mut db = WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH).unwrap();
+        let mut db =
+            WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
         let result = db
             .block_hash(42)
             .expect("block_hash on a missing block must NOT error");
@@ -207,10 +206,10 @@ mod tests {
         let known = B256::from([0xABu8; 32]);
         let mut block_hashes = HashMap::new();
         block_hashes.insert(42u64, known);
-        let mut db = WitnessDb::build_with_block_hashes(
+        let mut db = WitnessDb::build(
             &empty_witness(),
             alloy_trie::EMPTY_ROOT_HASH,
-            block_hashes,
+            Some(block_hashes),
         )
         .unwrap();
         let result = db.block_hash(42).expect("block_hash should succeed");
@@ -221,11 +220,30 @@ mod tests {
     fn test_block_hash_does_not_create_phantom_entry() {
         // Asking for an unknown block must not insert a zero entry — otherwise a later
         // real call for the same block could be silently accepted.
-        let mut db = WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH).unwrap();
+        let mut db =
+            WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
         let _ = db.block_hash(123).unwrap();
         assert!(
             db.block_hashes.get(&123).is_none(),
             "missing-block lookup must not poison the cache"
         );
     }
+
+    /// T15: `code_by_hash` for a code hash not in the witness must surface as a hard error,
+    /// not silently return empty bytecode. The "silent zero fallback" was the soundness risk
+    /// the WitnessDb intentionally avoids — pin the behavior with a regression test.
+    #[test]
+    fn test_code_by_hash_missing_returns_error() {
+        let mut db =
+            WitnessDb::build(&empty_witness(), alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
+        let result = db.code_by_hash(B256::from([0x42u8; 32]));
+        assert!(result.is_err(), "missing code must surface as hard error, not empty bytecode");
+        let err = result.unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("TrieWitnessError") || msg.contains("not in witness"),
+            "expected TrieWitnessError, got: {msg}"
+        );
+    }
 }
+

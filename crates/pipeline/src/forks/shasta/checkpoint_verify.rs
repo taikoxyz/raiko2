@@ -191,6 +191,8 @@ mod tests {
             },
             proposal_ancestor_headers: Vec::new(),
             proposal_state_nodes: Vec::new(),
+            l1_storage_proofs: Vec::new(),
+            l1_staticcall_witnesses: Vec::new(),
         }
     }
 

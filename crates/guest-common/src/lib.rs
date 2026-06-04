@@ -20,8 +20,8 @@ use raiko2_primitives_shasta::{
         shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     l1_precompiles::{
-        acquire_l1_precompile_lock, build_verified_state_root_map, populate_l1sload_cache,
-        reset_l1_precompile_state, verify_and_populate_l1_staticcall_witnesses_with_headers,
+        acquire_l1_precompile_lock, build_verified_state_root_map, reset_l1_precompile_state,
+        set_l1sload_origin, verify_and_populate_l1_staticcall_witnesses_with_headers,
         verify_and_populate_l1sload_proofs,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
@@ -779,7 +779,10 @@ where
     };
     let _l1_precompile_guard = acquire_l1_precompile_lock();
     reset_l1_precompile_state();
-    populate_l1sload_cache(&guest_input.l1_storage_proofs, l1_origin_block_number);
+    // Install the origin context FIRST so the precompile range-check has a window even if
+    // the storage-proof slice is empty. Cache population happens only after MPT verification
+    // (S4) — `verify_and_populate_l1sload_proofs` is the sole writer.
+    set_l1sload_origin(l1_origin_block_number);
     verify_and_populate_l1sload_proofs(
         &guest_input.l1_storage_proofs,
         &guest_input.taiko.l1_header,
@@ -796,7 +799,7 @@ where
     verify_and_populate_l1_staticcall_witnesses_with_headers(
         &guest_input.l1_staticcall_witnesses,
         &l1_state_root_map,
-        &l1_header_map,
+        Some(&l1_header_map),
         l1_origin_block_number,
     )?;
 

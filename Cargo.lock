@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-block"
 version = "1.1.0"
-source = "git+https://github.com/jmadibekov/alethia-reth?rev=a066500c207831f3061003fde2cbb40564cb4611#a066500c207831f3061003fde2cbb40564cb4611"
+source = "git+https://github.com/jmadibekov/alethia-reth?rev=d80f8780868ef7fdb28a9776b357f5812a556696#d80f8780868ef7fdb28a9776b357f5812a556696"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-chainspec"
 version = "1.1.0"
-source = "git+https://github.com/jmadibekov/alethia-reth?rev=a066500c207831f3061003fde2cbb40564cb4611#a066500c207831f3061003fde2cbb40564cb4611"
+source = "git+https://github.com/jmadibekov/alethia-reth?rev=d80f8780868ef7fdb28a9776b357f5812a556696#d80f8780868ef7fdb28a9776b357f5812a556696"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.0.4",
@@ -341,7 +341,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-consensus"
 version = "1.1.0"
-source = "git+https://github.com/jmadibekov/alethia-reth?rev=a066500c207831f3061003fde2cbb40564cb4611#a066500c207831f3061003fde2cbb40564cb4611"
+source = "git+https://github.com/jmadibekov/alethia-reth?rev=d80f8780868ef7fdb28a9776b357f5812a556696#d80f8780868ef7fdb28a9776b357f5812a556696"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -362,7 +362,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-evm"
 version = "1.1.0"
-source = "git+https://github.com/jmadibekov/alethia-reth?rev=a066500c207831f3061003fde2cbb40564cb4611#a066500c207831f3061003fde2cbb40564cb4611"
+source = "git+https://github.com/jmadibekov/alethia-reth?rev=d80f8780868ef7fdb28a9776b357f5812a556696#d80f8780868ef7fdb28a9776b357f5812a556696"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-primitives",
@@ -377,7 +377,7 @@ dependencies = [
 [[package]]
 name = "alethia-reth-primitives"
 version = "1.1.0"
-source = "git+https://github.com/jmadibekov/alethia-reth?rev=a066500c207831f3061003fde2cbb40564cb4611#a066500c207831f3061003fde2cbb40564cb4611"
+source = "git+https://github.com/jmadibekov/alethia-reth?rev=d80f8780868ef7fdb28a9776b357f5812a556696#d80f8780868ef7fdb28a9776b357f5812a556696"
 dependencies = [
  "alloy-consensus 2.0.4",
  "alloy-primitives",

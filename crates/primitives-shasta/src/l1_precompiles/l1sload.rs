@@ -18,12 +18,12 @@ use tracing::{debug, trace};
 
 use super::L1StorageProof;
 
-/// Verify L1SLOAD proofs via MPT against header-chain state roots, then populate the cache.
+/// Verify L1SLOAD proofs via MPT against header-chain state roots **without** populating
+/// the precompile cache. Useful for host-side preflight (S7) — surface MPT mismatches at the
+/// fetch boundary rather than letting them blow up deep inside the guest verifier.
 ///
-/// Walks backward from the L1 origin header (the root of trust, verified on-chain via
-/// the Proposal event's originBlockHash) through `l1_headers` to derive trusted state roots
-/// for each block in the range.
-pub fn verify_and_populate_l1sload_proofs(
+/// Returns `Ok(())` only if every proof verifies against its trusted state root.
+pub fn verify_l1sload_proofs(
     l1_storage_proofs: &[L1StorageProof],
     l1_origin_header: &Header,
     l1_headers: &[Header],
@@ -41,10 +41,6 @@ pub fn verify_and_populate_l1sload_proofs(
         l1_origin_block_number,
         l1_headers.len()
     );
-
-    // Precondition: the caller must have already set the L1 origin context via
-    // `populate_l1sload_cache(&[], l1_origin)`. Re-setting it here would mask a context-unset
-    // bug at the call site rather than surfacing it.
 
     // Build verified block_number → state_root map by walking backward from L1 origin.
     let state_root_map = build_verified_state_root_map(l1_origin_header, l1_headers)?;
@@ -80,37 +76,31 @@ pub fn verify_and_populate_l1sload_proofs(
                 e
             );
         }
-
-        set_l1_storage_value(
-            proof.contract_address,
-            proof.storage_key,
-            proof.block_number,
-            proof.value,
-        );
     }
 
     debug!(
-        "L1SLOAD: verified and cached {} storage proofs",
+        "L1SLOAD: verified {} storage proofs",
         l1_storage_proofs.len()
     );
     Ok(())
 }
 
-/// Set the L1 origin context and optionally populate the cache with pre-fetched proofs.
-pub fn populate_l1sload_cache(l1_storage_proofs: &[L1StorageProof], l1_origin_block_number: u64) {
-    debug!("L1 precompiles: origin context set (l1_origin={l1_origin_block_number})");
-    set_l1_origin_block_id(l1_origin_block_number);
-
-    if l1_storage_proofs.is_empty() {
-        return;
-    }
-
-    debug!(
-        "L1SLOAD: populating cache (l1_origin={}, proofs={})",
-        l1_origin_block_number,
-        l1_storage_proofs.len()
-    );
-
+/// Verify L1SLOAD proofs via MPT against header-chain state roots, then populate the cache.
+///
+/// Walks backward from the L1 origin header (the root of trust, verified on-chain via
+/// the Proposal event's originBlockHash) through `l1_headers` to derive trusted state roots
+/// for each block in the range. After verification, writes each `(addr, key, block) → value`
+/// triple to the precompile cache so the L2 EVM can serve it.
+///
+/// **Precondition**: the caller must have already set the L1 origin context via
+/// [`set_l1sload_origin`]. Re-setting it here would mask a context-unset bug at the call
+/// site rather than surfacing it.
+pub fn verify_and_populate_l1sload_proofs(
+    l1_storage_proofs: &[L1StorageProof],
+    l1_origin_header: &Header,
+    l1_headers: &[Header],
+) -> Result<()> {
+    verify_l1sload_proofs(l1_storage_proofs, l1_origin_header, l1_headers)?;
     for proof in l1_storage_proofs {
         set_l1_storage_value(
             proof.contract_address,
@@ -119,6 +109,38 @@ pub fn populate_l1sload_cache(l1_storage_proofs: &[L1StorageProof], l1_origin_bl
             proof.value,
         );
     }
+    if !l1_storage_proofs.is_empty() {
+        debug!(
+            "L1SLOAD: cached {} verified storage proofs",
+            l1_storage_proofs.len()
+        );
+    }
+    Ok(())
+}
+
+/// Set the L1 origin context (the upper bound of the `[origin − 256, origin]` lookback
+/// window). Cache population is the **sole responsibility** of
+/// [`verify_and_populate_l1sload_proofs`] (S4): writing unverified proof values to the cache
+/// before MPT verification runs would let an observer see untrusted state if a future code
+/// path read between the two calls. Keep origin-setup separate from cache-population.
+pub fn set_l1sload_origin(l1_origin_block_number: u64) {
+    debug!("L1 precompiles: origin context set (l1_origin={l1_origin_block_number})");
+    set_l1_origin_block_id(l1_origin_block_number);
+}
+
+/// Backward-compatible alias for [`set_l1sload_origin`] — older callers used
+/// `populate_l1sload_cache(&[], origin)` to install the origin context as a side effect.
+/// Behaviour is now strict: this is a pure origin setter, NOT a proof-cache pre-populator.
+/// The `_proofs` parameter is asserted empty to catch any caller still relying on the
+/// removed (unverified) pre-write loop.
+#[deprecated(note = "use set_l1sload_origin; cache population happens in verify_and_populate_l1sload_proofs")]
+pub fn populate_l1sload_cache(_proofs: &[L1StorageProof], l1_origin_block_number: u64) {
+    debug_assert!(
+        _proofs.is_empty(),
+        "populate_l1sload_cache no longer writes proofs to the cache; pass &[] and call \
+         verify_and_populate_l1sload_proofs to populate"
+    );
+    set_l1sload_origin(l1_origin_block_number);
 }
 
 /// Clear L1SLOAD cache and block-range context.
@@ -188,7 +210,11 @@ pub fn build_verified_state_root_map(
         }
         state_root_map.insert(header.number, header.state_root);
         expected_hash = header.parent_hash;
-        expected_number -= 1;
+        // Use `saturating_sub` to avoid `attempt to subtract with overflow` when the walk
+        // reaches block 0 (the genesis block). The next loop iteration — if any — will fail
+        // the number check at line `expected_number` because the saturated value re-uses 0,
+        // so soundness is preserved while a panic on perfectly-deep chains is avoided.
+        expected_number = expected_number.saturating_sub(1);
     }
 
     Ok(state_root_map)
@@ -800,19 +826,24 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────
-    // populate_l1sload_cache
+    // set_l1sload_origin + verify_and_populate_l1sload_proofs cache writeback
     // ───────────────────────────────────────────────
 
     #[test]
     #[serial]
-    fn test_populate_cache_empty() {
+    fn test_set_origin_only() {
         clear_l1sload_cache();
-        populate_l1sload_cache(&[], 110);
+        set_l1sload_origin(110);
+        // No proofs to populate yet — origin set is the only effect.
     }
 
     #[test]
     #[serial]
-    fn test_populate_cache_stores_values() {
+    fn test_set_origin_then_direct_cache_write_round_trips_via_precompile() {
+        // After S4 the proof-population side effect lives in `verify_and_populate_l1sload_proofs`,
+        // not in the origin setter. This test exercises the round trip without the MPT step by
+        // writing the cache value directly via `set_l1_storage_value` — the precompile-side
+        // contract is the same.
         clear_l1sload_cache();
 
         let addr = Address::from([0xAAu8; 20]);
@@ -820,16 +851,8 @@ mod tests {
         let block_num = B256::from(U256::from(100u64));
         let value = B256::from([0xCCu8; 32]);
 
-        let proof = L1StorageProof {
-            contract_address: addr,
-            storage_key: key,
-            block_number: block_num,
-            value,
-            account_proof: vec![],
-            storage_proof: vec![],
-        };
-
-        populate_l1sload_cache(&[proof], 110);
+        set_l1sload_origin(110);
+        set_l1_storage_value(addr, key, block_num, value);
 
         // Verify the value was cached by invoking the precompile.
         use alethia_reth_evm::precompiles::l1sload::l1sload_run;
@@ -929,5 +952,62 @@ mod tests {
             "absent key must resolve to empty, got {} bytes",
             out.len()
         );
+    }
+
+    // ── T10: build_verified_state_root_map boundary cases ─────────────
+
+    /// `l1_headers.len() > 256` must be rejected — the cap defends the trust window.
+    #[test]
+    fn test_state_root_map_rejects_over_256_headers() {
+        let mut headers = Vec::with_capacity(257);
+        // Build a deeper-but-detached chain (parent_hash linkage doesn't matter — the cap
+        // check fires first).
+        for i in 0..257u64 {
+            headers.push(make_header(i, B256::from([(i as u8); 32]), B256::ZERO));
+        }
+        let origin = make_header(257, B256::from([0x77u8; 32]), B256::ZERO);
+        let err = build_verified_state_root_map(&origin, &headers).unwrap_err();
+        assert!(
+            err.to_string().contains("exceed 256-block lookback cap"),
+            "expected 256-cap rejection, got: {err}"
+        );
+    }
+
+    /// Exactly 256 ancestors must be accepted (boundary inclusive).
+    #[test]
+    fn test_state_root_map_accepts_exactly_256_headers() {
+        // Build a real linked chain of 256 ancestors + 1 origin so the parent_hash walk
+        // succeeds.
+        let mut headers: Vec<Header> = Vec::with_capacity(256);
+        let mut prev_hash = B256::ZERO;
+        for i in 0..256u64 {
+            let h = make_header(i, B256::from([(i as u8); 32]), prev_hash);
+            prev_hash = h.hash_slow();
+            headers.push(h);
+        }
+        let origin = make_header(256, B256::from([0xAAu8; 32]), prev_hash);
+        let map = build_verified_state_root_map(&origin, &headers).expect("256 = boundary OK");
+        assert_eq!(map.len(), 257, "origin + 256 ancestors = 257 entries");
+    }
+
+    /// `l1_origin_number == 0` with non-empty headers must bail (underflow on backward walk).
+    #[test]
+    fn test_state_root_map_rejects_origin_zero_with_headers() {
+        let origin = make_header(0, B256::from([0x11u8; 32]), B256::ZERO);
+        let bogus_ancestor = make_header(0, B256::from([0x22u8; 32]), B256::ZERO);
+        let err = build_verified_state_root_map(&origin, &[bogus_ancestor]).unwrap_err();
+        assert!(
+            err.to_string().contains("must be >= 1 for backward walk"),
+            "expected underflow guard, got: {err}"
+        );
+    }
+
+    /// `l1_origin_number == 0` with empty headers must SUCCEED — origin is the only entry.
+    #[test]
+    fn test_state_root_map_origin_zero_empty_headers_ok() {
+        let origin = make_header(0, B256::from([0x11u8; 32]), B256::ZERO);
+        let map = build_verified_state_root_map(&origin, &[]).expect("origin=0, no ancestors");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map[&0], B256::from([0x11u8; 32]));
     }
 }

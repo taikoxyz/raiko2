@@ -12,7 +12,7 @@ use raiko2_primitives::{
     chain_spec::SupportedChainSpecs,
 };
 use serde::{Deserialize, Deserializer};
-use std::{sync::Arc, time::Instant};
+use std::{fmt, sync::Arc, time::Instant};
 use tracing::info;
 
 use crate::on_the_spot_witness::execution_witness;
@@ -148,6 +148,23 @@ fn witness_batch_size() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_WITNESS_BATCH_SIZE)
+}
+
+fn tx_list_witness_batch_error_message(
+    batch_index: usize,
+    blocks: &[u64],
+    err: impl fmt::Display,
+) -> String {
+    let first_block = blocks
+        .first()
+        .map_or_else(|| "<none>".to_string(), u64::to_string);
+    let last_block = blocks
+        .last()
+        .map_or_else(|| "<none>".to_string(), u64::to_string);
+    format!(
+        "error sending debug_executionWitnessForTxList batch {batch_index} for blocks {blocks:?} (first_block={first_block}, last_block={last_block}, batch_size={}): {err}",
+        blocks.len()
+    )
 }
 
 fn system_proof_batch_size() -> usize {
@@ -410,6 +427,7 @@ impl RethL2Provider {
 
         for chunk_start in (0..block_numbers.len()).step_by(batch_size) {
             let chunk_end = (chunk_start + batch_size).min(block_numbers.len());
+            let batch_index = chunk_start / batch_size;
             let mut batch = self.rpc.witness_client.new_batch();
             let mut pending = Vec::with_capacity(chunk_end - chunk_start);
 
@@ -437,9 +455,7 @@ impl RethL2Provider {
 
             batch.send().await.map_err(|e| {
                 let blocks = &block_numbers[chunk_start..chunk_end];
-                RaikoError::RPC(format!(
-                    "error sending debug_executionWitnessForTxList batch for blocks {blocks:?}: {e}"
-                ))
+                RaikoError::RPC(tx_list_witness_batch_error_message(batch_index, blocks, e))
             })?;
 
             for (index, block_number, request) in pending {
@@ -868,5 +884,16 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn tx_list_witness_batch_error_message_includes_batch_context() {
+        let message =
+            tx_list_witness_batch_error_message(3, &[10834703, 10834704], "deadline has elapsed");
+
+        assert_eq!(
+            message,
+            "error sending debug_executionWitnessForTxList batch 3 for blocks [10834703, 10834704] (first_block=10834703, last_block=10834704, batch_size=2): deadline has elapsed"
+        );
     }
 }

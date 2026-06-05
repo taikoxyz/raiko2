@@ -1175,6 +1175,54 @@ fn enforce_market_max_price_cap(
     Ok(())
 }
 
+fn apply_dynamic_pricing_timeout_modifier(
+    offer_spec: &BoundlessOfferParams,
+    lock_timeout: u32,
+    timeout: u32,
+) -> RaikoResult<(u32, u32)> {
+    if offer_spec.pricing_mode != BoundlessPricingMode::Market {
+        return Ok((lock_timeout, timeout));
+    }
+    let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
+        return Ok((lock_timeout, timeout));
+    };
+
+    let modified_lock_timeout = scale_timeout(lock_timeout, modifier, "lock_timeout")?;
+    let modified_timeout = scale_timeout(timeout, modifier, "timeout")?;
+    if modified_timeout <= modified_lock_timeout {
+        return Err(RaikoError::InvalidRequestConfig(
+            "dynamic_pricing_timeout_modifier produced a timeout that is not greater than lock_timeout"
+                .to_string(),
+        ));
+    }
+
+    tracing::debug!(
+        modifier,
+        lock_timeout,
+        modified_lock_timeout,
+        timeout,
+        modified_timeout,
+        "Applied Boundless dynamic-pricing timeout modifier"
+    );
+    Ok((modified_lock_timeout, modified_timeout))
+}
+
+fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
+    if !modifier.is_finite() || modifier < 1.0 {
+        return Err(RaikoError::InvalidRequestConfig(
+            "dynamic_pricing_timeout_modifier must be a finite number greater than or equal to 1.0"
+                .to_string(),
+        ));
+    }
+    let modified = (f64::from(value) * modifier).ceil();
+    if modified > f64::from(u32::MAX) {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "dynamic_pricing_timeout_modifier overflows {field}"
+        )));
+    }
+    Ok(modified as u32)
+}
+
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
@@ -1221,6 +1269,8 @@ fn validate_offer_params(
     };
     let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
+    let (lock_timeout, timeout) =
+        apply_dynamic_pricing_timeout_modifier(offer_spec, lock_timeout, timeout)?;
     let ramp_up_period_secs = offer_spec
         .ramp_up_period_blocks
         .saturating_mul(block_time_sec);
@@ -1417,6 +1467,21 @@ mod tests {
         assert!(validated.min_price.is_none());
         assert_eq!(max_price_cap.asset, Asset::ETH);
         assert_eq!(max_price_cap.value, parse_ether("0.00006").unwrap());
+    }
+
+    #[test]
+    fn validate_offer_params_applies_market_timeout_modifier() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
+
+        assert_eq!(validated.lock_timeout, 400);
+        assert_eq!(validated.timeout, 820);
+        assert!(validated.timeout > validated.lock_timeout);
     }
 
     #[test]

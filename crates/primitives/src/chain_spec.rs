@@ -694,7 +694,7 @@ mod tests {
     use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
         TAIKO_MASAYA_GENESIS_HASH,
-        hardfork::{TaikoHardfork, TaikoHardforks},
+        hardfork::{TaikoHardfork, TaikoHardforks as _},
     };
     use alloy_primitives::address;
 

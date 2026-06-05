@@ -18,7 +18,6 @@ alethia-reth-chainspec.workspace = true
 reth-revm.workspace = true
 reth-chainspec.workspace = true
 reth-consensus.workspace = true
-reth-ethereum-forks.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 alloy-consensus.workspace = true

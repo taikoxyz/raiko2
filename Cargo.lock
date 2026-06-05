@@ -10542,7 +10542,6 @@ dependencies = [
  "kzg-rs",
  "reth-chainspec",
  "reth-consensus",
- "reth-ethereum-forks",
  "reth-ethereum-primitives",
  "reth-primitives-traits",
  "reth-revm",

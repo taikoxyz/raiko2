@@ -39,7 +39,7 @@ pub enum BoundlessPricingMode {
     Market,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BoundlessOfferParams {
     #[serde(default)]
     pub pricing_mode: BoundlessPricingMode,
@@ -47,6 +47,8 @@ pub struct BoundlessOfferParams {
     pub ramp_up_period_blocks: u32,
     pub lock_timeout_ms_per_mcycle: u32,
     pub timeout_ms_per_mcycle: u32,
+    #[serde(default)]
+    pub dynamic_pricing_timeout_modifier: Option<f64>,
     #[serde(default)]
     pub max_price_per_mcycle: Option<String>,
     #[serde(default)]
@@ -146,6 +148,7 @@ pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 200,
         timeout_ms_per_mcycle: 410,
+        dynamic_pricing_timeout_modifier: None,
         max_price_per_mcycle: Some("0.000000085".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
         lock_collateral: "20".to_string(),
@@ -159,6 +162,7 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 3000,
         timeout_ms_per_mcycle: 6000,
+        dynamic_pricing_timeout_modifier: None,
         max_price_per_mcycle: Some("0.00000006".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
         lock_collateral: "20".to_string(),
@@ -202,6 +206,7 @@ fn parse_staking_token(value: &str) -> RaikoResult<U256> {
 /// amount is invalid.
 pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
     validate_offer_prices(offer_spec)?;
+    validate_dynamic_pricing_timeout_modifier(offer_spec)?;
     if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
         return Err("timeout must be greater than lock_timeout".to_string());
     }
@@ -239,6 +244,26 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
     if let Some(max_price_value) = offer_spec.max_price_per_mcycle.as_deref() {
         parse_ether(max_price_value)
             .map_err(|e| format!("Failed to parse max_price_per_mcycle {max_price_value}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_dynamic_pricing_timeout_modifier(
+    offer_spec: &BoundlessOfferParams,
+) -> Result<(), String> {
+    let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
+        return Ok(());
+    };
+    if offer_spec.pricing_mode != BoundlessPricingMode::Market {
+        return Err(
+            "dynamic_pricing_timeout_modifier is only valid when pricing_mode=market".to_string(),
+        );
+    }
+    if !modifier.is_finite() || modifier < 1.0 {
+        return Err(
+            "dynamic_pricing_timeout_modifier must be a finite number greater than or equal to 1.0"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -330,6 +355,38 @@ mod tests {
 
         let err = validate_offer_spec(&offer).expect_err("market offer with min price");
         assert!(err.contains("min_price_per_mcycle must be omitted"));
+    }
+
+    #[test]
+    fn validate_offer_spec_accepts_market_pricing_with_timeout_modifier() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+
+        validate_offer_spec(&offer).expect("valid market offer with timeout modifier");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_manual_pricing_with_timeout_modifier() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+
+        let err = validate_offer_spec(&offer).expect_err("manual offer with timeout modifier");
+        assert!(err.contains("dynamic_pricing_timeout_modifier is only valid"));
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_timeout_modifier_below_one() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.dynamic_pricing_timeout_modifier = Some(0.5);
+
+        let err = validate_offer_spec(&offer).expect_err("timeout modifier below one");
+        assert!(err.contains("greater than or equal to 1.0"));
     }
 
     #[test]

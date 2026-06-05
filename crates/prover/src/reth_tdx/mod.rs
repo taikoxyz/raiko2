@@ -28,9 +28,11 @@ use alloy_primitives::{B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data_vec, proof_carry_from_proof};
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 use reqwest::{
     Client, Url,
     header::{CONTENT_TYPE, HeaderValue},
+    redirect::Policy,
 };
 use serde_json::{Map, Value};
 
@@ -45,6 +47,11 @@ use protocol::{
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
+
+/// Cap on the response body we will buffer from reth-tdx. A proof + quote +
+/// carry payload is at most a few tens of KB even for a large aggregation;
+/// this only exists to stop a hostile/broken prover from OOM-ing the process.
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Static configuration for the [`RethTdxProver`] HTTP client.
 #[derive(Debug, Clone, Default)]
@@ -87,14 +94,22 @@ impl RethTdxProver {
         let base_url = Url::parse(&config.base_url).map_err(|err| {
             RaikoError::InvalidRequestConfig(format!("invalid reth_tdx.base_url: {err}"))
         })?;
-        let prove_url = base_url.join(SHASTA_PROPOSAL_PATH).map_err(|err| {
-            RaikoError::InvalidRequestConfig(format!("invalid reth_tdx prove URL: {err}"))
-        })?;
-        let aggregate_url = base_url.join(SHASTA_AGGREGATE_PATH).map_err(|err| {
-            RaikoError::InvalidRequestConfig(format!("invalid reth_tdx aggregate URL: {err}"))
-        })?;
+        if !matches!(base_url.scheme(), "http" | "https") {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "reth_tdx.base_url must use the http or https scheme, got '{}'",
+                base_url.scheme()
+            )));
+        }
+        // Append the endpoint onto the base URL's path. We deliberately avoid
+        // `Url::join("/prove/...")`, whose absolute-path semantics silently
+        // discard any path prefix on `base_url` (e.g. `http://h/api` → `http://h/prove/...`).
+        let prove_url = endpoint_url(&base_url, SHASTA_PROPOSAL_PATH)?;
+        let aggregate_url = endpoint_url(&base_url, SHASTA_AGGREGATE_PATH)?;
+        // `redirect(none)` stops a misconfigured/redirecting endpoint from being
+        // silently followed to a different (possibly internal) host.
         let client = Client::builder()
             .timeout(config.timeout())
+            .redirect(Policy::none())
             .build()
             .map_err(|err| {
                 RaikoError::InvalidRequestConfig(format!("failed to build reth_tdx client: {err}"))
@@ -172,6 +187,10 @@ where
                 )
             })?;
 
+        // Defense-in-depth: confirm the remote signed the proposal we asked
+        // for, not a substituted one (see `ensure_carry_matches_request`).
+        ensure_carry_matches_request(&carry, &packet.payload)?;
+
         let extra_data = with_shasta_extra_data(
             &carry,
             "reth_tdx",
@@ -223,6 +242,20 @@ where
                 )
             })?;
 
+        // Defense-in-depth: the echoed carry vector must line up 1:1 with the
+        // sub-proofs we asked to aggregate, and each entry must describe the
+        // proposal we requested (not a substituted one).
+        if carry_vec.len() != request.payload.proofs.len() {
+            return Err(RaikoError::Guest(format!(
+                "reth-tdx aggregation echoed {} carry entries but {} sub-proofs were requested",
+                carry_vec.len(),
+                request.payload.proofs.len()
+            )));
+        }
+        for (carry, requested) in carry_vec.iter().zip(request.payload.proofs.iter()) {
+            ensure_carry_matches_request(carry, &requested.payload)?;
+        }
+
         let metadata = reth_tdx_metadata(&envelope.schema, &result);
         let mut extra_data = encode_proof_carry_data_vec(carry_vec)?;
         if let Some(root) = extra_data.as_object_mut() {
@@ -254,10 +287,7 @@ impl RethTdxProver {
             .await
             .map_err(|err| RaikoError::Guest(format!("reth-tdx request failed: {err}")))?;
         let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| RaikoError::Guest(format!("reth-tdx read failed: {err}")))?;
+        let body = read_body_capped(response).await?;
         let envelope: ProofResponse = serde_json::from_slice(&body).map_err(|err| {
             RaikoError::Guest(format!(
                 "reth-tdx response decode failed (status {status}): {err}"
@@ -292,6 +322,95 @@ impl RethTdxProver {
 }
 
 // ─────────────────────────── Helpers ───────────────────────────
+
+/// Append `path` onto `base`'s path without discarding an existing path prefix.
+///
+/// `Url::join("/prove/shasta")` treats the leading slash as absolute and drops
+/// any prefix on `base` (so `http://h/api` becomes `http://h/prove/shasta`).
+/// This instead extends the base path's segments, so `http://h/api` →
+/// `http://h/api/prove/shasta` and `http://h` → `http://h/prove/shasta`.
+fn endpoint_url(base: &Url, path: &str) -> RaikoResult<Url> {
+    let mut url = base.clone();
+    url.path_segments_mut()
+        .map_err(|()| {
+            RaikoError::InvalidRequestConfig("reth_tdx.base_url cannot be a base URL".to_string())
+        })?
+        .pop_if_empty() // drop a trailing empty segment from a trailing slash
+        .extend(path.split('/').filter(|seg| !seg.is_empty()));
+    Ok(url)
+}
+
+/// Read a reth-tdx response body, refusing to buffer more than
+/// [`MAX_RESPONSE_BYTES`] so a hostile/broken prover cannot OOM the process.
+/// The cap is enforced on both the advertised `Content-Length` and the actual
+/// streamed length (a missing or lying header is still bounded).
+async fn read_body_capped(mut response: reqwest::Response) -> RaikoResult<Vec<u8>> {
+    if let Some(len) = response.content_length()
+        && len > MAX_RESPONSE_BYTES as u64
+    {
+        return Err(RaikoError::Guest(format!(
+            "reth-tdx response too large: {len} bytes (max {MAX_RESPONSE_BYTES})"
+        )));
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| RaikoError::Guest(format!("reth-tdx read failed: {err}")))?
+    {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(RaikoError::Guest(format!(
+                "reth-tdx response exceeds {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Confirm the carry data reth-tdx echoed back describes the *same* proposal
+/// raiko2 asked it to prove.
+///
+/// reth-tdx is trusted to source the L2-derived fields (`parent_block_hash`,
+/// `checkpoint`) locally, but the L1-derived fields below are values raiko2
+/// supplied and independently knows. A mismatch means the remote signed a
+/// different proposal than requested — reject it rather than silently package
+/// a substituted proof (which would still pass on-chain `verifyProof` because
+/// it is internally self-consistent).
+fn ensure_carry_matches_request(
+    carry: &ProofCarryData,
+    requested: &ShastaProvePayload,
+) -> RaikoResult<()> {
+    let mismatch = |field: &str| {
+        Err(RaikoError::Guest(format!(
+            "reth-tdx echoed carry data does not match the requested proposal (field `{field}` \
+             differs); refusing to package a substituted proof"
+        )))
+    };
+    let ti = &carry.transition_input;
+    if carry.chain_id != requested.chain_id {
+        return mismatch("chain_id");
+    }
+    if carry.verifier != requested.verifier {
+        return mismatch("verifier");
+    }
+    if ti.proposal_id != requested.proposal_id {
+        return mismatch("proposal_id");
+    }
+    if ti.proposal_hash != requested.proposal_hash {
+        return mismatch("proposal_hash");
+    }
+    if ti.parent_proposal_hash != requested.parent_proposal_hash {
+        return mismatch("parent_proposal_hash");
+    }
+    if ti.actual_prover != requested.actual_prover {
+        return mismatch("actual_prover");
+    }
+    if ti.transition != requested.transition {
+        return mismatch("transition");
+    }
+    Ok(())
+}
 
 fn build_shasta_request(input: &GuestInput) -> ShastaProveRequest {
     let carry = &input.proof_carry_data;

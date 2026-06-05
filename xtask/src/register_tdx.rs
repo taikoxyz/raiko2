@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use alloy::primitives::{Bytes, FixedBytes, U256, hex};
+use alloy::primitives::{Address, Bytes, FixedBytes, U256, hex};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
@@ -208,7 +208,7 @@ sol! {
             bytes calldata rawQuote,
             bytes calldata userData,
             bytes calldata nonce
-        ) external returns (uint256);
+        ) external;
         function trustedParams(uint256 index)
             external
             view
@@ -479,12 +479,47 @@ async fn run_native(
         );
     }
 
-    if args.release_url.is_some() {
-        println!(
-            "⚠ WARNING: --release-url RTMR cross-check is not yet implemented for the native \
-             TDX flow; the quote's measurements are still bound on-chain via --trust, but they \
-             are not pre-checked against a release here."
+    // The contract registers the instance at `bytes20(userData)`. Confirm that
+    // matches the address the bootstrap claims, so neither the success banner
+    // nor the registration can silently bind a different address than advertised.
+    let quote_addr = Address::from_slice(&user_data[..20]);
+    let claimed_addr = bootstrap.public_key.parse::<Address>().with_context(|| {
+        format!(
+            "bootstrap public_key '{}' is not an address",
+            bootstrap.public_key
+        )
+    })?;
+    if quote_addr != claimed_addr {
+        bail!(
+            "bootstrap public_key {claimed_addr} does not match the address bound in the quote's \
+             userData ({quote_addr}); refusing to register a mismatched instance"
         );
+    }
+    println!("  instance address (from quote userData): {quote_addr}");
+
+    // Cross-check the live quote's RTMRs against the release before signing —
+    // the native analogue of the Azure PCR cross-check. Without --release-url we
+    // cannot confirm the VM runs the expected image, so warn loudly.
+    match &args.release_url {
+        Some(url) => {
+            println!("loading release RTMRs from {url}");
+            let release = load_release_rtmrs(url, args.release_asset.as_deref())
+                .await
+                .context("failed to load release RTMRs")?;
+            cross_check_release_rtmrs(&raw_quote, &release)
+                .context("RTMR cross-check against release measurements failed")?;
+            println!(
+                "✓ Image verified against release asset '{}' — RTMR cross-check passed",
+                release.asset_name
+            );
+        }
+        None => {
+            println!(
+                "⚠ WARNING: --release-url not provided — VM image authenticity NOT verified \
+                 against a release. Pass --release-url (the release's *.gcp_measurements.json) to \
+                 confirm this VM runs the expected image before trusting or registering."
+            );
+        }
     }
 
     let signer: PrivateKeySigner = args
@@ -668,6 +703,39 @@ fn extract_native_trusted_params(
 // Bootstrap loading
 // ---------------------------------------------------------------
 
+/// Cap on any HTTP body we buffer (bootstrap, release JSON). These payloads are
+/// tiny (a measurements.json is well under 100 KB); the cap only exists to stop
+/// a hostile/misconfigured endpoint from streaming an unbounded body into memory.
+const MAX_HTTP_BYTES: usize = 16 * 1024 * 1024;
+
+/// Shared HTTP client with a request timeout so a hung endpoint can't stall the
+/// tool indefinitely.
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")
+}
+
+/// Read a response body, refusing to buffer more than [`MAX_HTTP_BYTES`]. The
+/// cap is enforced on both the advertised `Content-Length` and the actual
+/// streamed length (a missing or lying header is still bounded).
+async fn read_capped_bytes(mut resp: reqwest::Response) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length()
+        && len > MAX_HTTP_BYTES as u64
+    {
+        bail!("HTTP response too large: {len} bytes (max {MAX_HTTP_BYTES})");
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("HTTP read failed")? {
+        if buf.len() + chunk.len() > MAX_HTTP_BYTES {
+            bail!("HTTP response exceeds {MAX_HTTP_BYTES} bytes");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 async fn fetch_bootstrap(reth_tdx_url: &str) -> Result<BootstrapData> {
     let url = format!("{}/bootstrap", reth_tdx_url.trim_end_matches('/'));
     println!("fetching TDX bootstrap from {url}");
@@ -675,14 +743,17 @@ async fn fetch_bootstrap(reth_tdx_url: &str) -> Result<BootstrapData> {
     // reth-tdx's `GET /bootstrap` returns the bootstrap record directly (flat
     // object) — no issuer-type wrapping. Serde aliases handle camelCase vs
     // snake_case for forward-compat with the on-disk record format.
-    reqwest::get(&url)
+    let resp = http_client()?
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("GET {url} failed"))?
         .error_for_status()
-        .with_context(|| format!("GET {url} returned error status"))?
-        .json::<BootstrapData>()
+        .with_context(|| format!("GET {url} returned error status"))?;
+    let bytes = read_capped_bytes(resp)
         .await
-        .with_context(|| format!("failed to parse JSON from {url}"))
+        .with_context(|| format!("reading {url}"))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse JSON from {url}"))
 }
 
 fn read_bootstrap_from_disk() -> Result<BootstrapData> {
@@ -751,7 +822,7 @@ fn github_release_to_api(url: &str) -> Option<String> {
 }
 
 async fn http_get_json(client: &reqwest::Client, url: &str) -> Result<Value> {
-    client
+    let resp = client
         .get(url)
         // GitHub's REST API rejects requests without a User-Agent.
         .header("User-Agent", "raiko2-xtask-register-tdx")
@@ -760,28 +831,28 @@ async fn http_get_json(client: &reqwest::Client, url: &str) -> Result<Value> {
         .await
         .with_context(|| format!("GET {url} failed"))?
         .error_for_status()
-        .with_context(|| format!("GET {url} returned error status"))?
-        .json::<Value>()
+        .with_context(|| format!("GET {url} returned error status"))?;
+    let bytes = read_capped_bytes(resp)
         .await
-        .with_context(|| format!("failed to parse JSON from {url}"))
+        .with_context(|| format!("reading {url}"))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("failed to parse JSON from {url}"))
 }
 
-/// Download a `*.measurements.json` from a release URL or direct asset URL.
+/// Resolve a single release asset whose name ends with `suffix` to its parsed
+/// JSON, from either a GitHub release page URL or a direct asset URL.
 ///
-/// * Release page (`.../releases/tag/<tag>`): resolves the assets list,
-///   filters to entries whose name ends with `measurements.json`, then —
-///   if more than one survives — narrows further by `--release-asset`.
+/// * Release page (`.../releases/tag/<tag>`): resolves the assets list, filters
+///   to names ending with `suffix`, then — if more than one survives — narrows
+///   by `--release-asset`.
 /// * Anything else: treated as a direct URL to the JSON asset.
-async fn load_release_measurements(
+async fn resolve_release_asset(
+    client: &reqwest::Client,
     url: &str,
     asset_filter: Option<&str>,
-) -> Result<ReleaseMeasurements> {
-    let client = reqwest::Client::builder()
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let (asset_name, doc) = if let Some(api_url) = github_release_to_api(url) {
-        let release = http_get_json(&client, &api_url)
+    suffix: &str,
+) -> Result<(String, Value)> {
+    if let Some(api_url) = github_release_to_api(url) {
+        let release = http_get_json(client, &api_url)
             .await
             .with_context(|| format!("failed to fetch release info from {api_url}"))?;
         let assets = release
@@ -794,7 +865,7 @@ async fn load_release_measurements(
             .filter_map(|a| {
                 let name = a.get("name").and_then(Value::as_str)?;
                 let dl = a.get("browser_download_url").and_then(Value::as_str)?;
-                if name.ends_with("measurements.json") {
+                if name.ends_with(suffix) {
                     Some((name, dl))
                 } else {
                     None
@@ -803,39 +874,53 @@ async fn load_release_measurements(
             .collect();
 
         if candidates.is_empty() {
-            bail!("release has no '*.measurements.json' assets");
+            bail!("release has no '*{suffix}' assets");
         }
         if let Some(filter) = asset_filter {
             candidates.retain(|(name, _)| name.contains(filter));
             if candidates.is_empty() {
-                bail!("no measurements asset matches --release-asset='{filter}'");
+                bail!("no '*{suffix}' asset matches --release-asset='{filter}'");
             }
         }
         if candidates.len() > 1 {
             let names: Vec<&str> = candidates.iter().map(|(n, _)| *n).collect();
             bail!(
-                "release has multiple measurements assets — pass --release-asset to disambiguate: {names:?}"
+                "release has multiple '*{suffix}' assets — pass --release-asset to disambiguate: {names:?}"
             );
         }
         let (name, dl) = candidates[0];
-        let doc = http_get_json(&client, dl)
+        let doc = http_get_json(client, dl)
             .await
             .with_context(|| format!("failed to download asset {dl}"))?;
-
-        return parse_release_measurements(name, &doc);
+        Ok((name.to_string(), doc))
     } else {
-        let doc = http_get_json(&client, url)
+        let doc = http_get_json(client, url)
             .await
-            .with_context(|| format!("failed to fetch measurements directly from {url}"))?;
-        let asset_name = url
-            .rsplit('/')
-            .next()
-            .unwrap_or("measurements.json")
-            .to_string();
-        (asset_name, doc)
-    };
+            .with_context(|| format!("failed to fetch asset directly from {url}"))?;
+        let asset_name = url.rsplit('/').next().unwrap_or(suffix).to_string();
+        Ok((asset_name, doc))
+    }
+}
 
+/// Download a `*.measurements.json` (vTPM PCR reference values) from a release
+/// URL or direct asset URL.
+async fn load_release_measurements(
+    url: &str,
+    asset_filter: Option<&str>,
+) -> Result<ReleaseMeasurements> {
+    let client = http_client()?;
+    let (asset_name, doc) =
+        resolve_release_asset(&client, url, asset_filter, "measurements.json").await?;
     parse_release_measurements(&asset_name, &doc)
+}
+
+/// Download a `*.gcp_measurements.json` (native TDX RTMR reference values) from
+/// a release URL or direct asset URL.
+async fn load_release_rtmrs(url: &str, asset_filter: Option<&str>) -> Result<ReleaseRtmrs> {
+    let client = http_client()?;
+    let (asset_name, doc) =
+        resolve_release_asset(&client, url, asset_filter, "gcp_measurements.json").await?;
+    parse_release_rtmrs(&asset_name, &doc)
 }
 
 fn parse_release_measurements(asset_name: &str, doc: &Value) -> Result<ReleaseMeasurements> {
@@ -956,6 +1041,93 @@ fn cross_check_release_pcrs(metadata: &Value, release: &ReleaseMeasurements) -> 
                 hex::encode(&live_bytes),
                 hex::encode(expected)
             ));
+        }
+    }
+
+    if !mismatches.is_empty() {
+        bail!(
+            "live VM does not match release '{}'\n  {}",
+            release.asset_name,
+            mismatches.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------
+// Native (GCP / bare-metal) RTMR cross-check
+//
+// The release's `*.gcp_measurements.json` carries the image-determined RTMR
+// reference values (rtmr1 = kernel, rtmr2 = UKI sections; produced by
+// `dstack-mr`). When the operator passes `--release-url` on the native path we
+// extract the corresponding RTMRs from the live quote and require them to match
+// — the native analogue of `cross_check_release_pcrs`. RTMRs the release does
+// not cover (firmware-dependent RTMR0, runtime RTMR3) are not checked here.
+// ---------------------------------------------------------------
+
+struct ReleaseRtmrs {
+    asset_name: String,
+    expected: std::collections::HashMap<usize, [u8; TDX_RTMR_LEN]>,
+}
+
+fn parse_release_rtmrs(asset_name: &str, doc: &Value) -> Result<ReleaseRtmrs> {
+    let mut expected = std::collections::HashMap::new();
+    for i in 0..4usize {
+        let key = format!("rtmr{i}");
+        if let Some(s) = doc.get(&key).and_then(Value::as_str) {
+            let bytes = hex::decode(s.trim_start_matches("0x"))
+                .with_context(|| format!("{key} is not valid hex"))?;
+            let arr: [u8; TDX_RTMR_LEN] = bytes.try_into().map_err(|b: Vec<u8>| {
+                anyhow!("{key} must be {TDX_RTMR_LEN} bytes, got {}", b.len())
+            })?;
+            expected.insert(i, arr);
+        }
+    }
+    if expected.is_empty() {
+        bail!("gcp measurements file '{asset_name}' has no rtmr0..rtmr3 entries");
+    }
+    Ok(ReleaseRtmrs {
+        asset_name: asset_name.to_string(),
+        expected,
+    })
+}
+
+/// Read RTMR `idx` (0..3) from a raw TDX V4 quote, with the same bounds and
+/// offsets as `extract_native_trusted_params`.
+fn extract_quote_rtmr(raw_quote: &[u8], idx: usize) -> Result<[u8; TDX_RTMR_LEN]> {
+    if idx >= 4 {
+        bail!("RTMR index {idx} out of range (0..3)");
+    }
+    let off = TDX_QUOTE_HEADER_LEN + TDX_BODY_RTMR0 + TDX_RTMR_LEN * idx;
+    let end = off + TDX_RTMR_LEN;
+    if raw_quote.len() < end {
+        bail!(
+            "raw quote too short ({} bytes) to read RTMR{idx} (need >= {end})",
+            raw_quote.len()
+        );
+    }
+    raw_quote[off..end]
+        .try_into()
+        .map_err(|_| anyhow!("RTMR{idx} slice"))
+}
+
+/// Verify each RTMR the release covers matches the live quote. Lists all
+/// mismatches so the operator sees the full picture, not just the first.
+fn cross_check_release_rtmrs(raw_quote: &[u8], release: &ReleaseRtmrs) -> Result<()> {
+    let mut indices: Vec<usize> = release.expected.keys().copied().collect();
+    indices.sort_unstable();
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for i in indices {
+        let expected = &release.expected[&i];
+        match extract_quote_rtmr(raw_quote, i) {
+            Ok(live) if live == *expected => {}
+            Ok(live) => mismatches.push(format!(
+                "RTMR{i}: live=0x{} release=0x{}",
+                hex::encode(live),
+                hex::encode(expected)
+            )),
+            Err(e) => mismatches.push(format!("RTMR{i}: cannot read from live quote: {e}")),
         }
     }
 
@@ -1293,7 +1465,7 @@ fn extract_trusted_params(
     // The mrSeam / mrTd / teeTcbSvn slices below are at TDX V4 body offsets.
     // A non-V4 quote would silently slice unrelated bytes and write incorrect
     // measurements on-chain via `setTrustedParams`, so refuse to proceed.
-    if &report[0..2] != [0x04, 0x00] {
+    if report[0..2] != [0x04, 0x00] {
         bail!(
             "attestationReport version is 0x{:02x}{:02x} — expected TDX V4 (0x04 0x00); \
              refusing to extract trusted params from an unknown quote layout",
@@ -1331,9 +1503,9 @@ fn extract_trusted_params(
     }
 
     let mut selected_pcrs = Vec::new();
-    for i in 0..24 {
+    for (i, slot) in by_index.iter().enumerate() {
         if pcr_bitmap & (1 << i) != 0 {
-            let d = by_index[i]
+            let d = (*slot)
                 .ok_or_else(|| anyhow!("pcr_bitmap bit {i} set but metadata.pcrs[{i}] missing"))?;
             selected_pcrs.push(FixedBytes::from(d));
         }

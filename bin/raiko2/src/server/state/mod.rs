@@ -711,7 +711,6 @@ async fn build_sp1_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_tdx_engine(
     config: &Config,
@@ -780,6 +779,7 @@ async fn build_tdx_engine(
     Ok(engine)
 }
 
+#[cfg(feature = "local-provers")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_native_engine(
     config: &Config,

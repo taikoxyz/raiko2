@@ -22,28 +22,37 @@ use raiko2_prover::{
 use serde_json::json;
 
 fn fixture_guest_input() -> GuestInput {
-    let mut input = GuestInput::default();
-    input.proof_carry_data = ProofCarryData {
-        chain_id: 167_013,
-        verifier: Address::from([0x11; 20]),
-        transition_input: TransitionInputData {
-            proposal_id: 42,
-            proposal_hash: B256::from([0xaa; 32]),
-            parent_proposal_hash: B256::from([0xbb; 32]),
-            parent_block_hash: B256::from([0xcc; 32]),
-            actual_prover: Address::from([0x22; 20]),
-            transition: ShastaTransitionInput {
-                proposer: Address::from([0x33; 20]),
-                timestamp: 1_700_000_000,
+    GuestInput {
+        proof_carry_data: ProofCarryData {
+            chain_id: 167_013,
+            verifier: Address::from([0x11; 20]),
+            transition_input: TransitionInputData {
+                proposal_id: 42,
+                proposal_hash: B256::from([0xaa; 32]),
+                parent_proposal_hash: B256::from([0xbb; 32]),
+                parent_block_hash: B256::from([0xcc; 32]),
+                actual_prover: Address::from([0x22; 20]),
+                transition: ShastaTransitionInput {
+                    proposer: Address::from([0x33; 20]),
+                    timestamp: 1_700_000_000,
+                },
+                checkpoint: Checkpoint::default(),
             },
-            checkpoint: Checkpoint::default(),
         },
-    };
-    input
+        ..Default::default()
+    }
 }
 
 fn carry_for_response() -> ProofCarryData {
     fixture_guest_input().proof_carry_data
+}
+
+/// Carry data for a *different* proposal than [`fixture_guest_input`] requests —
+/// simulates a misbehaving/compromised remote prover echoing a substituted proof.
+fn tampered_carry() -> ProofCarryData {
+    let mut carry = carry_for_response();
+    carry.transition_input.proposal_id = 999; // requested was 42
+    carry
 }
 
 #[tokio::test]
@@ -346,4 +355,178 @@ async fn reth_tdx_prover_rejects_aggregate_missing_proof_carry_data_vec() {
     .await
     .expect_err("aggregation missing carry vec must error");
     assert!(err.to_string().contains("proof_carry_data_vec"));
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_carry_for_a_different_proposal() {
+    // The remote echoes a syntactically valid proof whose carry data describes a
+    // *different* proposal than we asked it to prove. raiko2 must refuse it
+    // rather than package a silently-substituted proof.
+    let server = MockServer::start();
+    let signing_hash = format!("0x{}", hex::encode([0x44; 32]));
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xproof",
+                    "quote": "0xquote",
+                    "input": signing_hash,
+                    "proof_carry_data_vec": [tampered_carry()],
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let err = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("substituted carry should be rejected");
+
+    mock.assert();
+    assert!(
+        err.to_string()
+            .contains("does not match the requested proposal"),
+        "got: {err}"
+    );
+    assert!(err.to_string().contains("proposal_id"), "got: {err}");
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_aggregate_carry_for_a_different_proposal() {
+    let server = MockServer::start();
+    let signing_hash = format!("0x{}", hex::encode([0x77; 32]));
+    let _mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta-aggregate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xagg",
+                    "quote": "0xaggquote",
+                    "input": signing_hash,
+                    "proof_carry_data_vec": [tampered_carry()],
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let sub_proof = Proof {
+        proof: Some("0xsub".to_string()),
+        input: Some(B256::from([0x88; 32])),
+        quote: Some("0xsubquote".to_string()),
+        extra_data: Some(serde_json::json!({
+            "shasta": { "proof_carry_data": carry_for_response() }
+        })),
+        ..Default::default()
+    };
+    let aggregate_input = raiko2_primitives::AggregationGuestInput {
+        proofs: vec![sub_proof],
+    };
+
+    let err = Prover::<NativeBackend>::aggregate(
+        &prover,
+        aggregate_input,
+        &ProverConfig::default(),
+        &NativeBackend,
+    )
+    .await
+    .expect_err("substituted aggregate carry should be rejected");
+    assert!(
+        err.to_string()
+            .contains("does not match the requested proposal"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_invalid_input_hash() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xproof",
+                    "quote": "0xquote",
+                    "input": "0xnot-a-valid-hash",
+                    "proof_carry_data_vec": [carry_for_response()],
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let err = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("invalid input hash should fail");
+
+    mock.assert();
+    assert!(
+        err.to_string().contains("invalid reth-tdx input hash"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_non_json_body() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body("this is definitely not json");
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let err = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("non-json body should fail");
+
+    mock.assert();
+    assert!(
+        err.to_string().contains("response decode failed"),
+        "got: {err}"
+    );
 }

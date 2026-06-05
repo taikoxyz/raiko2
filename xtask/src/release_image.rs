@@ -4,18 +4,37 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::Args;
-use xtask_build_guest::Backend;
+use clap::{Args, ValueEnum};
 
 use crate::util;
 
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
+const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageBackend {
+    /// Host-only runtime image. Guest ELF refresh is opt-in.
+    Host,
+    /// Runtime image with RISC0 guest ELF release refresh.
+    Risc0,
+    /// Runtime image with SP1 guest ELF release refresh.
+    Sp1,
+    /// Runtime image with all guest ELF release refreshes.
+    All,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuestBackend {
+    Risc0,
+    Sp1,
+    All,
+}
 
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseImageArgs {
     #[arg(value_enum)]
-    pub(crate) backend: Backend,
+    pub(crate) backend: ImageBackend,
 
     #[arg(long)]
     pub(crate) tag: String,
@@ -28,6 +47,10 @@ pub(crate) struct ReleaseImageArgs {
 
     #[arg(long, default_value_t = false)]
     pub(crate) skip_guest_refresh: bool,
+
+    /// For backend=host, optionally refresh checked-in guest ELFs before building the host image.
+    #[arg(long, value_enum)]
+    pub(crate) refresh_guest_elves: Option<GuestBackend>,
 }
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
@@ -36,9 +59,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
-    if args.skip_guest_refresh && args.force_rebuild_guests {
-        bail!("--skip-guest-refresh cannot be combined with --force-rebuild-guests");
-    }
+    let guest_refresh_backend = resolve_guest_refresh_backend(
+        args.backend,
+        args.force_rebuild_guests,
+        args.skip_guest_refresh,
+        args.refresh_guest_elves,
+    )?;
     ensure_clean_source_tree(root, "before release-image starts")?;
 
     let image_ref = format!("{}:{}", args.repository, args.tag);
@@ -50,22 +76,28 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     reset_dir(&buildx_cache_next)?;
 
     println!(
-        "[INFO] Preparing guest ELFs for backend `{}` before image release...",
-        backend_name(args.backend)
+        "[INFO] Preparing runtime image backend `{}`...",
+        image_backend_name(args.backend)
     );
-    if args.skip_guest_refresh {
-        println!("[INFO] Guest ELF refresh skipped by --skip-guest-refresh");
-    } else if args.force_rebuild_guests {
-        println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
-        xtask_build_guest::build(root, args.backend, false, None)?;
-    } else {
-        xtask_build_guest::ensure_release_guest_elves(root, args.backend, false, None)?;
-    }
-    if !args.skip_guest_refresh {
+    if let Some(guest_backend) = guest_refresh_backend {
+        println!(
+            "[INFO] Preparing guest ELFs for backend `{}` before image release...",
+            guest_backend_name(guest_backend)
+        );
+        if args.force_rebuild_guests {
+            println!("[INFO] Guest rebuild forced by --force-rebuild-guests");
+            refresh_guest_elves(root, guest_backend, true)?;
+        } else {
+            refresh_guest_elves(root, guest_backend, false)?;
+        }
         ensure_clean_source_tree(
             root,
             "after refreshing guest ELFs for release-image; review and commit updated release artifacts before retrying",
         )?;
+    } else if args.skip_guest_refresh {
+        println!("[INFO] Guest ELF refresh skipped by --skip-guest-refresh");
+    } else {
+        println!("[INFO] Guest ELF refresh skipped for backend=host");
     }
 
     println!(
@@ -91,7 +123,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
-        .args(build_metadata_flags(&source_revision))
+        .args(build_image_flags(args.backend, &source_revision))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
@@ -109,12 +141,78 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     Ok(())
 }
 
-const fn backend_name(backend: Backend) -> &'static str {
+const fn image_backend_name(backend: ImageBackend) -> &'static str {
     match backend {
-        Backend::Risc0 => "risc0",
-        Backend::Sp1 => "sp1",
-        Backend::All => "all",
+        ImageBackend::Host => "host",
+        ImageBackend::Risc0 => "risc0",
+        ImageBackend::Sp1 => "sp1",
+        ImageBackend::All => "all",
     }
+}
+
+const fn guest_backend_name(backend: GuestBackend) -> &'static str {
+    match backend {
+        GuestBackend::Risc0 => "risc0",
+        GuestBackend::Sp1 => "sp1",
+        GuestBackend::All => "all",
+    }
+}
+
+fn resolve_guest_refresh_backend(
+    image_backend: ImageBackend,
+    force_rebuild_guests: bool,
+    skip_guest_refresh: bool,
+    refresh_guest_elves: Option<GuestBackend>,
+) -> Result<Option<GuestBackend>> {
+    if skip_guest_refresh && force_rebuild_guests {
+        bail!("--skip-guest-refresh cannot be combined with --force-rebuild-guests");
+    }
+    if skip_guest_refresh && refresh_guest_elves.is_some() {
+        bail!("--skip-guest-refresh cannot be combined with --refresh-guest-elves");
+    }
+
+    match image_backend {
+        ImageBackend::Host => {
+            if force_rebuild_guests && refresh_guest_elves.is_none() {
+                bail!("--force-rebuild-guests requires --refresh-guest-elves for backend=host");
+            }
+            Ok(refresh_guest_elves)
+        }
+        ImageBackend::Risc0 | ImageBackend::Sp1 | ImageBackend::All => {
+            if refresh_guest_elves.is_some() {
+                bail!("--refresh-guest-elves is only supported for backend=host");
+            }
+            if skip_guest_refresh {
+                Ok(None)
+            } else {
+                Ok(Some(match image_backend {
+                    ImageBackend::Risc0 => GuestBackend::Risc0,
+                    ImageBackend::Sp1 => GuestBackend::Sp1,
+                    ImageBackend::All => GuestBackend::All,
+                    ImageBackend::Host => unreachable!("host handled above"),
+                }))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "guest-tools")]
+fn refresh_guest_elves(root: &Path, backend: GuestBackend, force_rebuild: bool) -> Result<()> {
+    let backend = match backend {
+        GuestBackend::Risc0 => xtask_build_guest::Backend::Risc0,
+        GuestBackend::Sp1 => xtask_build_guest::Backend::Sp1,
+        GuestBackend::All => xtask_build_guest::Backend::All,
+    };
+    if force_rebuild {
+        xtask_build_guest::build(root, backend, false, None)
+    } else {
+        xtask_build_guest::ensure_release_guest_elves(root, backend, false, None)
+    }
+}
+
+#[cfg(not(feature = "guest-tools"))]
+fn refresh_guest_elves(_root: &Path, _backend: GuestBackend, _force_rebuild: bool) -> Result<()> {
+    bail!("guest ELF refresh requires building xtask with the `guest-tools` feature");
 }
 
 fn ensure_non_empty(name: &str, value: &str) -> Result<()> {
@@ -133,6 +231,17 @@ fn build_metadata_flags(source_revision: &str) -> Vec<String> {
         "--build-arg".to_string(),
         format!("VCS_REF={source_revision}"),
     ]
+}
+
+fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<String> {
+    let mut flags = build_metadata_flags(source_revision);
+    if matches!(image_backend, ImageBackend::Host) {
+        flags.extend([
+            "--build-arg".to_string(),
+            format!("BIN_FEATURES={HOST_BIN_FEATURES}"),
+        ]);
+    }
+    flags
 }
 
 fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
@@ -246,7 +355,10 @@ mod tests {
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{build_metadata_flags, release_summary_lines, write_release_summary};
+    use super::{
+        GuestBackend, ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
+        resolve_guest_refresh_backend, write_release_summary,
+    };
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
@@ -271,6 +383,65 @@ mod tests {
         assert_eq!(
             flags,
             vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
+        );
+    }
+
+    #[test]
+    fn host_image_flags_select_host_features() {
+        let flags = build_image_flags(ImageBackend::Host, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--build-arg".to_string(),
+                "BIN_FEATURES=--no-default-features --features host".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_image_skips_guest_refresh_by_default() {
+        let refresh = resolve_guest_refresh_backend(ImageBackend::Host, false, false, None)
+            .expect("host image default should be valid");
+
+        assert_eq!(refresh, None);
+    }
+
+    #[test]
+    fn host_image_can_refresh_selected_guest_elves() {
+        let refresh = resolve_guest_refresh_backend(
+            ImageBackend::Host,
+            false,
+            false,
+            Some(GuestBackend::All),
+        )
+        .expect("host image should accept an explicit guest refresh backend");
+
+        assert_eq!(refresh, Some(GuestBackend::All));
+    }
+
+    #[test]
+    fn host_image_rejects_force_rebuild_without_refresh_backend() {
+        let err = resolve_guest_refresh_backend(ImageBackend::Host, true, false, None)
+            .expect_err("force rebuild needs a selected guest backend");
+
+        assert!(
+            err.to_string()
+                .contains("--force-rebuild-guests requires --refresh-guest-elves for backend=host")
+        );
+    }
+
+    #[test]
+    fn non_host_image_rejects_explicit_refresh_backend() {
+        let err =
+            resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(GuestBackend::All))
+                .expect_err("non-host backend owns its guest refresh backend already");
+
+        assert!(
+            err.to_string()
+                .contains("--refresh-guest-elves is only supported for backend=host")
         );
     }
 

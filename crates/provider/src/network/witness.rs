@@ -2,7 +2,7 @@ use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_primitives::addresses::{TAIKO_GOLDEN_TOUCH_ADDRESS, get_treasury_address};
 use alloy::{
     consensus::Header,
-    eips::BlockNumberOrTag,
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{Address, B256, Bytes},
     providers::Provider as AlloyProvider,
 };
@@ -390,6 +390,98 @@ impl RpcL2Provider {
 }
 
 impl RethL2Provider {
+    async fn fetch_witnesses_via_tx_list_debug_endpoint(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+        targets: &TaikoSystemProofTargets,
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        if block_numbers.len() != tx_lists.len() {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "tx list count ({}) does not match block count ({})",
+                tx_lists.len(),
+                block_numbers.len()
+            )));
+        }
+
+        let started_at = Instant::now();
+        let mut witness_chunk = Vec::with_capacity(block_numbers.len());
+        let batch_size = witness_batch_size();
+
+        for chunk_start in (0..block_numbers.len()).step_by(batch_size) {
+            let chunk_end = (chunk_start + batch_size).min(block_numbers.len());
+            let mut batch = self.rpc.witness_client.new_batch();
+            let mut pending = Vec::with_capacity(chunk_end - chunk_start);
+
+            for index in chunk_start..chunk_end {
+                let block_number = block_numbers[index];
+                let tx_list = tx_lists[index].clone();
+                pending.push((
+                    index,
+                    block_number,
+                    Box::pin(
+                        batch
+                            .add_call::<_, alloy_rpc_types_debug::ExecutionWitness>(
+                                "debug_executionWitnessForTxList",
+                                &(BlockId::number(block_number), tx_list),
+                            )
+                            .map_err(|_| {
+                                RaikoError::RPC(
+                                    "failed adding debug_executionWitnessForTxList call to batch"
+                                        .to_owned(),
+                                )
+                            })?,
+                    ),
+                ));
+            }
+
+            batch.send().await.map_err(|e| {
+                let blocks = &block_numbers[chunk_start..chunk_end];
+                RaikoError::RPC(format!(
+                    "error sending debug_executionWitnessForTxList batch for blocks {blocks:?}: {e}"
+                ))
+            })?;
+
+            for (index, block_number, request) in pending {
+                let raw_witness = request.await.map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "debug_executionWitnessForTxList failed for block {block_number}: {e}"
+                    ))
+                })?;
+                let witness = ExecutionWitness::try_from(raw_witness).map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "failed to decode debug_executionWitnessForTxList headers for block {block_number}: {e}"
+                    ))
+                })?;
+                witness_chunk.push((index, block_number, witness));
+            }
+        }
+
+        witness_chunk.sort_by_key(|(index, _, _)| *index);
+        let mut witness_chunk = witness_chunk
+            .into_iter()
+            .map(|(_, block_number, witness)| (block_number, witness))
+            .collect::<Vec<_>>();
+
+        if !targets.account_only.is_empty() || !targets.storage_backed.is_empty() {
+            self.rpc
+                .supplement_taiko_system_account_proofs(&mut witness_chunk, targets)
+                .await?;
+        }
+
+        info!(
+            block_count = block_numbers.len(),
+            witness_batch_size = batch_size,
+            system_proof_batch_size = system_proof_batch_size(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched proposal-window execution witnesses via tx-list debug endpoint"
+        );
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
+    }
+
     async fn fetch_witnesses_via_debug_endpoint(
         &self,
         block_numbers: &[u64],
@@ -530,6 +622,45 @@ impl RethL2Provider {
             }
             Err(err) => Err(err),
         }
+    }
+
+    pub(super) async fn fetch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let started_at = Instant::now();
+        let chain_id = self
+            .rpc
+            .witness_provider
+            .get_chain_id()
+            .await
+            .map_err(|e| {
+                RaikoError::RPC(format!(
+                    "eth_chainId failed while fetching tx-list witnesses: {e}"
+                ))
+            })?;
+        let resolved_l2_chain_spec = self.rpc.resolved_l2_chain_spec(chain_id);
+        let system_proof_targets = resolved_l2_chain_spec
+            .filter(ChainSpec::is_taiko)
+            .map_or_else(TaikoSystemProofTargets::default, |_| {
+                taiko_system_proof_targets(chain_id)
+            });
+
+        let witnesses = self
+            .fetch_witnesses_via_tx_list_debug_endpoint(
+                block_numbers,
+                tx_lists,
+                &system_proof_targets,
+            )
+            .await?;
+        info!(
+            chain_id,
+            block_count = block_numbers.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched witnesses via debug_executionWitnessForTxList"
+        );
+        Ok(witnesses)
     }
 }
 

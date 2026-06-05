@@ -782,6 +782,10 @@ mod tests {
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
         assert_eq!(
+            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(0))
+        );
+        assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
             Some(&ForkCondition::Timestamp(unzen_timestamp))
         );

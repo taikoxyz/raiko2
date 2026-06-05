@@ -2,7 +2,7 @@ use alloy_primitives::keccak256;
 use raiko2_engine::ProverTaskConfig;
 use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
-use raiko2_prover::sp1::{ProverMode as Sp1ProverMode, Sp1RequestContext};
+use raiko2_prover::sp1_config::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
@@ -293,7 +293,7 @@ mod tests {
     use axum::http::StatusCode;
     use raiko2_engine::ProverTaskConfig;
     use raiko2_pipeline::PipelineKey;
-    use raiko2_prover::sp1::Sp1RequestContext;
+    use raiko2_prover::sp1_config::Sp1RequestContext;
     use raiko2_runtime::RuntimeManager;
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};

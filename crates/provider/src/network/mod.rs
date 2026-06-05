@@ -3,8 +3,9 @@ use alloy::{
     providers::{DynProvider, Provider as AlloyProvider, ProviderBuilder},
     rpc::client::RpcClient,
 };
-use alloy_primitives::{Address, map::AddressMap};
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use alloy_primitives::{Address, Bytes, map::AddressMap};
+use alloy_rpc_types_eth::Header as AlloyRpcHeader;
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
@@ -50,6 +51,16 @@ pub(crate) trait L2Provider: Send + Sync {
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>>;
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        _block_numbers: &[u64],
+        _tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        Err(RaikoError::FeatureNotSupportedError(
+            "L2 provider does not support tx-list execution witnesses".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -131,6 +142,15 @@ impl L2Provider for RethL2Provider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
+    }
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
     }
 }
 
@@ -291,6 +311,40 @@ impl NetworkProvider {
     }
 }
 
+/// Fetch L2 blocks from a standalone RPC endpoint.
+///
+/// Used for optional cross-node checkpoint verification during preflight.
+///
+/// # Errors
+///
+/// Returns an error if the RPC client cannot be constructed or any requested block cannot be
+/// fetched from the target endpoint.
+pub async fn fetch_l2_blocks(
+    l2_rpc_url: &str,
+    block_numbers: &[u64],
+    config: &RpcClientConfig,
+) -> RaikoResult<Vec<RethBlock>> {
+    let l2_provider = RpcL2Provider::new(l2_rpc_url, None, None, config)?;
+    l2_provider.fetch_blocks(block_numbers).await
+}
+
+/// Fetch L2 headers from a standalone RPC endpoint.
+///
+/// Used for optional cross-node checkpoint verification during preflight.
+///
+/// # Errors
+///
+/// Returns an error if the RPC client cannot be constructed or any requested header cannot be
+/// fetched from the target endpoint.
+pub async fn fetch_l2_headers(
+    l2_rpc_url: &str,
+    block_numbers: &[u64],
+    config: &RpcClientConfig,
+) -> RaikoResult<Vec<AlloyRpcHeader>> {
+    let l2_provider = RpcL2Provider::new(l2_rpc_url, None, None, config)?;
+    l2_provider.fetch_headers(block_numbers).await
+}
+
 #[async_trait::async_trait]
 impl Provider for NetworkProvider {
     async fn batch_blocks(&self, block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
@@ -309,6 +363,16 @@ impl Provider for NetworkProvider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.l2_provider.batch_witnesses(block_numbers).await
+    }
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.l2_provider
+            .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
     }
 
     async fn batch_l1_headers(&self, block_numbers: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -338,5 +402,50 @@ impl Provider for NetworkProvider {
         let effective_spec = self.l1_chain_spec.as_ref().unwrap_or(l1_chain_spec);
         self.fetch_shasta_data_sources(effective_spec, proposal_event, blob_proof_type)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnsupportedTxListL2Provider;
+
+    #[async_trait::async_trait]
+    impl L2Provider for UnsupportedTxListL2Provider {
+        async fn batch_blocks(&self, _block_numbers: &[u64]) -> RaikoResult<Vec<RethBlock>> {
+            Ok(Vec::new())
+        }
+
+        async fn batch_accounts(
+            &self,
+            _block_numbers: &[u64],
+            _addresses: &[Vec<Address>],
+        ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
+            Ok(Vec::new())
+        }
+
+        async fn batch_witnesses(
+            &self,
+            _block_numbers: &[u64],
+        ) -> RaikoResult<Vec<ExecutionWitness>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_l2_provider_tx_list_witnesses_fail_fast() {
+        let provider = UnsupportedTxListL2Provider;
+
+        let err = provider
+            .batch_witnesses_with_tx_lists(&[1], &[Bytes::from_static(&[0xc0])])
+            .await
+            .expect_err("default tx-list witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("L2 provider does not support tx-list execution witnesses"),
+            "{err}"
+        );
     }
 }

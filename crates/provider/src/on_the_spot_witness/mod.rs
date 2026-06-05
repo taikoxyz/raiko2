@@ -189,23 +189,22 @@ mod tests {
         let block_id = std::env::var("ON_THE_SPOT_WITNESS_BLOCK")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .map(BlockNumberOrTag::from)
-            .unwrap_or(BlockNumberOrTag::Latest);
+            .map_or(BlockNumberOrTag::Latest, BlockNumberOrTag::from);
 
         let witness = match chain_id {
-            167000 => {
+            167_000 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_MAINNET.clone()));
                 execution_witness(evm_config, &provider, block_id).await?
             }
-            167001 => {
+            167_001 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_DEVNET.clone()));
                 execution_witness(evm_config, &provider, block_id).await?
             }
-            167011 => {
+            167_011 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_MASAYA.clone()));
                 execution_witness(evm_config, &provider, block_id).await?
             }
-            167013 => {
+            167_013 => {
                 let evm_config = Arc::new(TaikoEvmConfig::new(TAIKO_HOODI.clone()));
                 execution_witness(evm_config, &provider, block_id).await?
             }
@@ -217,11 +216,9 @@ mod tests {
                     NamedChain::Hoodi => Arc::new(EthEvmConfig::ethereum(HOODI.clone())),
                     NamedChain::Sepolia => Arc::new(EthEvmConfig::ethereum(SEPOLIA.clone())),
                     _ => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("unsupported chain: {chain}"),
-                        )
-                        .into());
+                        return Err(
+                            std::io::Error::other(format!("unsupported chain: {chain}")).into()
+                        );
                     }
                 };
                 execution_witness(evm_config, &provider, block_id).await?

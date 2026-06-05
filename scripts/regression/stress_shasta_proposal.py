@@ -1588,9 +1588,13 @@ class BatchMonitor:
             groups_found += 1
 
             # Find L1 inclusion block
-            l1_inclusion_block = await self.find_l1_inclusion_block(
-                group.proposal_id, group.anchor_number
+            l1_inclusion_block = self.find_l1_inclusion_block_by_indexed_proposal_id(
+                group.proposal_id
             )
+            if l1_inclusion_block is None:
+                l1_inclusion_block = await self.find_l1_inclusion_block(
+                    group.proposal_id, group.anchor_number
+                )
 
             if l1_inclusion_block is None:
                 self.logger.warning(

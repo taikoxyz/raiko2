@@ -94,14 +94,14 @@ Run the smallest set of checks that proves the change safely, then scale up when
 
 ## Alethia Reth Integration
 
-- Use the `feat/raiko2` branch from `https://github.com/taikoxyz/alethia-reth` as the canonical
-  base for all raiko2-specific alethia-reth patches, regardless of local checkout path.
-- Put every alethia-reth fix required by raiko2 on `feat/raiko2`; do not keep those fixes only in
-  one-off PR branches, local worktrees, or raiko2-side workaround layers.
-- Rebase `feat/raiko2` onto alethia-reth `origin/main` when upstream alethia-reth or reth changes are
-  adopted, then update raiko2 lockfiles to the resulting branch commit.
-- Raiko2 Cargo manifests should reference alethia-reth with `branch = "feat/raiko2"`; lockfiles are the
-  exact commit pin. Do not pin arbitrary alethia-reth `main` revisions for integration-only fixes.
+- Use `https://github.com/taikoxyz/alethia-reth` `origin/main` as the canonical source for raiko2
+  alethia-reth dependencies.
+- Raiko2 Cargo manifests should reference alethia-reth with explicit `rev` pins to reviewed commits
+  from `origin/main`; do not depend on a moving branch in manifests.
+- When raiko2 requires an alethia-reth fix, land that fix upstream on alethia-reth `main` first, then
+  update raiko2 manifests and lockfiles to the resulting commit.
+- Do not keep raiko2-required alethia-reth fixes only in one-off PR branches, local worktrees, or
+  raiko2-side workaround layers.
 - Treat reth test utilities as non-production support code. Do not solve guest or no-std issues by
   routing through `test-utils` features or dev-only APIs.
 - Keep RISC0 guest `getrandom` handling in `xtask`; do not add a second Cargo config source of truth

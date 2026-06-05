@@ -1,8 +1,28 @@
 # Raiko2 Open Source Readiness Review
 
-## Summary
+## Status
 
-`raiko2` is not quite ready to open source as-is.
+Partially resolved / historical snapshot.
+
+This review captured the repository state on 2026-05-06. Several blockers listed below have since
+been resolved on `main`:
+
+- tracked crash/runtime artifacts were removed and ignore rules were added
+- `NativeProver` no longer embeds a private key; native proofs use explicit mock identity/signature
+  material
+- `SECURITY.md` and `CONTRIBUTING.md` now exist
+- public docs now separate historical plans/issues from the main onboarding path
+
+Remaining public-packaging cleanup, if still desired:
+
+- decide whether tracked agent workflow files such as `AGENTS.md`, `CLAUDE.md`, and `.codex/skills`
+  should stay in the public repo
+- further sanitize operator-specific registry examples in operations/release docs
+- run dependency/license auditing with `cargo audit` / `cargo deny`
+
+## Original Summary
+
+At the time this review was written, `raiko2` was not quite ready to open source as-is.
 
 The main blockers are not architectural. They are mostly repository hygiene, hardcoded/mock
 security-sensitive behavior, and documentation that still assumes an internal operator or
@@ -171,6 +191,6 @@ Recommended follow-up:
 
 ## Readiness Call
 
-Current call: **not ready yet, but close enough that a short cleanup pass should get it there.**
+Original call: **not ready yet, but close enough that a short cleanup pass should get it there.**
 
 The blocking work is mostly packaging and hygiene rather than deep product redesign.

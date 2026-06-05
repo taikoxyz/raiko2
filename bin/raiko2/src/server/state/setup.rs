@@ -1,6 +1,8 @@
 use crate::config::{Config, ResolvedNetworkPair};
 use anyhow::Result;
-use raiko2_primitives::{ProofContext, ProofRequest, ProofType};
+use raiko2_primitives::{
+    PreflightRpcClientConfig, PreflightRpcRetryConfig, ProofContext, ProofRequest, ProofType,
+};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::time::Duration;
@@ -24,6 +26,7 @@ pub(crate) fn build_context(
         },
         raiko2_primitives::ProverConfig::default(),
     );
+    context.preflight.resolved_l1_chain_spec = Some(pair.l1_spec.clone());
     context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
     if !context.config.is_object() {
         context.config = serde_json::json!({});
@@ -35,7 +38,21 @@ pub(crate) fn build_context(
             serde_json::json!(pair.l1_network),
         );
     }
-    let _ = config;
+    if let Some(verify_rpc) = config
+        .preflight
+        .verify_checkpoint_l2_rpc_for_network(&pair.network)
+    {
+        context.preflight.verify_checkpoint_l2_rpc = Some(verify_rpc.to_owned());
+        context.preflight.rpc_client_config = Some(PreflightRpcClientConfig {
+            timeout_ms: config.rpc.client.timeout_ms,
+            concurrency_limit: config.rpc.client.concurrency_limit,
+            retry: PreflightRpcRetryConfig {
+                max_attempts: config.rpc.client.retry.max_attempts,
+                initial_backoff_ms: config.rpc.client.retry.initial_backoff_ms,
+                compute_units_per_second: config.rpc.client.retry.compute_units_per_second,
+            },
+        });
+    }
     Ok(context)
 }
 
@@ -67,6 +84,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -93,6 +111,7 @@ fn task_lease_duration(config: &Config) -> Duration {
     Duration::from_millis(lease_ms.max(60_000))
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
@@ -105,11 +124,13 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
+#[cfg(feature = "local-provers")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     config.prover.sp1.clone()
 }
 
+#[cfg(feature = "local-provers")]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -156,11 +177,41 @@ pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: Pipel
 #[cfg(test)]
 mod tests {
     use super::{
-        boundless_prover_config, boundless_scheduler_config, risc0_prover_config, scheduler_config,
+        boundless_prover_config, boundless_scheduler_config, build_context, risc0_prover_config,
+        scheduler_config,
     };
-    use crate::config::Config;
+    use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
+    use raiko2_primitives::{ProofType, SupportedChainSpecs};
+    use raiko2_provider::L2ProviderKind;
     use raiko2_queue::RetryPolicy;
     use std::time::Duration;
+
+    fn resolved_pair(network: &str, l1_network: &str) -> ResolvedNetworkPair {
+        let specs = SupportedChainSpecs::default();
+        let l1_spec = specs
+            .get_chain_spec(l1_network)
+            .expect("known l1 network")
+            .clone();
+        let l2_spec = specs
+            .get_chain_spec(network)
+            .expect("known l2 network")
+            .clone();
+
+        ResolvedNetworkPair {
+            key: format!("{network}/{l1_network}"),
+            network: network.to_string(),
+            l1_network: l1_network.to_string(),
+            l1_rpc: l1_spec.rpc.clone(),
+            l2_rpc: l2_spec.rpc.clone(),
+            l2_provider: L2ProviderKind::Reth,
+            l2_witness_rpc: l2_spec.rpc.clone(),
+            sp1_verifier_rpc_url: None,
+            sp1_verifier_address: None,
+            boundless: BoundlessPairConfig::default(),
+            l1_spec,
+            l2_spec,
+        }
+    }
 
     #[test]
     fn boundless_scheduler_uses_general_task_policy() {
@@ -259,6 +310,72 @@ mod tests {
         assert_eq!(
             boundless.offer_params.aggregation.timeout_ms_per_mcycle,
             7_000
+        );
+    }
+
+    #[test]
+    fn build_context_uses_network_specific_preflight_verify_rpc_and_rpc_client_config() {
+        let mut config = Config::default();
+        config.preflight.verify_checkpoint_l2_rpcs.insert(
+            "taiko_hoodi".to_string(),
+            "https://verify.hoodi.example".to_string(),
+        );
+        config.rpc.client.timeout_ms = 1234;
+        config.rpc.client.concurrency_limit = 7;
+        config.rpc.client.retry.max_attempts = 9;
+        config.rpc.client.retry.initial_backoff_ms = 88;
+        config.rpc.client.retry.compute_units_per_second = 77;
+
+        let pair = resolved_pair("taiko_hoodi", "hoodi");
+        let context = build_context(&config, &pair, ProofType::Risc0).expect("context");
+
+        assert_eq!(
+            context.preflight.verify_checkpoint_l2_rpc.as_deref(),
+            Some("https://verify.hoodi.example")
+        );
+        assert_eq!(
+            context
+                .preflight
+                .rpc_client_config
+                .as_ref()
+                .map(|cfg| cfg.timeout_ms),
+            Some(1234)
+        );
+        assert_eq!(
+            context
+                .preflight
+                .rpc_client_config
+                .as_ref()
+                .map(|cfg| cfg.concurrency_limit),
+            Some(7)
+        );
+        assert_eq!(
+            context
+                .preflight
+                .rpc_client_config
+                .as_ref()
+                .map(|cfg| cfg.retry.max_attempts),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn build_context_carries_resolved_l1_chain_spec() {
+        let config = Config::default();
+        let mut pair = resolved_pair("taiko_dev", "taiko_dev_l1");
+        pair.l1_spec.beacon_rpc = Some("https://beacon.example.test/".to_string());
+
+        let context = build_context(&config, &pair, ProofType::Sp1).expect("context");
+        let l1_spec = context
+            .preflight
+            .resolved_l1_chain_spec
+            .as_ref()
+            .expect("resolved l1 chain spec");
+
+        assert_eq!(l1_spec.chain_id, pair.l1_spec.chain_id);
+        assert_eq!(
+            l1_spec.beacon_rpc.as_deref(),
+            Some("https://beacon.example.test/")
         );
     }
 }

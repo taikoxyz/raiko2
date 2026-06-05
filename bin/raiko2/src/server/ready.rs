@@ -2,7 +2,7 @@ use crate::config::{Config, GuestSystem, PipelineRoute, QueueBackend, QueueConfi
 use alloy::providers::{Provider as AlloyProvider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::{Context, Result, bail};
-use raiko2_prover::sp1::{
+use raiko2_prover::sp1_config::{
     ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config,
     Sp1RemoteVerifyConfig, Sp1SystemConfig,
 };

@@ -7,14 +7,14 @@ pub mod on_the_spot_witness;
 pub mod rpc;
 
 use alloy::consensus::Header;
-use alloy_primitives::{Address, map::AddressMap};
+use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block;
 
-pub use network::{L2ProviderKind, NetworkProvider};
+pub use network::{L2ProviderKind, NetworkProvider, fetch_l2_blocks, fetch_l2_headers};
 pub use rpc::{DEFAULT_RPC_TIMEOUT_MS, RpcClientConfig, RpcRetryConfig};
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
@@ -41,6 +41,16 @@ pub trait Provider: Send + Sync {
     ) -> RaikoResult<Vec<AddressMap<TrieAccount>>>;
 
     async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
+
+    async fn batch_witnesses_with_tx_lists(
+        &self,
+        _blocks: &[u64],
+        _tx_lists: &[Bytes],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        Err(RaikoError::FeatureNotSupportedError(
+            "provider does not support tx-list execution witnesses".to_string(),
+        ))
+    }
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
 
@@ -70,7 +80,7 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{Bytes, U256};
 
     /// Mock provider for testing.
     pub(crate) struct MockProvider {
@@ -115,8 +125,8 @@ mod tests {
         let account = TrieAccount {
             nonce: 1,
             balance: U256::from(100),
-            storage_root: Default::default(),
-            code_hash: Default::default(),
+            storage_root: alloy_primitives::FixedBytes::default(),
+            code_hash: alloy_primitives::FixedBytes::default(),
         };
 
         assert_eq!(account.nonce, 1);
@@ -147,6 +157,21 @@ mod tests {
         let witnesses = provider.batch_witnesses(&[1]).await?;
         assert!(witnesses.is_empty());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_tx_list_witnesses_fail_fast_when_unsupported() {
+        let provider = MockProvider { blocks: vec![] };
+        let err = provider
+            .batch_witnesses_with_tx_lists(&[1], &[Bytes::from_static(&[0xc0])])
+            .await
+            .expect_err("default tx-list witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("provider does not support tx-list execution witnesses"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

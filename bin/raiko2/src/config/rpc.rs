@@ -56,7 +56,7 @@ pub(crate) fn is_valid_url(url: &str) -> bool {
 }
 
 /// Explicitly allowed L2/L1 network pair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPairConfig {
     pub network: String,
@@ -102,7 +102,7 @@ pub struct ResolvedNetworkPair {
 }
 
 /// Pair-specific Boundless overrides for RISC0 network routes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
@@ -138,7 +138,7 @@ impl BoundlessPairConfig {
 }
 
 /// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessOfferParamsOverride {
     pub batch: Option<BoundlessOfferParams>,

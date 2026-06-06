@@ -1898,14 +1898,6 @@ mod tests {
             super::derivation_source_max_blocks_for_chain_spec_at(
                 &devnet,
                 1,
-                devnet_unzen_timestamp.saturating_sub(1),
-            ),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
-        );
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &devnet,
-                1,
                 *devnet_unzen_timestamp,
             ),
             super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS

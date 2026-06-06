@@ -889,24 +889,19 @@ mod tests {
     }
 
     #[test]
-    fn taiko_devnet_to_alethia_chain_spec_uses_configured_unzen_timestamp() -> Result<()> {
+    fn taiko_devnet_to_alethia_chain_spec_enables_unzen_at_genesis() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
-        let unzen_timestamp = 1_777_787_739;
 
         let taiko = spec.to_taiko_chain_spec()?;
         let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
 
         assert!(
-            !unzen.active_at_timestamp(unzen_timestamp - 1),
-            "Unzen must not be active before the configured devnet timestamp"
-        );
-        assert!(
-            unzen.active_at_timestamp(unzen_timestamp),
-            "Unzen must be active at the configured devnet timestamp"
+            unzen.active_at_timestamp(0),
+            "Unzen must be active at genesis on internal devnet"
         );
         Ok(())
     }

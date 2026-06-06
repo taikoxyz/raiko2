@@ -842,7 +842,7 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
-        let unzen_timestamp = 1_777_787_739;
+        let unzen_timestamp = 0;
 
         assert_eq!(l1_spec.chain_id, 32_382);
         assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
@@ -850,7 +850,7 @@ mod tests {
             l1_spec.beacon_rpc.as_deref(),
             Some("https://example.com/taiko-dev-l1-beacon")
         );
-        assert_eq!(l1_spec.genesis_time, 1_779_670_900);
+        assert_eq!(l1_spec.genesis_time, 1_780_630_944);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
@@ -865,6 +865,10 @@ mod tests {
         assert_eq!(
             l2_spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
             address!("b432bbe475e569b2adef4830ae43d587932f139c")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::SgxGeth)?,
+            address!("698ceB7EF2E001347B1672389d6ca6aCE04b13C8")
         );
         Ok(())
     }

@@ -87,16 +87,28 @@ def resolve_rpc_url(role: str, spec: Dict[str, Any], explicit_rpc: Optional[str]
     return str(rpc)
 
 
+def resolve_contract_for_fork(contracts: Dict[str, Any], fork: str) -> Optional[str]:
+    contract = contracts.get(fork)
+    if contract:
+        return str(contract)
+    configured = [str(value) for value in contracts.values() if value]
+    if len(configured) == 1:
+        return configured[0]
+    return None
+
+
 def resolve_shasta_contract(l2_spec: Dict[str, Any], explicit_contract: Optional[str]) -> str:
     if explicit_contract:
         return explicit_contract
     contracts = l2_spec.get("l1_contract") or {}
-    contract = contracts.get(SHASTA_FORK)
+    contract = resolve_contract_for_fork(contracts, SHASTA_FORK)
     if not contract:
+        available = ",".join(sorted(contracts.keys())) or "none"
         raise ValueError(
-            f"L2 chain spec {l2_spec.get('name')} has no {SHASTA_FORK} l1_contract"
+            f"L2 chain spec {l2_spec.get('name')} has no {SHASTA_FORK} l1_contract "
+            f"and cannot infer one from configured forks: {available}"
         )
-    return str(contract)
+    return contract
 
 
 def resolve_monitor_config(

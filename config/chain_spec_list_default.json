@@ -106,7 +106,7 @@
                 "RISC0": "0x0000000000000000000000000000000000000000"
             }
         },
-        "genesis_time": 1779670900,
+        "genesis_time": 1780630944,
         "seconds_per_slot": 12,
         "is_taiko": false
     },
@@ -152,7 +152,7 @@
                 "Timestamp": 0
             },
             "UNZEN": {
-                "Timestamp": 1777787739
+                "Timestamp": 0
             },
             "CANCUN": {
                 "Timestamp": 0
@@ -174,7 +174,8 @@
             "CANCUN": {
                 "SGX": "0x2184bace3e668bf0eecb22c5ccf02cfca87c8a67",
                 "SP1": "0x9d351f6e72e3095f24dd854c9b8ca69f99a2c538",
-                "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb"
+                "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb",
+                "SGXGETH": "0x698ceB7EF2E001347B1672389d6ca6aCE04b13C8"
             }
         },
         "genesis_time": 0,

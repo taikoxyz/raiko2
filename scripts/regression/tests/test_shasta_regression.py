@@ -177,6 +177,28 @@ class TestChainSpecContracts(unittest.TestCase):
                 "0xabc",
             )
 
+    def test_resolve_event_address_uses_single_configured_contract_if_fork_key_is_absent(self):
+        from shasta_regression import resolve_event_address_from_chain_spec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "taiko_dev",
+                            "l1_contract": {
+                                "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
+                            },
+                        }
+                    ]
+                )
+            )
+            self.assertEqual(
+                resolve_event_address_from_chain_spec(spec_path, "taiko_dev", "SHASTA"),
+                "0xb432bbe475e569b2adef4830ae43d587932f139c",
+            )
+
 
 class TestConfigEventAddress(unittest.TestCase):
     def test_resolve_event_address_from_config(self):

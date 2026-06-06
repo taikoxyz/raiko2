@@ -50,7 +50,13 @@ def resolve_event_address_from_specs(
     for entry in specs:
         if entry.get("name") == chain_name:
             contracts = entry.get("l1_contract", {})
-            return contracts.get(fork)
+            address = contracts.get(fork)
+            if address:
+                return address
+            configured = [value for value in contracts.values() if value]
+            if len(configured) == 1:
+                return configured[0]
+            return None
     return None
 
 

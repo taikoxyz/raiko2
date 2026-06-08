@@ -126,6 +126,87 @@ class GenerateTests(unittest.TestCase):
                 self.assertEqual(generated.opcode_counts[opcode], 2)
                 self.assertTrue(generated.bytes_hex.endswith("00"))
 
+    def test_stack_family_templates_count_target_opcode(self):
+        cases = [
+            ("push17", 0x70, "stack_push"),
+            ("dup16", 0x8F, "stack_dup"),
+            ("swap16", 0x9F, "stack_swap"),
+        ]
+
+        for name, opcode, template in cases:
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    opcode=opcode,
+                    scenario="stack",
+                    template=template,
+                    target_raw_gas=3,
+                )
+                generated = opcode_gas.build_bytecode(case, 3)
+
+                self.assertEqual(generated.opcode_counts[opcode], 3)
+                self.assertTrue(generated.bytes_hex.endswith("00"))
+
+    def test_control_and_mcopy_templates_count_target_opcode(self):
+        cases = [
+            ("jump", 0x56, "jump_chain"),
+            ("jumpi", 0x57, "jumpi_chain"),
+            ("pc", 0x58, "stack_unary_producer"),
+            ("msize", 0x59, "stack_unary_producer"),
+            ("gas", 0x5A, "stack_unary_producer"),
+            ("jumpdest", 0x5B, "jumpdest_chain"),
+            ("mcopy", 0x5E, "memory_copy_32"),
+        ]
+
+        for name, opcode, template in cases:
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    opcode=opcode,
+                    scenario="control",
+                    template=template,
+                    target_raw_gas=3,
+                )
+                generated = opcode_gas.build_bytecode(case, 2)
+
+                self.assertEqual(generated.opcode_counts[opcode], 2)
+                self.assertTrue(generated.bytes_hex.endswith("00"))
+
+    def test_precompile_templates_emit_expected_input_sizes(self):
+        cases = [
+            ("ecrecover", 0x01, "precompile_ecrecover_valid", 128),
+            ("ripemd160", 0x03, "precompile_fixed_32", 32),
+            ("modexp", 0x05, "precompile_modexp_small", 99),
+            ("bn128_add", 0x06, "precompile_bn254_add", 128),
+            ("bn128_mul", 0x07, "precompile_bn254_mul", 96),
+            ("bn128_pairing", 0x08, "precompile_bn254_pairing", 192),
+            ("blake2f", 0x09, "precompile_blake2f_12_rounds", 213),
+            ("point_evaluation", 0x0A, "precompile_kzg_point_evaluation", 192),
+            ("bls12_g1add", 0x0B, "precompile_bls12_g1add_zero", 256),
+            ("bls12_g1msm", 0x0C, "precompile_bls12_g1msm_zero", 160),
+            ("bls12_g2add", 0x0E, "precompile_bls12_g2add_zero", 512),
+            ("bls12_g2msm", 0x0F, "precompile_bls12_g2msm_zero", 288),
+            ("bls12_pairing", 0x11, "precompile_bls12_pairing_zero", 384),
+            ("bls12_map_fp_to_g1", 0x12, "precompile_bls12_map_fp_to_g1_zero", 64),
+            ("bls12_map_fp2_to_g2", 0x13, "precompile_bls12_map_fp2_to_g2_zero", 128),
+        ]
+
+        for name, address, template, input_size in cases:
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    kind="precompile",
+                    address=address,
+                    scenario="precompile",
+                    template=template,
+                    input_size=input_size,
+                    target_raw_gas=1,
+                )
+
+                encoded = opcode_gas.build_precompile_input(case)
+
+                self.assertEqual(len(bytes.fromhex(encoded.removeprefix("0x"))), input_size)
+
 
 if __name__ == "__main__":
     unittest.main()

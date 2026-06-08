@@ -1,6 +1,8 @@
 name = "sp1-smoke"
 backend = "sp1"
 variants = [0, 1, 2, 4]
+include_uzen_pure_opcodes = true
+include_uzen_precompile_bodies = true
 
 [[cases]]
 name = "add"

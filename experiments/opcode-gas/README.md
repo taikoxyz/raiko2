@@ -84,17 +84,18 @@ longer research loops once it has been rebuilt.
 
 ## Current Limitation
 
-The opcode-lab guest is a small experiment-only bytecode interpreter. The precompile-lab guest
-currently supports direct body measurements for `identity(0x04)` and `sha256(0x02)`. These are
-enough to close the local SP1 `proverGas` loop for generated stack, memory, and basic precompile
-templates, but they are not a full alethia-reth/revm execution path yet. `STATICCALL` wrapper cost,
-warm/cold account access, precompile argument sweeps, and full block execution are TODOs for later
-suites.
+The opcode-lab guest is a small experiment-only bytecode interpreter. The smoke manifest now expands
+to every Uzen opcode that can be isolated without state, environment, or CALL/CREATE wrapper
+semantics, including arithmetic, comparison, bitwise, stack, fixed control-flow, and memory-copy
+templates.
 
-The current smoke manifest covers arithmetic/comparison/bitwise pure stack opcodes through `SAR`,
-`KECCAK256`, selected stack/memory opcodes, and the two direct precompile cases. Stack slopes include
-the repeated operand setup needed by the lab bytecode, so use them as smoke damage signals and
-regression anchors, not as final consensus coefficients.
+The precompile-lab guest supports direct body measurements for every Uzen precompile row through
+fixed deterministic inputs. These are direct body calls, not `STATICCALL` dispatch measurements.
+`STATICCALL` wrapper cost, warm/cold account access, precompile argument sweeps, stateful opcodes,
+and full block execution are TODOs for later suites.
+
+Stack, control, memory, and precompile slopes include the setup needed by the lab templates, so use
+them as smoke damage signals and regression anchors, not as final consensus coefficients.
 
 For tiny stack and memory templates, always inspect `fit.json` before using `damage.md`. Low R2 means
 the current variant counts are too small or the template has setup/cleanup noise. In that case, rerun

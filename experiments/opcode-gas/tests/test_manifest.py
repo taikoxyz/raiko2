@@ -17,6 +17,18 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest.name, "sp1-smoke")
         self.assertEqual(manifest.backend, "sp1")
         self.assertEqual(manifest.variants, [0, 1, 2, 4])
+        measured_opcodes = {
+            case.opcode
+            for case in manifest.cases
+            if case.kind == "opcode" and case.opcode is not None
+        }
+        measured_precompiles = {
+            case.address
+            for case in manifest.cases
+            if case.kind == "precompile" and case.address is not None
+        }
+        self.assertFalse(opcode_gas.PLANNED_PURE_OPCODE_OPCODES - measured_opcodes)
+        self.assertEqual(measured_precompiles, set(opcode_gas.UZEN_PRECOMPILE_ENTRIES))
         self.assertGreaterEqual(
             {case.name for case in manifest.cases},
             {
@@ -50,9 +62,35 @@ class ManifestTests(unittest.TestCase):
                 "mload",
                 "mstore",
                 "mstore8",
+                "mcopy",
+                "jump",
+                "jumpi",
+                "pc",
+                "msize",
+                "gas",
+                "jumpdest",
+                "push0",
+                "push32",
+                "dup16",
                 "swap1",
+                "swap16",
+                "ecrecover",
                 "identity",
                 "sha256",
+                "ripemd160",
+                "modexp",
+                "bn128_add",
+                "bn128_mul",
+                "bn128_pairing",
+                "blake2f",
+                "point_evaluation",
+                "bls12_g1add",
+                "bls12_g1msm",
+                "bls12_g2add",
+                "bls12_g2msm",
+                "bls12_pairing",
+                "bls12_map_fp_to_g1",
+                "bls12_map_fp2_to_g2",
             },
         )
         self.assertEqual(

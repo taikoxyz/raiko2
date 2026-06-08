@@ -294,10 +294,11 @@ V1 keeps the output compatible with alethia-reth's one-dimensional Uzen zk gas t
 storage access, argument-dependent precompile costs, and memory-size sweeps are tracked as future
 dimensions, not V1 coefficients.
 
-The current `sp1-opcode-lab` guest is an experiment-only mini bytecode interpreter. The
-`sp1-precompile-lab` guest supports direct `identity(0x04)` and `sha256(0x02)` body measurements.
-Both deliberately remove Shasta proposal/block noise and avoid live RPC, but they are not yet full
-alethia-reth/revm execution.
+The current `sp1-opcode-lab` guest is an experiment-only mini bytecode interpreter covering every
+Uzen opcode that can be isolated without state, environment, or CALL/CREATE wrapper semantics. The
+`sp1-precompile-lab` guest supports direct body measurements for every Uzen precompile row through
+fixed deterministic inputs. Both deliberately remove Shasta proposal/block noise and avoid live RPC,
+but they are not yet full alethia-reth/revm execution.
 
 The run command groups generated `guest-input.json` files by lab stage and batches each group into
 one launcher process via `--input-list` and `--jsonl-out`. This is important for research loops

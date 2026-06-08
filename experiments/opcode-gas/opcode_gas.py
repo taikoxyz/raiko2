@@ -299,6 +299,74 @@ PLANNED_PURE_OPCODE_OPCODES = set(UZEN_OPCODE_ENTRIES) - (
     SPAWN_WRAPPER_OPCODES | ZERO_OR_HALTING_OPCODES | STATE_OR_REVM_OPCODES
 )
 
+PURE_OPCODE_DEFAULTS = {
+    0x01: ("arithmetic", "stack_binary", 3),
+    0x02: ("arithmetic", "stack_binary", 5),
+    0x03: ("arithmetic", "stack_binary", 3),
+    0x04: ("arithmetic", "stack_binary", 5),
+    0x05: ("arithmetic", "stack_binary", 5),
+    0x06: ("arithmetic", "stack_binary", 5),
+    0x07: ("arithmetic", "stack_binary", 5),
+    0x08: ("arithmetic", "stack_ternary", 8),
+    0x09: ("arithmetic", "stack_ternary", 8),
+    0x0A: ("arithmetic", "stack_exp", 60),
+    0x0B: ("arithmetic", "stack_binary", 5),
+    0x10: ("comparison", "stack_binary", 3),
+    0x11: ("comparison", "stack_binary", 3),
+    0x12: ("comparison", "stack_binary", 3),
+    0x13: ("comparison", "stack_binary", 3),
+    0x14: ("comparison", "stack_binary", 3),
+    0x15: ("bitwise", "stack_unary", 3),
+    0x16: ("bitwise", "stack_binary", 3),
+    0x17: ("bitwise", "stack_binary", 3),
+    0x18: ("bitwise", "stack_binary", 3),
+    0x19: ("bitwise", "stack_unary", 3),
+    0x1A: ("bitwise", "stack_binary", 3),
+    0x1B: ("bitwise", "stack_binary", 3),
+    0x1C: ("bitwise", "stack_binary", 3),
+    0x1D: ("bitwise", "stack_binary", 3),
+    0x20: ("memory", "keccak_32", 36),
+    0x50: ("stack", "stack_pop", 2),
+    0x51: ("memory", "memory_load_32", 3),
+    0x52: ("memory", "memory_store_32", 3),
+    0x53: ("memory", "memory_store8", 3),
+    0x56: ("control", "jump_chain", 8),
+    0x57: ("control", "jumpi_chain", 10),
+    0x58: ("control", "stack_unary_producer", 2),
+    0x59: ("memory", "stack_unary_producer", 2),
+    0x5A: ("control", "stack_unary_producer", 2),
+    0x5B: ("control", "jumpdest_chain", 1),
+    0x5E: ("memory", "memory_copy_32", 6),
+    0x5F: ("stack", "stack_push", 2),
+}
+
+for _opcode in range(0x60, 0x80):
+    PURE_OPCODE_DEFAULTS[_opcode] = ("stack", "stack_push", 3)
+for _opcode in range(0x80, 0x90):
+    PURE_OPCODE_DEFAULTS[_opcode] = ("stack", "stack_dup", 3)
+for _opcode in range(0x90, 0xA0):
+    PURE_OPCODE_DEFAULTS[_opcode] = ("stack", "stack_swap", 3)
+
+PRECOMPILE_BODY_DEFAULTS = {
+    0x01: ("precompile_ecrecover_valid", 128, 3_000),
+    0x02: ("precompile_fixed_32", 32, 72),
+    0x03: ("precompile_fixed_32", 32, 720),
+    0x04: ("precompile_fixed_32", 32, 18),
+    0x05: ("precompile_modexp_small", 99, 500),
+    0x06: ("precompile_bn254_add", 128, 150),
+    0x07: ("precompile_bn254_mul", 96, 6_000),
+    0x08: ("precompile_bn254_pairing", 192, 79_000),
+    0x09: ("precompile_blake2f_12_rounds", 213, 12),
+    0x0A: ("precompile_kzg_point_evaluation", 192, 50_000),
+    0x0B: ("precompile_bls12_g1add_zero", 256, 375),
+    0x0C: ("precompile_bls12_g1msm_zero", 160, 12_000),
+    0x0E: ("precompile_bls12_g2add_zero", 512, 600),
+    0x0F: ("precompile_bls12_g2msm_zero", 288, 22_500),
+    0x11: ("precompile_bls12_pairing_zero", 384, 70_300),
+    0x12: ("precompile_bls12_map_fp_to_g1_zero", 64, 5_500),
+    0x13: ("precompile_bls12_map_fp2_to_g2_zero", 128, 23_800),
+}
+
 
 def load_manifest(path: pathlib.Path) -> Manifest:
     data = tomllib.loads(path.read_text())
@@ -315,11 +383,71 @@ def load_manifest(path: pathlib.Path) -> Manifest:
         )
         for item in data.get("cases", [])
     ]
+    cases = expand_manifest_cases(
+        cases,
+        include_uzen_pure_opcodes=bool(data.get("include_uzen_pure_opcodes", False)),
+        include_uzen_precompile_bodies=bool(data.get("include_uzen_precompile_bodies", False)),
+    )
     return Manifest(
         name=data["name"],
         backend=data.get("backend", "sp1"),
         variants=[int(value) for value in data.get("variants", [])],
         cases=cases,
+    )
+
+
+def expand_manifest_cases(
+    cases: list[CaseSpec],
+    *,
+    include_uzen_pure_opcodes: bool,
+    include_uzen_precompile_bodies: bool,
+) -> list[CaseSpec]:
+    expanded = list(cases)
+    measured_opcodes = {
+        case.opcode for case in expanded if case.kind == "opcode" and case.opcode is not None
+    }
+    measured_precompiles = {
+        case.address for case in expanded if case.kind == "precompile" and case.address is not None
+    }
+
+    if include_uzen_pure_opcodes:
+        for opcode in sorted(PLANNED_PURE_OPCODE_OPCODES - measured_opcodes):
+            expanded.append(default_opcode_case(opcode))
+    if include_uzen_precompile_bodies:
+        for address in sorted(set(UZEN_PRECOMPILE_ENTRIES) - measured_precompiles):
+            expanded.append(default_precompile_case(address))
+    return expanded
+
+
+def default_opcode_case(opcode: int) -> CaseSpec:
+    name, _ = UZEN_OPCODE_ENTRIES[opcode]
+    try:
+        scenario, template, target_raw_gas = PURE_OPCODE_DEFAULTS[opcode]
+    except KeyError as exc:
+        raise ValueError(f"no pure opcode default for 0x{opcode:02x} {name}") from exc
+    return CaseSpec(
+        name=name,
+        opcode=opcode,
+        scenario=scenario,
+        template=template,
+        target_raw_gas=target_raw_gas,
+    )
+
+
+def default_precompile_case(address: int) -> CaseSpec:
+    name, _ = UZEN_PRECOMPILE_ENTRIES[address]
+    try:
+        template, input_size, target_raw_gas = PRECOMPILE_BODY_DEFAULTS[address]
+    except KeyError as exc:
+        raise ValueError(f"no precompile body default for 0x{address:02x} {name}") from exc
+    return CaseSpec(
+        name=name,
+        kind="precompile",
+        address=address,
+        scenario="precompile",
+        template=template,
+        input_size=input_size,
+        target_raw_gas=target_raw_gas,
     )
 
 
@@ -354,6 +482,22 @@ def build_bytecode(case: CaseSpec, target_count: int) -> GeneratedBytecode:
         bytecode = build_stack_pop_bytecode(target_count)
     elif case.template == "stack_swap1":
         bytecode = build_stack_swap1_bytecode(target_count)
+    elif case.template == "stack_push":
+        bytecode = build_stack_push_bytecode(case.opcode, target_count)
+    elif case.template == "stack_dup":
+        bytecode = build_stack_dup_bytecode(case.opcode, target_count)
+    elif case.template == "stack_swap":
+        bytecode = build_stack_swap_bytecode(case.opcode, target_count)
+    elif case.template == "jump_chain":
+        bytecode = build_jump_chain_bytecode(target_count)
+    elif case.template == "jumpi_chain":
+        bytecode = build_jumpi_chain_bytecode(target_count)
+    elif case.template == "stack_unary_producer":
+        bytecode = build_stack_unary_producer_bytecode(case.opcode, target_count)
+    elif case.template == "jumpdest_chain":
+        bytecode = build_jumpdest_chain_bytecode(target_count)
+    elif case.template == "memory_copy_32":
+        bytecode = build_memory_copy_32_bytecode(target_count)
     else:
         raise ValueError(f"unknown template: {case.template}")
     return GeneratedBytecode(bytes_hex=bytecode.hex(), opcode_counts=count_opcodes(bytecode))
@@ -459,6 +603,97 @@ def build_stack_swap1_bytecode(target_count: int) -> bytes:
     return bytes(out)
 
 
+def build_stack_push_bytecode(opcode: int, target_count: int) -> bytes:
+    out = bytearray()
+    for _ in range(target_count):
+        append_push_opcode(out, opcode)
+        out.append(0x50)
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_stack_dup_bytecode(opcode: int, target_count: int) -> bytes:
+    depth = opcode - 0x7F
+    if not 1 <= depth <= 16:
+        raise ValueError(f"not a DUP opcode: 0x{opcode:02x}")
+    out = bytearray()
+    for value in range(1, depth + 1):
+        out.extend([0x60, value])
+    for _ in range(target_count):
+        out.extend([opcode, 0x50])
+    out.extend([0x50] * depth)
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_stack_swap_bytecode(opcode: int, target_count: int) -> bytes:
+    depth = opcode - 0x8F
+    if not 1 <= depth <= 16:
+        raise ValueError(f"not a SWAP opcode: 0x{opcode:02x}")
+    out = bytearray()
+    for value in range(1, depth + 2):
+        out.extend([0x60, value])
+    out.extend([opcode] * target_count)
+    out.extend([0x50] * (depth + 1))
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_jump_chain_bytecode(target_count: int) -> bytes:
+    out = bytearray()
+    for _ in range(target_count):
+        dest = len(out) + 3
+        if dest > 0xFF:
+            raise ValueError("jump_chain template currently supports only PUSH1 destinations")
+        out.extend([0x60, dest, 0x56, 0x5B])
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_jumpi_chain_bytecode(target_count: int) -> bytes:
+    out = bytearray()
+    for _ in range(target_count):
+        dest = len(out) + 5
+        if dest > 0xFF:
+            raise ValueError("jumpi_chain template currently supports only PUSH1 destinations")
+        out.extend([0x60, 0x01, 0x60, dest, 0x57, 0x5B])
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_stack_unary_producer_bytecode(opcode: int, target_count: int) -> bytes:
+    out = bytearray()
+    for _ in range(target_count):
+        out.extend([opcode, 0x50])
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_jumpdest_chain_bytecode(target_count: int) -> bytes:
+    out = bytearray([0x5B] * target_count)
+    out.append(0x00)
+    return bytes(out)
+
+
+def build_memory_copy_32_bytecode(target_count: int) -> bytes:
+    out = bytearray([0x60, 0x01, 0x60, 0x00, 0x52])  # initialize source word
+    for _ in range(target_count):
+        out.extend([0x60, 0x20, 0x60, 0x00, 0x60, 0x20, 0x5E])
+    out.append(0x00)
+    return bytes(out)
+
+
+def append_push_opcode(out: bytearray, opcode: int) -> None:
+    if opcode == 0x5F:
+        out.append(opcode)
+        return
+    if not 0x60 <= opcode <= 0x7F:
+        raise ValueError(f"not a PUSH opcode: 0x{opcode:02x}")
+    size = opcode - 0x5F
+    out.append(opcode)
+    out.extend((index + 1) & 0xFF for index in range(size))
+
+
 def count_opcodes(bytecode: bytes) -> dict[int, int]:
     counts: dict[int, int] = {}
     i = 0
@@ -474,8 +709,73 @@ def count_opcodes(bytecode: bytes) -> dict[int, int]:
 def build_precompile_input(case: CaseSpec) -> str:
     if case.input_size is None:
         raise ValueError(f"precompile case {case.name} is missing input_size")
-    payload = bytes((index % 251 for index in range(case.input_size)))
+    payload = build_precompile_payload(case)
+    if len(payload) != case.input_size:
+        raise ValueError(
+            f"precompile case {case.name} template emitted {len(payload)} bytes, "
+            f"expected {case.input_size}"
+        )
     return "0x" + payload.hex()
+
+
+def build_precompile_payload(case: CaseSpec) -> bytes:
+    if case.template in {"precompile_fixed", "precompile_fixed_32"}:
+        if case.input_size is None:
+            raise ValueError(f"precompile case {case.name} is missing input_size")
+        return bytes((index % 251 for index in range(case.input_size)))
+    if case.template == "precompile_ecrecover_valid":
+        return ecrecover_payload()
+    if case.template == "precompile_modexp_small":
+        return modexp_small_payload()
+    if case.template == "precompile_bn254_add":
+        return bytes(128)
+    if case.template == "precompile_bn254_mul":
+        return bytes(96)
+    if case.template == "precompile_bn254_pairing":
+        return bytes(192)
+    if case.template == "precompile_blake2f_12_rounds":
+        payload = bytearray(213)
+        payload[:4] = (12).to_bytes(4, "big")
+        payload[212] = 1
+        return bytes(payload)
+    if case.template == "precompile_kzg_point_evaluation":
+        return bytes.fromhex(
+            "01e798154708fe7789429634053cbf9f99b619f9f084048927333fce637f549b"
+            "73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000"
+            "1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9"
+            "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7"
+            "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc2160744faf0070725e00b60ad9a026a15b1a8c"
+        )
+    zero_sizes = {
+        "precompile_bls12_g1add_zero": 256,
+        "precompile_bls12_g1msm_zero": 160,
+        "precompile_bls12_g2add_zero": 512,
+        "precompile_bls12_g2msm_zero": 288,
+        "precompile_bls12_pairing_zero": 384,
+        "precompile_bls12_map_fp_to_g1_zero": 64,
+        "precompile_bls12_map_fp2_to_g2_zero": 128,
+    }
+    if case.template in zero_sizes:
+        return bytes(zero_sizes[case.template])
+    raise ValueError(f"unknown precompile template: {case.template}")
+
+
+def ecrecover_payload() -> bytes:
+    return bytes.fromhex(
+        "6b6f6f7468656e65766572676f6e6e6167697665796f75726d696e646f6e6e61"
+        "000000000000000000000000000000000000000000000000000000000000001b"
+        "b50bb6795f31748a4d37c3a97ebd06a22ea33771040f5c05d6e2bb2d38c6227c"
+        "343b6659db969959d9fddb44bd0dd9b9dd47666ab52871901d1761eb82ec8722"
+    )
+
+
+def modexp_small_payload() -> bytes:
+    out = bytearray()
+    for size in (1, 1, 1):
+        out.extend(bytes(31))
+        out.append(size)
+    out.extend([2, 3, 5])
+    return bytes(out)
 
 
 def generate_cases(manifest: Manifest, out_dir: pathlib.Path) -> list[pathlib.Path]:

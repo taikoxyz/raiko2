@@ -84,6 +84,31 @@ pub fn execute_bytecode(bytecode: &[u8]) -> u64 {
                 ensure_memory(&mut memory, offset.saturating_add(1));
                 memory[offset] = value as u8;
             }
+            0x56 => {
+                pc = checked_jump_destination(pop(&mut stack), bytecode);
+            }
+            0x57 => {
+                let destination = pop(&mut stack);
+                let condition = pop(&mut stack);
+                if condition != 0 {
+                    pc = checked_jump_destination(destination, bytecode);
+                }
+            }
+            0x58 => stack.push((pc - 1) as u64),
+            0x59 => stack.push(memory.len() as u64),
+            0x5A => stack.push(u64::MAX.saturating_sub(pc as u64)),
+            0x5B => {}
+            0x5E => {
+                let destination = to_usize(pop(&mut stack));
+                let source = to_usize(pop(&mut stack));
+                let len = to_usize(pop(&mut stack));
+                let end = source
+                    .saturating_add(len)
+                    .max(destination.saturating_add(len));
+                ensure_memory(&mut memory, end);
+                let copied = memory[source..source + len].to_vec();
+                memory[destination..destination + len].copy_from_slice(&copied);
+            }
             0x5f => stack.push(0),
             0x60..=0x7f => {
                 let len = usize::from(opcode - 0x5f);
@@ -96,16 +121,20 @@ pub fn execute_bytecode(bytecode: &[u8]) -> u64 {
                 pc += len;
                 stack.push(value);
             }
-            0x80 => {
-                let value = *stack.last().expect("DUP1 requires stack item");
+            0x80..=0x8F => {
+                let depth = usize::from(opcode - 0x7F);
+                let value = *stack
+                    .get(stack.len().checked_sub(depth).expect("DUP depth underflow"))
+                    .unwrap_or_else(|| panic!("DUP{depth} requires {depth} stack item(s)"));
                 stack.push(value);
             }
-            0x90 => {
+            0x90..=0x9F => {
+                let depth = usize::from(opcode - 0x8F);
                 let len = stack.len();
-                if len < 2 {
-                    panic!("SWAP1 requires two stack items");
+                if len <= depth {
+                    panic!("SWAP{depth} requires {} stack items", depth + 1);
                 }
-                stack.swap(len - 1, len - 2);
+                stack.swap(len - 1, len - 1 - depth);
             }
             _ => panic!("unsupported opcode 0x{opcode:02x}"),
         }
@@ -145,6 +174,14 @@ fn read_word(bytes: &[u8]) -> u64 {
 
 fn to_usize(value: u64) -> usize {
     usize::try_from(value).expect("memory index too large")
+}
+
+fn checked_jump_destination(destination: u64, bytecode: &[u8]) -> usize {
+    let destination = to_usize(destination);
+    if bytecode.get(destination) != Some(&0x5B) {
+        panic!("invalid JUMP destination {destination}");
+    }
+    destination
 }
 
 fn as_i64(value: u64) -> i64 {
@@ -261,5 +298,31 @@ mod tests {
             0x60, 0x00, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0x20, 0x50, 0x00,
         ];
         assert_eq!(execute_bytecode(&bytecode), 32);
+    }
+
+    #[test]
+    fn executes_remaining_pure_opcode_templates() {
+        let bytecode = [
+            0x5f, 0x50, // PUSH0; POP
+            0x7f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x50, // PUSH32; POP
+            0x60, 0x01, 0x60, 0x02, 0x60, 0x03, 0x60, 0x04, 0x60, 0x05, 0x60, 0x06, 0x60,
+            0x07, 0x60, 0x08, 0x60, 0x09, 0x60, 0x0a, 0x60, 0x0b, 0x60, 0x0c, 0x60, 0x0d,
+            0x60, 0x0e, 0x60, 0x0f, 0x60, 0x10, 0x8f, 0x50, // DUP16; POP
+            0x60, 0x11,
+            0x9f, // SWAP16
+            0x58, 0x50, // PC; POP
+            0x59, 0x50, // MSIZE; POP
+            0x5a, 0x50, // GAS; POP
+            0x60, 0x01, 0x60, 0x00, 0x52, // MSTORE
+            0x60, 0x20, 0x60, 0x00, 0x60, 0x20, 0x5e, // MCOPY
+            0x60, 0x5f, 0x56, // JUMP to the next JUMPDEST
+            0x00, 0x5b, // skipped STOP; JUMPDEST
+            0x60, 0x01, 0x60, 0x66, 0x57, // JUMPI to the final JUMPDEST
+            0x00, 0x5b, 0x00,
+        ];
+
+        assert_ne!(execute_bytecode(&bytecode), 0);
     }
 }

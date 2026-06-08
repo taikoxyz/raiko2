@@ -66,25 +66,238 @@ class DamageResult:
     binding_resource: str
 
 
-UZEN_OPCODE_MULTIPLIERS = {
-    0x01: 12,  # ADD
-    0x02: 21,  # MUL
-    0x03: 13,  # SUB
-    0x04: 110,  # DIV
-    0x06: 95,  # MOD
-    0x10: 11,  # LT
-    0x11: 10,  # GT
-    0x14: 35,  # EQ
-    0x16: 8,  # AND
-    0x17: 9,  # OR
-    0x18: 9,  # XOR
-    0x20: 85,  # KECCAK256
+@dataclass(frozen=True)
+class InventoryRow:
+    kind: str
+    identifier: str
+    name: str
+    multiplier: int
+    status: str
+    manifest_case: str | None = None
+
+
+UZEN_OPCODE_ENTRIES = {
+    0x00: ("stop", 0),
+    0x01: ("add", 12),
+    0x02: ("mul", 21),
+    0x03: ("sub", 13),
+    0x04: ("div", 110),
+    0x05: ("sdiv", 93),
+    0x06: ("mod", 95),
+    0x07: ("smod", 29),
+    0x08: ("addmod", 71),
+    0x09: ("mulmod", 152),
+    0x0A: ("exp", 33),
+    0x0B: ("signextend", 21),
+    0x10: ("lt", 11),
+    0x11: ("gt", 10),
+    0x12: ("slt", 14),
+    0x13: ("sgt", 14),
+    0x14: ("eq", 35),
+    0x15: ("iszero", 8),
+    0x16: ("and", 8),
+    0x17: ("or", 9),
+    0x18: ("xor", 9),
+    0x19: ("not", 6),
+    0x1A: ("byte", 9),
+    0x1B: ("shl", 20),
+    0x1C: ("shr", 19),
+    0x1D: ("sar", 29),
+    0x20: ("keccak256", 85),
+    0x30: ("address", 22),
+    0x31: ("balance", 6),
+    0x32: ("origin", 21),
+    0x33: ("caller", 21),
+    0x34: ("callvalue", 13),
+    0x35: ("calldataload", 20),
+    0x36: ("calldatasize", 11),
+    0x37: ("calldatacopy", 12),
+    0x38: ("codesize", 11),
+    0x39: ("codecopy", 13),
+    0x3A: ("gasprice", 14),
+    0x3B: ("extcodesize", 6),
+    0x3C: ("extcodecopy", 6),
+    0x3D: ("returndatasize", 10),
+    0x3E: ("returndatacopy", 9),
+    0x3F: ("extcodehash", 8),
+    0x40: ("blockhash", 7),
+    0x41: ("coinbase", 21),
+    0x42: ("timestamp", 11),
+    0x43: ("number", 11),
+    0x44: ("prevrandao", 28),
+    0x45: ("gaslimit", 11),
+    0x46: ("chainid", 11),
+    0x47: ("selfbalance", 85),
+    0x48: ("basefee", 11),
+    0x49: ("blobhash", 10),
+    0x4A: ("blobbasefee", 15),
+    0x50: ("pop", 5),
+    0x51: ("mload", 20),
+    0x52: ("mstore", 22),
+    0x53: ("mstore8", 9),
+    0x54: ("sload", 5),
+    0x55: ("sstore", 13),
+    0x56: ("jump", 3),
+    0x57: ("jumpi", 5),
+    0x58: ("pc", 12),
+    0x59: ("msize", 11),
+    0x5A: ("gas", 11),
+    0x5B: ("jumpdest", 9),
+    0x5C: ("tload", 1),
+    0x5D: ("tstore", 6),
+    0x5E: ("mcopy", 5),
+    0x5F: ("push0", 10),
+    0x60: ("push1", 5),
+    0x61: ("push2", 5),
+    0x62: ("push3", 6),
+    0x63: ("push4", 8),
+    0x64: ("push5", 6),
+    0x65: ("push6", 8),
+    0x66: ("push7", 7),
+    0x67: ("push8", 7),
+    0x68: ("push9", 9),
+    0x69: ("push10", 10),
+    0x6A: ("push11", 8),
+    0x6B: ("push12", 9),
+    0x6C: ("push13", 7),
+    0x6D: ("push14", 12),
+    0x6E: ("push15", 10),
+    0x6F: ("push16", 11),
+    0x70: ("push17", 13),
+    0x71: ("push18", 11),
+    0x72: ("push19", 11),
+    0x73: ("push20", 13),
+    0x74: ("push21", 14),
+    0x75: ("push22", 16),
+    0x76: ("push23", 12),
+    0x77: ("push24", 16),
+    0x78: ("push25", 13),
+    0x79: ("push26", 14),
+    0x7A: ("push27", 15),
+    0x7B: ("push28", 17),
+    0x7C: ("push29", 17),
+    0x7D: ("push30", 12),
+    0x7E: ("push31", 18),
+    0x7F: ("push32", 17),
+    0x80: ("dup1", 6),
+    0x81: ("dup2", 5),
+    0x82: ("dup3", 6),
+    0x83: ("dup4", 6),
+    0x84: ("dup5", 6),
+    0x85: ("dup6", 6),
+    0x86: ("dup7", 5),
+    0x87: ("dup8", 6),
+    0x88: ("dup9", 7),
+    0x89: ("dup10", 5),
+    0x8A: ("dup11", 6),
+    0x8B: ("dup12", 8),
+    0x8C: ("dup13", 6),
+    0x8D: ("dup14", 7),
+    0x8E: ("dup15", 8),
+    0x8F: ("dup16", 6),
+    0x90: ("swap1", 16),
+    0x91: ("swap2", 18),
+    0x92: ("swap3", 18),
+    0x93: ("swap4", 19),
+    0x94: ("swap5", 16),
+    0x95: ("swap6", 17),
+    0x96: ("swap7", 17),
+    0x97: ("swap8", 15),
+    0x98: ("swap9", 18),
+    0x99: ("swap10", 17),
+    0x9A: ("swap11", 18),
+    0x9B: ("swap12", 19),
+    0x9C: ("swap13", 19),
+    0x9D: ("swap14", 18),
+    0x9E: ("swap15", 17),
+    0x9F: ("swap16", 18),
+    0xA0: ("log0", 6),
+    0xA1: ("log1", 7),
+    0xA2: ("log2", 4),
+    0xA3: ("log3", 5),
+    0xA4: ("log4", 5),
+    0xF0: ("create", 1),
+    0xF1: ("call", 25),
+    0xF2: ("callcode", 24),
+    0xF3: ("return", 0),
+    0xF4: ("delegatecall", 21),
+    0xF5: ("create2", 1),
+    0xFA: ("staticcall", 24),
+    0xFD: ("revert", 0),
+    0xFE: ("invalid", 0),
+    0xFF: ("selfdestruct", 0),
 }
 
-UZEN_PRECOMPILE_MULTIPLIERS = {
-    0x02: 10,  # SHA256
-    0x04: 2,  # identity
+UZEN_PRECOMPILE_ENTRIES = {
+    0x01: ("ecrecover", 81),
+    0x02: ("sha256", 10),
+    0x03: ("ripemd160", 3),
+    0x04: ("identity", 2),
+    0x05: ("modexp", 1363),
+    0x06: ("bn128_add", 38),
+    0x07: ("bn128_mul", 87),
+    0x08: ("bn128_pairing", 82),
+    0x09: ("blake2f", 243),
+    0x0A: ("point_evaluation", 398),
+    0x0B: ("bls12_g1add", 112),
+    0x0C: ("bls12_g1msm", 52),
+    0x0E: ("bls12_g2add", 111),
+    0x0F: ("bls12_g2msm", 39),
+    0x11: ("bls12_pairing", 134),
+    0x12: ("bls12_map_fp_to_g1", 159),
+    0x13: ("bls12_map_fp2_to_g2", 112),
 }
+
+UZEN_OPCODE_MULTIPLIERS = {
+    opcode: multiplier for opcode, (_, multiplier) in UZEN_OPCODE_ENTRIES.items()
+}
+UZEN_PRECOMPILE_MULTIPLIERS = {
+    address: multiplier for address, (_, multiplier) in UZEN_PRECOMPILE_ENTRIES.items()
+}
+
+SPAWN_WRAPPER_OPCODES = {0xF0, 0xF1, 0xF2, 0xF4, 0xF5, 0xFA}
+ZERO_OR_HALTING_OPCODES = {0x00, 0xF3, 0xFD, 0xFE, 0xFF}
+STATE_OR_REVM_OPCODES = {
+    0x30,
+    0x31,
+    0x32,
+    0x33,
+    0x34,
+    0x35,
+    0x36,
+    0x37,
+    0x38,
+    0x39,
+    0x3A,
+    0x3B,
+    0x3C,
+    0x3D,
+    0x3E,
+    0x3F,
+    0x40,
+    0x41,
+    0x42,
+    0x43,
+    0x44,
+    0x45,
+    0x46,
+    0x47,
+    0x48,
+    0x49,
+    0x4A,
+    0x54,
+    0x55,
+    0x5C,
+    0x5D,
+    0xA0,
+    0xA1,
+    0xA2,
+    0xA3,
+    0xA4,
+}
+PLANNED_PURE_OPCODE_OPCODES = set(UZEN_OPCODE_ENTRIES) - (
+    SPAWN_WRAPPER_OPCODES | ZERO_OR_HALTING_OPCODES | STATE_OR_REVM_OPCODES
+)
 
 
 def load_manifest(path: pathlib.Path) -> Manifest:
@@ -431,6 +644,69 @@ def current_uzen_multiplier(case: CaseSpec) -> int:
     raise ValueError(f"unknown case kind: {case.kind}")
 
 
+def build_inventory(manifest: Manifest) -> list[InventoryRow]:
+    measured_opcodes = {
+        case.opcode: case.name
+        for case in manifest.cases
+        if case.kind == "opcode" and case.opcode is not None
+    }
+    measured_precompiles = {
+        case.address: case.name
+        for case in manifest.cases
+        if case.kind == "precompile" and case.address is not None
+    }
+
+    rows = []
+    for opcode, (name, multiplier) in sorted(UZEN_OPCODE_ENTRIES.items()):
+        manifest_case = measured_opcodes.get(opcode)
+        rows.append(
+            InventoryRow(
+                kind="opcode",
+                identifier=f"0x{opcode:02x}",
+                name=name,
+                multiplier=multiplier,
+                status=manifest_case and "measured" or classify_opcode_status(opcode),
+                manifest_case=manifest_case,
+            )
+        )
+    for address, (name, multiplier) in sorted(UZEN_PRECOMPILE_ENTRIES.items()):
+        manifest_case = measured_precompiles.get(address)
+        rows.append(
+            InventoryRow(
+                kind="precompile",
+                identifier=f"0x{address:02x}",
+                name=name,
+                multiplier=multiplier,
+                status=manifest_case and "measured" or "needs_precompile_body",
+                manifest_case=manifest_case,
+            )
+        )
+    return rows
+
+
+def classify_opcode_status(opcode: int) -> str:
+    if opcode in SPAWN_WRAPPER_OPCODES:
+        return "needs_spawn_wrapper"
+    if opcode in ZERO_OR_HALTING_OPCODES:
+        return "not_measured_zero_or_halting"
+    if opcode in STATE_OR_REVM_OPCODES:
+        return "needs_state_or_revm"
+    if opcode in PLANNED_PURE_OPCODE_OPCODES:
+        return "planned_pure_opcode"
+    return "needs_state_or_revm"
+
+
+def inventory_report(manifest_path: pathlib.Path, out_dir: pathlib.Path) -> list[InventoryRow]:
+    manifest = load_manifest(manifest_path)
+    rows = build_inventory(manifest)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "inventory.json").write_text(
+        json.dumps([asdict(row) for row in rows], indent=2, sort_keys=True) + "\n"
+    )
+    write_inventory_markdown_report(out_dir / "inventory.md", rows)
+    return rows
+
+
 def damage_report(
     *,
     fit_path: pathlib.Path,
@@ -469,6 +745,21 @@ def damage_report(
         zk_gas_limit=zk_gas_limit,
     )
     return results
+
+
+def write_inventory_markdown_report(path: pathlib.Path, rows: list[InventoryRow]) -> None:
+    lines = [
+        "# ZKGas Coverage Inventory",
+        "",
+        "| Kind | ID | Name | Multiplier | Status | Manifest case |",
+        "| --- | --- | --- | ---: | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row.kind} | {row.identifier} | {row.name} | {row.multiplier} | "
+            f"{row.status} | {row.manifest_case or ''} |"
+        )
+    path.write_text("\n".join(lines) + "\n")
 
 
 def write_markdown_report(path: pathlib.Path, results: list[FitResult]) -> None:
@@ -555,6 +846,11 @@ def cmd_damage(args: argparse.Namespace) -> None:
     print(f"wrote damage report for {len(results)} case(s)")
 
 
+def cmd_inventory(args: argparse.Namespace) -> None:
+    rows = inventory_report(manifest_path=args.manifest, out_dir=args.out)
+    print(f"wrote inventory report for {len(rows)} row(s)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -594,6 +890,11 @@ def build_parser() -> argparse.ArgumentParser:
     damage.add_argument("--zk-gas-limit", type=int, required=True)
     damage.add_argument("--out", type=pathlib.Path, required=True)
     damage.set_defaults(func=cmd_damage)
+
+    inventory = subcommands.add_parser("inventory", help="report Uzen coverage inventory")
+    inventory.add_argument("--manifest", type=pathlib.Path, required=True)
+    inventory.add_argument("--out", type=pathlib.Path, required=True)
+    inventory.set_defaults(func=cmd_inventory)
     return parser
 
 

@@ -103,6 +103,24 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(args.eth_gas_limit, 30_000_000)
         self.assertEqual(args.zk_gas_limit, 100_000_000)
 
+    def test_parser_accepts_inventory_command(self):
+        args = opcode_gas.build_parser().parse_args(
+            [
+                "inventory",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-smoke.toml",
+                "--out",
+                "/tmp/inventory",
+            ]
+        )
+
+        self.assertEqual(args.command, "inventory")
+        self.assertEqual(
+            args.manifest,
+            pathlib.Path("experiments/opcode-gas/manifests/sp1-smoke.toml"),
+        )
+        self.assertEqual(args.out, pathlib.Path("/tmp/inventory"))
+
 
 if __name__ == "__main__":
     unittest.main()

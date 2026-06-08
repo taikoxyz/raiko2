@@ -54,6 +54,14 @@ Compute an eth-limit damage frontier and current-Uzen containment report from fi
   --out /tmp/raiko2-opcode-gas/damage
 ```
 
+Write the Uzen opcode/precompile coverage inventory:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py inventory \
+  --manifest experiments/opcode-gas/manifests/sp1-smoke.toml \
+  --out /tmp/raiko2-opcode-gas/inventory
+```
+
 The `run` command invokes `target/release/guest-launcher` directly with `--stage opcode-lab` or
 `--stage precompile-lab`, always using `--proof-type sp1 --mode execute --sp1-prover local`. It
 batches generated inputs into one launcher process per lab stage through `--input-list` and
@@ -65,6 +73,10 @@ The `damage` command is measurement-only. It answers how much SP1 workload fits 
 limit, then shows how much of that surface remains reachable under the current-Uzen smoke multipliers
 and a chosen block zk gas limit. Realistic block and app impact is a later input to the same report,
 not inferred from the smoke lab.
+
+The `inventory` command is coverage-only. It lists every opcode and precompile entry from the current
+Uzen table and marks whether the smoke manifest measures it or which future measurement path is
+needed.
 
 For a quick smoke after changing launcher code, `target/debug/guest-launcher` built with
 `cargo build -p guest-launcher --features sp1-sdk/profiling` also works. Use the release binary for

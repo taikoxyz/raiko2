@@ -1,5 +1,6 @@
 import pathlib
 import sys
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -56,6 +57,35 @@ class FitTests(unittest.TestCase):
         self.assertEqual(damage.candidate_damage, 900)
         self.assertEqual(damage.attack_reduction, 0)
         self.assertEqual(damage.binding_resource, "eth")
+
+    def test_damage_markdown_explains_metrics_and_reports_r2(self):
+        damage = opcode_gas.compute_damage_result(
+            case="add",
+            kind="opcode",
+            eth_gas_per_unit=3,
+            measured_workload_per_unit=90.0,
+            zkgas_multiplier=12,
+            eth_gas_limit=30,
+            zk_gas_limit=100,
+            r2=0.98,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "damage.md"
+            opcode_gas.write_damage_markdown_report(
+                path,
+                results=[damage],
+                eth_gas_limit=30,
+                zk_gas_limit=100,
+            )
+
+            report = path.read_text()
+
+        self.assertIn("## Metric Meaning", report)
+        self.assertIn("R2", report)
+        self.assertIn("`binding_resource = zkgas`", report)
+        self.assertIn("| add | opcode | 3 | 90 | 30 | 0.98 |", report)
+        self.assertIn("| add | 12 | 36 | 2 | 180 | 80.00% | zkgas | 0.98 |", report)
 
     def test_current_uzen_multiplier_covers_expanded_smoke_stack_binary_cases(self):
         expected = {

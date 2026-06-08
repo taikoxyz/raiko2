@@ -56,6 +56,7 @@ class DamageResult:
     eth_gas_per_unit: int
     measured_workload_per_unit: float
     damage_ratio: float
+    r2: float
     eth_only_units: int
     eth_only_damage: float
     zkgas_multiplier: int
@@ -984,6 +985,7 @@ def compute_damage_result(
     zkgas_multiplier: int,
     eth_gas_limit: int,
     zk_gas_limit: int,
+    r2: float = 1.0,
 ) -> DamageResult:
     if eth_gas_per_unit <= 0:
         raise ValueError("eth_gas_per_unit must be positive")
@@ -1010,6 +1012,7 @@ def compute_damage_result(
         eth_gas_per_unit=eth_gas_per_unit,
         measured_workload_per_unit=measured_workload_per_unit,
         damage_ratio=measured_workload_per_unit / eth_gas_per_unit,
+        r2=r2,
         eth_only_units=eth_only_units,
         eth_only_damage=eth_only_damage,
         zkgas_multiplier=zkgas_multiplier,
@@ -1125,6 +1128,7 @@ def damage_report(
                 zkgas_multiplier=current_uzen_multiplier(case),
                 eth_gas_limit=eth_gas_limit,
                 zk_gas_limit=zk_gas_limit,
+                r2=float(row["r2"]),
             )
         )
 
@@ -1187,16 +1191,30 @@ def write_damage_markdown_report(
         "- Candidate table: current Uzen smoke multipliers",
         "- Realistic workload impact: pending real block/app contribution accounting",
         "",
+        "## Metric Meaning",
+        "",
+        "- `Workload/unit`: fitted SP1 `proverGas` increase per target opcode or precompile body execution.",
+        "- `Damage ratio`: `Workload/unit / Eth gas/unit`, the measured zk workload reachable per ETH gas.",
+        "- `R2`: linear-fit quality for the smoke variants. Low R2 means template noise or too few counts; do not use that slope as a coefficient without a better sweep.",
+        "- `Eth-only units`: max target executions under the ETH gas limit only.",
+        "- `Eth-only damage`: `Eth-only units * Workload/unit`, before any zkgas accounting.",
+        "- `ZK gas/unit`: `Eth gas/unit * current-Uzen multiplier`.",
+        "- `Candidate units`: max target executions after applying both ETH gas and zkgas limits.",
+        "- `Candidate damage`: `Candidate units * Workload/unit`, the workload still reachable under current zkgas accounting.",
+        "- `Attack reduction`: reduction from eth-only damage after applying the current zkgas limit.",
+        "- `binding_resource = zkgas`: the current zkgas limit caps this homogeneous workload before the ETH gas limit. A 30M gas block filled with that case would be filtered by zkgas first.",
+        "- `binding_resource = eth`: the ETH gas limit caps this workload first; current zkgas has headroom for that homogeneous case.",
+        "",
         "## Eth-Only Damage Frontier",
         "",
-        "| Case | Kind | Eth gas/unit | Workload/unit | Damage ratio | Eth-only units | Eth-only damage |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Case | Kind | Eth gas/unit | Workload/unit | Damage ratio | R2 | Eth-only units | Eth-only damage |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in sorted(results, key=lambda item: item.damage_ratio, reverse=True):
         lines.append(
             f"| {result.case} | {result.kind} | {result.eth_gas_per_unit} | "
             f"{result.measured_workload_per_unit:.6g} | {result.damage_ratio:.6g} | "
-            f"{result.eth_only_units} | {result.eth_only_damage:.6g} |"
+            f"{result.r2:.6g} | {result.eth_only_units} | {result.eth_only_damage:.6g} |"
         )
 
     lines.extend(
@@ -1205,15 +1223,15 @@ def write_damage_markdown_report(
             "## Current-Uzen Containment",
             "",
             "| Case | Multiplier | ZK gas/unit | Candidate units | Candidate damage | "
-            "Attack reduction | Binding resource |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+            "Attack reduction | Binding resource | R2 |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |",
         ]
     )
     for result in sorted(results, key=lambda item: item.candidate_damage, reverse=True):
         lines.append(
             f"| {result.case} | {result.zkgas_multiplier} | {result.zkgas_per_unit} | "
             f"{result.candidate_units} | {result.candidate_damage:.6g} | "
-            f"{result.attack_reduction:.2%} | {result.binding_resource} |"
+            f"{result.attack_reduction:.2%} | {result.binding_resource} | {result.r2:.6g} |"
         )
 
     path.write_text("\n".join(lines) + "\n")

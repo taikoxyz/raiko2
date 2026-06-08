@@ -78,3 +78,8 @@ enough to close the local SP1 `proverGas` loop for generated stack, memory, and 
 templates, but they are not a full alethia-reth/revm execution path yet. `STATICCALL` wrapper cost,
 warm/cold account access, precompile argument sweeps, and full block execution are TODOs for later
 suites.
+
+The current smoke manifest covers stack-binary arithmetic, comparison, and bitwise opcodes, plus
+`KECCAK256` and the two direct precompile cases. Stack-binary slopes include the repeated operand
+setup needed by the lab bytecode, so use them as smoke damage signals and regression anchors, not as
+final consensus coefficients.

@@ -17,6 +17,69 @@ template = "stack_binary"
 target_raw_gas = 5
 
 [[cases]]
+name = "sub"
+opcode = "0x03"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "div"
+opcode = "0x04"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "mod"
+opcode = "0x06"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "lt"
+opcode = "0x10"
+scenario = "comparison"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "gt"
+opcode = "0x11"
+scenario = "comparison"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "eq"
+opcode = "0x14"
+scenario = "comparison"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "and"
+opcode = "0x16"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "or"
+opcode = "0x17"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "xor"
+opcode = "0x18"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
 name = "keccak256"
 opcode = "0x20"
 scenario = "memory"

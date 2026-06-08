@@ -69,6 +69,15 @@ class DamageResult:
 UZEN_OPCODE_MULTIPLIERS = {
     0x01: 12,  # ADD
     0x02: 21,  # MUL
+    0x03: 13,  # SUB
+    0x04: 110,  # DIV
+    0x06: 95,  # MOD
+    0x10: 11,  # LT
+    0x11: 10,  # GT
+    0x14: 35,  # EQ
+    0x16: 8,  # AND
+    0x17: 9,  # OR
+    0x18: 9,  # XOR
     0x20: 85,  # KECCAK256
 }
 

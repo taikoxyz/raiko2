@@ -57,6 +57,30 @@ class FitTests(unittest.TestCase):
         self.assertEqual(damage.attack_reduction, 0)
         self.assertEqual(damage.binding_resource, "eth")
 
+    def test_current_uzen_multiplier_covers_expanded_smoke_stack_binary_cases(self):
+        expected = {
+            "sub": (0x03, 13),
+            "div": (0x04, 110),
+            "mod": (0x06, 95),
+            "lt": (0x10, 11),
+            "gt": (0x11, 10),
+            "eq": (0x14, 35),
+            "and": (0x16, 8),
+            "or": (0x17, 9),
+            "xor": (0x18, 9),
+        }
+
+        for name, (opcode, multiplier) in expected.items():
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    opcode=opcode,
+                    scenario="stack",
+                    template="stack_binary",
+                    target_raw_gas=3,
+                )
+                self.assertEqual(opcode_gas.current_uzen_multiplier(case), multiplier)
+
 
 if __name__ == "__main__":
     unittest.main()

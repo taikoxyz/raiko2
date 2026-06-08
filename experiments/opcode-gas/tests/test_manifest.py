@@ -19,7 +19,22 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest.variants, [0, 1, 2, 4])
         self.assertGreaterEqual(
             {case.name for case in manifest.cases},
-            {"add", "mul", "keccak256", "identity", "sha256"},
+            {
+                "add",
+                "mul",
+                "sub",
+                "div",
+                "mod",
+                "lt",
+                "gt",
+                "eq",
+                "and",
+                "or",
+                "xor",
+                "keccak256",
+                "identity",
+                "sha256",
+            },
         )
         self.assertEqual(
             {case.name: case.kind for case in manifest.cases}["identity"],

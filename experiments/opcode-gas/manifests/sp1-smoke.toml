@@ -31,8 +31,50 @@ template = "stack_binary"
 target_raw_gas = 5
 
 [[cases]]
+name = "sdiv"
+opcode = "0x05"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
 name = "mod"
 opcode = "0x06"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "smod"
+opcode = "0x07"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "addmod"
+opcode = "0x08"
+scenario = "arithmetic"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "mulmod"
+opcode = "0x09"
+scenario = "arithmetic"
+template = "stack_ternary"
+target_raw_gas = 8
+
+[[cases]]
+name = "exp"
+opcode = "0x0a"
+scenario = "arithmetic"
+template = "stack_exp"
+target_raw_gas = 60
+
+[[cases]]
+name = "signextend"
+opcode = "0x0b"
 scenario = "arithmetic"
 template = "stack_binary"
 target_raw_gas = 5
@@ -47,6 +89,20 @@ target_raw_gas = 3
 [[cases]]
 name = "gt"
 opcode = "0x11"
+scenario = "comparison"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "slt"
+opcode = "0x12"
+scenario = "comparison"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sgt"
+opcode = "0x13"
 scenario = "comparison"
 template = "stack_binary"
 target_raw_gas = 3
@@ -75,6 +131,41 @@ target_raw_gas = 3
 [[cases]]
 name = "xor"
 opcode = "0x18"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "not"
+opcode = "0x19"
+scenario = "bitwise"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
+name = "byte"
+opcode = "0x1a"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shl"
+opcode = "0x1b"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "shr"
+opcode = "0x1c"
+scenario = "bitwise"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "sar"
+opcode = "0x1d"
 scenario = "bitwise"
 template = "stack_binary"
 target_raw_gas = 3

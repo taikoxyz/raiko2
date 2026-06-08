@@ -91,10 +91,10 @@ templates, but they are not a full alethia-reth/revm execution path yet. `STATIC
 warm/cold account access, precompile argument sweeps, and full block execution are TODOs for later
 suites.
 
-The current smoke manifest covers stack-binary arithmetic, comparison, and bitwise opcodes, plus
-`KECCAK256` and the two direct precompile cases. Stack-binary slopes include the repeated operand
-setup needed by the lab bytecode, so use them as smoke damage signals and regression anchors, not as
-final consensus coefficients.
+The current smoke manifest covers arithmetic/comparison/bitwise pure stack opcodes through `SAR`,
+`KECCAK256`, selected stack/memory opcodes, and the two direct precompile cases. Stack slopes include
+the repeated operand setup needed by the lab bytecode, so use them as smoke damage signals and
+regression anchors, not as final consensus coefficients.
 
 For tiny stack and memory templates, always inspect `fit.json` before using `damage.md`. Low R2 means
 the current variant counts are too small or the template has setup/cleanup noise. In that case, rerun

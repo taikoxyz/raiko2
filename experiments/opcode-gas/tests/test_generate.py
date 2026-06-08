@@ -54,6 +54,37 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(generated.opcode_counts[0x15], 3)
         self.assertTrue(generated.bytes_hex.endswith("00"))
 
+    def test_stack_ternary_variant_counts_target_opcode(self):
+        case = opcode_gas.CaseSpec(
+            name="addmod",
+            opcode=0x08,
+            scenario="arithmetic",
+            template="stack_ternary",
+            target_raw_gas=8,
+        )
+
+        zero = opcode_gas.build_bytecode(case, 0)
+        three = opcode_gas.build_bytecode(case, 3)
+
+        self.assertEqual(zero.opcode_counts.get(0x08, 0), 0)
+        self.assertEqual(three.opcode_counts[0x08], 3)
+        self.assertTrue(zero.bytes_hex.endswith("00"))
+        self.assertTrue(three.bytes_hex.endswith("00"))
+
+    def test_stack_exp_variant_counts_exp_opcode(self):
+        case = opcode_gas.CaseSpec(
+            name="exp",
+            opcode=0x0A,
+            scenario="arithmetic",
+            template="stack_exp",
+            target_raw_gas=60,
+        )
+
+        generated = opcode_gas.build_bytecode(case, 2)
+
+        self.assertEqual(generated.opcode_counts[0x0A], 2)
+        self.assertTrue(generated.bytes_hex.endswith("00"))
+
     def test_memory_templates_count_target_opcode(self):
         cases = [
             ("mload", 0x51, "memory_load_32"),

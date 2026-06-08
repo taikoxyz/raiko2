@@ -338,6 +338,10 @@ def build_bytecode(case: CaseSpec, target_count: int) -> GeneratedBytecode:
         bytecode = build_stack_binary_bytecode(case.opcode, target_count)
     elif case.template == "stack_unary":
         bytecode = build_stack_unary_bytecode(case.opcode, target_count)
+    elif case.template == "stack_ternary":
+        bytecode = build_stack_ternary_bytecode(case.opcode, target_count)
+    elif case.template == "stack_exp":
+        bytecode = build_stack_exp_bytecode(target_count)
     elif case.template == "keccak_32":
         bytecode = build_keccak_32_bytecode(target_count)
     elif case.template == "memory_load_32":
@@ -377,6 +381,32 @@ def build_stack_unary_bytecode(opcode: int, target_count: int) -> bytes:
     out.extend([0x60, 0x01])
     for _ in range(target_count):
         out.append(opcode)
+    out.extend([0x50, 0x00])  # POP; STOP
+    return bytes(out)
+
+
+def build_stack_ternary_bytecode(opcode: int, target_count: int) -> bytes:
+    out = bytearray()
+    if target_count == 0:
+        out.extend([0x60, 0x01, 0x50, 0x00])  # PUSH1 1; POP; STOP
+        return bytes(out)
+
+    out.extend([0x60, 0x01, 0x60, 0x02, 0x60, 0x05, opcode])
+    for _ in range(target_count - 1):
+        out.extend([0x60, 0x01, 0x60, 0x05, opcode])
+    out.extend([0x50, 0x00])  # POP; STOP
+    return bytes(out)
+
+
+def build_stack_exp_bytecode(target_count: int) -> bytes:
+    out = bytearray()
+    if target_count == 0:
+        out.extend([0x60, 0x01, 0x50, 0x00])  # PUSH1 1; POP; STOP
+        return bytes(out)
+
+    out.extend([0x60, 0x02])
+    for _ in range(target_count):
+        out.extend([0x60, 0x02, 0x0A])
     out.extend([0x50, 0x00])  # POP; STOP
     return bytes(out)
 

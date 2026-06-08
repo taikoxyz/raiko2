@@ -28,7 +28,8 @@ class InventoryTests(unittest.TestCase):
         by_key = {(row.kind, row.identifier): row for row in rows}
 
         self.assertEqual(by_key[("opcode", "0x01")].status, "measured")
-        self.assertEqual(by_key[("opcode", "0x09")].status, "planned_pure_opcode")
+        self.assertEqual(by_key[("opcode", "0x09")].status, "measured")
+        self.assertEqual(by_key[("opcode", "0x61")].status, "planned_pure_opcode")
         self.assertEqual(by_key[("opcode", "0x54")].status, "needs_state_or_revm")
         self.assertEqual(by_key[("opcode", "0xf1")].status, "needs_spawn_wrapper")
         self.assertEqual(by_key[("precompile", "0x04")].status, "measured")

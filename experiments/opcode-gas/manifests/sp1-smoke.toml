@@ -1,0 +1,42 @@
+name = "sp1-smoke"
+backend = "sp1"
+variants = [0, 1, 2, 4]
+
+[[cases]]
+name = "add"
+opcode = "0x01"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 3
+
+[[cases]]
+name = "mul"
+opcode = "0x02"
+scenario = "arithmetic"
+template = "stack_binary"
+target_raw_gas = 5
+
+[[cases]]
+name = "keccak256"
+opcode = "0x20"
+scenario = "memory"
+template = "keccak_32"
+target_raw_gas = 36
+
+[[cases]]
+name = "identity"
+kind = "precompile"
+address = "0x04"
+scenario = "precompile"
+template = "precompile_fixed"
+input_size = 32
+target_raw_gas = 18
+
+[[cases]]
+name = "sha256"
+kind = "precompile"
+address = "0x02"
+scenario = "precompile"
+template = "precompile_fixed"
+input_size = 32
+target_raw_gas = 72

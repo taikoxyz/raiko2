@@ -28,7 +28,7 @@ Steps:
 Steps:
 
 1. Accept the supplied start/end in the provider entry point used by preflight.
-2. Fetch blocks [start, end] inclusive; reuse existing block-fetch logic (with witnesses if `--debug-witness` is on).
+2. Fetch blocks [start, end] inclusive; current Shasta preflight builds tx-list witnesses by default through `debug_executionWitnessForTxList`.
 3. Ensure fetched blocks replace the prior single-block assumption; pass into GuestInput witnesses list.
 
 ### Task 3: Validation of supplied range

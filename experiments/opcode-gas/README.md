@@ -1,0 +1,64 @@
+# SP1 Opcode Prover Gas Experiment
+
+This experiment suite is a local, repeatable scaffold for measuring opcode and precompile
+contribution to SP1 software `proverGas`.
+
+V1 intentionally exports a one-dimensional result shape compatible with the current alethia-reth
+Uzen table. Warm/cold storage access, argument-dependent precompile cost, and memory-size sweeps are
+tracked as future dimensions, not V1 coefficients.
+
+## Commands
+
+Build or refresh the SP1 lab ELFs, then build a release launcher once:
+
+```bash
+cargo run -r -p xtask -- build-guest sp1 --bench
+cargo build -r -p guest-launcher --features sp1-sdk/profiling
+```
+
+Generate smoke case metadata and lab inputs:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate \
+  --manifest experiments/opcode-gas/manifests/sp1-smoke.toml \
+  --out /tmp/raiko2-opcode-gas/fixtures
+```
+
+Run existing `guest-input.json` cases with a prebuilt launcher:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py run \
+  --fixtures /tmp/raiko2-opcode-gas/fixtures \
+  --guest-launcher target/release/guest-launcher \
+  --elf crates/guests/elf/sp1_opcode_lab.elf \
+  --precompile-elf crates/guests/elf/sp1_precompile_lab.elf \
+  --out /tmp/raiko2-opcode-gas/raw-runs.jsonl
+```
+
+Fit reports from raw runs:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py fit \
+  --runs /tmp/raiko2-opcode-gas/raw-runs.jsonl \
+  --out /tmp/raiko2-opcode-gas/report
+```
+
+The `run` command invokes `target/release/guest-launcher` directly with `--stage opcode-lab` or
+`--stage precompile-lab`, always using `--proof-type sp1 --mode execute --sp1-prover local`. It
+batches generated inputs into one launcher process per lab stage through `--input-list` and
+`--jsonl-out`, so the expensive SP1 executor startup cost is paid once per stage instead of once per
+variant. It does not use `cargo run`, does not submit network proofs, and does not access live
+L1/L2 RPC.
+
+For a quick smoke after changing launcher code, `target/debug/guest-launcher` built with
+`cargo build -p guest-launcher --features sp1-sdk/profiling` also works. Use the release binary for
+longer research loops once it has been rebuilt.
+
+## Current Limitation
+
+The opcode-lab guest is a small experiment-only bytecode interpreter. The precompile-lab guest
+currently supports direct body measurements for `identity(0x04)` and `sha256(0x02)`. These are
+enough to close the local SP1 `proverGas` loop for generated stack, memory, and basic precompile
+templates, but they are not a full alethia-reth/revm execution path yet. `STATICCALL` wrapper cost,
+warm/cold account access, precompile argument sweeps, and full block execution are TODOs for later
+suites.

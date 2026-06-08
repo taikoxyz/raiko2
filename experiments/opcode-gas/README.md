@@ -95,3 +95,7 @@ The current smoke manifest covers stack-binary arithmetic, comparison, and bitwi
 `KECCAK256` and the two direct precompile cases. Stack-binary slopes include the repeated operand
 setup needed by the lab bytecode, so use them as smoke damage signals and regression anchors, not as
 final consensus coefficients.
+
+For tiny stack and memory templates, always inspect `fit.json` before using `damage.md`. Low R2 means
+the current variant counts are too small or the template has setup/cleanup noise. In that case, rerun
+with larger variants or a cleaner template before treating the slope as a candidate coefficient.

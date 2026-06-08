@@ -80,11 +80,53 @@ template = "stack_binary"
 target_raw_gas = 3
 
 [[cases]]
+name = "iszero"
+opcode = "0x15"
+scenario = "bitwise"
+template = "stack_unary"
+target_raw_gas = 3
+
+[[cases]]
 name = "keccak256"
 opcode = "0x20"
 scenario = "memory"
 template = "keccak_32"
 target_raw_gas = 36
+
+[[cases]]
+name = "pop"
+opcode = "0x50"
+scenario = "stack"
+template = "stack_pop"
+target_raw_gas = 2
+
+[[cases]]
+name = "mload"
+opcode = "0x51"
+scenario = "memory"
+template = "memory_load_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore"
+opcode = "0x52"
+scenario = "memory"
+template = "memory_store_32"
+target_raw_gas = 3
+
+[[cases]]
+name = "mstore8"
+opcode = "0x53"
+scenario = "memory"
+template = "memory_store8"
+target_raw_gas = 3
+
+[[cases]]
+name = "swap1"
+opcode = "0x90"
+scenario = "stack"
+template = "stack_swap1"
+target_raw_gas = 3
 
 [[cases]]
 name = "identity"

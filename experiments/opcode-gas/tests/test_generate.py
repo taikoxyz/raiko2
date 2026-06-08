@@ -40,6 +40,61 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(generated.opcode_counts[0x20], 2)
         self.assertTrue(generated.bytes_hex.endswith("00"))
 
+    def test_stack_unary_variant_counts_target_opcode(self):
+        case = opcode_gas.CaseSpec(
+            name="iszero",
+            opcode=0x15,
+            scenario="bitwise",
+            template="stack_unary",
+            target_raw_gas=3,
+        )
+
+        generated = opcode_gas.build_bytecode(case, 3)
+
+        self.assertEqual(generated.opcode_counts[0x15], 3)
+        self.assertTrue(generated.bytes_hex.endswith("00"))
+
+    def test_memory_templates_count_target_opcode(self):
+        cases = [
+            ("mload", 0x51, "memory_load_32"),
+            ("mstore", 0x52, "memory_store_32"),
+            ("mstore8", 0x53, "memory_store8"),
+        ]
+
+        for name, opcode, template in cases:
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    opcode=opcode,
+                    scenario="memory",
+                    template=template,
+                    target_raw_gas=3,
+                )
+                generated = opcode_gas.build_bytecode(case, 2)
+
+                self.assertEqual(generated.opcode_counts[opcode], 2)
+                self.assertTrue(generated.bytes_hex.endswith("00"))
+
+    def test_stack_pop_and_swap_templates_count_target_opcode(self):
+        cases = [
+            ("pop", 0x50, "stack_pop"),
+            ("swap1", 0x90, "stack_swap1"),
+        ]
+
+        for name, opcode, template in cases:
+            with self.subTest(name=name):
+                case = opcode_gas.CaseSpec(
+                    name=name,
+                    opcode=opcode,
+                    scenario="stack",
+                    template=template,
+                    target_raw_gas=3,
+                )
+                generated = opcode_gas.build_bytecode(case, 2)
+
+                self.assertEqual(generated.opcode_counts[opcode], 2)
+                self.assertTrue(generated.bytes_hex.endswith("00"))
+
 
 if __name__ == "__main__":
     unittest.main()

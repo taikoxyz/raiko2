@@ -43,12 +43,28 @@ Fit reports from raw runs:
   --out /tmp/raiko2-opcode-gas/report
 ```
 
+Compute an eth-limit damage frontier and current-Uzen containment report from fit results:
+
+```bash
+~/.venv/bin/python experiments/opcode-gas/opcode_gas.py damage \
+  --fit /tmp/raiko2-opcode-gas/report/fit.json \
+  --manifest experiments/opcode-gas/manifests/sp1-smoke.toml \
+  --eth-gas-limit 30000000 \
+  --zk-gas-limit 100000000 \
+  --out /tmp/raiko2-opcode-gas/damage
+```
+
 The `run` command invokes `target/release/guest-launcher` directly with `--stage opcode-lab` or
 `--stage precompile-lab`, always using `--proof-type sp1 --mode execute --sp1-prover local`. It
 batches generated inputs into one launcher process per lab stage through `--input-list` and
 `--jsonl-out`, so the expensive SP1 executor startup cost is paid once per stage instead of once per
 variant. It does not use `cargo run`, does not submit network proofs, and does not access live
 L1/L2 RPC.
+
+The `damage` command is measurement-only. It answers how much SP1 workload fits under an Ethereum gas
+limit, then shows how much of that surface remains reachable under the current-Uzen smoke multipliers
+and a chosen block zk gas limit. Realistic block and app impact is a later input to the same report,
+not inferred from the smoke lab.
 
 For a quick smoke after changing launcher code, `target/debug/guest-launcher` built with
 `cargo build -p guest-launcher --features sp1-sdk/profiling` also works. Use the release binary for

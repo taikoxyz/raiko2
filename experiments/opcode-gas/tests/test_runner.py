@@ -81,6 +81,28 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(raw_run["gas"], 160)
         self.assertEqual(raw_run["case"], "add")
 
+    def test_parser_accepts_damage_command(self):
+        args = opcode_gas.build_parser().parse_args(
+            [
+                "damage",
+                "--fit",
+                "/tmp/fit.json",
+                "--manifest",
+                "experiments/opcode-gas/manifests/sp1-smoke.toml",
+                "--eth-gas-limit",
+                "30000000",
+                "--zk-gas-limit",
+                "100000000",
+                "--out",
+                "/tmp/damage",
+            ]
+        )
+
+        self.assertEqual(args.command, "damage")
+        self.assertEqual(args.fit, pathlib.Path("/tmp/fit.json"))
+        self.assertEqual(args.eth_gas_limit, 30_000_000)
+        self.assertEqual(args.zk_gas_limit, 100_000_000)
+
 
 if __name__ == "__main__":
     unittest.main()

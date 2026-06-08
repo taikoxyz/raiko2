@@ -49,6 +49,35 @@ class FitResult:
     r2: float
 
 
+@dataclass(frozen=True)
+class DamageResult:
+    case: str
+    kind: str
+    eth_gas_per_unit: int
+    measured_workload_per_unit: float
+    damage_ratio: float
+    eth_only_units: int
+    eth_only_damage: float
+    zkgas_multiplier: int
+    zkgas_per_unit: int
+    candidate_units: int
+    candidate_damage: float
+    attack_reduction: float
+    binding_resource: str
+
+
+UZEN_OPCODE_MULTIPLIERS = {
+    0x01: 12,  # ADD
+    0x02: 21,  # MUL
+    0x20: 85,  # KECCAK256
+}
+
+UZEN_PRECOMPILE_MULTIPLIERS = {
+    0x02: 10,  # SHA256
+    0x04: 2,  # identity
+}
+
+
 def load_manifest(path: pathlib.Path) -> Manifest:
     data = tomllib.loads(path.read_text())
     cases = [
@@ -329,6 +358,110 @@ def fit_report(runs_path: pathlib.Path, out_dir: pathlib.Path) -> list[FitResult
     return results
 
 
+def compute_damage_result(
+    *,
+    case: str,
+    kind: str,
+    eth_gas_per_unit: int,
+    measured_workload_per_unit: float,
+    zkgas_multiplier: int,
+    eth_gas_limit: int,
+    zk_gas_limit: int,
+) -> DamageResult:
+    if eth_gas_per_unit <= 0:
+        raise ValueError("eth_gas_per_unit must be positive")
+    if zkgas_multiplier < 0:
+        raise ValueError("zkgas_multiplier must be non-negative")
+    if eth_gas_limit < 0:
+        raise ValueError("eth_gas_limit must be non-negative")
+    if zk_gas_limit < 0:
+        raise ValueError("zk_gas_limit must be non-negative")
+
+    eth_only_units = eth_gas_limit // eth_gas_per_unit
+    eth_only_damage = eth_only_units * measured_workload_per_unit
+    zkgas_per_unit = eth_gas_per_unit * zkgas_multiplier
+    zkgas_units = eth_only_units if zkgas_per_unit == 0 else zk_gas_limit // zkgas_per_unit
+    candidate_units = min(eth_only_units, zkgas_units)
+    candidate_damage = candidate_units * measured_workload_per_unit
+    attack_reduction = (
+        0.0 if eth_only_damage == 0 else 1.0 - (candidate_damage / eth_only_damage)
+    )
+    binding_resource = "zkgas" if candidate_units < eth_only_units else "eth"
+    return DamageResult(
+        case=case,
+        kind=kind,
+        eth_gas_per_unit=eth_gas_per_unit,
+        measured_workload_per_unit=measured_workload_per_unit,
+        damage_ratio=measured_workload_per_unit / eth_gas_per_unit,
+        eth_only_units=eth_only_units,
+        eth_only_damage=eth_only_damage,
+        zkgas_multiplier=zkgas_multiplier,
+        zkgas_per_unit=zkgas_per_unit,
+        candidate_units=candidate_units,
+        candidate_damage=candidate_damage,
+        attack_reduction=attack_reduction,
+        binding_resource=binding_resource,
+    )
+
+
+def current_uzen_multiplier(case: CaseSpec) -> int:
+    if case.kind == "opcode":
+        if case.opcode is None:
+            raise ValueError(f"opcode case {case.name} is missing opcode")
+        try:
+            return UZEN_OPCODE_MULTIPLIERS[case.opcode]
+        except KeyError as exc:
+            raise ValueError(f"no current-Uzen opcode multiplier for {case.name}") from exc
+    if case.kind == "precompile":
+        if case.address is None:
+            raise ValueError(f"precompile case {case.name} is missing address")
+        try:
+            return UZEN_PRECOMPILE_MULTIPLIERS[case.address]
+        except KeyError as exc:
+            raise ValueError(f"no current-Uzen precompile multiplier for {case.name}") from exc
+    raise ValueError(f"unknown case kind: {case.kind}")
+
+
+def damage_report(
+    *,
+    fit_path: pathlib.Path,
+    manifest_path: pathlib.Path,
+    eth_gas_limit: int,
+    zk_gas_limit: int,
+    out_dir: pathlib.Path,
+) -> list[DamageResult]:
+    manifest = load_manifest(manifest_path)
+    case_by_name = {case.name: case for case in manifest.cases}
+    fit_rows = json.loads(fit_path.read_text())
+    results = []
+    for row in fit_rows:
+        case = case_by_name[str(row["case"])]
+        results.append(
+            compute_damage_result(
+                case=case.name,
+                kind=case.kind,
+                eth_gas_per_unit=case.target_raw_gas,
+                measured_workload_per_unit=float(row["slope_per_operation"]),
+                zkgas_multiplier=current_uzen_multiplier(case),
+                eth_gas_limit=eth_gas_limit,
+                zk_gas_limit=zk_gas_limit,
+            )
+        )
+
+    results = sorted(results, key=lambda item: item.eth_only_damage, reverse=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "damage.json").write_text(
+        json.dumps([asdict(result) for result in results], indent=2, sort_keys=True) + "\n"
+    )
+    write_damage_markdown_report(
+        out_dir / "damage.md",
+        results=results,
+        eth_gas_limit=eth_gas_limit,
+        zk_gas_limit=zk_gas_limit,
+    )
+    return results
+
+
 def write_markdown_report(path: pathlib.Path, results: list[FitResult]) -> None:
     lines = [
         "# Uzen Vs Fitted SP1 Prover Gas",
@@ -344,6 +477,53 @@ def write_markdown_report(path: pathlib.Path, results: list[FitResult]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def write_damage_markdown_report(
+    path: pathlib.Path,
+    *,
+    results: list[DamageResult],
+    eth_gas_limit: int,
+    zk_gas_limit: int,
+) -> None:
+    lines = [
+        "# ZKGas Workload Damage Report",
+        "",
+        f"- Eth gas limit: `{eth_gas_limit}`",
+        f"- ZK gas limit: `{zk_gas_limit}`",
+        "- Candidate table: current Uzen smoke multipliers",
+        "- Realistic workload impact: pending real block/app contribution accounting",
+        "",
+        "## Eth-Only Damage Frontier",
+        "",
+        "| Case | Kind | Eth gas/unit | Workload/unit | Damage ratio | Eth-only units | Eth-only damage |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for result in sorted(results, key=lambda item: item.damage_ratio, reverse=True):
+        lines.append(
+            f"| {result.case} | {result.kind} | {result.eth_gas_per_unit} | "
+            f"{result.measured_workload_per_unit:.6g} | {result.damage_ratio:.6g} | "
+            f"{result.eth_only_units} | {result.eth_only_damage:.6g} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Current-Uzen Containment",
+            "",
+            "| Case | Multiplier | ZK gas/unit | Candidate units | Candidate damage | "
+            "Attack reduction | Binding resource |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for result in sorted(results, key=lambda item: item.candidate_damage, reverse=True):
+        lines.append(
+            f"| {result.case} | {result.zkgas_multiplier} | {result.zkgas_per_unit} | "
+            f"{result.candidate_units} | {result.candidate_damage:.6g} | "
+            f"{result.attack_reduction:.2%} | {result.binding_resource} |"
+        )
+
+    path.write_text("\n".join(lines) + "\n")
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     manifest = load_manifest(args.manifest)
     written = generate_cases(manifest, args.out)
@@ -353,6 +533,17 @@ def cmd_generate(args: argparse.Namespace) -> None:
 def cmd_fit(args: argparse.Namespace) -> None:
     results = fit_report(args.runs, args.out)
     print(f"fit {len(results)} case(s)")
+
+
+def cmd_damage(args: argparse.Namespace) -> None:
+    results = damage_report(
+        fit_path=args.fit,
+        manifest_path=args.manifest,
+        eth_gas_limit=args.eth_gas_limit,
+        zk_gas_limit=args.zk_gas_limit,
+        out_dir=args.out,
+    )
+    print(f"wrote damage report for {len(results)} case(s)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -386,6 +577,14 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--runs", type=pathlib.Path, required=True)
     fit.add_argument("--out", type=pathlib.Path, required=True)
     fit.set_defaults(func=cmd_fit)
+
+    damage = subcommands.add_parser("damage", help="compute eth-limit zkgas damage statistics")
+    damage.add_argument("--fit", type=pathlib.Path, required=True)
+    damage.add_argument("--manifest", type=pathlib.Path, required=True)
+    damage.add_argument("--eth-gas-limit", type=int, required=True)
+    damage.add_argument("--zk-gas-limit", type=int, required=True)
+    damage.add_argument("--out", type=pathlib.Path, required=True)
+    damage.set_defaults(func=cmd_damage)
     return parser
 
 

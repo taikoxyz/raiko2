@@ -23,6 +23,38 @@ class FitTests(unittest.TestCase):
         self.assertEqual(fit.slope_per_raw_gas, 10)
         self.assertEqual(fit.r2, 1)
 
+    def test_fit_uses_selected_workload_metric(self):
+        runs = [
+            {
+                "case": "add",
+                "target_count": 0,
+                "target_raw_gas": 3,
+                "prover_gas": 100,
+                "risc0_padded_cycles": 1024,
+            },
+            {
+                "case": "add",
+                "target_count": 1,
+                "target_raw_gas": 3,
+                "prover_gas": 130,
+                "risc0_padded_cycles": 1124,
+            },
+            {
+                "case": "add",
+                "target_count": 2,
+                "target_raw_gas": 3,
+                "prover_gas": 160,
+                "risc0_padded_cycles": 1224,
+            },
+        ]
+
+        fit = opcode_gas.fit_case(runs, metric="risc0_padded_cycles")
+
+        self.assertEqual(fit.metric, "risc0_padded_cycles")
+        self.assertEqual(fit.slope_per_operation, 100)
+        self.assertAlmostEqual(fit.slope_per_raw_gas, 100 / 3)
+        self.assertEqual(fit.r2, 1)
+
     def test_damage_result_reports_eth_only_and_zkgas_limited_damage(self):
         damage = opcode_gas.compute_damage_result(
             case="add",

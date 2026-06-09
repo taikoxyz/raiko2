@@ -3676,6 +3676,7 @@ dependencies = [
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
+ "revm",
  "revm-precompile",
  "sha2 0.10.8",
  "sp1-zkvm",

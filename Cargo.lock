@@ -6451,6 +6451,7 @@ dependencies = [
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
  "raiko2-prover",
+ "risc0-zkvm",
  "serde",
  "serde_json",
  "sp1-sdk",

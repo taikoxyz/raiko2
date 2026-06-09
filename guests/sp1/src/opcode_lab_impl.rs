@@ -13,9 +13,15 @@ pub fn execute_bytecode(bytecode: &[u8]) -> u64 {
             0x01 => binary(&mut stack, |left, right| left.wrapping_add(right)),
             0x02 => binary(&mut stack, |left, right| left.wrapping_mul(right)),
             0x03 => binary(&mut stack, |left, right| left.wrapping_sub(right)),
-            0x04 => binary(&mut stack, |left, right| if right == 0 { 0 } else { left / right }),
+            0x04 => binary(
+                &mut stack,
+                |left, right| if right == 0 { 0 } else { left / right },
+            ),
             0x05 => binary(&mut stack, signed_div),
-            0x06 => binary(&mut stack, |left, right| if right == 0 { 0 } else { left % right }),
+            0x06 => binary(
+                &mut stack,
+                |left, right| if right == 0 { 0 } else { left % right },
+            ),
             0x07 => binary(&mut stack, signed_mod),
             0x08 => ternary(&mut stack, |left, right, modulus| {
                 if modulus == 0 {
@@ -38,8 +44,12 @@ pub fn execute_bytecode(bytecode: &[u8]) -> u64 {
             0x0B => binary(&mut stack, signextend),
             0x10 => binary(&mut stack, |left, right| u64::from(left < right)),
             0x11 => binary(&mut stack, |left, right| u64::from(left > right)),
-            0x12 => binary(&mut stack, |left, right| u64::from(as_i64(left) < as_i64(right))),
-            0x13 => binary(&mut stack, |left, right| u64::from(as_i64(left) > as_i64(right))),
+            0x12 => binary(&mut stack, |left, right| {
+                u64::from(as_i64(left) < as_i64(right))
+            }),
+            0x13 => binary(&mut stack, |left, right| {
+                u64::from(as_i64(left) > as_i64(right))
+            }),
             0x14 => binary(&mut stack, |left, right| u64::from(left == right)),
             0x15 => {
                 let value = pop(&mut stack);
@@ -307,11 +317,10 @@ mod tests {
             0x7f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
             0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
             0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x50, // PUSH32; POP
-            0x60, 0x01, 0x60, 0x02, 0x60, 0x03, 0x60, 0x04, 0x60, 0x05, 0x60, 0x06, 0x60,
-            0x07, 0x60, 0x08, 0x60, 0x09, 0x60, 0x0a, 0x60, 0x0b, 0x60, 0x0c, 0x60, 0x0d,
-            0x60, 0x0e, 0x60, 0x0f, 0x60, 0x10, 0x8f, 0x50, // DUP16; POP
-            0x60, 0x11,
-            0x9f, // SWAP16
+            0x60, 0x01, 0x60, 0x02, 0x60, 0x03, 0x60, 0x04, 0x60, 0x05, 0x60, 0x06, 0x60, 0x07,
+            0x60, 0x08, 0x60, 0x09, 0x60, 0x0a, 0x60, 0x0b, 0x60, 0x0c, 0x60, 0x0d, 0x60, 0x0e,
+            0x60, 0x0f, 0x60, 0x10, 0x8f, 0x50, // DUP16; POP
+            0x60, 0x11, 0x9f, // SWAP16
             0x58, 0x50, // PC; POP
             0x59, 0x50, // MSIZE; POP
             0x5a, 0x50, // GAS; POP

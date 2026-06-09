@@ -28,6 +28,12 @@ The raiko2 experiment suite under `experiments/opcode-gas/` measures local SP1 s
 `proverGas` without running network proofs. That suite is the measurement source for this damage
 model.
 
+RISC0 can now be observed through proposal-level execute runs, but its primary local metric is cycle
+count, not SP1 `proverGas`. Keep RISC0 on a backend-native cycle budget until a separate
+cost-or-time calibration layer exists. A working SP1 heuristic such as 30M Ethereum gas to roughly
+10B `proverGas` is not a RISC0 rule; RISC0 needs its own 30M Ethereum-gas to cycle anchor and its
+own headroom analysis.
+
 ## Model
 
 Treat Ethereum gas as the attacker's execution budget and SP1 prover gas as the cost objective.
@@ -41,6 +47,17 @@ Where:
 
 - `W(block)` is measured SP1 workload, approximated by software `proverGas`.
 - `L_eth` is the block Ethereum gas limit.
+
+For backend comparison, compute this model per backend first:
+
+```text
+W_sp1(block)  = measured SP1 prover_gas
+W_r0(block)   = measured RISC0 padded cycles
+```
+
+Do not take a raw maximum across those values. A multi-backend envelope is only meaningful after each
+backend metric has been mapped into a common cost unit, or after reviewers intentionally choose
+separate SP1 and RISC0 limits and compare each block against the relevant backend-native limit.
 
 For a single opcode or precompile scenario:
 

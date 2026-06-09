@@ -42,6 +42,7 @@ class GeneratedBytecode:
 @dataclass(frozen=True)
 class FitResult:
     case: str
+    metric: str
     sample_count: int
     slope_per_operation: float
     slope_per_raw_gas: float
@@ -53,6 +54,7 @@ class FitResult:
 class DamageResult:
     case: str
     kind: str
+    workload_metric: str
     eth_gas_per_unit: int
     measured_workload_per_unit: float
     damage_ratio: float
@@ -858,11 +860,12 @@ def run_guest_input(
     elf_path: pathlib.Path,
     input_path: pathlib.Path,
     json_out: pathlib.Path,
+    stage: str = "opcode-lab",
 ) -> None:
     cmd = [
         str(guest_launcher),
         "--stage",
-        "opcode-lab",
+        stage,
         "--proof-type",
         "sp1",
         "--mode",
@@ -912,10 +915,67 @@ def run_guest_inputs(
     return input_list_path
 
 
+def run_proposal_guest_input(
+    *,
+    guest_launcher: pathlib.Path,
+    guest_input: pathlib.Path,
+    proof_type: str,
+    case_name: str,
+    target_raw_gas: int,
+    target_count: int,
+    out: pathlib.Path,
+    risc0_execution_po2: int = 20,
+) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    report_path = out.with_name(f"{out.stem}.guest-launcher.json")
+    cmd = [
+        str(guest_launcher),
+        "--stage",
+        "proposal",
+        "--proof-type",
+        proof_type,
+        "--mode",
+        "execute",
+        "--input",
+        str(guest_input),
+        "--json-out",
+        str(report_path),
+    ]
+    if proof_type == "sp1":
+        cmd.extend(["--sp1-prover", "local"])
+    elif proof_type == "risc0":
+        cmd.extend(["--risc0-execution-po2", str(risc0_execution_po2)])
+    else:
+        raise ValueError("run-proposal supports proof_type sp1 or risc0")
+    subprocess.run(cmd, check=True)
+
+    report = json.loads(report_path.read_text())
+    case = {
+        "case": case_name,
+        "kind": "proposal",
+        "proof_type": proof_type,
+        "guest_input": str(guest_input),
+        "target_count": target_count,
+        "target_raw_gas": target_raw_gas,
+    }
+    out.write_text(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
+
+
 def raw_run_from_report(case: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
     raw_run = {**case, **report}
     if "prover_gas" not in raw_run and "gas" in raw_run:
         raw_run["prover_gas"] = raw_run["gas"]
+    primary_metric = raw_run.get("primary_workload_metric")
+    if isinstance(primary_metric, dict):
+        label = primary_metric.get("label")
+        count = primary_metric.get("count")
+        if label is not None and count is not None:
+            raw_run.setdefault("workload_metric", label)
+            raw_run.setdefault("workload_value", count)
+    if "workload_metric" not in raw_run and "prover_gas" in raw_run:
+        raw_run["workload_metric"] = "prover_gas"
+    if "workload_value" not in raw_run and "prover_gas" in raw_run:
+        raw_run["workload_value"] = raw_run["prover_gas"]
     return raw_run
 
 
@@ -927,13 +987,21 @@ def iter_jsonl(path: pathlib.Path) -> Iterable[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def fit_case(runs: list[dict[str, Any]]) -> FitResult:
+def run_metric_value(run: dict[str, Any], metric: str) -> float:
+    if metric in run:
+        return float(run[metric])
+    if run.get("workload_metric") == metric and "workload_value" in run:
+        return float(run["workload_value"])
+    raise KeyError(f"run is missing workload metric {metric}")
+
+
+def fit_case(runs: list[dict[str, Any]], metric: str = "prover_gas") -> FitResult:
     if len(runs) < 2:
         raise ValueError("at least two runs are required")
     case_name = str(runs[0]["case"])
     raw_gas = float(runs[0]["target_raw_gas"])
     xs = [float(run["target_count"]) for run in runs]
-    ys = [float(run["prover_gas"]) for run in runs]
+    ys = [run_metric_value(run, metric) for run in runs]
     mean_x = statistics.fmean(xs)
     mean_y = statistics.fmean(ys)
     denom = sum((x - mean_x) ** 2 for x in xs)
@@ -947,6 +1015,7 @@ def fit_case(runs: list[dict[str, Any]]) -> FitResult:
     r2 = 1.0 if ss_tot == 0 else 1.0 - (ss_res / ss_tot)
     return FitResult(
         case=case_name,
+        metric=metric,
         sample_count=len(runs),
         slope_per_operation=slope,
         slope_per_raw_gas=slope / raw_gas,
@@ -955,11 +1024,18 @@ def fit_case(runs: list[dict[str, Any]]) -> FitResult:
     )
 
 
-def fit_report(runs_path: pathlib.Path, out_dir: pathlib.Path) -> list[FitResult]:
+def fit_report(
+    runs_path: pathlib.Path,
+    out_dir: pathlib.Path,
+    metric: str = "prover_gas",
+) -> list[FitResult]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for run in iter_jsonl(runs_path):
         grouped.setdefault(str(run["case"]), []).append(run)
-    results = [fit_case(sorted(items, key=lambda item: item["target_count"])) for items in grouped.values()]
+    results = [
+        fit_case(sorted(items, key=lambda item: item["target_count"]), metric=metric)
+        for items in grouped.values()
+    ]
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "fit.json").write_text(
         json.dumps([asdict(result) for result in results], indent=2, sort_keys=True) + "\n"
@@ -972,7 +1048,7 @@ def fit_report(runs_path: pathlib.Path, out_dir: pathlib.Path) -> list[FitResult
         )
         + "\n"
     )
-    write_markdown_report(out_dir / "uzen-vs-fit.md", results)
+    write_markdown_report(out_dir / "uzen-vs-fit.md", results, metric=metric)
     return results
 
 
@@ -980,6 +1056,7 @@ def compute_damage_result(
     *,
     case: str,
     kind: str,
+    workload_metric: str = "prover_gas",
     eth_gas_per_unit: int,
     measured_workload_per_unit: float,
     zkgas_multiplier: int,
@@ -1009,6 +1086,7 @@ def compute_damage_result(
     return DamageResult(
         case=case,
         kind=kind,
+        workload_metric=workload_metric,
         eth_gas_per_unit=eth_gas_per_unit,
         measured_workload_per_unit=measured_workload_per_unit,
         damage_ratio=measured_workload_per_unit / eth_gas_per_unit,
@@ -1116,13 +1194,18 @@ def damage_report(
     manifest = load_manifest(manifest_path)
     case_by_name = {case.name: case for case in manifest.cases}
     fit_rows = json.loads(fit_path.read_text())
+    workload_metric = str(fit_rows[0].get("metric", "prover_gas")) if fit_rows else "prover_gas"
     results = []
     for row in fit_rows:
+        row_metric = str(row.get("metric", workload_metric))
+        if row_metric != workload_metric:
+            raise ValueError("damage report requires one workload metric per fit file")
         case = case_by_name[str(row["case"])]
         results.append(
             compute_damage_result(
                 case=case.name,
                 kind=case.kind,
+                workload_metric=workload_metric,
                 eth_gas_per_unit=case.target_raw_gas,
                 measured_workload_per_unit=float(row["slope_per_operation"]),
                 zkgas_multiplier=current_uzen_multiplier(case),
@@ -1142,6 +1225,7 @@ def damage_report(
         results=results,
         eth_gas_limit=eth_gas_limit,
         zk_gas_limit=zk_gas_limit,
+        workload_metric=workload_metric,
     )
     return results
 
@@ -1161,9 +1245,15 @@ def write_inventory_markdown_report(path: pathlib.Path, rows: list[InventoryRow]
     path.write_text("\n".join(lines) + "\n")
 
 
-def write_markdown_report(path: pathlib.Path, results: list[FitResult]) -> None:
+def write_markdown_report(
+    path: pathlib.Path,
+    results: list[FitResult],
+    metric: str = "prover_gas",
+) -> None:
     lines = [
-        "# Uzen Vs Fitted SP1 Prover Gas",
+        "# Uzen Vs Fitted Workload Metric",
+        "",
+        f"- Workload metric: `{metric}`",
         "",
         "| Case | Samples | Slope/op | Slope/raw-gas | R2 |",
         "| --- | ---: | ---: | ---: | ---: |",
@@ -1182,18 +1272,20 @@ def write_damage_markdown_report(
     results: list[DamageResult],
     eth_gas_limit: int,
     zk_gas_limit: int,
+    workload_metric: str = "prover_gas",
 ) -> None:
     lines = [
         "# ZKGas Workload Damage Report",
         "",
         f"- Eth gas limit: `{eth_gas_limit}`",
         f"- ZK gas limit: `{zk_gas_limit}`",
+        f"- Workload metric: `{workload_metric}`",
         "- Candidate table: current Uzen smoke multipliers",
         "- Realistic workload impact: pending real block/app contribution accounting",
         "",
         "## Metric Meaning",
         "",
-        "- `Workload/unit`: fitted SP1 `proverGas` increase per target opcode or precompile body execution.",
+        f"- `Workload/unit`: fitted `{workload_metric}` increase per target opcode or precompile body execution.",
         "- `Damage ratio`: `Workload/unit / Eth gas/unit`, the measured zk workload reachable per ETH gas.",
         "- `R2`: linear-fit quality for the smoke variants. Low R2 means template noise or too few counts; do not use that slope as a coefficient without a better sweep.",
         "- `Eth-only units`: max target executions under the ETH gas limit only.",
@@ -1244,7 +1336,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
 
 
 def cmd_fit(args: argparse.Namespace) -> None:
-    results = fit_report(args.runs, args.out)
+    results = fit_report(args.runs, args.out, metric=args.metric)
     print(f"fit {len(results)} case(s)")
 
 
@@ -1288,12 +1380,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=pathlib.Path("crates/guests/elf/sp1_precompile_lab.elf"),
         help="SP1 precompile-lab guest ELF",
     )
+    run.add_argument(
+        "--opcode-stage",
+        choices=["opcode-lab", "revm-opcode-lab"],
+        default="opcode-lab",
+        help="SP1 opcode lab stage to run for opcode fixtures",
+    )
     run.add_argument("--out", type=pathlib.Path, required=True)
     run.set_defaults(func=cmd_run)
 
-    fit = subcommands.add_parser("fit", help="fit marginal prover-gas coefficients")
+    run_proposal = subcommands.add_parser(
+        "run-proposal",
+        help="run one proposal GuestInput through guest-launcher and write normalized raw JSONL",
+    )
+    run_proposal.add_argument("--guest-launcher", type=pathlib.Path, required=True)
+    run_proposal.add_argument("--guest-input", type=pathlib.Path, required=True)
+    run_proposal.add_argument("--proof-type", choices=["sp1", "risc0"], required=True)
+    run_proposal.add_argument("--case", required=True)
+    run_proposal.add_argument("--target-raw-gas", type=int, required=True)
+    run_proposal.add_argument("--target-count", type=int, default=1)
+    run_proposal.add_argument("--risc0-execution-po2", type=int, default=20)
+    run_proposal.add_argument("--out", type=pathlib.Path, required=True)
+    run_proposal.set_defaults(func=cmd_run_proposal)
+
+    fit = subcommands.add_parser("fit", help="fit marginal workload coefficients")
     fit.add_argument("--runs", type=pathlib.Path, required=True)
     fit.add_argument("--out", type=pathlib.Path, required=True)
+    fit.add_argument(
+        "--metric",
+        default="prover_gas",
+        help="raw-run metric field to fit, e.g. prover_gas or risc0_padded_cycles",
+    )
     fit.set_defaults(func=cmd_fit)
 
     damage = subcommands.add_parser("damage", help="compute eth-limit zkgas damage statistics")
@@ -1321,8 +1438,15 @@ def cmd_run(args: argparse.Namespace) -> None:
             cases_by_kind.setdefault(case.get("kind", "opcode"), []).append((case, input_path))
     report_paths = []
     for kind, cases in sorted(cases_by_kind.items()):
-        stage = "opcode-lab" if kind == "opcode" else "precompile-lab"
-        elf_path = args.elf if kind == "opcode" else args.precompile_elf
+        stage = args.opcode_stage if kind == "opcode" else "precompile-lab"
+        if kind == "opcode" and args.elf == pathlib.Path("crates/guests/elf/sp1_opcode_lab.elf"):
+            elf_path = pathlib.Path(
+                "crates/guests/elf/sp1_revm_opcode_lab.elf"
+                if stage == "revm-opcode-lab"
+                else "crates/guests/elf/sp1_opcode_lab.elf"
+            )
+        else:
+            elf_path = args.elf if kind == "opcode" else args.precompile_elf
         report_path = args.out.with_name(f"{args.out.stem}.{stage}.jsonl")
         run_guest_inputs(
             guest_launcher=args.guest_launcher,
@@ -1343,6 +1467,20 @@ def cmd_run(args: argparse.Namespace) -> None:
                 out.write(json.dumps(raw_run_from_report(case, report), sort_keys=True) + "\n")
                 ran += 1
     print(f"ran {ran} executable case(s)")
+
+
+def cmd_run_proposal(args: argparse.Namespace) -> None:
+    run_proposal_guest_input(
+        guest_launcher=args.guest_launcher,
+        guest_input=args.guest_input,
+        proof_type=args.proof_type,
+        case_name=args.case,
+        target_raw_gas=args.target_raw_gas,
+        target_count=args.target_count,
+        out=args.out,
+        risc0_execution_po2=args.risc0_execution_po2,
+    )
+    print(f"wrote proposal raw run to {args.out}")
 
 
 def main() -> None:

@@ -81,7 +81,7 @@ pub struct ShastaAggregateProof {
     pub payload: ShastaProvePayload,
     /// Original signing hash.
     pub input: B256,
-    /// Hex-encoded 89-byte sub-proof.
+    /// Hex-encoded 85-byte sub-proof: `instance_address(20) || signature(65)`.
     pub proof: String,
 }
 
@@ -115,7 +115,7 @@ pub enum ProofStatus {
 /// Successful proof payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProofResult {
-    /// Hex-encoded 89-byte TDX proof.
+    /// Hex-encoded 85-byte TDX proof: `instance_address(20) || signature(65)`.
     pub proof: String,
     /// Hex-encoded TDX attestation quote bound to the signing hash.
     pub quote: String,

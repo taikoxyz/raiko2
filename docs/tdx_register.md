@@ -229,7 +229,7 @@ is a **`view`** function that **reverts** on an invalid proof — so a non-rever
 means "verified". This is identical for `AzureTdxVerifier` and `GcpTdxVerifier`.
 
 The catch is computing `_commitmentHash`. The proof response (`/v3/proof/batch/shasta`) gives:
-- `data.proof.proof` — the 89-byte proof: `instance_id(4) || instance(20) || signature(65)`.
+- `data.proof.proof` — the 85-byte proof: `instance(20) || signature(65)`.
 - `data.proof.input` — the **already-signed** hash. Do **not** pass this to `verifyProof`.
 - `data.proof.extra_data.shasta.proof_carry_data` (single) or `proof_carry_data_vec` (aggregate).
 
@@ -315,5 +315,5 @@ the proof bytes, **for the given `_commitmentHash`**. Usually one of:
 ### `TDX_INVALID_INSTANCE()` (`0x07b8ce1e`) when calling `verifyProof`
 
 The recovered signer is valid as a signature, but the address isn't a registered live
-instance at the given `id`. Re-run `--register` for this prover, or check that the proof's
-4-byte `instance_id` prefix matches the slot you registered into.
+instance. Re-run `--register` for this prover, or check that the proof's first 20 bytes
+and `data.proof.extra_data.reth_tdx.instance_address` match the registered address.

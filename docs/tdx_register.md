@@ -217,7 +217,7 @@ key across restarts, so the registered instance survives a process restart or a
 `reth-tdx` binary update on the same image.
 
 raiko2 itself no longer holds a TDX bootstrap key. When `raiko2` is configured for the
-`tdx/remote` route, it forwards proof requests over HTTP to the `reth-tdx` instance running
+`tdx_dcap/remote` route, it forwards proof requests over HTTP to the `reth-tdx` instance running
 inside the VM — see
 [`raiko2-prover::reth_tdx`](../crates/prover/src/reth_tdx/mod.rs) for the wire protocol.
 

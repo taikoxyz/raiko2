@@ -31,11 +31,11 @@ pub enum ProofType {
     /// Uses the external gaiko2 SGX service lane for Shasta proving.
     #[serde(alias = "SGXGETH")]
     SgxGeth = 4u8,
-    /// # Tdx
+    /// # `TdxDcap`
     ///
-    /// Builds the block inside a TDX-protected VM and produces an attestation quote.
-    #[serde(alias = "TDX")]
-    Tdx = 5u8,
+    /// Uses a TDX remote prover backed by native DCAP attestation.
+    #[serde(alias = "TDX_DCAP")]
+    TdxDcap = 5u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -46,7 +46,7 @@ impl std::fmt::Display for ProofType {
             ProofType::Sgx => "sgx",
             ProofType::SgxGeth => "sgxgeth",
             ProofType::Risc0 => "risc0",
-            ProofType::Tdx => "tdx",
+            ProofType::TdxDcap => "tdx_dcap",
         })
     }
 }
@@ -61,7 +61,7 @@ impl std::str::FromStr for ProofType {
             "sgx" => Ok(ProofType::Sgx),
             "sgxgeth" => Ok(ProofType::SgxGeth),
             "risc0" => Ok(ProofType::Risc0),
-            "tdx" => Ok(ProofType::Tdx),
+            "tdx_dcap" => Ok(ProofType::TdxDcap),
             _ => Err(format!("Unknown proof type {s}")),
         }
     }
@@ -77,7 +77,7 @@ impl TryFrom<u8> for ProofType {
             2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
             4 => Ok(Self::SgxGeth),
-            5 => Ok(Self::Tdx),
+            5 => Ok(Self::TdxDcap),
             _ => Err(format!("Unknown proof type {value}")),
         }
     }
@@ -115,16 +115,19 @@ mod tests {
     use super::ProofType;
 
     #[test]
-    fn accepts_sgx_variants_by_string() {
+    fn accepts_sgx_and_tdx_dcap_variants_by_string() {
         assert_eq!("sgx".parse::<ProofType>().unwrap(), ProofType::Sgx);
         assert_eq!("sgxgeth".parse::<ProofType>().unwrap(), ProofType::SgxGeth);
+        assert_eq!("tdx_dcap".parse::<ProofType>().unwrap(), ProofType::TdxDcap);
+        assert_eq!(ProofType::TdxDcap.to_string(), "tdx_dcap");
+        assert!("tdx".parse::<ProofType>().is_err());
     }
 
     #[test]
     fn accepts_sgx_variants_by_u8() {
         assert_eq!(ProofType::try_from(2u8).unwrap(), ProofType::Sgx);
         assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::SgxGeth);
-        assert_eq!(ProofType::try_from(5u8).unwrap(), ProofType::Tdx);
+        assert_eq!(ProofType::try_from(5u8).unwrap(), ProofType::TdxDcap);
         assert!(ProofType::try_from(6u8).is_err());
     }
 }

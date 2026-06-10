@@ -501,7 +501,7 @@ fn prover_type_for_proof_type(
         BatchProofType::Native
         | BatchProofType::Sgx
         | BatchProofType::SgxGeth
-        | BatchProofType::Tdx => Ok(None),
+        | BatchProofType::TdxDcap => Ok(None),
         BatchProofType::ZkAny => Err(ApiError::bad_request(
             "proof_type=zk_any must be resolved before prover type selection",
         )),
@@ -2404,7 +2404,7 @@ const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> Bat
         ProofType::Sgx => BatchProofType::Sgx,
         ProofType::SgxGeth => BatchProofType::SgxGeth,
         ProofType::Risc0 => BatchProofType::Risc0,
-        ProofType::Tdx => BatchProofType::Tdx,
+        ProofType::TdxDcap => BatchProofType::TdxDcap,
     }
 }
 
@@ -4037,12 +4037,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_aggregate_request_shape_accepts_tdx() {
+    fn validate_aggregate_request_shape_accepts_tdx_dcap() {
         // Regression test for the Copilot review finding: validate_aggregate_request_shape
-        // gates on is_concrete_public_proof_type, which must include Tdx so the
+        // gates on is_concrete_public_proof_type, which must include TdxDcap so the
         // TDX aggregation route is reachable.
-        let req = aggregate_request_with_proof_type(BatchProofType::Tdx);
-        validate_aggregate_request_shape(&req).expect("Tdx aggregate request should validate");
+        let req = aggregate_request_with_proof_type(BatchProofType::TdxDcap);
+        validate_aggregate_request_shape(&req).expect("TdxDcap aggregate request should validate");
     }
 
     #[test]

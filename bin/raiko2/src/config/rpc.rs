@@ -264,76 +264,7 @@ impl RpcConfig {
             if !seen.insert(pair.key.clone()) {
                 bail!("duplicate rpc pair configuration: {}", pair.key);
             }
-            pair.boundless.validate(&pair.key)?;
-            if !is_valid_url(&pair.l1_rpc) {
-                bail!(
-                    "{}: l1_rpc = '{}'",
-                    validation::INVALID_RPC_URL,
-                    pair.l1_rpc
-                );
-            }
-            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc {
-                if !is_valid_url(beacon_rpc) {
-                    bail!(
-                        "{}: beacon_rpc = '{}'",
-                        validation::INVALID_RPC_URL,
-                        beacon_rpc
-                    );
-                }
-            }
-            if pair.l1_spec.seconds_per_slot == 0 {
-                bail!("{}: L1 chain spec seconds_per_slot must be > 0", pair.key);
-            }
-            if !is_valid_url(&pair.l2_rpc) {
-                bail!(
-                    "{}: l2_rpc = '{}'",
-                    validation::INVALID_RPC_URL,
-                    pair.l2_rpc
-                );
-            }
-            if !is_valid_url(&pair.l2_witness_rpc) {
-                bail!(
-                    "{}: l2_witness_rpc = '{}'",
-                    validation::INVALID_RPC_URL,
-                    pair.l2_witness_rpc
-                );
-            }
-            match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
-                (Some(rpc_url), Some(address)) => {
-                    if !is_valid_url(rpc_url) {
-                        bail!(
-                            "{}: sp1_verifier_rpc_url = '{}'",
-                            validation::INVALID_RPC_URL,
-                            rpc_url
-                        );
-                    }
-                    let verifier_address = Address::from_str(address).map_err(|_| {
-                        anyhow::anyhow!("{}: invalid sp1_verifier_address = '{address}'", pair.key)
-                    })?;
-                    if verifier_address == Address::ZERO {
-                        bail!(
-                            "{}: sp1_verifier_address must not be the zero address",
-                            pair.key
-                        );
-                    }
-                }
-                (None, None) => {}
-                (Some(_), None) => {
-                    bail!(
-                        "{}: sp1_verifier_address must be set when sp1_verifier_rpc_url is set",
-                        pair.key
-                    );
-                }
-                (None, Some(_)) => {
-                    bail!(
-                        "{}: sp1_verifier_rpc_url must be set when sp1_verifier_address is set",
-                        pair.key
-                    );
-                }
-            }
-            if !pair.l2_spec.is_taiko() {
-                bail!("rpc pair {} must target a Taiko L2 network", pair.key);
-            }
+            validate_resolved_pair(&pair)?;
         }
         Ok(())
     }
@@ -374,6 +305,80 @@ impl RpcConfig {
             },
         }
     }
+}
+
+fn validate_resolved_pair(pair: &ResolvedNetworkPair) -> Result<()> {
+    pair.boundless.validate(&pair.key)?;
+    if !is_valid_url(&pair.l1_rpc) {
+        bail!(
+            "{}: l1_rpc = '{}'",
+            validation::INVALID_RPC_URL,
+            pair.l1_rpc
+        );
+    }
+    if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc
+        && !is_valid_url(beacon_rpc)
+    {
+        bail!(
+            "{}: beacon_rpc = '{}'",
+            validation::INVALID_RPC_URL,
+            beacon_rpc
+        );
+    }
+    if pair.l1_spec.seconds_per_slot == 0 {
+        bail!("{}: L1 chain spec seconds_per_slot must be > 0", pair.key);
+    }
+    if !is_valid_url(&pair.l2_rpc) {
+        bail!(
+            "{}: l2_rpc = '{}'",
+            validation::INVALID_RPC_URL,
+            pair.l2_rpc
+        );
+    }
+    if !is_valid_url(&pair.l2_witness_rpc) {
+        bail!(
+            "{}: l2_witness_rpc = '{}'",
+            validation::INVALID_RPC_URL,
+            pair.l2_witness_rpc
+        );
+    }
+    match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
+        (Some(rpc_url), Some(address)) => {
+            if !is_valid_url(rpc_url) {
+                bail!(
+                    "{}: sp1_verifier_rpc_url = '{}'",
+                    validation::INVALID_RPC_URL,
+                    rpc_url
+                );
+            }
+            let verifier_address = Address::from_str(address).map_err(|_| {
+                anyhow::anyhow!("{}: invalid sp1_verifier_address = '{address}'", pair.key)
+            })?;
+            if verifier_address == Address::ZERO {
+                bail!(
+                    "{}: sp1_verifier_address must not be the zero address",
+                    pair.key
+                );
+            }
+        }
+        (None, None) => {}
+        (Some(_), None) => {
+            bail!(
+                "{}: sp1_verifier_address must be set when sp1_verifier_rpc_url is set",
+                pair.key
+            );
+        }
+        (None, Some(_)) => {
+            bail!(
+                "{}: sp1_verifier_rpc_url must be set when sp1_verifier_address is set",
+                pair.key
+            );
+        }
+    }
+    if !pair.l2_spec.is_taiko() {
+        bail!("rpc pair {} must target a Taiko L2 network", pair.key);
+    }
+    Ok(())
 }
 
 fn resolve_pair(

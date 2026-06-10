@@ -481,8 +481,8 @@ mod tests {
             PipelineRoute::new(GuestSystem::Native, RunnerKind::Local)
         );
         assert_eq!(
-            "tdx/remote".parse::<PipelineRoute>().unwrap(),
-            PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote)
+            "tdx_dcap/remote".parse::<PipelineRoute>().unwrap(),
+            PipelineRoute::new(GuestSystem::TdxDcap, RunnerKind::Remote)
         );
         assert_eq!(
             "risc0/boundless".parse::<PipelineRoute>().unwrap(),

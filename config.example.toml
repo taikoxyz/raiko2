@@ -139,7 +139,7 @@ lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
 lock_collateral = "20"
 
-# TDX prover config — used when [prover].guest_system = "tdx" and runner = "remote".
+# TDX DCAP prover config — used when [prover].guest_system = "tdx_dcap" and runner = "remote".
 # Points raiko2 at a `reth-tdx` instance running inside a Nethermind TDX VM;
 # raiko2 itself never speaks the tdxs daemon protocol or holds the bootstrap
 # key. Setting an empty `base_url` here disables the TDX engine at startup;

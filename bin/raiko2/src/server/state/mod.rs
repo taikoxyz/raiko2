@@ -158,30 +158,31 @@ const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
     !config.prover.is_remote_sgx_route() && !config.prover.is_tdx_route()
 }
 
+fn runtime_observer(
+    runtime: &Arc<RuntimeManager>,
+    pair: &ResolvedNetworkPair,
+) -> Arc<dyn EngineObserver> {
+    Arc::new(RuntimeObserver::new(Arc::clone(runtime), pair.key.clone()))
+}
+
 async fn register_pair_pipelines(
     factory: &mut StaticPipelineFactory,
     registration: PairPipelineRegistration<'_>,
 ) -> Result<()> {
     if registration.config.prover.is_remote_sgx_route() {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
+        let runtime_observer = runtime_observer(&registration.runtime, registration.pair);
         register_remote_sgx_pipelines(factory, &registration, Arc::clone(&runtime_observer))
             .await?;
         register_tdx_pipeline(factory, &registration, runtime_observer).await?;
         return Ok(());
     }
 
-    // tdx/remote default-route hosts register only the TDX engine (plus any
+    // tdx_dcap/remote default-route hosts register only the TDX DCAP engine (plus any
     // remote SGX engines that are also configured). Skipping the ZK / native /
     // boundless engines avoids requiring guest ELFs or zkVM keys on an
     // operator who only wants to serve TDX proofs.
     if registration.config.prover.is_tdx_route() {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
+        let runtime_observer = runtime_observer(&registration.runtime, registration.pair);
         register_tdx_pipeline(factory, &registration, Arc::clone(&runtime_observer)).await?;
         register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
         return Ok(());
@@ -194,10 +195,7 @@ async fn register_pair_pipelines(
 
     #[cfg(feature = "local-provers")]
     {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
+        let runtime_observer = runtime_observer(&registration.runtime, registration.pair);
         let risc0_engine = build_risc0_engine(
             registration.config,
             registration.pair,
@@ -305,7 +303,7 @@ async fn register_tdx_pipeline(
     );
     factory.insert(
         registration.pair.key.clone(),
-        PipelineKey::ShastaTdx,
+        PipelineKey::ShastaTdxDcap,
         Arc::new(tdx_engine),
     );
     Ok(())
@@ -729,8 +727,13 @@ async fn build_tdx_engine(
     let engine = match config.queue.backend {
         QueueBackend::Memory => {
             let provider = setup::build_provider(config, pair)?;
-            let context = setup::build_context(config, pair, ProofType::Tdx)?;
-            let spec = ShastaSpec::new(PipelineKey::ShastaTdx, tdx_prover, NativeBackend, provider);
+            let context = setup::build_context(config, pair, ProofType::TdxDcap)?;
+            let spec = ShastaSpec::new(
+                PipelineKey::ShastaTdxDcap,
+                tdx_prover,
+                NativeBackend,
+                provider,
+            );
             Engine::with_store_scheduler_config_and_observer(
                 spec,
                 context,
@@ -745,10 +748,13 @@ async fn build_tdx_engine(
                 type TdxOutput =
                     EngineOutput<<TdxSpec as raiko2_pipeline::PipelineSpec>::GuestInput>;
                 let provider = setup::build_provider(config, pair)?;
-                let context = setup::build_context(config, pair, ProofType::Tdx)?;
+                let context = setup::build_context(config, pair, ProofType::TdxDcap)?;
                 let url = config.queue.redis_url.clone().unwrap_or_default();
-                let namespace =
-                    setup::queue_namespace(&config.queue.namespace, pair, PipelineKey::ShastaTdx);
+                let namespace = setup::queue_namespace(
+                    &config.queue.namespace,
+                    pair,
+                    PipelineKey::ShastaTdxDcap,
+                );
                 let store =
                     raiko2_queue::RedisStore::<EngineTask, TdxOutput, EngineTaskKey>::connect(
                         &url,
@@ -756,8 +762,12 @@ async fn build_tdx_engine(
                         scheduler_config.lease_duration,
                     )
                     .await?;
-                let spec =
-                    ShastaSpec::new(PipelineKey::ShastaTdx, tdx_prover, NativeBackend, provider);
+                let spec = ShastaSpec::new(
+                    PipelineKey::ShastaTdxDcap,
+                    tdx_prover,
+                    NativeBackend,
+                    provider,
+                );
                 Engine::with_store_scheduler_config_and_observer(
                     spec,
                     context,

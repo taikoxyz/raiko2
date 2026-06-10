@@ -345,7 +345,7 @@ fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
         "SGX" | "Sgx" => Ok(ProofType::Sgx),
         "SGXGETH" | "SgxGeth" => Ok(ProofType::SgxGeth),
         "RISC0" | "Risc0" => Ok(ProofType::Risc0),
-        "TDX" | "Tdx" => Ok(ProofType::Tdx),
+        "TDX_DCAP" | "TdxDcap" => Ok(ProofType::TdxDcap),
         _ => Err(format!("unknown ProofType variant: {value}")),
     }
 }

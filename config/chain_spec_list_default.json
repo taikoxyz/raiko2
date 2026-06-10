@@ -137,7 +137,7 @@
                 "RISC0": "0x059dAF31F571da48Ab4e74Ae12F64f907681Cd8b",
                 "SP1": "0x96337327648dcFA22b014009cf10A2D5E2F305f6",
                 "SGXGETH": "0x08568Df252ecf37D6C3eFD24f6ca3688118697F1",
-                "TDX": "0x0000000000000000000000000000000000000000"
+                "TDX_DCAP": "0x0000000000000000000000000000000000000000"
             }
         },
         "genesis_time": 0,
@@ -176,7 +176,7 @@
                 "SGX": "0x2184bace3e668bf0eecb22c5ccf02cfca87c8a67",
                 "SP1": "0x9d351f6e72e3095f24dd854c9b8ca69f99a2c538",
                 "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb",
-                "TDX": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+                "TDX_DCAP": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
                 "SGXGETH": "0x698ceB7EF2E001347B1672389d6ca6aCE04b13C8"
             }
         },
@@ -224,7 +224,7 @@
                 "SP1": "0x2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815",
                 "RISC0": "0x2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815",
                 "SGXGETH": "0x2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815",
-                "TDX": "0x0000000000000000000000000000000000000000"
+                "TDX_DCAP": "0x0000000000000000000000000000000000000000"
             }
         },
         "genesis_time": 0,
@@ -276,7 +276,7 @@
                 "RISC0": "0xfa0e7dAFe9785627df034c123A9B87497EB06b41",
                 "SP1": "0xc42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7",
                 "SGXGETH": "0x8e362ef5140B0b9BE4a1141b6367784b0A7cefB1",
-                "TDX": "0x0000000000000000000000000000000000000000"
+                "TDX_DCAP": "0x0000000000000000000000000000000000000000"
             }
         },
         "genesis_time": 0,

@@ -42,7 +42,7 @@ pub enum PipelineKey {
     ShastaRisc0Network,
     ShastaSgx,
     ShastaSgxGeth,
-    ShastaTdx,
+    ShastaTdxDcap,
 }
 
 impl PipelineKey {
@@ -55,7 +55,7 @@ impl PipelineKey {
             PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
             PipelineKey::ShastaSgx => "shasta-sgx-remote",
             PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
-            PipelineKey::ShastaTdx => "shasta-tdx-remote",
+            PipelineKey::ShastaTdxDcap => "shasta-tdx-dcap-remote",
         }
     }
 
@@ -69,7 +69,7 @@ impl PipelineKey {
                 PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
             }
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
-            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote),
+            Self::ShastaTdxDcap => PipelineRoute::new(GuestSystem::TdxDcap, RunnerKind::Remote),
         }
     }
 }
@@ -91,7 +91,7 @@ impl FromStr for PipelineKey {
             "shasta-sgx-remote" => Ok(Self::ShastaSgx),
             "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
             "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
-            "shasta-tdx-remote" => Ok(Self::ShastaTdx),
+            "shasta-tdx-dcap-remote" => Ok(Self::ShastaTdxDcap),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
     }
@@ -106,7 +106,8 @@ pub enum GuestSystem {
     Sp1,
     Native,
     Sgx,
-    Tdx,
+    #[serde(rename = "tdx_dcap")]
+    TdxDcap,
 }
 
 impl GuestSystem {
@@ -117,7 +118,7 @@ impl GuestSystem {
             Self::Sp1 => "sp1",
             Self::Native => "native",
             Self::Sgx => "sgx",
-            Self::Tdx => "tdx",
+            Self::TdxDcap => "tdx_dcap",
         }
     }
 }
@@ -137,7 +138,7 @@ impl FromStr for GuestSystem {
             "sp1" => Ok(Self::Sp1),
             "native" => Ok(Self::Native),
             "sgx" => Ok(Self::Sgx),
-            "tdx" => Ok(Self::Tdx),
+            "tdx_dcap" => Ok(Self::TdxDcap),
             _ => Err(format!("Unknown guest_system: {s}")),
         }
     }
@@ -206,7 +207,7 @@ impl PipelineRoute {
             GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
             GuestSystem::Native => raiko2_primitives::ProofType::Native,
             GuestSystem::Sgx => raiko2_primitives::ProofType::Sgx,
-            GuestSystem::Tdx => raiko2_primitives::ProofType::Tdx,
+            GuestSystem::TdxDcap => raiko2_primitives::ProofType::TdxDcap,
         }
     }
 
@@ -232,12 +233,12 @@ impl PipelineRoute {
             (GuestSystem::Sgx, RunnerKind::Network) => {
                 Err("Unsupported proving route: sgx/network".to_string())
             }
-            (GuestSystem::Tdx, RunnerKind::Remote) => Ok(PipelineKey::ShastaTdx),
-            (GuestSystem::Tdx, RunnerKind::Network) => {
-                Err("Unsupported proving route: tdx/network".to_string())
+            (GuestSystem::TdxDcap, RunnerKind::Remote) => Ok(PipelineKey::ShastaTdxDcap),
+            (GuestSystem::TdxDcap, RunnerKind::Network) => {
+                Err("Unsupported proving route: tdx_dcap/network".to_string())
             }
-            (GuestSystem::Tdx, RunnerKind::Local) => {
-                Err("Unsupported proving route: tdx/local".to_string())
+            (GuestSystem::TdxDcap, RunnerKind::Local) => {
+                Err("Unsupported proving route: tdx_dcap/local".to_string())
             }
             (GuestSystem::Sp1, RunnerKind::Remote) => {
                 Err("Unsupported proving route: sp1/remote".to_string())

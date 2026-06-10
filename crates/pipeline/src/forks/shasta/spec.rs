@@ -111,7 +111,7 @@ where
         let chain_spec = chain_spec_from_context(ctx);
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
-        let (manifest, witnesses) = if proof_type == ProofType::Tdx {
+        let (manifest, witnesses) = if proof_type == ProofType::TdxDcap {
             // TDX proofs run inside the TEE and don't consume execution
             // witnesses, so skip the (expensive) witness + tx-list derivation
             // and fetch the blocks only.
@@ -375,7 +375,7 @@ async fn build_preflight_manifest<P: Provider>(
         chain_spec.chain_id,
         blocks,
         &mut manifest,
-        proof_type == ProofType::Tdx,
+        proof_type == ProofType::TdxDcap,
     )
     .await?;
     if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
@@ -1336,7 +1336,7 @@ where
     type Input = GuestInput;
 
     fn validate(&self, ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
-        if proof_type_from_context(ctx) == ProofType::Tdx {
+        if proof_type_from_context(ctx) == ProofType::TdxDcap {
             // TDX runs inside a TEE that re-executes blocks itself; stateless
             // re-execution against an empty witness would always fail.
             return Ok(());

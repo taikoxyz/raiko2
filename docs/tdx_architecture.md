@@ -16,7 +16,7 @@ deployment pipeline (image build → smart-contract deploy → registration) see
   [NethermindEth/reth-tdx](https://github.com/NethermindEth/reth-tdx)) runs
   **inside** a measured Nethermind TDX VM produced by
   [`nethermind-tdx`](https://github.com/NethermindEth/nethermind-tdx).
-- On a `proof_type=tdx` request, raiko2 forwards only L1-derived proposal data
+- On a `proof_type=tdx_dcap` request, raiko2 forwards only L1-derived proposal data
   over HTTP to `reth-tdx`. `reth-tdx` fetches the corresponding L2 block from
   its co-resident Nethermind, builds the Shasta commitment, signs it with a
   TDX-bound bootstrap key, and returns the 89-byte proof + attestation quote.
@@ -179,7 +179,7 @@ sequenceDiagram
     participant TDXS as tdxs (in-VM)
     participant ETH as Inbox + AzureTdxVerifier
 
-    TC->>R2: POST /v3/proof/batch/shasta<br/>{ proof_type: "tdx", proposals }
+    TC->>R2: POST /v3/proof/batch/shasta<br/>{ proof_type: "tdx_dcap", proposals }
     R2->>L1: fetch L1 proposal event<br/>+ ancestor headers
     R2->>RTDX: POST /prove/shasta<br/>(L1 fields only: proposal_id,<br/>proposal_hash, parent_proposal_hash,<br/>actual_prover, transition)
     RTDX->>NM: eth_getBlockByNumber(proposal_id)

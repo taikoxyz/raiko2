@@ -73,13 +73,16 @@ Each precompile needs deterministic valid inputs. Invalid-input cases should be 
 
 ### Phase 4: Real Dispatch And Realistic Workloads
 
-Add real execution paths for:
+The `sp1-revm-opcode-lab` path is now the base real-dispatch opcode path. Continue from that path
+rather than replacing it with a lower-level direct interpreter call. The remaining work is to add
+realistic context around revm execution:
 
 - `STATICCALL` wrapper overhead
 - precompile dispatch metering
 - CALL/CREATE spawn estimates
 - stateful opcodes and warm/cold dimensions
 - historical proposal and app benchmark contribution accounting
+- Taiko fork config, block env, and realistic transaction env
 
 ## Output
 

@@ -145,6 +145,10 @@ Use `experiments/opcode-gas` fitted coefficients to compute:
 
 This phase is independent of the current alethia-reth table.
 
+For opcode coefficients, prefer the `sp1-revm-opcode-lab` fit once it has stable coverage and fit
+quality. Keep the mini `sp1-opcode-lab` fit as a fast smoke/regression signal because it deliberately
+removes revm execution context.
+
 ### Phase 2: Candidate Schedule Sweep
 
 For each candidate table and `L_zk`, compute:
@@ -196,5 +200,7 @@ decisions. Required follow-up work:
 - add argument and input-size sweeps for precompiles
 - add memory expansion dimensions for copy and hashing operations
 - add call wrapper and spawn estimate validation
+- add Taiko/reth-context revm lab inputs for fork config, block env, realistic tx env, and
+  warm/cold state
 - add realistic block and app benchmark contribution accounting
 - decide whether the table remains one-dimensional or needs scenario-specific dimensions

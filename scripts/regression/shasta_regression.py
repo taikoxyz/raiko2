@@ -50,7 +50,13 @@ def resolve_event_address_from_specs(
     for entry in specs:
         if entry.get("name") == chain_name:
             contracts = entry.get("l1_contract", {})
-            return contracts.get(fork)
+            address = contracts.get(fork)
+            if address:
+                return address
+            configured = [value for value in contracts.values() if value]
+            if len(configured) == 1:
+                return configured[0]
+            return None
     return None
 
 
@@ -194,6 +200,59 @@ def discover_proposal_spans_from_blocks(blocks: Iterable[Dict]) -> List[Dict[str
     return spans
 
 
+def load_proposal_metadata(path: Path) -> List[Dict[str, int]]:
+    payload = load_json_file(path, "proposal metadata")
+    records = payload.get("proposals") if isinstance(payload, dict) else payload
+    if not isinstance(records, list):
+        raise ValueError(f"proposal metadata must be a list or contain proposals: {path}")
+
+    required = [
+        "proposal_id",
+        "l1_inclusion_block_number",
+        "last_anchor_block_number",
+        "l2_start",
+        "l2_end",
+    ]
+    spans: List[Dict[str, int]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"proposal metadata record {index} is not an object")
+        missing = [key for key in required if key not in record]
+        if missing:
+            raise ValueError(
+                f"proposal metadata record {index} is missing: {', '.join(missing)}"
+            )
+        l2_start = int(record["l2_start"])
+        l2_end = int(record["l2_end"])
+        l2_block_numbers = record.get("l2_block_numbers")
+        block_count = (
+            len(l2_block_numbers)
+            if isinstance(l2_block_numbers, list)
+            else (l2_end - l2_start) + 1
+        )
+        spans.append(
+            {
+                "proposal_id": int(record["proposal_id"]),
+                "l1_inclusion_block_number": int(
+                    record["l1_inclusion_block_number"]
+                ),
+                "last_anchor_block_number": int(record["last_anchor_block_number"]),
+                "l2_start": l2_start,
+                "l2_end": l2_end,
+                "block_count": block_count,
+            }
+        )
+    return spans
+
+
+def missing_preflight_metadata(span: Dict[str, int]) -> List[str]:
+    return [
+        key
+        for key in ("l1_inclusion_block_number", "last_anchor_block_number")
+        if key not in span
+    ]
+
+
 def rpc_call(rpc_url: str, method: str, params: List, timeout: int) -> Optional[Dict]:
     try:
         response = requests.post(
@@ -264,25 +323,29 @@ def run_preflight(
     preflight_bin: str,
     out_path: Path,
     proposal_id: int,
+    l1_inclusion_block_number: int,
+    last_anchor_block_number: int,
     l2_start: int,
     l2_end: int,
-    rpc_url: str,
+    l2_rpc_url: str,
+    l1_rpc_url: str,
     l2_chain_id: int,
     l1_chain_id: int,
     proof_type: str,
-    debug_witness: bool,
 ) -> subprocess.CompletedProcess:
     cmd = build_preflight_cmd(
         preflight_bin=preflight_bin,
         proposal_id=proposal_id,
+        l1_inclusion_block_number=l1_inclusion_block_number,
+        last_anchor_block_number=last_anchor_block_number,
         l2_start=l2_start,
         l2_end=l2_end,
-        rpc_url=rpc_url,
+        l2_rpc_url=l2_rpc_url,
+        l1_rpc_url=l1_rpc_url,
         l2_chain_id=l2_chain_id,
         l1_chain_id=l1_chain_id,
         output_path=out_path,
         proof_type=proof_type,
-        debug_witness=debug_witness,
     )
     return run_command(cmd)
 
@@ -291,25 +354,33 @@ def build_preflight_cmd(
     *,
     preflight_bin: str,
     proposal_id: int,
+    l1_inclusion_block_number: int,
+    last_anchor_block_number: int,
     l2_start: int,
     l2_end: int,
-    rpc_url: str,
+    l2_rpc_url: str,
+    l1_rpc_url: str,
     l2_chain_id: int,
     l1_chain_id: int,
     output_path: Path,
     proof_type: str,
-    debug_witness: bool,
 ) -> List[str]:
     cmd = [
         preflight_bin,
         "--rpc-url",
-        rpc_url,
+        l2_rpc_url,
+        "--l1-rpc-url",
+        l1_rpc_url,
         "--l2-chain-id",
         str(l2_chain_id),
         "--l1-chain-id",
         str(l1_chain_id),
         "--proposal-id",
         str(proposal_id),
+        "--l1-inclusion-block-number",
+        str(l1_inclusion_block_number),
+        "--last-anchor-block-number",
+        str(last_anchor_block_number),
         "--l2-start",
         str(l2_start),
         "--l2-end",
@@ -319,8 +390,6 @@ def build_preflight_cmd(
         "--output",
         str(output_path),
     ]
-    if debug_witness:
-        cmd.append("--debug-witness")
     return cmd
 
 
@@ -660,6 +729,12 @@ def main() -> int:
         help="Print resolved proposal spans as JSON and exit without running binaries",
     )
     parser.add_argument(
+        "--proposal-metadata",
+        type=Path,
+        default=None,
+        help="Path to proposal metadata JSON produced by stress_shasta_proposal.py --proposal-out",
+    )
+    parser.add_argument(
         "--aggregate", type=int, default=0, help="Aggregation group size (0=off)"
     )
     parser.add_argument("--out-dir", default="test/regression/shasta")
@@ -667,11 +742,6 @@ def main() -> int:
         "--proof-type",
         default=None,
         help="Proof backend to use (native or sp1). Defaults to config value or native.",
-    )
-    parser.add_argument(
-        "--debug-witness",
-        default=None,
-        help="Enable debug witness in preflight (default true).",
     )
     parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--poll-interval", type=int, default=None)
@@ -722,9 +792,6 @@ def main() -> int:
     event_abi = config.get("event_abi")
     anchor_abi = config.get("anchor_abi")
     timeout = args.timeout or config.get("timeout_sec")
-    debug_witness = parse_boolish(args.debug_witness)
-    if debug_witness is None:
-        debug_witness = config.get("debug_witness", True)
     proof_type = args.proof_type or config.get("proof_type") or "native"
 
     out_dir = Path(args.out_dir)
@@ -740,11 +807,11 @@ def main() -> int:
         return 2
 
     logger.info(
-        "Starting discovery (range=%s, count=%s, proof_type=%s, debug_witness=%s)",
+        "Starting discovery (range=%s, count=%s, proposal_metadata=%s, proof_type=%s)",
         args.range_value,
         args.count,
+        args.proposal_metadata,
         proof_type,
-        debug_witness,
     )
 
     if not l2_rpc:
@@ -759,7 +826,15 @@ def main() -> int:
         logger.error("%s", message)
         return 2
 
-    if range_tuple:
+    if args.proposal_metadata:
+        try:
+            selected = load_proposal_metadata(args.proposal_metadata)
+        except ValueError as err:
+            logger.error("%s", err)
+            return 2
+        summary_range = None
+        summary_proposals = [span["proposal_id"] for span in selected]
+    elif range_tuple:
         expanded_start, expanded_end, start_pid, end_pid = (
             expand_range_to_proposal_boundaries(
                 l2_rpc, range_tuple[0], range_tuple[1], timeout
@@ -784,7 +859,7 @@ def main() -> int:
         summary_range = None
         summary_proposals = [span["proposal_id"] for span in selected]
     else:
-        logger.error("Either --range or --count must be provided.")
+        logger.error("Either --range, --count, or --proposal-metadata must be provided.")
         return 2
 
     logger.info("Selected %s proposals", len(selected))
@@ -795,10 +870,12 @@ def main() -> int:
             "resolved_range": summary_range,
             "resolved_proposals": summary_proposals,
             "resolved_spans": selected,
+            "proposal_metadata": str(args.proposal_metadata)
+            if args.proposal_metadata
+            else None,
             "count": args.count,
             "aggregate": args.aggregate,
             "proof_type": proof_type,
-            "debug_witness": debug_witness,
         },
         "successes": [],
         "failures": [],
@@ -810,9 +887,12 @@ def main() -> int:
         print()
         return 0
 
-    preflight_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
-    if not preflight_rpc:
+    preflight_l2_rpc = preflight_rpc_from_config({"l1_rpc": l1_rpc, "l2_rpc": l2_rpc})
+    if not preflight_l2_rpc:
         logger.error("Missing l2_rpc in config or chain spec lookup.")
+        return 2
+    if not l1_rpc:
+        logger.error("Missing l1_rpc in config or chain spec lookup.")
         return 2
     if not l2_chain_id:
         logger.error("Missing l2_chain_id in config or chain spec lookup.")
@@ -821,6 +901,22 @@ def main() -> int:
         l1_chain_id = 1
     if not event_address:
         logger.error("Missing event_address (resolve from chain spec).")
+        return 2
+    incomplete_spans = [
+        (span["proposal_id"], missing_preflight_metadata(span))
+        for span in selected
+        if missing_preflight_metadata(span)
+    ]
+    if incomplete_spans:
+        formatted = ", ".join(
+            f"{proposal_id} missing {missing}" for proposal_id, missing in incomplete_spans
+        )
+        logger.error(
+            "Selected proposal spans do not include current preflight metadata: %s. "
+            "Run scripts/regression/stress_shasta_proposal.py --discover-only --proposal-out "
+            "and pass the JSON with --proposal-metadata.",
+            formatted,
+        )
         return 2
 
     guest_mode = "prove" if proof_type == "native" else "execute"
@@ -847,13 +943,15 @@ def main() -> int:
             args.preflight_bin,
             paths["input"],
             proposal_id,
+            span["l1_inclusion_block_number"],
+            span["last_anchor_block_number"],
             l2_start,
             l2_end,
-            preflight_rpc,
+            preflight_l2_rpc,
+            l1_rpc,
             l2_chain_id,
             l1_chain_id,
             proof_type,
-            debug_witness,
         )
         if preflight.returncode != 0:
             logger.error("preflight failed for %s: %s", proposal_id, preflight.stderr)

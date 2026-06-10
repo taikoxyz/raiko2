@@ -139,6 +139,46 @@ class TestProposalSpanDiscovery(unittest.TestCase):
         )
 
 
+class TestProposalMetadata(unittest.TestCase):
+    def test_load_proposal_metadata_from_stress_payload(self):
+        from shasta_regression import load_proposal_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "proposals.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "proposals": [
+                            {
+                                "proposal_id": 7,
+                                "l1_inclusion_block_number": 99,
+                                "last_anchor_block_number": 88,
+                                "l2_start": 100,
+                                "l2_end": 110,
+                                "l2_block_numbers": list(range(100, 111)),
+                            }
+                        ]
+                    }
+                )
+            )
+
+            spans = load_proposal_metadata(path)
+
+            self.assertEqual(
+                spans,
+                [
+                    {
+                        "proposal_id": 7,
+                        "l1_inclusion_block_number": 99,
+                        "last_anchor_block_number": 88,
+                        "l2_start": 100,
+                        "l2_end": 110,
+                        "block_count": 11,
+                    }
+                ],
+            )
+
+
 class TestChainSpecLookup(unittest.TestCase):
     def test_resolve_rpc_from_chain_spec(self):
         from shasta_regression import resolve_rpc_from_chain_spec
@@ -175,6 +215,28 @@ class TestChainSpecContracts(unittest.TestCase):
             self.assertEqual(
                 resolve_event_address_from_chain_spec(spec_path, "taiko_dev", "SHASTA"),
                 "0xabc",
+            )
+
+    def test_resolve_event_address_uses_single_configured_contract_if_fork_key_is_absent(self):
+        from shasta_regression import resolve_event_address_from_chain_spec
+
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "taiko_dev",
+                            "l1_contract": {
+                                "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
+                            },
+                        }
+                    ]
+                )
+            )
+            self.assertEqual(
+                resolve_event_address_from_chain_spec(spec_path, "taiko_dev", "SHASTA"),
+                "0xb432bbe475e569b2adef4830ae43d587932f139c",
             )
 
 
@@ -259,22 +321,29 @@ class TestPreflightCommand(unittest.TestCase):
         cmd = build_preflight_cmd(
             preflight_bin="/bin/preflight",
             proposal_id=7,
+            l1_inclusion_block_number=99,
+            last_anchor_block_number=88,
             l2_start=100,
             l2_end=110,
-            rpc_url="http://l1",
+            l2_rpc_url="http://l2",
+            l1_rpc_url="http://l1",
             l2_chain_id=123,
             l1_chain_id=1,
             output_path=Path("/tmp/out.json"),
             proof_type="native",
-            debug_witness=True,
         )
         self.assertIn("--rpc-url", cmd)
+        self.assertIn("http://l2", cmd)
+        self.assertIn("--l1-rpc-url", cmd)
+        self.assertIn("http://l1", cmd)
         self.assertIn("--l2-chain-id", cmd)
         self.assertIn("--l1-chain-id", cmd)
         self.assertIn("--proposal-id", cmd)
-        self.assertNotIn("--l1-rpc", cmd)
-        self.assertIn("--debug-witness", cmd)
-        self.assertNotIn("true", cmd)
+        self.assertIn("--l1-inclusion-block-number", cmd)
+        self.assertIn("99", cmd)
+        self.assertIn("--last-anchor-block-number", cmd)
+        self.assertIn("88", cmd)
+        self.assertNotIn("--debug-witness", cmd)
 
 
 class TestPreflightRpc(unittest.TestCase):

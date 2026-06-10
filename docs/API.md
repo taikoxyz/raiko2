@@ -454,7 +454,8 @@ Returns the root-task view derived from the original batch request.
   Completed proof artifacts are stored independently under `cache/proofs/...` and are indexed by
   stable proof refs, so aggregation can reuse them after engine task cleanup or process restart.
 - When `data.execution_mode=execute`, proposal completion returns `proof = null` and places the
-  execute report under `proposals[].extra_data.sp1`.
+  execute report under `proposals[].extra_data.sp1`. When present,
+  `proposals[].extra_data.sp1.gas` is SP1 prover gas from `ExecutionReport::gas()`, not EVM gas.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 

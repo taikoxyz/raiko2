@@ -18,6 +18,7 @@ raiko2-primitives-shasta.workspace = true
 raiko2-protocol-shasta.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+risc0-zkvm.workspace = true
 sp1-sdk.workspace = true
 alloy-primitives.workspace = true
 raiko2-prover.workspace = true

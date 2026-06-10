@@ -21,6 +21,7 @@ reth-consensus.workspace = true
 reth-primitives-traits.workspace = true
 reth-ethereum-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-hardforks.workspace = true
 alloy-primitives.workspace = true
 alloy-eips.workspace = true
 alloy-rpc-types-debug.workspace = true

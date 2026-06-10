@@ -97,8 +97,8 @@
         },
         "l1_contract": {},
         "l2_contract": null,
-        "rpc": "https://example.com/taiko-dev-l1-rpc",
-        "beacon_rpc": "https://example.com/taiko-dev-l1-beacon",
+        "rpc": "https://l1rpc.internal.taiko.xyz",
+        "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
         "verifier_address_forks": {
             "FRONTIER": {
                 "SGX": "0x532efbf6d62720d0b2a2bb9d11066e8588cae6d9",
@@ -106,7 +106,7 @@
                 "RISC0": "0x0000000000000000000000000000000000000000"
             }
         },
-        "genesis_time": 1779670900,
+        "genesis_time": 1780630944,
         "seconds_per_slot": 12,
         "is_taiko": false
     },
@@ -153,7 +153,7 @@
                 "Timestamp": 0
             },
             "UNZEN": {
-                "Timestamp": 1777787739
+                "Timestamp": 0
             },
             "CANCUN": {
                 "Timestamp": 0
@@ -169,14 +169,15 @@
             "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
         },
         "l2_contract": "0x1670010000000000000000000000000000010001",
-        "rpc": "https://rpc.dev.taiko.xyz",
+        "rpc": "https://rpc.internal.taiko.xyz",
         "beacon_rpc": null,
         "verifier_address_forks": {
             "CANCUN": {
                 "SGX": "0x2184bace3e668bf0eecb22c5ccf02cfca87c8a67",
                 "SP1": "0x9d351f6e72e3095f24dd854c9b8ca69f99a2c538",
                 "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb",
-                "TDX": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570"
+                "TDX": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+                "SGXGETH": "0x698ceB7EF2E001347B1672389d6ca6aCE04b13C8"
             }
         },
         "genesis_time": 0,

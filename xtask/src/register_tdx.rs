@@ -29,7 +29,10 @@ use serde_json::Value;
 
 #[derive(Args)]
 pub(crate) struct RegisterTdxArgs {
-    /// Address of the deployed `AzureTdxVerifier` contract.
+    /// Address of the deployed TDX verifier contract.
+    ///
+    /// Use `AzureTdxVerifier` for `issuer_type=azure`; use `GcpTdxVerifier`
+    /// for native raw-DCAP issuers (`tdx`, `gcp`, or `native`).
     #[arg(long, env = "TDX_VERIFIER")]
     verifier: alloy::primitives::Address,
 
@@ -121,6 +124,25 @@ struct BootstrapData {
     quote: String,
     nonce: String,
     metadata: Value,
+}
+
+#[derive(Debug)]
+enum TdxIssuer {
+    Azure,
+    Native,
+}
+
+fn classify_tdx_issuer(issuer: &str) -> Result<TdxIssuer> {
+    match issuer.trim().to_ascii_lowercase().as_str() {
+        "azure" => Ok(TdxIssuer::Azure),
+        // Native raw-DCAP TDX issuers. `tdx` is what reth-tdx currently emits;
+        // `gcp` and `native` are accepted aliases for explicit operator configs.
+        "tdx" | "gcp" | "native" => Ok(TdxIssuer::Native),
+        other => bail!(
+            "unsupported TDX issuer '{other}'; expected 'azure' or native raw-DCAP issuer \
+             ('tdx', 'gcp', 'native')"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------
@@ -237,10 +259,13 @@ pub(crate) async fn run(args: RegisterTdxArgs) -> Result<()> {
         bootstrap.issuer_type, bootstrap.public_key
     );
 
-    // Native Intel TDX (GCP / bare-metal) uses the GcpTdxVerifier (raw DCAP
-    // quote, RTMR measurements). Only the `azure` issuer takes the vTPM path.
-    if !bootstrap.issuer_type.eq_ignore_ascii_case("azure") {
-        return run_native(&args, &bootstrap, do_trust, do_register).await;
+    match classify_tdx_issuer(&bootstrap.issuer_type)? {
+        TdxIssuer::Native => {
+            // Native Intel TDX (GCP / bare-metal) uses the GcpTdxVerifier
+            // (raw DCAP quote, RTMR measurements).
+            return run_native(&args, &bootstrap, do_trust, do_register).await;
+        }
+        TdxIssuer::Azure => {}
     }
 
     if args.pcr_bitmap >= (1u32 << 24) {
@@ -1057,21 +1082,29 @@ fn cross_check_release_pcrs(metadata: &Value, release: &ReleaseMeasurements) -> 
 // ---------------------------------------------------------------
 // Native (GCP / bare-metal) RTMR cross-check
 //
-// The release's `*.gcp_measurements.json` carries the image-determined RTMR
-// reference values (rtmr1 = kernel, rtmr2 = UKI sections; produced by
-// `dstack-mr`). When the operator passes `--release-url` on the native path we
-// extract the corresponding RTMRs from the live quote and require them to match
-// — the native analogue of `cross_check_release_pcrs`. RTMRs the release does
-// not cover (firmware-dependent RTMR0, runtime RTMR3) are not checked here.
+// The release's `*.gcp_measurements.json` carries native TDX image identity
+// reference values. Older manifests may contain only RTMRs (for example
+// rtmr1 = kernel, rtmr2 = UKI sections; produced by `dstack-mr`). Newer
+// manifests should also include tee_tcb_svn, mr_seam, and mr_td. When the
+// operator passes `--release-url` on the native path, every field present in
+// the manifest must match the live quote before we trust or register.
 // ---------------------------------------------------------------
 
 struct ReleaseRtmrs {
     asset_name: String,
-    expected: std::collections::HashMap<usize, [u8; TDX_RTMR_LEN]>,
+    tee_tcb_svn: Option<[u8; 16]>,
+    mr_seam: Option<[u8; 48]>,
+    mr_td: Option<[u8; 48]>,
+    expected_rtmrs: std::collections::HashMap<usize, [u8; TDX_RTMR_LEN]>,
 }
 
 fn parse_release_rtmrs(asset_name: &str, doc: &Value) -> Result<ReleaseRtmrs> {
-    let mut expected = std::collections::HashMap::new();
+    let tee_tcb_svn =
+        parse_optional_hex_array::<16>(doc, &["tee_tcb_svn", "teeTcbSvn"], "teeTcbSvn")?;
+    let mr_seam = parse_optional_hex_array::<48>(doc, &["mr_seam", "mrSeam"], "mrSeam")?;
+    let mr_td = parse_optional_hex_array::<48>(doc, &["mr_td", "mrTd"], "mrTd")?;
+
+    let mut expected_rtmrs = std::collections::HashMap::new();
     for i in 0..4usize {
         let key = format!("rtmr{i}");
         if let Some(s) = doc.get(&key).and_then(Value::as_str) {
@@ -1080,54 +1113,90 @@ fn parse_release_rtmrs(asset_name: &str, doc: &Value) -> Result<ReleaseRtmrs> {
             let arr: [u8; TDX_RTMR_LEN] = bytes.try_into().map_err(|b: Vec<u8>| {
                 anyhow!("{key} must be {TDX_RTMR_LEN} bytes, got {}", b.len())
             })?;
-            expected.insert(i, arr);
+            expected_rtmrs.insert(i, arr);
         }
     }
-    if expected.is_empty() {
-        bail!("gcp measurements file '{asset_name}' has no rtmr0..rtmr3 entries");
+    if tee_tcb_svn.is_none() && mr_seam.is_none() && mr_td.is_none() && expected_rtmrs.is_empty() {
+        bail!(
+            "gcp measurements file '{asset_name}' has no tee_tcb_svn/mr_seam/mr_td or rtmr0..rtmr3 entries"
+        );
     }
     Ok(ReleaseRtmrs {
         asset_name: asset_name.to_string(),
-        expected,
+        tee_tcb_svn,
+        mr_seam,
+        mr_td,
+        expected_rtmrs,
     })
 }
 
-/// Read RTMR `idx` (0..3) from a raw TDX V4 quote, with the same bounds and
-/// offsets as `extract_native_trusted_params`.
-fn extract_quote_rtmr(raw_quote: &[u8], idx: usize) -> Result<[u8; TDX_RTMR_LEN]> {
-    if idx >= 4 {
-        bail!("RTMR index {idx} out of range (0..3)");
+fn parse_optional_hex_array<const N: usize>(
+    doc: &Value,
+    keys: &[&str],
+    label: &str,
+) -> Result<Option<[u8; N]>> {
+    for key in keys {
+        if let Some(value) = doc.get(*key) {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow!("{key} must be a hex string"))?;
+            let bytes = hex::decode(s.trim_start_matches("0x"))
+                .with_context(|| format!("{key} is not valid hex"))?;
+            let arr: [u8; N] = bytes
+                .try_into()
+                .map_err(|b: Vec<u8>| anyhow!("{label} must be {N} bytes, got {}", b.len()))?;
+            return Ok(Some(arr));
+        }
     }
-    let off = TDX_QUOTE_HEADER_LEN + TDX_BODY_RTMR0 + TDX_RTMR_LEN * idx;
-    let end = off + TDX_RTMR_LEN;
-    if raw_quote.len() < end {
-        bail!(
-            "raw quote too short ({} bytes) to read RTMR{idx} (need >= {end})",
-            raw_quote.len()
-        );
-    }
-    raw_quote[off..end]
-        .try_into()
-        .map_err(|_| anyhow!("RTMR{idx} slice"))
+    Ok(None)
 }
 
 /// Verify each RTMR the release covers matches the live quote. Lists all
 /// mismatches so the operator sees the full picture, not just the first.
 fn cross_check_release_rtmrs(raw_quote: &[u8], release: &ReleaseRtmrs) -> Result<()> {
-    let mut indices: Vec<usize> = release.expected.keys().copied().collect();
+    let live = extract_native_trusted_params(raw_quote, 0b1111)
+        .context("cannot extract native TDX measurements from live quote")?;
+
+    let mut indices: Vec<usize> = release.expected_rtmrs.keys().copied().collect();
     indices.sort_unstable();
 
     let mut mismatches: Vec<String> = Vec::new();
+    if let Some(expected) = &release.tee_tcb_svn
+        && live.teeTcbSvn.0 != *expected
+    {
+        mismatches.push(format!(
+            "teeTcbSvn: live=0x{} release=0x{}",
+            hex::encode(live.teeTcbSvn.0),
+            hex::encode(expected)
+        ));
+    }
+    if let Some(expected) = &release.mr_seam
+        && live.mrSeam.as_ref() != expected.as_slice()
+    {
+        mismatches.push(format!(
+            "mrSeam: live=0x{} release=0x{}",
+            hex::encode(&live.mrSeam[..]),
+            hex::encode(expected)
+        ));
+    }
+    if let Some(expected) = &release.mr_td
+        && live.mrTd.as_ref() != expected.as_slice()
+    {
+        mismatches.push(format!(
+            "mrTd: live=0x{} release=0x{}",
+            hex::encode(&live.mrTd[..]),
+            hex::encode(expected)
+        ));
+    }
     for i in indices {
-        let expected = &release.expected[&i];
-        match extract_quote_rtmr(raw_quote, i) {
-            Ok(live) if live == *expected => {}
-            Ok(live) => mismatches.push(format!(
+        let expected = &release.expected_rtmrs[&i];
+        let live_rtmr = live.rtmrs[i].as_ref();
+        if live_rtmr != expected.as_slice() {
+            mismatches.push(format!(
                 "RTMR{i}: live=0x{} release=0x{}",
-                hex::encode(live),
+                hex::encode(live_rtmr),
                 hex::encode(expected)
-            )),
-            Err(e) => mismatches.push(format!("RTMR{i}: cannot read from live quote: {e}")),
+            ));
         }
     }
 
@@ -1530,4 +1599,118 @@ fn parse_hex(value: &Value, field: &str) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("{field} must be a hex string"))?;
     let s = s.trim_start_matches("0x");
     hex::decode(s).with_context(|| format!("{field} not valid hex"))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn synthetic_native_quote(
+        tee_tcb_svn: [u8; 16],
+        mr_seam: [u8; 48],
+        mr_td: [u8; 48],
+        rtmrs: [[u8; TDX_RTMR_LEN]; 4],
+    ) -> Vec<u8> {
+        let mut raw = vec![0u8; TDX_QUOTE_HEADER_LEN + TDX_BODY_RTMR0 + 4 * TDX_RTMR_LEN];
+        raw[0..2].copy_from_slice(&[0x04, 0x00]);
+
+        let body = TDX_QUOTE_HEADER_LEN;
+        raw[body + TDX_BODY_TEE_TCB_SVN..body + TDX_BODY_TEE_TCB_SVN + 16]
+            .copy_from_slice(&tee_tcb_svn);
+        raw[body + TDX_BODY_MR_SEAM..body + TDX_BODY_MR_SEAM + 48].copy_from_slice(&mr_seam);
+        raw[body + TDX_BODY_MR_TD..body + TDX_BODY_MR_TD + 48].copy_from_slice(&mr_td);
+        for (i, rtmr) in rtmrs.iter().enumerate() {
+            let start = body + TDX_BODY_RTMR0 + i * TDX_RTMR_LEN;
+            raw[start..start + TDX_RTMR_LEN].copy_from_slice(rtmr);
+        }
+        raw
+    }
+
+    #[test]
+    fn native_release_cross_check_rejects_mismatched_mr_td() {
+        let raw_quote = synthetic_native_quote(
+            [0x11; 16],
+            [0x22; 48],
+            [0x33; 48],
+            [[0x40; 48], [0x41; 48], [0x42; 48], [0x43; 48]],
+        );
+        let release_doc = json!({
+            "mr_td": hex::encode([0x99; 48]),
+            "rtmr0": hex::encode([0x40; 48]),
+        });
+        let release = parse_release_rtmrs("test.gcp_measurements.json", &release_doc).unwrap();
+
+        let err = cross_check_release_rtmrs(&raw_quote, &release)
+            .expect_err("mismatched release mr_td must fail the native release check");
+
+        assert!(
+            err.to_string().contains("mrTd"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn native_release_cross_check_accepts_matching_identity_and_rtmrs() {
+        let raw_quote = synthetic_native_quote(
+            [0x11; 16],
+            [0x22; 48],
+            [0x33; 48],
+            [[0x40; 48], [0x41; 48], [0x42; 48], [0x43; 48]],
+        );
+        let release_doc = json!({
+            "teeTcbSvn": hex::encode([0x11; 16]),
+            "mr_seam": hex::encode([0x22; 48]),
+            "mr_td": hex::encode([0x33; 48]),
+            "rtmr0": hex::encode([0x40; 48]),
+            "rtmr2": hex::encode([0x42; 48]),
+        });
+        let release = parse_release_rtmrs("test.gcp_measurements.json", &release_doc).unwrap();
+
+        cross_check_release_rtmrs(&raw_quote, &release).unwrap();
+    }
+
+    #[test]
+    fn native_release_cross_check_keeps_legacy_rtmr_only_manifest_working() {
+        let raw_quote = synthetic_native_quote(
+            [0x11; 16],
+            [0x22; 48],
+            [0x33; 48],
+            [[0x40; 48], [0x41; 48], [0x42; 48], [0x43; 48]],
+        );
+        let release_doc = json!({
+            "rtmr1": hex::encode([0x41; 48]),
+        });
+        let release = parse_release_rtmrs("legacy.gcp_measurements.json", &release_doc).unwrap();
+
+        cross_check_release_rtmrs(&raw_quote, &release).unwrap();
+    }
+
+    #[test]
+    fn tdx_issuer_classification_is_explicit() {
+        assert!(matches!(
+            classify_tdx_issuer("azure").unwrap(),
+            TdxIssuer::Azure
+        ));
+        assert!(matches!(
+            classify_tdx_issuer("tdx").unwrap(),
+            TdxIssuer::Native
+        ));
+        assert!(matches!(
+            classify_tdx_issuer("gcp").unwrap(),
+            TdxIssuer::Native
+        ));
+        assert!(matches!(
+            classify_tdx_issuer("native").unwrap(),
+            TdxIssuer::Native
+        ));
+
+        let err = classify_tdx_issuer("unknown-cloud")
+            .expect_err("unknown issuers must not default to native TDX");
+        assert!(
+            err.to_string().contains("unsupported TDX issuer"),
+            "unexpected error: {err:#}"
+        );
+    }
 }

@@ -13,7 +13,7 @@ Hoodi-compatible v3 API.
 ## At a Glance
 
 - Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
-- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `tdx/remote`
+- Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`, `tdx_dcap/remote`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
@@ -73,11 +73,11 @@ flowchart LR
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
-- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, `tdx`, and
+- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, `tdx_dcap`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
   regression when the server route is `native/local`.
-- `proof_type=tdx` routes to `tdx/remote` and is accepted only when the server is configured for
-  `tdx/remote` with a reachable [`reth-tdx`](https://github.com/NethermindEth/reth-tdx) endpoint
+- `proof_type=tdx_dcap` routes to `tdx_dcap/remote` and is accepted only when the server is configured for
+  `tdx_dcap/remote` with a reachable [`reth-tdx`](https://github.com/NethermindEth/reth-tdx) endpoint
   in `[prover.tdx].base_url`. `reth-tdx` runs inside a TDX-protected Nethermind VM (see
   [nethermind-tdx](https://github.com/NethermindEth/nethermind-tdx)) and handles all
   attestation-key custody on its side. `ProverConfig::validate()` rejects misconfigured
@@ -98,7 +98,7 @@ flowchart LR
 - `risc0/network` submits RISC Zero proving directly to Boundless from the `raiko2` process.
 - `sp1/local` and `sp1/network` select the SP1 pipeline. The task `prover_type` reports whether
   SP1 ran in `mock`, `local`, or `network` mode.
-- `tdx/remote` forwards Shasta proving to a [`reth-tdx`](https://github.com/NethermindEth/reth-tdx)
+- `tdx_dcap/remote` forwards Shasta proving to a [`reth-tdx`](https://github.com/NethermindEth/reth-tdx)
   HTTP service running inside a TDX-protected Nethermind VM. raiko2 sends only L1-derived
   proposal data over the wire; `reth-tdx` fetches the L2 block from its co-resident Nethermind,
   signs the Shasta aggregation hash with its TDX-bound bootstrap key, and produces an Intel TDX

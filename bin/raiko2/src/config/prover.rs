@@ -65,7 +65,7 @@ impl ProverConfig {
         matches!(
             self.route(),
             PipelineRoute {
-                guest_system: GuestSystem::Tdx,
+                guest_system: GuestSystem::TdxDcap,
                 runner: RunnerKind::Remote
             }
         )
@@ -138,11 +138,11 @@ impl ProverConfig {
         }
         self.zk_any.validate()?;
 
-        // The tdx/remote route requires a configured base URL — raiko2 has no
+        // The tdx_dcap/remote route requires a configured base URL — raiko2 has no
         // way to reach the reth-tdx server inside the VM otherwise.
         if self.is_tdx_route() {
             if self.tdx.base_url.trim().is_empty() {
-                bail!("prover.tdx.base_url must not be empty for the tdx/remote route");
+                bail!("prover.tdx.base_url must not be empty for the tdx_dcap/remote route");
             }
             if self.tdx.timeout_ms == 0 {
                 bail!("prover.tdx.timeout_ms must be greater than zero");
@@ -270,7 +270,7 @@ impl Default for Risc0Config {
     }
 }
 
-fn default_risc0_execution_po2() -> u32 {
+const fn default_risc0_execution_po2() -> u32 {
     20
 }
 

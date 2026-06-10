@@ -228,6 +228,39 @@ class TestStressChainSpecResolution(unittest.TestCase):
         self.assertEqual(Path(resolved.abi_file), DEFAULT_SHASTA_IINBOX_ABI)
         self.assertEqual(Path(resolved.anchor_abi_file), DEFAULT_SHASTA_ANCHOR_ABI)
 
+    def test_resolves_single_configured_contract_when_shasta_key_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "chain_spec.json"
+            spec_path.write_text(
+                json.dumps(
+                    [
+                        {"name": "l1", "rpc": "http://l1"},
+                        {
+                            "name": "taiko_dev",
+                            "rpc": "http://l2",
+                            "l1_contract": {
+                                "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
+                            },
+                        },
+                    ]
+                )
+            )
+
+            resolved = resolve_monitor_config(
+                chain_spec_list=spec_path,
+                network="taiko_dev",
+                l1_network="l1",
+                l1_rpc=None,
+                l2_rpc=None,
+                event_contract=None,
+                abi_file=None,
+                anchor_abi_file=None,
+            )
+
+        self.assertEqual(
+            resolved.event_contract, "0xb432bbe475e569b2adef4830ae43d587932f139c"
+        )
+
     def test_explicit_values_override_chain_specs(self):
         resolved = resolve_monitor_config(
             chain_spec_list=DEFAULT_CHAIN_SPEC_LIST,

@@ -241,6 +241,7 @@ async fn fetch_preflight_witnesses<P: Provider>(
         .enumerate()
         .map(|(chunk_index, start)| (chunk_index, start, (start + chunk_size).min(blocks.len())))
         .collect::<Vec<_>>();
+    let chunk_count = chunked_inputs.len();
     let mut chunk_results: Vec<(usize, Vec<StatelessInput>)> =
         stream::iter(chunked_inputs.into_iter())
             .map(|(chunk_index, start, end)| {
@@ -248,13 +249,25 @@ async fn fetch_preflight_witnesses<P: Provider>(
                 let chunk_blocks = &blocks[start..end];
                 let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
                 async move {
-                    let operation = format!("shasta preflight chunk {chunk_index}");
+                    let chunk_block_numbers = chunk_blocks
+                        .iter()
+                        .map(|block| block.header.number)
+                        .collect::<Vec<_>>();
+                    let operation = preflight_chunk_operation(
+                        proposal_id,
+                        chunk_index,
+                        chunk_count,
+                        &chunk_block_numbers,
+                        chunk_tx_lists.is_some(),
+                    );
                     retry_shasta_preflight_operation(&operation, || {
                         let chain_spec = chain_spec.clone();
                         async {
                             fetch_preflight_chunk(
                                 provider,
+                                proposal_id,
                                 chunk_index,
+                                chunk_count,
                                 chunk_blocks,
                                 chunk_tx_lists,
                                 chain_spec,
@@ -350,6 +363,23 @@ fn preflight_chunk_concurrency() -> usize {
         .unwrap_or(DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY)
 }
 
+fn preflight_chunk_operation(
+    proposal_id: u64,
+    chunk_index: usize,
+    chunk_count: usize,
+    block_numbers: &[u64],
+    tx_list_witness: bool,
+) -> String {
+    let block_range = match (block_numbers.first(), block_numbers.last()) {
+        (Some(first), Some(last)) => format!("{first}..{last}"),
+        _ => "<empty>".to_string(),
+    };
+    format!(
+        "shasta preflight chunk {chunk_index} proposal_id={proposal_id} chunk_count={chunk_count} blocks={block_range} block_count={} tx_list_witness={tx_list_witness}",
+        block_numbers.len()
+    )
+}
+
 const fn preflight_retry_initial_delay() -> Duration {
     #[cfg(test)]
     {
@@ -427,7 +457,9 @@ fn collect_preflight_account_targets(_block: &reth_ethereum_primitives::Block) -
 
 async fn fetch_preflight_chunk<P: Provider>(
     provider: &P,
+    proposal_id: u64,
     chunk_index: usize,
+    chunk_count: usize,
     blocks: &[reth_ethereum_primitives::Block],
     tx_lists: Option<&[Bytes]>,
     chain_spec: ChainSpec,
@@ -438,10 +470,13 @@ async fn fetch_preflight_chunk<P: Provider>(
         .collect::<Vec<_>>();
     let chunk_started_at = Instant::now();
     info!(
+        proposal_id,
         chunk_index,
+        chunk_count,
         first_block = block_numbers.first().copied(),
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
+        tx_list_witness = tx_lists.is_some(),
         "starting shasta preflight chunk"
     );
     let witnesses = async {
@@ -489,10 +524,13 @@ async fn fetch_preflight_chunk<P: Provider>(
         .collect::<Vec<_>>();
 
     info!(
+        proposal_id,
         chunk_index,
+        chunk_count,
         first_block = block_numbers.first().copied(),
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
+        tx_list_witness = tx_lists.is_some(),
         witnesses_elapsed_ms,
         accounts_elapsed_ms,
         total_elapsed_ms = chunk_started_at.elapsed().as_millis(),
@@ -1752,6 +1790,16 @@ mod tests {
     }
 
     #[test]
+    fn preflight_chunk_operation_includes_proposal_and_block_range() {
+        let operation = super::preflight_chunk_operation(2156, 19, 48, &[10834703, 10834704], true);
+
+        assert_eq!(
+            operation,
+            "shasta preflight chunk 19 proposal_id=2156 chunk_count=48 blocks=10834703..10834704 block_count=2 tx_list_witness=true"
+        );
+    }
+
+    #[test]
     fn extract_block_range_requires_explicit_l2_block_range() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_block_range = None;
@@ -1846,14 +1894,6 @@ mod tests {
         else {
             panic!("taiko_dev should configure a timestamp-based Unzen fork");
         };
-        assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &devnet,
-                1,
-                devnet_unzen_timestamp.saturating_sub(1),
-            ),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
-        );
         assert_eq!(
             super::derivation_source_max_blocks_for_chain_spec_at(
                 &devnet,

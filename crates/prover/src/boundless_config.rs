@@ -139,14 +139,22 @@ const fn default_aggregation_quoted_mcycles() -> u32 {
     200
 }
 
+// Default offer prices are calibrated against observed Taiko-market clearing data
+// (May-Jun 2026): locked requests cleared at a median of ~240 gwei/mcycle (p90 ~890),
+// and requests capped below ~100 gwei/mcycle were mostly never locked. Provers also
+// post a fixed ~8.7 microETH cost per proof, so requests quoted at few mcycles
+// (aggregation, flat 200 mcycles) need a substantially higher per-mcycle cap than
+// proposal batches for the same effective margin. The max price is a cap, not the
+// paid price: provers lock during the ramp at their own floor whenever there is
+// competition.
 pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 200,
-        timeout_ms_per_mcycle: 410,
-        max_price_per_mcycle: Some("0.000000085".to_string()),
+        lock_timeout_ms_per_mcycle: 300,
+        timeout_ms_per_mcycle: 900,
+        max_price_per_mcycle: Some("0.0000006".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
         lock_collateral: "20".to_string(),
     }
@@ -159,7 +167,7 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 3000,
         timeout_ms_per_mcycle: 6000,
-        max_price_per_mcycle: Some("0.00000006".to_string()),
+        max_price_per_mcycle: Some("0.0000008".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
         lock_collateral: "20".to_string(),
     }

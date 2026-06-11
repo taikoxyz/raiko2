@@ -496,6 +496,9 @@ All API errors use the Hoodi-style envelope:
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and delegates price selection to the Boundless SDK price
   provider.
+- Expired Boundless requests are resubmitted automatically. With `manual` pricing each
+  resubmission doubles the offer's max price, capped at `4x` the configured
+  `max_price_per_mcycle`; the min price is unchanged.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

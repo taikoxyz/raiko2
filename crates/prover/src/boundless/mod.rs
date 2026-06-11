@@ -49,6 +49,10 @@ const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+// Cap manual max-price escalation at 2 doublings (4x). Resubmitting an expired
+// request at the same price just repeats the same auction outcome; doubling the
+// cap per attempt clears transient capacity crunches without unbounded spend.
+const RETRY_PRICE_MAX_DOUBLINGS: u64 = 2;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -115,6 +119,16 @@ fn now_secs() -> u64 {
 fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     let mcycles = user_cycles.div_ceil(MILLION_CYCLES);
     u32::try_from(mcycles).unwrap_or(u32::MAX)
+}
+
+const fn retry_price_multiplier(attempt: u64) -> u32 {
+    let doublings = attempt.saturating_sub(1);
+    let doublings = if doublings > RETRY_PRICE_MAX_DOUBLINGS {
+        RETRY_PRICE_MAX_DOUBLINGS
+    } else {
+        doublings
+    };
+    1_u32 << doublings
 }
 
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
@@ -211,6 +225,7 @@ struct FreshSubmissionContext<'a> {
     observer: Option<&'a Arc<dyn ProverProgressObserver>>,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
+    max_price_multiplier: u32,
 }
 
 enum BoundlessAttemptError {
@@ -485,6 +500,7 @@ impl BoundlessProver {
         offer_spec: &BoundlessOfferParams,
         mcycles_count: u32,
         journal: Vec<u8>,
+        max_price_multiplier: u32,
     ) -> RaikoResult<ProofRequest> {
         let ValidatedOfferParams {
             max_price,
@@ -495,7 +511,12 @@ impl BoundlessProver {
             timeout,
             ramp_up_period_secs,
             bidding_start,
-        } = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
+        } = validate_offer_params(
+            offer_spec,
+            mcycles_count,
+            self.config.block_time_sec(),
+            max_price_multiplier,
+        )?;
         let input_url = retry_external("upload boundless input", || async {
             client.upload_input(guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
@@ -670,6 +691,7 @@ impl BoundlessProver {
             context.offer_spec,
             context.quoted_mcycles_count,
             context.journal.to_vec(),
+            context.max_price_multiplier,
         ))
         .await?;
 
@@ -944,6 +966,7 @@ impl BoundlessProver {
                     observer: observer.as_ref(),
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
+                    max_price_multiplier: retry_price_multiplier(attempt),
                 }))
                 .await?
             };
@@ -1227,6 +1250,7 @@ fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
     block_time_sec: u32,
+    max_price_multiplier: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let (max_price, min_price, max_price_cap) = match offer_spec.pricing_mode {
@@ -1236,12 +1260,22 @@ fn validate_offer_params(
                     "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
                 )
             })?;
-            let max_price = parse_request_amount(
+            let mut max_price = parse_request_amount(
                 max_price_value,
                 "max_price_per_mcycle",
                 Asset::ETH,
                 mcycles_count,
             )?;
+            // Escalate only the cap on resubmissions; the min price keeps the
+            // ramp start unchanged so an idle prover still locks cheaply.
+            max_price.value = max_price
+                .value
+                .checked_mul(U256::from(max_price_multiplier.max(1)))
+                .ok_or_else(|| {
+                    RaikoError::InvalidRequestConfig(format!(
+                        "max_price_per_mcycle overflows when multiplied by retry multiplier {max_price_multiplier}"
+                    ))
+                })?;
             let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
             let min_price = parse_request_amount(
                 min_price_value,
@@ -1410,8 +1444,8 @@ mod tests {
     #[test]
     fn validate_offer_params_rejects_min_price_above_max_price() {
         let mut offer = sample_offer();
-        offer.min_price_per_mcycle = Some("0.00000009".to_string());
-        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
+        offer.min_price_per_mcycle = Some("0.000001".to_string());
+        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
         assert!(err.to_string().contains("min_price_per_mcycle"));
     }
 
@@ -1420,13 +1454,13 @@ mod tests {
         let mut offer = sample_offer();
         offer.lock_timeout_ms_per_mcycle = 300;
         offer.timeout_ms_per_mcycle = 300;
-        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
+        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
 
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
-        let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
         let max_price = validated.max_price.expect("manual max price");
         let min_price = validated.min_price.expect("manual min price");
         assert_eq!(max_price.asset, Asset::ETH);
@@ -1438,13 +1472,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_offer_params_escalates_only_max_price() {
+        let base = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
+        let escalated = validate_offer_params(&sample_offer(), 1_000, 2, 4).expect("valid offer");
+
+        let base_max = base.max_price.expect("manual max price");
+        let escalated_max = escalated.max_price.expect("manual max price");
+        assert_eq!(escalated_max.value, base_max.value * U256::from(4));
+
+        let base_min = base.min_price.expect("manual min price");
+        let escalated_min = escalated.min_price.expect("manual min price");
+        assert_eq!(escalated_min.value, base_min.value);
+    }
+
+    #[test]
+    fn retry_price_multiplier_doubles_per_attempt_with_cap() {
+        assert_eq!(super::retry_price_multiplier(1), 1);
+        assert_eq!(super::retry_price_multiplier(2), 2);
+        assert_eq!(super::retry_price_multiplier(3), 4);
+        assert_eq!(super::retry_price_multiplier(4), 4);
+        assert_eq!(super::retry_price_multiplier(100), 4);
+    }
+
+    #[test]
     fn validate_offer_params_omits_prices_for_market_pricing() {
         let mut offer = sample_offer();
         offer.pricing_mode = BoundlessPricingMode::Market;
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
 
         assert!(validated.max_price.is_none());
         assert!(validated.min_price.is_none());
@@ -1460,7 +1517,7 @@ mod tests {
         offer.max_price_per_mcycle = Some("0.00000006".to_string());
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
         let max_price_cap = validated.max_price_cap.expect("market max price cap");
 
         assert!(validated.max_price.is_none());
@@ -1477,10 +1534,10 @@ mod tests {
         offer.min_price_per_mcycle = None;
         offer.dynamic_pricing_timeout_modifier = Some(2.0);
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
 
-        assert_eq!(validated.lock_timeout, 400);
-        assert_eq!(validated.timeout, 820);
+        assert_eq!(validated.lock_timeout, 600);
+        assert_eq!(validated.timeout, 1800);
         assert!(validated.timeout > validated.lock_timeout);
     }
 

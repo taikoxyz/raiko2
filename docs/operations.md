@@ -539,6 +539,10 @@ Operator notes:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
+  each resubmission doubles the offer's max price, capped at `4x` the configured
+  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
+  the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,

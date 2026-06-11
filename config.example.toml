@@ -29,8 +29,11 @@ pairs = [
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x3B6041173B80E77f038f3F2C0f9744f04837185e" },
   # Optional: override Boundless quote and offer params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
-  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200 } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000060", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, lock_collateral = "20" } } } },
+  # Avoid fixing `batch_quoted_mcycles` for networks with variable proposal sizes: quote
+  # drives offer price and timeouts, so fixed quote underprices large proposals until no
+  # prover will lock them. Leave it unset to quote evaluated cycles (`raiko_agent` strategy).
+  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quoted_mcycles = 200 } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quoted_mcycles = 200, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
@@ -84,7 +87,10 @@ timeout_secs = 7200
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
-batch_quoted_mcycles = 6000
+# Leave `batch_quoted_mcycles` unset so proposal quotes use evaluated cycles
+# (`raiko_agent` rounds up to the next 1000 mcycles with a 2000 mcycle floor).
+# Fixed quote underprices large proposals and overprices small ones.
+# batch_quoted_mcycles = 6000
 batch_quote_strategy = "raiko_agent"
 aggregation_quoted_mcycles = 200
 poll_interval_ms = 10000
@@ -124,12 +130,17 @@ pricing_mode = "market"
 # 2.0 doubles both values, giving provers more time to accept larger proofs.
 dynamic_pricing_timeout_modifier = 2.0
 # Optional in market mode: reject SDK autoprice offers above this per-mcycle safety cap.
-max_price_per_mcycle = "0.000000060"
+max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 200
-timeout_ms_per_mcycle = 410
+lock_timeout_ms_per_mcycle = 300
+timeout_ms_per_mcycle = 900
 lock_collateral = "20"
+# pricing_mode = "manual", set both price fields. max price is a cap, not
+# paid price; provers lock the ramping auction price. Caps below ~0.0000001 ETH/mcycle
+# historically expired un-locked on Taiko market.
+# max_price_per_mcycle = "0.0000006"
+# min_price_per_mcycle = "0.000000010"
 
 [prover.boundless.offer_params.aggregation]
 pricing_mode = "market"
@@ -138,6 +149,12 @@ ramp_up_period_blocks = 60
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
 lock_collateral = "20"
+# Aggregation uses flat `aggregation_quoted_mcycles` (default 200), so per-mcycle
+# cap must also amortize prover's per-proof overhead (~0.0000087 ETH).
+# Manual caps below ~0.0000002 ETH/mcycle (= 0.00004 ETH total at 200 mcycles)
+# rarely lock.
+# max_price_per_mcycle = "0.0000008"
+# min_price_per_mcycle = "0.000000006"
 
 [queue]
 backend = "memory"

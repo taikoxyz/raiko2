@@ -140,15 +140,23 @@ const fn default_aggregation_quoted_mcycles() -> u32 {
     200
 }
 
+// Default offer prices are calibrated against observed Taiko-market clearing data
+// (May-Jun 2026): locked requests cleared at a median of ~240 gwei/mcycle (p90 ~890),
+// and requests capped below ~100 gwei/mcycle were mostly never locked. Provers also
+// post a fixed ~8.7 microETH cost per proof, so requests quoted at few mcycles
+// (aggregation, flat 200 mcycles) need a substantially higher per-mcycle cap than
+// proposal batches for the same effective margin. The max price is a cap, not the
+// paid price: provers lock during the ramp at their own floor whenever there is
+// competition.
 pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 200,
-        timeout_ms_per_mcycle: 410,
+        lock_timeout_ms_per_mcycle: 300,
+        timeout_ms_per_mcycle: 900,
         dynamic_pricing_timeout_modifier: None,
-        max_price_per_mcycle: Some("0.000000085".to_string()),
+        max_price_per_mcycle: Some("0.0000006".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
         lock_collateral: "20".to_string(),
     }
@@ -162,7 +170,7 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         lock_timeout_ms_per_mcycle: 3000,
         timeout_ms_per_mcycle: 6000,
         dynamic_pricing_timeout_modifier: None,
-        max_price_per_mcycle: Some("0.00000006".to_string()),
+        max_price_per_mcycle: Some("0.0000008".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
         lock_collateral: "20".to_string(),
     }
@@ -312,10 +320,10 @@ mod tests {
         let batch = BoundlessConfig::default().offer_params.batch;
         assert_eq!(batch.ramp_up_start_sec, 20);
         assert_eq!(batch.ramp_up_period_blocks, 60);
-        assert_eq!(batch.lock_timeout_ms_per_mcycle, 200);
-        assert_eq!(batch.timeout_ms_per_mcycle, 410);
+        assert_eq!(batch.lock_timeout_ms_per_mcycle, 300);
+        assert_eq!(batch.timeout_ms_per_mcycle, 900);
         assert_eq!(batch.pricing_mode, BoundlessPricingMode::Manual);
-        assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.000000085"));
+        assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.0000006"));
         assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
         assert_eq!(batch.lock_collateral, "20");
     }
@@ -330,7 +338,7 @@ mod tests {
         assert_eq!(aggregation.pricing_mode, BoundlessPricingMode::Manual);
         assert_eq!(
             aggregation.max_price_per_mcycle.as_deref(),
-            Some("0.00000006")
+            Some("0.0000008")
         );
         assert_eq!(
             aggregation.min_price_per_mcycle.as_deref(),
@@ -342,7 +350,7 @@ mod tests {
     #[test]
     fn validate_offer_spec_rejects_min_price_above_max_price() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.min_price_per_mcycle = Some("0.00000009".to_string());
+        offer.min_price_per_mcycle = Some("0.000001".to_string());
         let err = validate_offer_spec(&offer).expect_err("min_price above max");
         assert!(err.contains("min_price_per_mcycle"));
     }

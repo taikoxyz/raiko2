@@ -498,6 +498,9 @@ All API errors use the Hoodi-style envelope:
   pricing, and optionally accepts `max_price_per_mcycle` as a per-mcycle safety cap. The cap value
   is multiplied by the quoted mcycle count; SDK autoprice offers whose resulting `maxPrice` exceeds
   that total cap fail before submission. `market` must omit `min_price_per_mcycle`.
+- Expired Boundless requests are resubmitted automatically. `manual` pricing doubles the
+  offer's max price on each resubmission, capped at `4x` configured `max_price_per_mcycle`;
+  min price is unchanged. `market` resubmissions are re-priced by the SDK price provider.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

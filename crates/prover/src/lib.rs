@@ -378,7 +378,7 @@ pub fn validate_external_aggregate_proofs(
                         ))
                     })?;
             }
-            raiko2_pipeline::PipelineKey::ShastaTdx => {
+            raiko2_pipeline::PipelineKey::ShastaTdxDcap => {
                 if proof.input.is_none()
                     || proof.proof.is_none()
                     || proof.quote.is_none()

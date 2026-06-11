@@ -17,7 +17,7 @@ pub(super) enum BatchProofType {
     Sgx,
     #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
     SgxGeth,
-    Tdx,
+    TdxDcap,
     ZkAny,
 }
 
@@ -30,7 +30,7 @@ impl BatchProofType {
             Self::Boundless => "boundless",
             Self::Sgx => "sgx",
             Self::SgxGeth => "sgxgeth",
-            Self::Tdx => "tdx",
+            Self::TdxDcap => "tdx_dcap",
             Self::ZkAny => "zk_any",
         }
     }
@@ -42,7 +42,7 @@ impl BatchProofType {
             | Self::Risc0
             | Self::Sgx
             | Self::SgxGeth
-            | Self::Tdx
+            | Self::TdxDcap
             | Self::ZkAny => true,
             Self::Boundless => false,
         }
@@ -51,7 +51,7 @@ impl BatchProofType {
     pub(super) const fn is_concrete_public_proof_type(self) -> bool {
         matches!(
             self,
-            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::Tdx
+            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::TdxDcap
         )
     }
 }
@@ -306,7 +306,7 @@ pub(super) struct RootTaskState {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchProofType, BatchShastaRequest};
+    use super::{AggregateProofRequest, BatchProofType, BatchShastaRequest};
 
     #[test]
     fn shasta_batch_request_accepts_sgxgeth_json_variant() {
@@ -333,11 +333,32 @@ mod tests {
     }
 
     #[test]
-    fn tdx_is_a_concrete_public_proof_type_for_aggregate_requests() {
+    fn tdx_dcap_is_a_concrete_public_proof_type_for_aggregate_requests() {
         // Regression: /v3/proof/aggregate validates proof_type through
-        // is_concrete_public_proof_type. Without Tdx here the aggregate path is
-        // rejected at validation time, before the TDX aggregation pipeline can
+        // is_concrete_public_proof_type. Without TdxDcap here the aggregate path
+        // is rejected at validation time, before the TDX aggregation pipeline can
         // be reached.
-        assert!(BatchProofType::Tdx.is_concrete_public_proof_type());
+        let req: AggregateProofRequest = serde_json::from_value(serde_json::json!({
+            "aggregation_ids": [],
+            "proofs": [],
+            "proof_type": "tdx_dcap",
+            "network": "taiko_mainnet",
+            "l1_network": "ethereum"
+        }))
+        .expect("deserialize tdx_dcap aggregate request");
+
+        assert!(matches!(req.proof_type, BatchProofType::TdxDcap));
+        assert!(req.proof_type.is_concrete_public_proof_type());
+        assert!(
+            serde_json::from_value::<AggregateProofRequest>(serde_json::json!({
+                "aggregation_ids": [],
+                "proofs": [],
+                "proof_type": "tdx",
+                "network": "taiko_mainnet",
+                "l1_network": "ethereum"
+            }))
+            .is_err(),
+            "legacy proof_type=tdx must not alias the DCAP verifier lane"
+        );
     }
 }

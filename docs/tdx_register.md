@@ -125,7 +125,8 @@ cargo run -p xtask -- register-tdx \
 Identical command shape — the xtask detects `issuer_type == "tdx"` from the
 bootstrap and automatically uses the **`GcpTdxVerifier`** native-DCAP flow
 (raw quote + RTMRs, no vTPM). Point `--verifier` at the deployed `GcpTdxVerifier`
-proxy. Measurements are bound from the quote's RTMRs per `--rtmr-mask`.
+proxy. Trusted params bind `teeTcbSvn`, `mrSeam`, `mrTd`, and the quote RTMRs
+selected by `--rtmr-mask`.
 
 ```bash
 cargo run -p xtask -- register-tdx \
@@ -144,8 +145,11 @@ Under the hood the native path unwraps tdxs's attestation document
 on-chain via `reportData == sha256(userData || nonce)`.
 
 > The `GcpTdxVerifier` must be deployed against the **same Automata DCAP** the
-> Azure verifier uses (see `DeployGcpTdxVerifier.s.sol`). `--release-url` RTMR
-> cross-check is not yet implemented for the native flow.
+> Azure verifier uses (see `DeployGcpTdxVerifier.s.sol`). For native TDX,
+> `--release-url` should point to a `*.gcp_measurements.json` asset. The xtask
+> cross-checks every release field it contains (`tee_tcb_svn`/`teeTcbSvn`,
+> `mr_seam`/`mrSeam`, `mr_td`/`mrTd`, `rtmr0..rtmr3`) against the live quote
+> before broadcasting.
 
 ---
 
@@ -195,8 +199,8 @@ If a release contains assets for multiple chains, use `--release-asset`:
 | `--trusted-params-index` | — | `0` | Slot to read/write |
 | `--pcr-bitmap` | — | `0xBA10` | **Azure issuer only.** 24-bit mask of PCR indices to include in trusted params (PCRs 4, 9, 11, 12, 13, 15 — Azure paravisor reference set). Overridden by the release's bitmap when `--release-url` is set |
 | `--rtmr-mask` | — | `0b0111` | **Native (tdx) issuer only.** 4-bit mask of RTMRs to bind into `GcpTdxVerifier` trusted params. Default = RTMR0,1,2 (image/boot measurements); RTMR3 is excluded because it is typically extended by the runtime |
-| `--release-url` | `TDX_RELEASE_URL` | — | GitHub release page URL or direct `*.measurements.json` URL. When set, downloads the release-blessed measurements, uses its PCR bitmap, and cross-checks the live VM's PCR digests against it before broadcasting |
-| `--release-asset` | `TDX_RELEASE_ASSET` | — | Substring filter when the release page has multiple `*.measurements.json` assets. Required when more than one matches |
+| `--release-url` | `TDX_RELEASE_URL` | — | GitHub release page URL or direct measurements asset URL. Azure uses `*.measurements.json` for PCRs; native TDX uses `*.gcp_measurements.json` for `teeTcbSvn`/`mrSeam`/`mrTd`/RTMR cross-checks before broadcasting |
+| `--release-asset` | `TDX_RELEASE_ASSET` | — | Substring filter when the release page has multiple matching measurement assets. Required when more than one matches |
 | `--trust` | — | `false` | Call `setTrustedParams` (owner-only). Extracts `mrSeam`, `mrTd`, `teeTcbSvn`, and PCRs from the live VM's attestation quote |
 | `--register` | — | `true` if no flags given | Call `registerInstance`. Submits the live VM's attestation for on-chain verification |
 | `--dry-run` | — | `false` | Print transactions without broadcasting |
@@ -213,7 +217,7 @@ key across restarts, so the registered instance survives a process restart or a
 `reth-tdx` binary update on the same image.
 
 raiko2 itself no longer holds a TDX bootstrap key. When `raiko2` is configured for the
-`tdx/remote` route, it forwards proof requests over HTTP to the `reth-tdx` instance running
+`tdx_dcap/remote` route, it forwards proof requests over HTTP to the `reth-tdx` instance running
 inside the VM — see
 [`raiko2-prover::reth_tdx`](../crates/prover/src/reth_tdx/mod.rs) for the wire protocol.
 

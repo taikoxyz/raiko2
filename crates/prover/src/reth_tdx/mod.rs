@@ -24,10 +24,14 @@ pub mod protocol;
 
 use std::{str::FromStr, time::Duration};
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data_vec, proof_carry_from_proof};
+use raiko2_primitives_shasta::{
+    GuestInput, encode_proof_carry_data_vec,
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+    proof_carry_from_proof,
+};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use reqwest::{
     Client, Url,
@@ -47,6 +51,7 @@ use protocol::{
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
+const TDX_PROOF_BYTES: usize = 85;
 
 /// Cap on the response body we will buffer from reth-tdx. A proof + quote +
 /// carry payload is at most a few tens of KB even for a large aggregation;
@@ -168,6 +173,7 @@ where
                 result.input
             ))
         })?;
+        let instance = decode_tdx_instance_address(&result.proof)?;
 
         // reth-tdx must echo back the exact ProofCarryData it signed over so
         // raiko2 can compute the on-chain commitment hash. A missing or empty
@@ -190,6 +196,7 @@ where
         // Defense-in-depth: confirm the remote signed the proposal we asked
         // for, not a substituted one (see `ensure_carry_matches_request`).
         ensure_carry_matches_request(&carry, &packet.payload)?;
+        ensure_tdx_input_matches(&[carry.clone()], instance, input_hash)?;
 
         let extra_data = with_shasta_extra_data(
             &carry,
@@ -228,6 +235,7 @@ where
                 result.input
             ))
         })?;
+        let instance = decode_tdx_instance_address(&result.proof)?;
 
         let carry_vec = result
             .proof_carry_data_vec
@@ -255,6 +263,7 @@ where
         for (carry, requested) in carry_vec.iter().zip(request.payload.proofs.iter()) {
             ensure_carry_matches_request(carry, &requested.payload)?;
         }
+        ensure_tdx_input_matches(carry_vec, instance, input_hash)?;
 
         let metadata = reth_tdx_metadata(&envelope.schema, &result);
         let mut extra_data = encode_proof_carry_data_vec(carry_vec)?;
@@ -338,6 +347,44 @@ fn endpoint_url(base: &Url, path: &str) -> RaikoResult<Url> {
         .pop_if_empty() // drop a trailing empty segment from a trailing slash
         .extend(path.split('/').filter(|seg| !seg.is_empty()));
     Ok(url)
+}
+
+fn decode_tdx_instance_address(proof: &str) -> RaikoResult<Address> {
+    let proof = proof.strip_prefix("0x").unwrap_or(proof);
+    let proof = hex::decode(proof)
+        .map_err(|err| RaikoError::Guest(format!("invalid reth-tdx proof hex: {err}")))?;
+    if proof.len() != TDX_PROOF_BYTES {
+        return Err(RaikoError::Guest(format!(
+            "invalid reth-tdx proof length: got {} bytes, expected {TDX_PROOF_BYTES} \
+             bytes (instance_address(20) || signature(65))",
+            proof.len()
+        )));
+    }
+    Ok(Address::from_slice(&proof[..20]))
+}
+
+fn ensure_tdx_input_matches(
+    carry_vec: &[ProofCarryData],
+    instance: Address,
+    input_hash: B256,
+) -> RaikoResult<()> {
+    let commitment =
+        build_shasta_commitment_from_proof_carry_data_vec(carry_vec).ok_or_else(|| {
+            RaikoError::Guest(
+                "reth-tdx response carry data cannot build a Shasta commitment".to_string(),
+            )
+        })?;
+    let first = carry_vec.first().ok_or_else(|| {
+        RaikoError::Guest("reth-tdx response carry data cannot be empty".to_string())
+    })?;
+    let expected = shasta_aggregation_output(&commitment, first.chain_id, first.verifier, instance);
+    if input_hash != expected {
+        return Err(RaikoError::Guest(format!(
+            "reth-tdx input hash does not match echoed carry data and instance address: \
+             got {input_hash}, expected {expected}"
+        )));
+    }
+    Ok(())
 }
 
 /// Read a reth-tdx response body, refusing to buffer more than

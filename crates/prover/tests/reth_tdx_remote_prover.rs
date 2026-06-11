@@ -5,7 +5,10 @@ use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::NativeBackend;
 use raiko2_primitives::{Proof, ProverConfig};
-use raiko2_primitives_shasta::GuestInput;
+use raiko2_primitives_shasta::{
+    GuestInput,
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+};
 use raiko2_protocol_shasta::shasta::{
     Checkpoint, ProofCarryData, ShastaTransitionInput, TransitionInputData,
 };
@@ -47,6 +50,38 @@ fn carry_for_response() -> ProofCarryData {
     fixture_guest_input().proof_carry_data
 }
 
+fn tdx_proof_hex() -> String {
+    let mut proof = Vec::with_capacity(85);
+    proof.extend([0x11; 20]);
+    proof.extend([0x22; 65]);
+    format!("0x{}", hex::encode(proof))
+}
+
+fn tdx_instance_address() -> Address {
+    Address::from([0x11; 20])
+}
+
+fn expected_tdx_input_hex(carry_vec: &[ProofCarryData]) -> String {
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(carry_vec)
+        .expect("test carry data should build commitment");
+    let first = carry_vec.first().expect("non-empty test carry vec");
+    let input = shasta_aggregation_output(
+        &commitment,
+        first.chain_id,
+        first.verifier,
+        tdx_instance_address(),
+    );
+    format!("0x{}", hex::encode(input))
+}
+
+fn sgx_style_proof_with_instance_id_hex() -> String {
+    let mut proof = Vec::with_capacity(89);
+    proof.extend([0x12; 4]);
+    proof.extend([0x11; 20]);
+    proof.extend([0x22; 65]);
+    format!("0x{}", hex::encode(proof))
+}
+
 /// Carry data for a *different* proposal than [`fixture_guest_input`] requests —
 /// simulates a misbehaving/compromised remote prover echoing a substituted proof.
 fn tampered_carry() -> ProofCarryData {
@@ -58,7 +93,9 @@ fn tampered_carry() -> ProofCarryData {
 #[tokio::test]
 async fn reth_tdx_prover_posts_shasta_packet_and_maps_success_response() {
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x44; 32]));
+    let signing_hash = expected_tdx_input_hex(&[carry_for_response()]);
+    let proof_bytes = tdx_proof_hex();
+    let expected_proof = proof_bytes.clone();
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
@@ -69,7 +106,7 @@ async fn reth_tdx_prover_posts_shasta_packet_and_maps_success_response() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xproof",
+                    "proof": proof_bytes,
                     "quote": "0xquote",
                     "input": signing_hash,
                     "instance_address": "0xinstance",
@@ -94,9 +131,22 @@ async fn reth_tdx_prover_posts_shasta_packet_and_maps_success_response() {
         .expect("remote prove");
 
     mock.assert();
-    assert_eq!(proof.proof.as_deref(), Some("0xproof"));
+    assert_eq!(proof.proof.as_deref(), Some(expected_proof.as_str()));
+    assert_eq!(
+        hex::decode(expected_proof.trim_start_matches("0x"))
+            .expect("valid proof hex")
+            .len(),
+        85
+    );
     assert_eq!(proof.quote.as_deref(), Some("0xquote"));
-    assert_eq!(proof.input, Some(B256::from([0x44; 32])));
+    assert_eq!(
+        proof.input,
+        Some(
+            signing_hash
+                .parse()
+                .expect("expected signing hash should parse")
+        )
+    );
 
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
@@ -117,7 +167,8 @@ async fn reth_tdx_prover_posts_shasta_packet_and_maps_success_response() {
 #[tokio::test]
 async fn reth_tdx_prover_rejects_missing_proof_carry_data_vec() {
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x55; 32]));
+    let signing_hash = expected_tdx_input_hex(&[carry_for_response()]);
+    let proof_bytes = tdx_proof_hex();
     let mock = server.mock(|when, then| {
         when.method(POST).path("/prove/shasta");
         then.status(200)
@@ -126,7 +177,7 @@ async fn reth_tdx_prover_rejects_missing_proof_carry_data_vec() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xproof",
+                    "proof": proof_bytes,
                     "quote": "0xquote",
                     "input": signing_hash,
                 }
@@ -150,6 +201,92 @@ async fn reth_tdx_prover_rejects_missing_proof_carry_data_vec() {
 
     mock.assert();
     assert!(err.to_string().contains("proof_carry_data_vec"));
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_input_hash_mismatched_with_carry_and_instance() {
+    let server = MockServer::start();
+    let proof_bytes = tdx_proof_hex();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": proof_bytes,
+                    "quote": "0xquote",
+                    "input": format!("0x{}", hex::encode([0x44; 32])),
+                    "proof_carry_data_vec": [carry_for_response()],
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let err = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("mismatched input hash should fail");
+
+    mock.assert();
+    assert!(
+        err.to_string().contains("input hash does not match"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn reth_tdx_prover_rejects_sgx_style_proof_with_instance_id_prefix() {
+    let server = MockServer::start();
+    let signing_hash = expected_tdx_input_hex(&[carry_for_response()]);
+    let sgx_style_proof = sgx_style_proof_with_instance_id_hex();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": sgx_style_proof,
+                    "quote": "0xquote",
+                    "input": signing_hash,
+                    "proof_carry_data_vec": [carry_for_response()],
+                }
+            }));
+    });
+
+    let prover = RethTdxProver::new(&RethTdxConfig {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build reth-tdx prover");
+
+    let err = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("SGX-style 89-byte TDX proof should be rejected");
+
+    mock.assert();
+    assert!(
+        err.to_string().contains("invalid reth-tdx proof length"),
+        "got: {err}"
+    );
+    assert!(err.to_string().contains("expected 85"), "got: {err}");
 }
 
 #[tokio::test]
@@ -233,7 +370,9 @@ async fn reth_tdx_prover_surfaces_remote_error_envelope() {
 #[tokio::test]
 async fn reth_tdx_prover_aggregates_and_maps_success_response() {
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x77; 32]));
+    let signing_hash = expected_tdx_input_hex(&[carry_for_response()]);
+    let proof_bytes = tdx_proof_hex();
+    let expected_proof = proof_bytes.clone();
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta-aggregate")
@@ -244,7 +383,7 @@ async fn reth_tdx_prover_aggregates_and_maps_success_response() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xagg",
+                    "proof": proof_bytes,
                     "quote": "0xaggquote",
                     "input": signing_hash,
                     "proof_carry_data_vec": [carry_for_response()],
@@ -283,9 +422,16 @@ async fn reth_tdx_prover_aggregates_and_maps_success_response() {
     .expect("aggregate");
 
     mock.assert();
-    assert_eq!(proof.proof.as_deref(), Some("0xagg"));
+    assert_eq!(proof.proof.as_deref(), Some(expected_proof.as_str()));
     assert_eq!(proof.quote.as_deref(), Some("0xaggquote"));
-    assert_eq!(proof.input, Some(B256::from([0x77; 32])));
+    assert_eq!(
+        proof.input,
+        Some(
+            signing_hash
+                .parse()
+                .expect("expected signing hash should parse")
+        )
+    );
 
     // The aggregation proof must carry the full vec under
     // `extra_data.shasta.proof_carry_data_vec` so on-chain callers can compute
@@ -308,7 +454,8 @@ async fn reth_tdx_prover_aggregates_and_maps_success_response() {
 #[tokio::test]
 async fn reth_tdx_prover_rejects_aggregate_missing_proof_carry_data_vec() {
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x77; 32]));
+    let signing_hash = expected_tdx_input_hex(&[carry_for_response()]);
+    let proof_bytes = tdx_proof_hex();
     let _mock = server.mock(|when, then| {
         when.method(POST).path("/prove/shasta-aggregate");
         then.status(200)
@@ -317,7 +464,7 @@ async fn reth_tdx_prover_rejects_aggregate_missing_proof_carry_data_vec() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xagg",
+                    "proof": proof_bytes,
                     "quote": "0xaggquote",
                     "input": signing_hash,
                     // proof_carry_data_vec deliberately omitted.
@@ -363,7 +510,8 @@ async fn reth_tdx_prover_rejects_carry_for_a_different_proposal() {
     // *different* proposal than we asked it to prove. raiko2 must refuse it
     // rather than package a silently-substituted proof.
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x44; 32]));
+    let signing_hash = expected_tdx_input_hex(&[tampered_carry()]);
+    let proof_bytes = tdx_proof_hex();
     let mock = server.mock(|when, then| {
         when.method(POST).path("/prove/shasta");
         then.status(200)
@@ -372,7 +520,7 @@ async fn reth_tdx_prover_rejects_carry_for_a_different_proposal() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xproof",
+                    "proof": proof_bytes,
                     "quote": "0xquote",
                     "input": signing_hash,
                     "proof_carry_data_vec": [tampered_carry()],
@@ -407,7 +555,8 @@ async fn reth_tdx_prover_rejects_carry_for_a_different_proposal() {
 #[tokio::test]
 async fn reth_tdx_prover_rejects_aggregate_carry_for_a_different_proposal() {
     let server = MockServer::start();
-    let signing_hash = format!("0x{}", hex::encode([0x77; 32]));
+    let signing_hash = expected_tdx_input_hex(&[tampered_carry()]);
+    let proof_bytes = tdx_proof_hex();
     let _mock = server.mock(|when, then| {
         when.method(POST).path("/prove/shasta-aggregate");
         then.status(200)
@@ -416,7 +565,7 @@ async fn reth_tdx_prover_rejects_aggregate_carry_for_a_different_proposal() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xagg",
+                    "proof": proof_bytes,
                     "quote": "0xaggquote",
                     "input": signing_hash,
                     "proof_carry_data_vec": [tampered_carry()],
@@ -461,6 +610,7 @@ async fn reth_tdx_prover_rejects_aggregate_carry_for_a_different_proposal() {
 #[tokio::test]
 async fn reth_tdx_prover_rejects_invalid_input_hash() {
     let server = MockServer::start();
+    let proof_bytes = tdx_proof_hex();
     let mock = server.mock(|when, then| {
         when.method(POST).path("/prove/shasta");
         then.status(200)
@@ -469,7 +619,7 @@ async fn reth_tdx_prover_rejects_invalid_input_hash() {
                 "schema": RETH_TDX_PROOF_RESPONSE_SCHEMA,
                 "status": "ok",
                 "result": {
-                    "proof": "0xproof",
+                    "proof": proof_bytes,
                     "quote": "0xquote",
                     "input": "0xnot-a-valid-hash",
                     "proof_carry_data_vec": [carry_for_response()],

@@ -19,7 +19,7 @@ deployment pipeline (image build → smart-contract deploy → registration) see
 - On a `proof_type=tdx` request, raiko2 forwards only L1-derived proposal data
   over HTTP to `reth-tdx`. `reth-tdx` fetches the corresponding L2 block from
   its co-resident Nethermind, builds the Shasta commitment, signs it with a
-  TDX-bound bootstrap key, and returns the 89-byte proof + attestation quote.
+  TDX-bound bootstrap key, and returns the 85-byte proof + attestation quote.
 - Only `reth-tdx` ever touches the `tdxs` daemon or the bootstrap key. raiko2
   never speaks the tdxs protocol.
 
@@ -201,10 +201,10 @@ sequenceDiagram
 
 Key wire-format facts:
 
-- The 89-byte TDX proof body
-  (`instance_id(4) ‖ address(20) ‖ signature(65)`) is byte-identical to the
-  existing SGX wire format, so the on-chain verifier reuses the same
-  recover-and-compare logic.
+- The TDX proof body returned by `reth-tdx` is 85 bytes:
+  `instance_address(20) ‖ signature(65)`. Unlike SGX, TDX proof verification
+  should be address-keyed and does not require a chain-assigned `instance_id`
+  in the proof envelope.
 - The HTTP boundary between raiko2 and `reth-tdx` uses the
   `reth-tdx-shasta-request-v1` schema; only L1-derived fields cross the
   boundary, never L2 block data. `reth-tdx` sources L2 state from its

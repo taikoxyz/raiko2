@@ -45,9 +45,18 @@ pedantic = "warn"
 redundant_pub_crate = "warn"
 missing_const_for_fn = "warn"
 
-# Always optimize for performance
+# Dev builds favor compile speed; use `--release` (unchanged below) when runtime
+# performance matters.
 [profile.dev]
-opt-level = 3
+opt-level = 0
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+# Tests need light optimization: deep-recursion tests (e.g. shasta manifest
+# validation) overflow the default test stack at opt-level 0. Matches CI's
+# CARGO_PROFILE_TEST_OPT_LEVEL=1.
+[profile.test]
+opt-level = 1
 
 [profile.release]
 debug = 1
@@ -89,7 +98,6 @@ alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "1ed7c19d1f9652c5fed96185f4ab8f930e812dd3", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
-reth = { git = "https://github.com/paradigmxyz/reth", package = "reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f" }
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f", default-features = false, features = [
     "serde",
 ] }
@@ -153,8 +161,8 @@ alloy-signer-local = { version = "1.8.3" }
 
 # Async, server, http
 axum = { version = "0.8.7", features = ["macros"] }
-tower-http = { version = "0.6.8", features = ["full"] }
-tower = { version = "0.5.2", features = ["full"] }
+tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+tower = { version = "0.5.2", features = ["util"] }
 tokio = { version = "^1.23", features = ["full"] }
 reqwest = { version = "0.12.26", features = ["json"] }
 async-trait = "0.1"
@@ -196,7 +204,9 @@ thiserror = "2.0.17"
 
 # rpc-proxy dependencies
 actix-web = "4"
-alloy = { version = "2.0", features = ["full", "serde"] }
+# Default features bring the provider/contract/rpc-types essentials; list only
+# the extras this workspace actually uses (no ws/ipc/pubsub/anvil/trace APIs).
+alloy = { version = "2.0", features = ["consensus", "eips", "k256", "rlp", "serde"] }
 alloy-chains = { version = "0.2.23", features = ["serde"] }
 blst = "0.3"
 itertools = "0.14"

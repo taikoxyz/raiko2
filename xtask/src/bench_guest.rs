@@ -337,6 +337,7 @@ pub(crate) fn run(root: &Path, args: BenchGuestArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_bench_report(
     backend: String,
     mode: String,
@@ -454,6 +455,7 @@ fn prepare_bench_cases(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_bench_case(
     launcher_path: &Path,
     results_dir: &Path,

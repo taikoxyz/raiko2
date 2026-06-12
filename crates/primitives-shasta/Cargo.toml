@@ -14,7 +14,6 @@ raiko2-primitives.workspace = true
 raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 
-reth-ethereum-primitives.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
@@ -24,5 +23,3 @@ serde_json.workspace = true
 bincode.workspace = true
 
 anyhow.workspace = true
-hex.workspace = true
-tracing.workspace = true

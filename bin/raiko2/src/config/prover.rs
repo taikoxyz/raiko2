@@ -242,7 +242,7 @@ impl Default for Risc0Config {
     }
 }
 
-fn default_risc0_execution_po2() -> u32 {
+const fn default_risc0_execution_po2() -> u32 {
     20
 }
 

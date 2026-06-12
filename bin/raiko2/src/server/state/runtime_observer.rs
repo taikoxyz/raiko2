@@ -796,10 +796,10 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Proposal { .. } => None,
         }?;
 
+        // Submissions are resumable even past their on-chain expiry: a fulfilled request
+        // stays readable on the market forever, so the prover can collect already-paid
+        // work, and an expired one is replaced after a single status read.
         let expires_at = runtime.expires_at?;
-        if expires_at <= now_secs() {
-            return None;
-        }
 
         Some(BoundlessSubmissionResume {
             provider_request_id: runtime.provider_request_id.clone()?,
@@ -846,6 +846,7 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+#[cfg(test)]
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1093,26 +1094,30 @@ mod tests {
             .await?
             .expect("runtime task");
         let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
+        let past_expires_at = now_secs().saturating_sub(1);
         metadata
             .runtime
             .proposals
             .get_mut(&task_ref)
             .expect("proposal runtime exists")
-            .expires_at = Some(now_secs().saturating_sub(1));
+            .expires_at = Some(past_expires_at);
         record.metadata = serde_json::to_value(metadata)?;
         runtime.upsert_task(&record).await?;
-        assert!(
-            observer
-                .load_boundless_submission(
-                    &proposal_task_id,
-                    &EngineTask::ProveProposal {
-                        request: proposal_request(),
-                        input_task: proposal_task_id.clone(),
-                    },
-                )
-                .await
-                .is_none()
-        );
+        // Past-expiry submissions stay resumable: the prover collects a fulfillment that
+        // landed before the deadline instead of repurchasing it, and replaces a genuinely
+        // expired request after one status read.
+        let resumed_expired = observer
+            .load_boundless_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("expired boundless submission can resume");
+        assert_eq!(resumed_expired.provider_request_id, "0x1234");
+        assert_eq!(resumed_expired.expires_at, past_expires_at);
         Ok(())
     }
 

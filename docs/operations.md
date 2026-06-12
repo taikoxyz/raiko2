@@ -539,11 +539,13 @@ Operator notes:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- `prover.boundless.timeout_ms` bounds only the un-locked phase of a market request: if no
-  prover locks the request within the budget, `raiko2` abandons it and resubmits a fresh
-  request. Once a request is locked, `raiko2` keeps polling until the request's on-chain
-  expiry — the locked prover still collects on delivery, so abandoning early would pay for
-  the same proof twice.
+- `prover.boundless.timeout_ms` bounds only the un-locked phase of a market request: if a
+  status read confirms the request is still un-locked past the budget, `raiko2` abandons it
+  and resubmits a fresh request. Failed status reads never trigger the budget. Once a
+  request is locked, `raiko2` keeps polling until the request's on-chain expiry, and an
+  observed fulfillment is never abandoned — the prover collects on delivery either way, so
+  abandoning early would pay for the same proof twice. Stored submissions are resumed even
+  past their expiry so an already-paid fulfillment is collected rather than repurchased.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,

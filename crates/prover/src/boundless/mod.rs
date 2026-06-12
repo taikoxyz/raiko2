@@ -19,7 +19,7 @@ use alloy_primitives::{B256, Bytes, U256, address};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
-    contracts::RequestStatus,
+    contracts::{Fulfillment, RequestStatus},
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
     price_oracle::{Amount, Asset},
@@ -48,10 +48,10 @@ const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-// Grace past a submission's on-chain expiry before the poll loop gives up on a locked
-// request; absorbs market-chain clock skew and status RPC lag. The market reports
-// `Expired` on its own once the chain passes `expires_at`, so this only fires when the
-// status endpoint itself is unavailable around expiry.
+// Grace past a submission's on-chain expiry before the poll loop gives up on a request
+// whose fulfillment was never observed; absorbs market-chain clock skew and status RPC
+// lag. The market reports `Expired` on its own once the chain passes `expires_at`, so
+// this only fires when the status endpoint itself is unavailable around expiry.
 const LOCKED_EXPIRY_GRACE_SECS: u64 = 300;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
@@ -122,24 +122,34 @@ enum PollAbandon {
     ExpiryOverrun,
 }
 
-// Lock-aware abandon policy for the fulfillment poll loop. The configured poll budget
-// (`prover.boundless.timeout_ms`) bounds only the un-locked phase: resubmitting an offer
-// nobody locked re-runs the auction, but abandoning a locked request discards work a
-// prover is already committed to deliver — the locked prover still collects on
-// fulfillment, so raiko2 would pay for the same proof twice. Once a lock is observed,
-// only the request's own on-chain expiry (plus grace) ends the wait.
+// Lock-aware abandon policy for the fulfillment poll loop, decided strictly from
+// confirmed market state:
+// - `confirmed_unlocked`: the latest successful status read returned `Unknown`. The
+//   configured poll budget (`prover.boundless.timeout_ms`) only applies on that
+//   evidence — a failed status read says nothing about lock state, and resubmitting
+//   an offer that may be locked or fulfilled would buy the same proof twice.
+// - `fulfilled_observed`: a successful read returned `Fulfilled`. The proof is paid
+//   for; never abandon it — only the queue-level task budget bounds the wait for a
+//   readable fulfillment.
+// - clock backstop: past `expires_at` + grace the request is dead on-chain regardless
+//   of RPC health, so resubmitting is safe; whenever the RPC works, status reads
+//   report `Expired` before this fires.
 const fn poll_abandon_reason(
-    lock_observed: bool,
+    confirmed_unlocked: bool,
+    fulfilled_observed: bool,
     elapsed_ms: u128,
     timeout_ms: u64,
     now_secs: u64,
     expires_at: u64,
     grace_secs: u64,
 ) -> Option<PollAbandon> {
+    if fulfilled_observed {
+        return None;
+    }
     if now_secs > expires_at.saturating_add(grace_secs) {
         return Some(PollAbandon::ExpiryOverrun);
     }
-    if !lock_observed && elapsed_ms > timeout_ms as u128 {
+    if confirmed_unlocked && elapsed_ms > timeout_ms as u128 {
         return Some(PollAbandon::UnlockedTimeout);
     }
     None
@@ -745,17 +755,99 @@ impl BoundlessProver {
         let mut last_poll_error: Option<String> = None;
         let mut consecutive_poll_errors = 0_u32;
         let mut lock_observed = false;
+        let mut fulfilled_observed = false;
 
         loop {
-            let abandon = poll_abandon_reason(
-                lock_observed,
+            // Read market state first: abandoning is decided strictly from confirmed
+            // status (or the clock-only expiry backstop), never from absence of data.
+            let mut confirmed_unlocked = false;
+            if !fulfilled_observed {
+                match client
+                    .boundless_market
+                    .get_status(submission.market_request_id, Some(submission.expires_at))
+                    .await
+                {
+                    Ok(status) => {
+                        consecutive_poll_errors = 0;
+                        last_poll_error = None;
+                        match status {
+                            RequestStatus::Unknown => confirmed_unlocked = true,
+                            RequestStatus::Locked => {
+                                if !lock_observed {
+                                    lock_observed = true;
+                                    tracing::info!(
+                                        provider_request_id = %submission.provider_request_id,
+                                        expires_at = submission.expires_at,
+                                        elapsed_secs = started_at.elapsed().as_secs(),
+                                        "Boundless request locked; awaiting fulfillment until on-chain expiry"
+                                    );
+                                }
+                            }
+                            RequestStatus::Expired => {
+                                return Err(BoundlessAttemptError::Retryable(format!(
+                                    "Boundless request {} expired before fulfillment",
+                                    submission.provider_request_id
+                                )));
+                            }
+                            RequestStatus::Fulfilled => fulfilled_observed = true,
+                        }
+                    }
+                    Err(error) => {
+                        consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        let message = format!("Failed to read boundless status: {error}");
+                        tracing::warn!(
+                            provider_request_id = submission.provider_request_id,
+                            consecutive_poll_errors,
+                            "{message}"
+                        );
+                        last_poll_error = Some(message);
+                    }
+                }
+            }
+
+            // The fulfillment is already paid for: retry reads until they succeed (the
+            // queue-level task budget bounds the attempt), never abandon to resubmit.
+            if fulfilled_observed {
+                match client
+                    .boundless_market
+                    .get_request_fulfillment(submission.market_request_id, None, None)
+                    .await
+                {
+                    Ok(fulfillment) => {
+                        return self.build_proof_from_fulfillment(
+                            submission,
+                            &fulfillment,
+                            proof_type,
+                            image_id,
+                            block_image_id,
+                            expected_input_hash,
+                            quoted_mcycles_count,
+                            evaluated_mcycles_count,
+                            proposal_carry_data,
+                        );
+                    }
+                    Err(error) => {
+                        consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
+                        let message = format!("Failed to read boundless fulfillment: {error}");
+                        tracing::warn!(
+                            provider_request_id = submission.provider_request_id,
+                            consecutive_poll_errors,
+                            "{message}"
+                        );
+                        last_poll_error = Some(message);
+                    }
+                }
+            }
+
+            if let Some(reason) = poll_abandon_reason(
+                confirmed_unlocked,
+                fulfilled_observed,
                 started_at.elapsed().as_millis(),
                 timeout_ms,
                 now_secs(),
                 submission.expires_at,
                 LOCKED_EXPIRY_GRACE_SECS,
-            );
-            if let Some(reason) = abandon {
+            ) {
                 let detail = last_poll_error
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
@@ -773,155 +865,99 @@ impl BoundlessProver {
                 return Err(BoundlessAttemptError::Retryable(message));
             }
 
-            let status = match client
-                .boundless_market
-                .get_status(submission.market_request_id, Some(submission.expires_at))
-                .await
-            {
-                Ok(status) => {
-                    consecutive_poll_errors = 0;
-                    last_poll_error = None;
-                    status
-                }
-                Err(error) => {
-                    consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
-                    let message = format!("Failed to read boundless status: {error}");
-                    tracing::warn!(
-                        provider_request_id = submission.provider_request_id,
-                        consecutive_poll_errors,
-                        "{message}"
-                    );
-                    last_poll_error = Some(message);
-                    tokio::time::sleep(poll_interval).await;
-                    continue;
-                }
-            };
-
-            match status {
-                RequestStatus::Unknown => {}
-                RequestStatus::Locked => {
-                    if !lock_observed {
-                        lock_observed = true;
-                        tracing::info!(
-                            provider_request_id = %submission.provider_request_id,
-                            expires_at = submission.expires_at,
-                            elapsed_secs = started_at.elapsed().as_secs(),
-                            "Boundless request locked; awaiting fulfillment until on-chain expiry"
-                        );
-                    }
-                }
-                RequestStatus::Expired => {
-                    return Err(BoundlessAttemptError::Retryable(format!(
-                        "Boundless request {} expired before fulfillment",
-                        submission.provider_request_id
-                    )));
-                }
-                RequestStatus::Fulfilled => {
-                    let fulfillment = match client
-                        .boundless_market
-                        .get_request_fulfillment(submission.market_request_id, None, None)
-                        .await
-                    {
-                        Ok(fulfillment) => fulfillment,
-                        Err(error) => {
-                            consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
-                            let message = format!("Failed to read boundless fulfillment: {error}");
-                            tracing::warn!(
-                                provider_request_id = submission.provider_request_id,
-                                consecutive_poll_errors,
-                                "{message}"
-                            );
-                            last_poll_error = Some(message);
-                            tokio::time::sleep(poll_interval).await;
-                            continue;
-                        }
-                    };
-                    let fulfillment_data = fulfillment.data().map_err(|e| {
-                        BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                            "Failed to decode boundless fulfillment payload: {e}"
-                        )))
-                    })?;
-                    let journal = fulfillment_data.journal().ok_or_else(|| {
-                        BoundlessAttemptError::Fatal(RaikoError::Guest(
-                            "Boundless fulfillment is missing journal".to_string(),
-                        ))
-                    })?;
-                    let seal = fulfillment.seal.clone();
-                    let receipt_json = if proof_type == "proposal" {
-                        match decode_seal(seal.clone(), image_id, journal.to_vec()) {
-                            Ok(ContractReceipt::Base(receipt)) => {
-                                serde_json::to_string(&receipt).ok()
-                            }
-                            Ok(ContractReceipt::SetInclusion(_)) | Err(_) => None,
-                        }
-                    } else {
-                        None
-                    };
-                    let input_hash = match proof_type {
-                        "proposal" => parse_shasta_proposal_input_hash(journal)?,
-                        _ => parse_shasta_aggregation_input_hash(journal)?,
-                    };
-                    if input_hash != expected_input_hash {
-                        return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
-                            "Boundless fulfillment journal does not match local dry-run journal"
-                                .to_string(),
-                        )));
-                    }
-                    let stage_metadata = serde_json::json!({
-                        "zkvm": "risc0",
-                        "runner": "network",
-                        "proof_type": proof_type,
-                        "mcycles_count": quoted_mcycles_count,
-                        "quoted_mcycles_count": quoted_mcycles_count,
-                        "evaluated_mcycles_count": evaluated_mcycles_count,
-                        "boundless": {
-                            "provider_request_id": submission.provider_request_id,
-                            "remote_tx_hash": submission.remote_tx_hash,
-                            "expires_at": submission.expires_at,
-                            "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
-                            "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
-                            "offchain": self.config.offchain,
-                        }
-                    });
-                    let extra_data = match (proof_type, proposal_carry_data) {
-                        ("proposal", Some(carry)) => {
-                            with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
-                        }
-                        _ => Some(stage_metadata),
-                    };
-                    let proof = match proof_type {
-                        "proposal" => encode_risc0_proposal_seal_payload(
-                            &seal,
-                            B256::from_slice(image_id.as_bytes()),
-                        ),
-                        _ => encode_risc0_aggregation_seal_payload(
-                            &seal,
-                            B256::from_slice(
-                                block_image_id
-                                    .ok_or_else(|| {
-                                        RaikoError::Guest(
-                                            "missing block image id for aggregation proof"
-                                                .to_string(),
-                                        )
-                                    })?
-                                    .as_bytes(),
-                            ),
-                            B256::from_slice(image_id.as_bytes()),
-                        ),
-                    };
-                    return Ok(Proof {
-                        proof: Some(proof),
-                        input: Some(input_hash),
-                        quote: receipt_json,
-                        uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
-                        kzg_proof: None,
-                        extra_data,
-                    });
-                }
-            }
-
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_proof_from_fulfillment(
+        &self,
+        submission: &Submission,
+        fulfillment: &Fulfillment,
+        proof_type: &'static str,
+        image_id: Digest,
+        block_image_id: Option<Digest>,
+        expected_input_hash: B256,
+        quoted_mcycles_count: u32,
+        evaluated_mcycles_count: u32,
+        proposal_carry_data: Option<&ProofCarryData>,
+    ) -> Result<Proof, BoundlessAttemptError> {
+        let fulfillment_data = fulfillment.data().map_err(|e| {
+            BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
+                "Failed to decode boundless fulfillment payload: {e}"
+            )))
+        })?;
+        let journal = fulfillment_data.journal().ok_or_else(|| {
+            BoundlessAttemptError::Fatal(RaikoError::Guest(
+                "Boundless fulfillment is missing journal".to_string(),
+            ))
+        })?;
+        let seal = fulfillment.seal.clone();
+        let receipt_json = if proof_type == "proposal" {
+            match decode_seal(seal.clone(), image_id, journal.to_vec()) {
+                Ok(ContractReceipt::Base(receipt)) => serde_json::to_string(&receipt).ok(),
+                Ok(ContractReceipt::SetInclusion(_)) | Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let input_hash = match proof_type {
+            "proposal" => parse_shasta_proposal_input_hash(journal)?,
+            _ => parse_shasta_aggregation_input_hash(journal)?,
+        };
+        if input_hash != expected_input_hash {
+            return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
+                "Boundless fulfillment journal does not match local dry-run journal".to_string(),
+            )));
+        }
+        let stage_metadata = serde_json::json!({
+            "zkvm": "risc0",
+            "runner": "network",
+            "proof_type": proof_type,
+            "mcycles_count": quoted_mcycles_count,
+            "quoted_mcycles_count": quoted_mcycles_count,
+            "evaluated_mcycles_count": evaluated_mcycles_count,
+            "boundless": {
+                "provider_request_id": submission.provider_request_id,
+                "remote_tx_hash": submission.remote_tx_hash,
+                "expires_at": submission.expires_at,
+                "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
+                "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
+                "offchain": self.config.offchain,
+            }
+        });
+        let extra_data = match (proof_type, proposal_carry_data) {
+            ("proposal", Some(carry)) => {
+                with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
+            }
+            _ => Some(stage_metadata),
+        };
+        let proof = match proof_type {
+            "proposal" => {
+                encode_risc0_proposal_seal_payload(&seal, B256::from_slice(image_id.as_bytes()))
+            }
+            _ => encode_risc0_aggregation_seal_payload(
+                &seal,
+                B256::from_slice(
+                    block_image_id
+                        .ok_or_else(|| {
+                            RaikoError::Guest(
+                                "missing block image id for aggregation proof".to_string(),
+                            )
+                        })?
+                        .as_bytes(),
+                ),
+                B256::from_slice(image_id.as_bytes()),
+            ),
+        };
+        Ok(Proof {
+            proof: Some(proof),
+            input: Some(input_hash),
+            quote: receipt_json,
+            uuid: Some(alloy_primitives::hex::encode_prefixed(image_id.as_bytes())),
+            kzg_proof: None,
+            extra_data,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -963,14 +999,10 @@ impl BoundlessProver {
 
         loop {
             let submission = if let Some(submission) = resume_submission.take() {
-                if submission.expires_at <= now_secs() {
-                    tracing::warn!(
-                        provider_request_id = %submission.provider_request_id,
-                        expires_at = submission.expires_at,
-                        "Stored Boundless submission is expired; submitting a new request"
-                    );
-                    continue;
-                }
+                // Resume even past expiry: a request fulfilled before its deadline reports
+                // `Fulfilled` forever, so the poll loop can still collect already-paid work.
+                // A genuinely expired request resolves to a fresh submission after a single
+                // status read instead of being discarded here unchecked.
                 publish_boundless_progress(
                     observer.as_ref(),
                     &submission,
@@ -1409,48 +1441,64 @@ mod tests {
     }
 
     #[test]
-    fn poll_abandon_keeps_unlocked_request_within_budget() {
+    fn poll_abandon_keeps_confirmed_unlocked_request_within_budget() {
         assert_eq!(
-            super::poll_abandon_reason(false, 1_000, 2_000, 100, 10_000, 300),
+            super::poll_abandon_reason(true, false, 1_000, 2_000, 100, 10_000, 300),
             None
         );
     }
 
     #[test]
-    fn poll_abandon_times_out_unlocked_request_after_budget() {
+    fn poll_abandon_times_out_confirmed_unlocked_request_after_budget() {
         assert_eq!(
-            super::poll_abandon_reason(false, 2_001, 2_000, 100, 10_000, 300),
+            super::poll_abandon_reason(true, false, 2_001, 2_000, 100, 10_000, 300),
             Some(super::PollAbandon::UnlockedTimeout)
         );
     }
 
     #[test]
-    fn poll_abandon_ignores_budget_once_locked() {
-        // Hours past the configured budget but before on-chain expiry: keep waiting for
-        // the locked prover instead of buying the same proof twice.
+    fn poll_abandon_ignores_budget_without_confirmed_unlocked_status() {
+        // Locked requests and failed status reads both leave confirmed_unlocked=false:
+        // hours past the budget, neither may trigger a resubmission that could buy the
+        // same proof twice.
         assert_eq!(
-            super::poll_abandon_reason(true, 50_000_000, 2_000, 9_000, 10_000, 300),
+            super::poll_abandon_reason(false, false, 50_000_000, 2_000, 9_000, 10_000, 300),
             None
         );
     }
 
     #[test]
-    fn poll_abandon_stops_locked_request_after_expiry_grace() {
+    fn poll_abandon_stops_unfulfilled_request_after_expiry_grace() {
         assert_eq!(
-            super::poll_abandon_reason(true, 1_000, 2_000, 10_300, 10_000, 300),
+            super::poll_abandon_reason(false, false, 1_000, 2_000, 10_300, 10_000, 300),
             None
         );
         assert_eq!(
-            super::poll_abandon_reason(true, 1_000, 2_000, 10_301, 10_000, 300),
+            super::poll_abandon_reason(false, false, 1_000, 2_000, 10_301, 10_000, 300),
             Some(super::PollAbandon::ExpiryOverrun)
         );
     }
 
     #[test]
-    fn poll_abandon_expiry_overrun_takes_precedence_for_unlocked_requests() {
+    fn poll_abandon_expiry_overrun_takes_precedence_over_unlocked_timeout() {
         assert_eq!(
-            super::poll_abandon_reason(false, 5_000, 2_000, 10_400, 10_000, 300),
+            super::poll_abandon_reason(true, false, 5_000, 2_000, 10_400, 10_000, 300),
             Some(super::PollAbandon::ExpiryOverrun)
+        );
+    }
+
+    #[test]
+    fn poll_abandon_never_abandons_observed_fulfillment() {
+        // Once Fulfilled is observed the proof is paid for: neither the un-locked budget
+        // nor the expiry backstop may resubmit; only the queue-level task budget bounds
+        // the wait for a readable fulfillment.
+        assert_eq!(
+            super::poll_abandon_reason(false, true, 50_000_000, 2_000, 99_999, 10_000, 300),
+            None
+        );
+        assert_eq!(
+            super::poll_abandon_reason(true, true, 50_000_000, 2_000, 99_999, 10_000, 300),
+            None
         );
     }
 

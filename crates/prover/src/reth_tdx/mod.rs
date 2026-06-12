@@ -26,7 +26,10 @@ use std::{str::FromStr, time::Duration};
 
 use alloy_primitives::{Address, B256, Bytes};
 use raiko2_pipeline::ProverBackend;
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{
+    AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult,
+    TdxDirectAggregateGuestInput, TdxDirectAggregateProposal,
+};
 use raiko2_primitives_shasta::{
     GuestInput, encode_proof_carry_data_vec,
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
@@ -44,13 +47,15 @@ use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
 
 use protocol::{
     ProofResponse, ProofResult, ProofStatus, RETH_TDX_PROOF_RESPONSE_SCHEMA,
-    RETH_TDX_SHASTA_AGGREGATE_REQUEST_SCHEMA, RETH_TDX_SHASTA_REQUEST_SCHEMA,
-    ShastaAggregatePayload, ShastaAggregateProof, ShastaAggregateRequest, ShastaProvePayload,
-    ShastaProveRequest,
+    RETH_TDX_SHASTA_AGGREGATE_REQUEST_SCHEMA, RETH_TDX_SHASTA_DIRECT_AGGREGATE_REQUEST_SCHEMA,
+    RETH_TDX_SHASTA_REQUEST_SCHEMA, ShastaAggregatePayload, ShastaAggregateProof,
+    ShastaAggregateRequest, ShastaDirectAggregatePayload, ShastaDirectAggregateRequest,
+    ShastaProvePayload, ShastaProveRequest,
 };
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
+const SHASTA_DIRECT_AGGREGATE_PATH: &str = "/prove/shasta-direct-aggregate";
 const TDX_PROOF_BYTES: usize = 85;
 
 /// Cap on the response body we will buffer from reth-tdx. A proof + quote +
@@ -82,6 +87,7 @@ pub struct RethTdxProver {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
+    direct_aggregate_url: Url,
 }
 
 impl RethTdxProver {
@@ -110,6 +116,7 @@ impl RethTdxProver {
         // discard any path prefix on `base_url` (e.g. `http://h/api` → `http://h/prove/...`).
         let prove_url = endpoint_url(&base_url, SHASTA_PROPOSAL_PATH)?;
         let aggregate_url = endpoint_url(&base_url, SHASTA_AGGREGATE_PATH)?;
+        let direct_aggregate_url = endpoint_url(&base_url, SHASTA_DIRECT_AGGREGATE_PATH)?;
         // `redirect(none)` stops a misconfigured/redirecting endpoint from being
         // silently followed to a different (possibly internal) host.
         let client = Client::builder()
@@ -124,6 +131,7 @@ impl RethTdxProver {
             client,
             prove_url,
             aggregate_url,
+            direct_aggregate_url,
         })
     }
 }
@@ -219,6 +227,10 @@ where
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
+        if let Some(direct) = input.tdx_direct {
+            return self.aggregate_direct(direct).await;
+        }
+
         let request = build_shasta_aggregate_request(&input.proofs)?;
         let payload = serde_json::to_vec(&request).map_err(|err| {
             RaikoError::Guest(format!(
@@ -282,6 +294,47 @@ where
 }
 
 impl RethTdxProver {
+    async fn aggregate_direct(&self, input: TdxDirectAggregateGuestInput) -> RaikoResult<Proof> {
+        let request = build_shasta_direct_aggregate_request(input)?;
+        let payload = serde_json::to_vec(&request).map_err(|err| {
+            RaikoError::Guest(format!(
+                "failed to encode reth-tdx direct aggregate request: {err}"
+            ))
+        })?;
+
+        let (envelope, result) = self
+            .post_request(self.direct_aggregate_url.clone(), payload)
+            .await?;
+        let input_hash = parse_result_input_hash(&result)?;
+        let instance = decode_tdx_instance_address(&result.proof)?;
+        let carry_vec = result
+            .proof_carry_data_vec
+            .as_ref()
+            .filter(|vec| !vec.is_empty())
+            .ok_or_else(|| {
+                RaikoError::Guest(
+                    "reth-tdx direct aggregation response is missing `proof_carry_data_vec`; \
+                     the remote prover must echo the carry data it signed over for \
+                     on-chain verification"
+                        .to_string(),
+                )
+            })?;
+
+        if carry_vec.len() != request.payload.proposals.len() {
+            return Err(RaikoError::Guest(format!(
+                "reth-tdx direct aggregation echoed {} carry entries but {} proposals were requested",
+                carry_vec.len(),
+                request.payload.proposals.len()
+            )));
+        }
+        for (carry, requested) in carry_vec.iter().zip(request.payload.proposals.iter()) {
+            ensure_carry_matches_direct_request(carry, requested)?;
+        }
+        ensure_tdx_input_matches(carry_vec, instance, input_hash)?;
+
+        proof_from_aggregate_result(envelope.schema.as_str(), &result, input_hash, carry_vec)
+    }
+
     async fn post_request(
         &self,
         url: Url,
@@ -363,6 +416,15 @@ fn decode_tdx_instance_address(proof: &str) -> RaikoResult<Address> {
     Ok(Address::from_slice(&proof[..20]))
 }
 
+fn parse_result_input_hash(result: &ProofResult) -> RaikoResult<B256> {
+    B256::from_str(&result.input).map_err(|err| {
+        RaikoError::Guest(format!(
+            "invalid reth-tdx input hash '{}': {err}",
+            result.input
+        ))
+    })
+}
+
 fn ensure_tdx_input_matches(
     carry_vec: &[ProofCarryData],
     instance: Address,
@@ -385,6 +447,27 @@ fn ensure_tdx_input_matches(
         )));
     }
     Ok(())
+}
+
+fn proof_from_aggregate_result(
+    response_schema: &str,
+    result: &ProofResult,
+    input_hash: B256,
+    carry_vec: &[ProofCarryData],
+) -> RaikoResult<Proof> {
+    let metadata = reth_tdx_metadata(response_schema, result);
+    let mut extra_data = encode_proof_carry_data_vec(carry_vec)?;
+    if let Some(root) = extra_data.as_object_mut() {
+        root.insert("reth_tdx".to_string(), metadata);
+    }
+
+    Ok(Proof {
+        proof: Some(result.proof.clone()),
+        input: Some(input_hash),
+        quote: Some(result.quote.clone()),
+        extra_data: Some(extra_data),
+        ..Default::default()
+    })
 }
 
 /// Read a reth-tdx response body, refusing to buffer more than
@@ -459,6 +542,52 @@ fn ensure_carry_matches_request(
     Ok(())
 }
 
+fn ensure_carry_matches_direct_request(
+    carry: &ProofCarryData,
+    requested: &TdxDirectAggregateProposal,
+) -> RaikoResult<()> {
+    let mismatch = |field: &str| {
+        Err(RaikoError::Guest(format!(
+            "reth-tdx echoed carry data does not match the requested direct aggregate proposal \
+             (field `{field}` differs); refusing to package a substituted proof"
+        )))
+    };
+    let ti = &carry.transition_input;
+    if carry.chain_id != requested.chain_id {
+        return mismatch("chain_id");
+    }
+    if carry.verifier != requested.verifier {
+        return mismatch("verifier");
+    }
+    if ti.proposal_id != requested.proposal_id {
+        return mismatch("proposal_id");
+    }
+    if ti.proposal_hash != requested.proposal_hash {
+        return mismatch("proposal_hash");
+    }
+    if ti.parent_proposal_hash != requested.parent_proposal_hash {
+        return mismatch("parent_proposal_hash");
+    }
+    if ti.actual_prover != requested.actual_prover {
+        return mismatch("actual_prover");
+    }
+    if ti.transition.proposer != requested.transition.proposer {
+        return mismatch("transition.proposer");
+    }
+    if ti.transition.timestamp != requested.transition.timestamp {
+        return mismatch("transition.timestamp");
+    }
+    let Some(last_block_number) = requested.l2_block_numbers.last().copied() else {
+        return Err(RaikoError::InvalidRequestConfig(
+            "TDX direct aggregate proposal l2_block_numbers must not be empty".to_string(),
+        ));
+    };
+    if ti.checkpoint.blockNumber.to::<u64>() != last_block_number {
+        return mismatch("checkpoint.blockNumber");
+    }
+    Ok(())
+}
+
 fn build_shasta_request(input: &GuestInput) -> ShastaProveRequest {
     let carry = &input.proof_carry_data;
     let payload = ShastaProvePayload {
@@ -521,6 +650,83 @@ fn build_shasta_aggregate_request(proofs: &[Proof]) -> RaikoResult<ShastaAggrega
         schema: RETH_TDX_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
         payload: ShastaAggregatePayload { proofs: entries },
     })
+}
+
+fn build_shasta_direct_aggregate_request(
+    input: TdxDirectAggregateGuestInput,
+) -> RaikoResult<ShastaDirectAggregateRequest> {
+    if input.proposals.is_empty() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "cannot build reth-tdx direct aggregate request without proposals".to_string(),
+        ));
+    }
+    let mut previous_proposal = None;
+    for (index, proposal) in input.proposals.iter().enumerate() {
+        validate_direct_l2_block_numbers(index, &proposal.l2_block_numbers)?;
+        if let Some(previous) = previous_proposal {
+            validate_direct_proposal_continuity(previous, proposal, index)?;
+        }
+        previous_proposal = Some(proposal);
+    }
+
+    Ok(ShastaDirectAggregateRequest {
+        schema: RETH_TDX_SHASTA_DIRECT_AGGREGATE_REQUEST_SCHEMA.to_string(),
+        payload: ShastaDirectAggregatePayload {
+            proposals: input.proposals,
+        },
+    })
+}
+
+fn validate_direct_proposal_continuity(
+    previous: &TdxDirectAggregateProposal,
+    current: &TdxDirectAggregateProposal,
+    index: usize,
+) -> RaikoResult<()> {
+    if current.proposal_id != previous.proposal_id + 1 {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "TDX direct aggregate proposal {index} proposal_id must be contiguous"
+        )));
+    }
+    let previous_last_block = previous.l2_block_numbers.last().copied().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(format!(
+            "TDX direct aggregate proposal {} l2_block_numbers must not be empty",
+            index - 1
+        ))
+    })?;
+    let current_first_block = current.l2_block_numbers.first().copied().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(format!(
+            "TDX direct aggregate proposal {index} l2_block_numbers must not be empty"
+        ))
+    })?;
+    if current_first_block != previous_last_block + 1 {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "TDX direct aggregate proposal {index} l2_block_numbers must continue the previous proposal"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_direct_l2_block_numbers(index: usize, numbers: &[u64]) -> RaikoResult<()> {
+    let Some((&start, rest)) = numbers.split_first() else {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "TDX direct aggregate proposal {index} l2_block_numbers must not be empty"
+        )));
+    };
+    let mut previous = start;
+    for number in rest {
+        if *number <= previous {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "TDX direct aggregate proposal {index} l2_block_numbers must be strictly increasing"
+            )));
+        }
+        if *number != previous + 1 {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "TDX direct aggregate proposal {index} l2_block_numbers must be contiguous"
+            )));
+        }
+        previous = *number;
+    }
+    Ok(())
 }
 
 fn reth_tdx_metadata(response_schema: &str, result: &ProofResult) -> Value {

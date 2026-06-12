@@ -12,6 +12,7 @@ raiko2-pipeline.workspace = true
 raiko2-provider.workspace = true
 raiko2-primitives.workspace = true
 raiko2-primitives-shasta.workspace = true
+raiko2-protocol-shasta.workspace = true
 raiko2-queue.workspace = true
 raiko2-prover = { path = "../prover", default-features = false }
 

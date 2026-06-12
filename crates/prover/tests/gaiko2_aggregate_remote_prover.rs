@@ -80,6 +80,7 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
         .aggregate(
             AggregationGuestInput {
                 proofs: vec![fixture_aggregate_proof()],
+                tdx_direct: None,
             },
             &ProverConfig::default(),
             &NativeBackend,

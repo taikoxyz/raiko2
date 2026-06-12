@@ -7,7 +7,7 @@ use axum::{
 };
 use raiko2_engine::{
     AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey, ProofArtifactRef,
-    ProposalTaskRequest, ProverTaskConfig,
+    ProposalTaskRequest, ProverTaskConfig, TdxDirectProposalInput,
 };
 use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
 use raiko2_primitives::{L2BlockRange, Proof, ProofType};
@@ -92,6 +92,7 @@ struct SubmissionPlan {
 enum ProposalPlanSource {
     Pending,
     Cached,
+    DirectAggregate,
 }
 
 struct ExternalAggregateSubmission {
@@ -845,22 +846,42 @@ async fn build_submission_plan(
     let mut aggregate_inputs = Vec::new();
     if submission.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
-        for proposal in &proposals {
-            if let Some(material) =
-                load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
-            {
-                proposal_sources.push(ProposalPlanSource::Cached);
-                aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
-                    network_pair: material.record.network_pair,
-                    proof_ref: material.record.proof_ref,
-                    proof_path: material.record.proof_path,
-                }));
-            } else {
-                proposal_sources.push(ProposalPlanSource::Pending);
-                aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
-                    artifact: proof_artifact_ref(runtime, &submission.pair.key, &proposal.task_ref),
-                    dependency: Box::new(proposal.task_id.clone()),
-                });
+        if submission.route.pipeline_key() == PipelineKey::ShastaTdxDcap {
+            for proposal in &proposals {
+                proposal_sources.push(ProposalPlanSource::DirectAggregate);
+                aggregate_inputs.push(AggregateProofInput::TdxDirectProposal(
+                    TdxDirectProposalInput {
+                        proposal_id: proposal.proposal.proposal_id,
+                        l2_block_numbers: proposal.proposal.l2_block_numbers.clone(),
+                        l1_inclusion_block_number: proposal.proposal.l1_inclusion_block_number,
+                        last_anchor_block_number: proposal.proposal.last_anchor_block_number,
+                        checkpoint: proposal.proposal.checkpoint,
+                        prover: proposal.request.prover.clone(),
+                    },
+                ));
+            }
+        } else {
+            for proposal in &proposals {
+                if let Some(material) =
+                    load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
+                {
+                    proposal_sources.push(ProposalPlanSource::Cached);
+                    aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
+                        network_pair: material.record.network_pair,
+                        proof_ref: material.record.proof_ref,
+                        proof_path: material.record.proof_path,
+                    }));
+                } else {
+                    proposal_sources.push(ProposalPlanSource::Pending);
+                    aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
+                        artifact: proof_artifact_ref(
+                            runtime,
+                            &submission.pair.key,
+                            &proposal.task_ref,
+                        ),
+                        dependency: Box::new(proposal.task_id.clone()),
+                    });
+                }
             }
         }
     } else {
@@ -1055,7 +1076,10 @@ async fn enqueue_submission_plan(
     let mut previous = None;
 
     for (index, proposal) in plan.proposals.iter().enumerate() {
-        if matches!(plan.proposal_sources[index], ProposalPlanSource::Cached) {
+        if matches!(
+            plan.proposal_sources[index],
+            ProposalPlanSource::Cached | ProposalPlanSource::DirectAggregate
+        ) {
             continue;
         }
         let task_id = engine
@@ -1315,6 +1339,10 @@ async fn existing_batch_aggregate_inputs(
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
 ) -> Result<Vec<AggregateProofInput>, ApiError> {
+    if existing.pipeline_key == PipelineKey::ShastaTdxDcap {
+        return tdx_direct_aggregate_inputs_from_metadata(existing, existing_metadata);
+    }
+
     let route = CanonicalProofRoute::new(
         existing.route,
         existing.pipeline_key,
@@ -1349,6 +1377,36 @@ async fn existing_batch_aggregate_inputs(
         return Err(ApiError::internal(
             "existing aggregate task has no proposal proof inputs",
         ));
+    }
+    Ok(inputs)
+}
+
+fn tdx_direct_aggregate_inputs_from_metadata(
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    existing_metadata: &TaskMetadata,
+) -> Result<Vec<AggregateProofInput>, ApiError> {
+    let inputs = existing_metadata
+        .proposals
+        .iter()
+        .map(|proposal| {
+            AggregateProofInput::TdxDirectProposal(TdxDirectProposalInput {
+                proposal_id: proposal.proposal_id,
+                l2_block_numbers: proposal.l2_block_numbers.clone(),
+                l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+                last_anchor_block_number: proposal.last_anchor_block_number,
+                checkpoint: proposal.checkpoint,
+                prover: proposal
+                    .request
+                    .as_ref()
+                    .and_then(|request| request.prover.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Err(ApiError::internal(format!(
+            "existing TDX aggregate task {} has no proposal inputs",
+            existing.task_id
+        )));
     }
     Ok(inputs)
 }
@@ -2976,6 +3034,14 @@ mod tests {
         )
     }
 
+    fn tdx_dcap_remote_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::TdxDcap, RunnerKind::Remote),
+            PipelineKey::ShastaTdxDcap,
+            ProofType::TdxDcap,
+        )
+    }
+
     fn valid_native_proof() -> Proof {
         Proof {
             proof: Some("0xproof".to_string()),
@@ -3625,6 +3691,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tdx_dcap_aggregate_plan_uses_direct_proposal_inputs() -> Result<()> {
+        let route = tdx_dcap_remote_route();
+        let runtime = RuntimeManager::new(unique_test_runtime_root("tdx-direct-aggregate-plan"))
+            .expect("runtime manager");
+        let mut submission = canonical_multi_submission(route);
+        submission.prover = Some("0x1111111111111111111111111111111111111111".to_string());
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("submission plan");
+
+        assert!(
+            plan.proposal_sources
+                .iter()
+                .all(|source| { matches!(source, ProposalPlanSource::DirectAggregate) })
+        );
+        assert_eq!(plan.aggregate_inputs.len(), 2);
+        assert_eq!(
+            plan.aggregate_inputs[0],
+            AggregateProofInput::TdxDirectProposal(TdxDirectProposalInput {
+                proposal_id: 7,
+                l2_block_numbers: vec![7],
+                l1_inclusion_block_number: 11,
+                last_anchor_block_number: 6,
+                checkpoint: None,
+                prover: submission.prover.clone(),
+            })
+        );
+        assert_eq!(
+            plan.aggregate_inputs[1],
+            AggregateProofInput::TdxDirectProposal(TdxDirectProposalInput {
+                proposal_id: 8,
+                l2_block_numbers: vec![8],
+                l1_inclusion_block_number: 12,
+                last_anchor_block_number: 7,
+                checkpoint: None,
+                prover: submission.prover.clone(),
+            })
+        );
+
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaTdxDcap));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        enqueue_submission_plan(&engine, &plan)
+            .await
+            .expect("enqueue plan");
+
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert!(
+            proposals.is_empty(),
+            "TDX direct aggregate must not enqueue proposal proof tasks"
+        );
+        drop(proposals);
+
+        let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
+        assert_eq!(*aggregate_inputs, plan.aggregate_inputs);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn aggregate_recovery_only_reenqueues_aggregate_from_artifacts() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
@@ -3682,6 +3808,51 @@ mod tests {
                     if artifact.proof_ref.starts_with("task_")
             )
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tdx_dcap_aggregate_recovery_rebuilds_direct_inputs_from_metadata() -> Result<()> {
+        let route = tdx_dcap_remote_route();
+        let runtime =
+            RuntimeManager::new(unique_test_runtime_root("tdx-direct-aggregate-recovery"))
+                .expect("runtime manager");
+        let submission = canonical_multi_submission(route);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("submission plan");
+        let mut metadata = build_task_metadata(
+            &submission.pair,
+            BuildTaskMetadataParams {
+                network: &submission.pair.network,
+                l1_network: &submission.pair.l1_network,
+                proof_type: submission.route.proof_type(),
+                prover_type: submission.prover_type,
+                execution_mode: submission.execution_mode,
+                aggregate_requested: true,
+            },
+            &plan.proposals,
+            plan.aggregate.as_ref(),
+        );
+        metadata.runtime.active_stage = Some("aggregate".to_string());
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = route.pipeline_key();
+        record.route = route.route;
+
+        let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        reenqueue_existing_batch_aggregate_task(&runtime, &engine, &record, &metadata)
+            .await
+            .expect("TDX aggregate recovery should rebuild direct inputs");
+
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert!(proposals.is_empty());
+        drop(proposals);
+
+        let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
+        assert_eq!(*aggregate_inputs, plan.aggregate_inputs);
         Ok(())
     }
 

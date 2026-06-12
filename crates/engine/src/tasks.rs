@@ -55,6 +55,7 @@ pub enum AggregateProofInput {
         artifact: ProofArtifactRef,
         dependency: Box<EngineTaskId>,
     },
+    TdxDirectProposal(TdxDirectProposalInput),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +63,17 @@ pub struct ProofArtifactRef {
     pub network_pair: String,
     pub proof_ref: String,
     pub proof_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TdxDirectProposalInput {
+    pub proposal_id: u64,
+    pub l2_block_numbers: Vec<u64>,
+    pub l1_inclusion_block_number: u64,
+    pub last_anchor_block_number: u64,
+    pub checkpoint: Option<ShastaCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prover: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,6 +5,7 @@
 //! cross-version mismatches fail fast at runtime.
 
 use alloy_primitives::{Address, B256};
+use raiko2_primitives::TdxDirectAggregateProposal;
 use raiko2_protocol_shasta::shasta::{ProofCarryData, ShastaTransitionInput};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,10 @@ pub const RETH_TDX_SHASTA_REQUEST_SCHEMA: &str = "reth-tdx-shasta-request-v1";
 
 /// Request schema for a Shasta aggregation proof.
 pub const RETH_TDX_SHASTA_AGGREGATE_REQUEST_SCHEMA: &str = "reth-tdx-shasta-aggregate-request-v1";
+
+/// Request schema for a direct Shasta aggregation proof.
+pub const RETH_TDX_SHASTA_DIRECT_AGGREGATE_REQUEST_SCHEMA: &str =
+    "reth-tdx-shasta-direct-aggregate-request-v1";
 
 /// Response schema shared by both proof endpoints.
 pub const RETH_TDX_PROOF_RESPONSE_SCHEMA: &str = "reth-tdx-proof-v1";
@@ -83,6 +88,25 @@ pub struct ShastaAggregateProof {
     pub input: B256,
     /// Hex-encoded 85-byte sub-proof: `instance_address(20) || signature(65)`.
     pub proof: String,
+}
+
+// ─────────────────────────── Direct aggregation proof ───────────────────────────
+
+/// Top-level request envelope for `POST /prove/shasta-direct-aggregate`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShastaDirectAggregateRequest {
+    /// Schema discriminator — must equal
+    /// [`RETH_TDX_SHASTA_DIRECT_AGGREGATE_REQUEST_SCHEMA`].
+    pub schema: String,
+    /// One entry per proposal being directly aggregated.
+    pub payload: ShastaDirectAggregatePayload,
+}
+
+/// Direct aggregation payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShastaDirectAggregatePayload {
+    /// Proposal payloads and their canonical L2 block numbers.
+    pub proposals: Vec<TdxDirectAggregateProposal>,
 }
 
 // ─────────────────────────── Response ───────────────────────────

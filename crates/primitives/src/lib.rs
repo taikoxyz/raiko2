@@ -19,6 +19,7 @@ pub mod proof;
 pub mod proof_type;
 mod serde_bincode;
 mod stateless;
+pub mod tdx;
 
 pub use chain_spec::{ChainSpec, SupportedChainSpecs};
 pub use context::{
@@ -34,3 +35,6 @@ pub use proof::{IdStore, IdWrite, Proof, ProofKey, ProverConfig};
 pub use proof_type::ProofType;
 pub use serde_bincode::EthereumBlock;
 pub use stateless::{ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode};
+pub use tdx::{
+    TdxDirectAggregateGuestInput, TdxDirectAggregateProposal, TdxDirectAggregateTransition,
+};

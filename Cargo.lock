@@ -10452,6 +10452,7 @@ dependencies = [
  "raiko2-pipeline",
  "raiko2-primitives",
  "raiko2-primitives-shasta",
+ "raiko2-protocol-shasta",
  "raiko2-prover",
  "raiko2-provider",
  "raiko2-queue",

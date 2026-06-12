@@ -367,6 +367,7 @@ mod tests {
             .aggregate(
                 AggregationGuestInput {
                     proofs: proofs.clone(),
+                    tdx_direct: None,
                 },
                 &serde_json::json!({}),
                 &NativeBackend,
@@ -411,6 +412,7 @@ mod tests {
             .aggregate(
                 AggregationGuestInput {
                     proofs: vec![proof],
+                    tdx_direct: None,
                 },
                 &serde_json::json!({}),
                 &NativeBackend,

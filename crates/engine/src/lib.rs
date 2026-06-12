@@ -18,16 +18,24 @@ pub mod worker;
 pub use tasks::{
     AggregateProofInput, AggregationSource, AggregationTaskRequest, EncodedGuestInput,
     EngineTaskId, EngineTaskKey, ProofArtifactRef, ProposalStage, ProposalTaskRequest,
-    ProverTaskConfig,
+    ProverTaskConfig, TdxDirectProposalInput,
 };
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::worker::WorkerConfig;
+use alloy_primitives::Address;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
-use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
+use raiko2_primitives::{
+    AggregationGuestInput, Proof, ProofContext, ProofType, ShastaRequest, SupportedChainSpecs,
+    TdxDirectAggregateGuestInput, TdxDirectAggregateProposal, TdxDirectAggregateTransition,
+};
+use raiko2_protocol_shasta::{
+    libhash::hash_proposal,
+    shasta::{ShastaEventData, decode_proposal_id_from_extra_data},
+};
 use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -380,7 +388,8 @@ where
                     dependency: proof_task,
                     ..
                 } => proof_task,
-                AggregateProofInput::ProofArtifact(_) => continue,
+                AggregateProofInput::ProofArtifact(_)
+                | AggregateProofInput::TdxDirectProposal(_) => continue,
             };
             match &proof_task.0 {
                 EngineTaskKey::Proposal { pipeline, .. }
@@ -704,9 +713,29 @@ where
     async fn resolve_aggregation_source(
         &self,
         source: AggregationSource,
-    ) -> Result<Vec<raiko2_primitives::Proof>, String> {
+    ) -> Result<AggregationGuestInput, String> {
         match source {
             AggregationSource::Inputs(inputs) => {
+                let has_direct_inputs = inputs
+                    .iter()
+                    .any(|input| matches!(input, AggregateProofInput::TdxDirectProposal(_)));
+                let has_proof_inputs = inputs.iter().any(|input| {
+                    matches!(
+                        input,
+                        AggregateProofInput::ProofArtifact(_)
+                            | AggregateProofInput::PendingProofArtifact { .. }
+                    )
+                });
+                if has_direct_inputs && has_proof_inputs {
+                    return Err(
+                        "aggregation inputs cannot mix TDX direct proposals and proof artifacts"
+                            .to_string(),
+                    );
+                }
+                if has_direct_inputs {
+                    return self.resolve_tdx_direct_aggregation_input(inputs).await;
+                }
+
                 let mut proofs = Vec::with_capacity(inputs.len());
                 for input in inputs {
                     match input {
@@ -714,11 +743,120 @@ where
                         | AggregateProofInput::PendingProofArtifact { artifact, .. } => {
                             proofs.push(self.get_proof_artifact(artifact).await?);
                         }
+                        AggregateProofInput::TdxDirectProposal(_) => unreachable!(
+                            "TDX direct inputs were handled before proof artifact resolution"
+                        ),
                     }
                 }
-                Ok(proofs)
+                Ok(AggregationGuestInput {
+                    proofs,
+                    tdx_direct: None,
+                })
             }
         }
+    }
+
+    async fn resolve_tdx_direct_aggregation_input(
+        &self,
+        inputs: Vec<AggregateProofInput>,
+    ) -> Result<AggregationGuestInput, String> {
+        let mut proposals = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let AggregateProofInput::TdxDirectProposal(input) = input else {
+                unreachable!("caller filters non-TDX direct aggregate inputs");
+            };
+            proposals.push(self.build_tdx_direct_aggregate_proposal(input).await?);
+        }
+        Ok(AggregationGuestInput {
+            proofs: Vec::new(),
+            tdx_direct: Some(TdxDirectAggregateGuestInput { proposals }),
+        })
+    }
+
+    async fn build_tdx_direct_aggregate_proposal(
+        &self,
+        input: TdxDirectProposalInput,
+    ) -> Result<TdxDirectAggregateProposal, String> {
+        validate_tdx_direct_l2_block_numbers(&input.l2_block_numbers)?;
+        let first_block_number = input
+            .l2_block_numbers
+            .first()
+            .copied()
+            .ok_or_else(|| "TDX direct proposal block list is empty".to_string())?;
+        let blocks = self
+            .inner
+            .spec
+            .provider()
+            .batch_blocks(&[first_block_number])
+            .await
+            .map_err(|err| err.to_string())?;
+        let first_block = blocks
+            .first()
+            .ok_or_else(|| format!("provider returned no block for {first_block_number}"))?;
+        let decoded_proposal_id = decode_proposal_id_from_extra_data(
+            &first_block.header.extra_data,
+        )
+        .ok_or_else(|| {
+            format!(
+                "failed to decode Shasta proposal id from L2 block {} extraData",
+                first_block.header.number
+            )
+        })?;
+        if decoded_proposal_id != input.proposal_id {
+            return Err(format!(
+                "L2 block {} belongs to proposal {}, expected {}",
+                first_block.header.number, decoded_proposal_id, input.proposal_id
+            ));
+        }
+
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(self.inner.context.request.l2_chain_id)
+            .ok_or_else(|| {
+                format!(
+                    "unsupported L2 chain id {} for TDX direct aggregate",
+                    self.inner.context.request.l2_chain_id
+                )
+            })?;
+        let l1_contract = chain_spec
+            .get_fork_l1_contract_address_at(
+                first_block.header.number,
+                first_block.header.timestamp,
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to resolve Shasta L1 contract for block {} timestamp {}: {err}",
+                    first_block.header.number, first_block.header.timestamp
+                )
+            })?;
+        let verifier = chain_spec
+            .get_fork_verifier_address(
+                first_block.header.number,
+                first_block.header.timestamp,
+                ProofType::TdxDcap,
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to resolve TDX DCAP verifier for block {} timestamp {}: {err}",
+                    first_block.header.number, first_block.header.timestamp
+                )
+            })?;
+        let proposal_event = self
+            .inner
+            .spec
+            .provider()
+            .shasta_proposal_event(
+                l1_contract,
+                input.l1_inclusion_block_number,
+                input.proposal_id,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        build_tdx_direct_aggregate_proposal_from_event(
+            &self.inner.context,
+            input,
+            proposal_event,
+            verifier,
+        )
     }
 
     async fn execute_proposal_stage<T>(
@@ -996,13 +1134,13 @@ where
                     request: request.clone(),
                     source: source.clone(),
                 };
-                let proofs = self.resolve_aggregation_source(source).await?;
+                let aggregation_input = self.resolve_aggregation_source(source).await?;
                 let proof = self
                     .inner
                     .spec
                     .prover()
                     .aggregate_with_observer(
-                        AggregationGuestInput { proofs },
+                        aggregation_input,
                         &ctx.config,
                         self.inner.spec.backend(),
                         self.inner.observer.as_ref().map(|observer| {
@@ -1022,6 +1160,60 @@ where
             }
         }
     }
+}
+
+fn build_tdx_direct_aggregate_proposal_from_event(
+    ctx: &ProofContext,
+    input: TdxDirectProposalInput,
+    proposal_event: ShastaEventData,
+    verifier: Address,
+) -> Result<TdxDirectAggregateProposal, String> {
+    let event_proposal_id = proposal_event.proposal.id.to::<u64>();
+    if event_proposal_id != input.proposal_id {
+        return Err(format!(
+            "Shasta proposal event id {event_proposal_id} does not match requested proposal {}",
+            input.proposal_id
+        ));
+    }
+
+    let actual_prover = input
+        .prover
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|err| format!("invalid prover address: {err}"))?
+        .unwrap_or_default();
+
+    Ok(TdxDirectAggregateProposal {
+        chain_id: ctx.request.l2_chain_id,
+        verifier,
+        proposal_id: input.proposal_id,
+        proposal_hash: hash_proposal(&proposal_event.proposal),
+        parent_proposal_hash: proposal_event.proposal.parentProposalHash,
+        actual_prover,
+        transition: TdxDirectAggregateTransition {
+            proposer: proposal_event.proposal.proposer,
+            timestamp: proposal_event.proposal.timestamp.to(),
+        },
+        l2_block_numbers: input.l2_block_numbers,
+    })
+}
+
+fn validate_tdx_direct_l2_block_numbers(numbers: &[u64]) -> Result<(), String> {
+    let Some((&start, rest)) = numbers.split_first() else {
+        return Err("TDX direct proposal block list is empty".to_string());
+    };
+    let mut previous = start;
+    for number in rest {
+        if *number <= previous {
+            return Err("TDX direct proposal block list must be strictly increasing".to_string());
+        }
+        if *number != previous + 1 {
+            return Err("TDX direct proposal block list must be contiguous".to_string());
+        }
+        previous = *number;
+    }
+    Ok(())
 }
 
 fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {
@@ -1100,7 +1292,7 @@ where
 mod tests {
     use std::time::Duration;
 
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{Address, B256, Bytes, Uint};
     use raiko2_pipeline::{
         NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight, ProofStage,
         ProverBackend,
@@ -1110,6 +1302,7 @@ mod tests {
         RaikoResult,
     };
     use raiko2_primitives_shasta::GuestInput;
+    use raiko2_protocol_shasta::shasta::{Proposal, ShastaEventData};
     use raiko2_prover::{GuestInputCodec, Prover};
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
@@ -1409,6 +1602,17 @@ mod tests {
         }
     }
 
+    fn tdx_direct_input(proposal_id: u64, block_number: u64) -> AggregateProofInput {
+        AggregateProofInput::TdxDirectProposal(crate::tasks::TdxDirectProposalInput {
+            proposal_id,
+            l2_block_numbers: vec![block_number],
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: block_number.saturating_sub(1),
+            checkpoint: None,
+            prover: None,
+        })
+    }
+
     fn boundless_test_engine(scheduler_config: SchedulerConfig) -> Engine<TestSpec<MockProver>> {
         Engine::with_store_and_scheduler_config(
             TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaRisc0Network),
@@ -1416,6 +1620,45 @@ mod tests {
             raiko2_queue::MemoryStore::new(),
             scheduler_config,
         )
+    }
+
+    #[test]
+    fn tdx_direct_aggregate_proposal_uses_input_prover_address()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut ctx = test_context();
+        ctx.request.l2_chain_id = 167_013;
+        let actual_prover = Address::from([0x11; 20]);
+        let proposer = Address::from([0x22; 20]);
+        let verifier = Address::from([0x33; 20]);
+        let parent_proposal_hash = B256::from([0x44; 32]);
+        let mut proposal = Proposal::default();
+        proposal.id = Uint::from(7_u64);
+        proposal.timestamp = Uint::from(1_700_000_000_u64);
+        proposal.proposer = proposer;
+        proposal.parentProposalHash = parent_proposal_hash;
+        let input = crate::tasks::TdxDirectProposalInput {
+            proposal_id: 7,
+            l2_block_numbers: vec![700, 701],
+            l1_inclusion_block_number: 11,
+            last_anchor_block_number: 699,
+            checkpoint: None,
+            prover: Some(actual_prover.to_string()),
+        };
+
+        let direct = super::build_tdx_direct_aggregate_proposal_from_event(
+            &ctx,
+            input,
+            ShastaEventData { proposal },
+            verifier,
+        )?;
+
+        assert_eq!(direct.chain_id, 167_013);
+        assert_eq!(direct.verifier, verifier);
+        assert_eq!(direct.actual_prover, actual_prover);
+        assert_eq!(direct.parent_proposal_hash, parent_proposal_hash);
+        assert_eq!(direct.transition.proposer, proposer);
+        assert_eq!(direct.l2_block_numbers, vec![700, 701]);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1544,6 +1787,43 @@ mod tests {
             aggregate_id,
             EngineTaskId::new(EngineTaskKey::Aggregate {
                 pipeline: raiko2_pipeline::PipelineKey::ShastaNative,
+                request,
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submit_aggregation_proof_accepts_tdx_direct_inputs_without_dependencies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaTdxDcap),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+
+        let request = AggregationTaskRequest {
+            request_id: "tdx-direct".to_string(),
+            proposal_ids: vec![1, 2],
+            prover_config: ProverTaskConfig::default(),
+        };
+        let aggregate_id = engine
+            .submit_aggregation_proof_from_inputs(
+                request.clone(),
+                vec![tdx_direct_input(1, 100), tdx_direct_input(2, 101)],
+            )
+            .await?;
+
+        let view = engine
+            .get(aggregate_id.clone())
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected aggregate task view"))?;
+        assert!(matches!(view.state, TaskState::Pending { .. }));
+        assert_eq!(
+            aggregate_id,
+            EngineTaskId::new(EngineTaskKey::Aggregate {
+                pipeline: PipelineKey::ShastaTdxDcap,
                 request,
             })
         );

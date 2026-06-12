@@ -378,7 +378,10 @@ async fn build_preflight_manifest<P: Provider>(
         proof_type == ProofType::TdxDcap,
     )
     .await?;
-    if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
+    if proof_type != ProofType::TdxDcap
+        && manifest.data_sources.is_empty()
+        && !manifest.proposal_event.proposal.sources.is_empty()
+    {
         let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
         manifest.data_sources =
             retry_shasta_preflight_operation("fetch shasta data sources", || async {
@@ -1423,6 +1426,7 @@ mod tests {
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        data_source_calls: Arc<AtomicUsize>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
         tx_list_witness_calls: Arc<AtomicUsize>,
@@ -1517,6 +1521,7 @@ mod tests {
             _proposal_event: &ShastaEventData,
             _blob_proof_type: BlobProofType,
         ) -> RaikoResult<Vec<InputDataSource>> {
+            self.data_source_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.data_sources.clone())
         }
     }
@@ -1657,6 +1662,7 @@ mod tests {
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            data_source_calls: Arc::new(AtomicUsize::new(0)),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
@@ -1748,6 +1754,7 @@ mod tests {
             input.taiko.blob_proof_type,
             BlobProofType::ProofOfEquivalence
         );
+        assert_eq!(provider.data_source_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             input.witnesses[0].chain_spec,
             SupportedChainSpecs::default()
@@ -2140,5 +2147,41 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+        assert_eq!(provider.data_source_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tdx_preflight_skips_shasta_data_source_hydration() {
+        let mut provider = sample_provider();
+        let blob_bytes = vec![0; BYTES_PER_BLOB];
+        provider.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: false,
+            blobSlice: BlobSlice {
+                blobHashes: vec![B256::from([0x44; 32])],
+                offset: 0u32.try_into().expect("fits in uint24"),
+                timestamp: 777u64.try_into().expect("fits in uint48"),
+            },
+        }];
+        provider.data_sources = vec![InputDataSource {
+            tx_data_from_calldata: Vec::new(),
+            tx_data_from_blob: vec![blob_bytes],
+            blob_commitments: vec![vec![4; 48]],
+            blob_proofs: vec![vec![5; 48]],
+            is_forced_inclusion: false,
+        }];
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_001;
+        ctx.request.proof_type = ProofType::TdxDcap;
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaTdxDcap,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert!(input.taiko.data_sources.is_empty());
+        assert_eq!(provider.data_source_calls.load(Ordering::SeqCst), 0);
     }
 }

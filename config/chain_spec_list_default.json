@@ -176,7 +176,7 @@
                 "SGX": "0x2184bace3e668bf0eecb22c5ccf02cfca87c8a67",
                 "SP1": "0x9d351f6e72e3095f24dd854c9b8ca69f99a2c538",
                 "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb",
-                "TDX_DCAP": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+                "TDX_DCAP": "0x75e0225807Aa5c7876E486ED8C454c1134Fd7C83",
                 "SGXGETH": "0x698ceB7EF2E001347B1672389d6ca6aCE04b13C8"
             }
         },

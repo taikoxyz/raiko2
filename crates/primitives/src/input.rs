@@ -1,6 +1,6 @@
 //! Input types for raiko2 guest programs.
 
-use crate::{chain_spec::ChainSpec, proof::Proof};
+use crate::{chain_spec::ChainSpec, proof::Proof, tdx::TdxDirectAggregateGuestInput};
 use alloy_consensus::TrieAccount;
 use alloy_primitives::{B256, map::AddressMap};
 use reth_ethereum_primitives::Block;
@@ -27,6 +27,10 @@ pub struct StatelessInput {
 pub struct AggregationGuestInput {
     /// All block proofs to prove.
     pub proofs: Vec<Proof>,
+    /// Direct TDX aggregate proposal payload. When present, TDX provers should
+    /// sign directly from proposals instead of consuming sub-proof artifacts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tdx_direct: Option<TdxDirectAggregateGuestInput>,
 }
 
 /// The raw proof data necessary to verify a proof.

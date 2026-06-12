@@ -496,6 +496,10 @@ All API errors use the Hoodi-style envelope:
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and delegates price selection to the Boundless SDK price
   provider.
+- `prover.boundless.timeout_ms` is the poll budget for the un-locked phase of a
+  `risc0/network` market request: requests that stay un-locked past the budget are abandoned
+  and resubmitted. Once a request is locked it is polled until its on-chain expiry regardless
+  of this budget.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

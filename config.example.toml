@@ -93,6 +93,11 @@ batch_quoted_mcycles = 6000
 batch_quote_strategy = "raiko_agent"
 aggregation_quoted_mcycles = 200
 poll_interval_ms = 10000
+# Local poll budget for the un-locked phase of a Boundless request: if no prover locks
+# the request within this window, raiko2 abandons it and submits a fresh market request.
+# Once a request is locked this budget no longer applies; raiko2 polls until the
+# request's on-chain expiry, because the locked prover still collects on delivery and
+# abandoning early would pay for the same proof twice.
 timeout_ms = 3600000
 
 # Optional request sampling policy for proof_type=zk_any.

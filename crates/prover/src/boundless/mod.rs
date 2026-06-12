@@ -48,6 +48,11 @@ const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+// Grace past a submission's on-chain expiry before the poll loop gives up on a locked
+// request; absorbs market-chain clock skew and status RPC lag. The market reports
+// `Expired` on its own once the chain passes `expires_at`, so this only fires when the
+// status endpoint itself is unavailable around expiry.
+const LOCKED_EXPIRY_GRACE_SECS: u64 = 300;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -109,6 +114,35 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PollAbandon {
+    UnlockedTimeout,
+    ExpiryOverrun,
+}
+
+// Lock-aware abandon policy for the fulfillment poll loop. The configured poll budget
+// (`prover.boundless.timeout_ms`) bounds only the un-locked phase: resubmitting an offer
+// nobody locked re-runs the auction, but abandoning a locked request discards work a
+// prover is already committed to deliver — the locked prover still collects on
+// fulfillment, so raiko2 would pay for the same proof twice. Once a lock is observed,
+// only the request's own on-chain expiry (plus grace) ends the wait.
+const fn poll_abandon_reason(
+    lock_observed: bool,
+    elapsed_ms: u128,
+    timeout_ms: u64,
+    now_secs: u64,
+    expires_at: u64,
+    grace_secs: u64,
+) -> Option<PollAbandon> {
+    if now_secs > expires_at.saturating_add(grace_secs) {
+        return Some(PollAbandon::ExpiryOverrun);
+    }
+    if !lock_observed && elapsed_ms > timeout_ms as u128 {
+        return Some(PollAbandon::UnlockedTimeout);
+    }
+    None
 }
 
 fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
@@ -706,21 +740,37 @@ impl BoundlessProver {
         proposal_carry_data: Option<&ProofCarryData>,
     ) -> Result<Proof, BoundlessAttemptError> {
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
-        let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
+        let timeout_ms = self.config.timeout_ms.max(1);
         let started_at = Instant::now();
         let mut last_poll_error: Option<String> = None;
         let mut consecutive_poll_errors = 0_u32;
+        let mut lock_observed = false;
 
         loop {
-            if started_at.elapsed() > timeout {
+            let abandon = poll_abandon_reason(
+                lock_observed,
+                started_at.elapsed().as_millis(),
+                timeout_ms,
+                now_secs(),
+                submission.expires_at,
+                LOCKED_EXPIRY_GRACE_SECS,
+            );
+            if let Some(reason) = abandon {
                 let detail = last_poll_error
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
                     .unwrap_or_default();
-                return Err(BoundlessAttemptError::Retryable(format!(
-                    "Boundless request {} timed out before fulfillment{detail}",
-                    submission.provider_request_id
-                )));
+                let message = match reason {
+                    PollAbandon::UnlockedTimeout => format!(
+                        "Boundless request {} was not locked within the {timeout_ms}ms poll budget{detail}",
+                        submission.provider_request_id
+                    ),
+                    PollAbandon::ExpiryOverrun => format!(
+                        "Boundless request {} passed its on-chain expiry ({}) without a terminal status{detail}",
+                        submission.provider_request_id, submission.expires_at
+                    ),
+                };
+                return Err(BoundlessAttemptError::Retryable(message));
             }
 
             let status = match client
@@ -748,7 +798,18 @@ impl BoundlessProver {
             };
 
             match status {
-                RequestStatus::Unknown | RequestStatus::Locked => {}
+                RequestStatus::Unknown => {}
+                RequestStatus::Locked => {
+                    if !lock_observed {
+                        lock_observed = true;
+                        tracing::info!(
+                            provider_request_id = %submission.provider_request_id,
+                            expires_at = submission.expires_at,
+                            elapsed_secs = started_at.elapsed().as_secs(),
+                            "Boundless request locked; awaiting fulfillment until on-chain expiry"
+                        );
+                    }
+                }
                 RequestStatus::Expired => {
                     return Err(BoundlessAttemptError::Retryable(format!(
                         "Boundless request {} expired before fulfillment",
@@ -1345,6 +1406,52 @@ mod tests {
         assert!(validated.min_price.is_none());
         assert_eq!(validated.ramp_up_period_secs, 120);
         assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn poll_abandon_keeps_unlocked_request_within_budget() {
+        assert_eq!(
+            super::poll_abandon_reason(false, 1_000, 2_000, 100, 10_000, 300),
+            None
+        );
+    }
+
+    #[test]
+    fn poll_abandon_times_out_unlocked_request_after_budget() {
+        assert_eq!(
+            super::poll_abandon_reason(false, 2_001, 2_000, 100, 10_000, 300),
+            Some(super::PollAbandon::UnlockedTimeout)
+        );
+    }
+
+    #[test]
+    fn poll_abandon_ignores_budget_once_locked() {
+        // Hours past the configured budget but before on-chain expiry: keep waiting for
+        // the locked prover instead of buying the same proof twice.
+        assert_eq!(
+            super::poll_abandon_reason(true, 50_000_000, 2_000, 9_000, 10_000, 300),
+            None
+        );
+    }
+
+    #[test]
+    fn poll_abandon_stops_locked_request_after_expiry_grace() {
+        assert_eq!(
+            super::poll_abandon_reason(true, 1_000, 2_000, 10_300, 10_000, 300),
+            None
+        );
+        assert_eq!(
+            super::poll_abandon_reason(true, 1_000, 2_000, 10_301, 10_000, 300),
+            Some(super::PollAbandon::ExpiryOverrun)
+        );
+    }
+
+    #[test]
+    fn poll_abandon_expiry_overrun_takes_precedence_for_unlocked_requests() {
+        assert_eq!(
+            super::poll_abandon_reason(false, 5_000, 2_000, 10_400, 10_000, 300),
+            Some(super::PollAbandon::ExpiryOverrun)
+        );
     }
 
     #[test]

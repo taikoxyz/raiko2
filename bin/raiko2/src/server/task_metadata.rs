@@ -57,6 +57,8 @@ pub(crate) struct TaskMetadata {
 pub(crate) struct AggregateInputProofArtifact {
     pub(crate) proof_ref: String,
     pub(crate) proof_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) proof_compatibility_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]

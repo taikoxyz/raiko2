@@ -16,7 +16,10 @@ use raiko2_prover::sp1_config::{
     ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1RemoteVerifyConfig,
     Sp1RequestContext, Sp1SystemConfig,
 };
-use raiko2_prover::validate_external_aggregate_proofs;
+use raiko2_prover::{
+    proof_compatibility_id, validate_aggregate_proof_compatibility,
+    validate_external_aggregate_proofs,
+};
 use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
 };
@@ -84,6 +87,7 @@ struct PlannedAggregateTask {
 struct SubmissionPlan {
     proposals: Vec<PlannedProposalTask>,
     proposal_sources: Vec<ProposalPlanSource>,
+    stale_proposal_tasks: Vec<EngineTaskId>,
     aggregate: Option<PlannedAggregateTask>,
     aggregate_inputs: Vec<AggregateProofInput>,
 }
@@ -92,6 +96,16 @@ struct SubmissionPlan {
 enum ProposalPlanSource {
     Pending,
     Cached,
+}
+
+struct LoadedProposalCache {
+    material: ProofArtifactMaterial,
+    compatibility_id: Option<String>,
+}
+
+enum ProposalCacheLookup {
+    Cached(LoadedProposalCache),
+    Missing { reset_task: bool },
 }
 
 struct ExternalAggregateSubmission {
@@ -449,6 +463,7 @@ fn validate_public_prover_args(
     Ok(ProverTaskConfig {
         sp1: args.sp1.clone(),
         sp1_system: None,
+        expected_child_proof_compatibility_id: None,
     })
 }
 
@@ -681,6 +696,8 @@ async fn build_external_aggregate_submission(
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    validate_aggregate_proof_compatibility(route.route, &req.proofs)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
     let request_fingerprint =
         external_aggregate_request_fingerprint(&pair, route, prover_type, &req, &prover_config)?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
@@ -726,6 +743,10 @@ async fn persist_external_aggregate_input_artifacts(
     let mut inputs = Vec::with_capacity(proofs.len());
     let mut input_artifacts = Vec::with_capacity(proofs.len());
     for (index, proof) in proofs.iter().enumerate() {
+        let proof_compatibility_id =
+            proof_compatibility_id(route.pipeline_key(), proof).map_err(|err| {
+                ApiError::bad_request(format!("aggregate input proof {index} invalid: {err}"))
+            })?;
         let proof_ref = aggregate_input_proof_ref(request_fingerprint, index);
         let proof_path = runtime
             .write_proof_artifact_bytes(
@@ -747,6 +768,7 @@ async fn persist_external_aggregate_input_artifacts(
                 pipeline_key: route.pipeline_key(),
                 route: route.route,
                 proof_path: proof_path.clone(),
+                proof_compatibility_id: Some(proof_compatibility_id.clone()),
             })
             .await
             .map_err(|err| {
@@ -760,6 +782,7 @@ async fn persist_external_aggregate_input_artifacts(
         input_artifacts.push(AggregateInputProofArtifact {
             proof_ref,
             proof_path,
+            proof_compatibility_id: Some(proof_compatibility_id),
         });
     }
     Ok((inputs, input_artifacts))
@@ -832,19 +855,87 @@ async fn build_submission_plan(
 
     let mut proposal_sources = Vec::with_capacity(proposals.len());
     let mut aggregate_inputs = Vec::new();
+    let mut stale_proposal_tasks = Vec::new();
     if submission.aggregate_requested {
         aggregate_inputs.reserve(proposals.len());
+        let mut loaded_caches = Vec::with_capacity(proposals.len());
+        let mut target_compatibility_id: Option<(String, i64, usize)> = None;
+
         for proposal in &proposals {
             if let Some(material) =
                 load_cached_proposal_artifact(runtime, submission, &proposal.task_ref).await?
             {
-                proposal_sources.push(ProposalPlanSource::Cached);
-                aggregate_inputs.push(AggregateProofInput::ProofArtifact(ProofArtifactRef {
-                    network_pair: material.record.network_pair,
-                    proof_ref: material.record.proof_ref,
-                    proof_path: material.record.proof_path,
+                let compatibility_id = cached_proof_compatibility_id(submission.route, &material);
+                if let Some(compatibility_id) = compatibility_id.as_ref() {
+                    let rank = loaded_caches.len();
+                    let updated_at = material.record.updated_at;
+                    let is_new_target = target_compatibility_id.as_ref().is_none_or(
+                        |(_, current_updated_at, current_rank)| {
+                            updated_at > *current_updated_at
+                                || (updated_at == *current_updated_at && rank > *current_rank)
+                        },
+                    );
+                    if is_new_target {
+                        target_compatibility_id =
+                            Some((compatibility_id.clone(), updated_at, rank));
+                    }
+                }
+                loaded_caches.push(ProposalCacheLookup::Cached(LoadedProposalCache {
+                    material,
+                    compatibility_id,
                 }));
             } else {
+                let reset_task = runtime
+                    .take_proof_artifact_prune(&submission.pair.key, &proposal.task_ref)
+                    .await
+                    .map_err(|err| {
+                        ApiError::internal(format!(
+                            "failed to consume proof artifact prune marker: {err}"
+                        ))
+                    })?;
+                loaded_caches.push(ProposalCacheLookup::Missing { reset_task });
+            }
+        }
+
+        let target_compatibility_id =
+            target_compatibility_id.map(|(compatibility_id, _, _)| compatibility_id);
+        for (proposal, loaded) in proposals.iter().zip(loaded_caches) {
+            let use_pending = match loaded {
+                ProposalCacheLookup::Cached(loaded) => {
+                    let is_stale = target_compatibility_id.as_ref().is_some_and(|target| {
+                        loaded.compatibility_id.as_deref() != Some(target.as_str())
+                    });
+                    if is_stale {
+                        prune_stale_cached_proof_artifact(
+                            runtime,
+                            &loaded.material.record,
+                            loaded.compatibility_id.as_deref(),
+                            target_compatibility_id.as_deref(),
+                        )
+                        .await?;
+                        stale_proposal_tasks.push(proposal.task_id.clone());
+                        true
+                    } else {
+                        proposal_sources.push(ProposalPlanSource::Cached);
+                        aggregate_inputs.push(AggregateProofInput::ProofArtifact(
+                            ProofArtifactRef {
+                                network_pair: loaded.material.record.network_pair,
+                                proof_ref: loaded.material.record.proof_ref,
+                                proof_path: loaded.material.record.proof_path,
+                            },
+                        ));
+                        false
+                    }
+                }
+                ProposalCacheLookup::Missing { reset_task } => {
+                    if reset_task {
+                        stale_proposal_tasks.push(proposal.task_id.clone());
+                    }
+                    true
+                }
+            };
+
+            if use_pending {
                 proposal_sources.push(ProposalPlanSource::Pending);
                 aggregate_inputs.push(AggregateProofInput::PendingProofArtifact {
                     artifact: proof_artifact_ref(runtime, &submission.pair.key, &proposal.task_ref),
@@ -882,6 +973,7 @@ async fn build_submission_plan(
     Ok(SubmissionPlan {
         proposals,
         proposal_sources,
+        stale_proposal_tasks,
         aggregate,
         aggregate_inputs,
     })
@@ -1042,6 +1134,12 @@ async fn enqueue_submission_plan(
     plan: &SubmissionPlan,
 ) -> Result<(), ApiError> {
     let mut previous = None;
+
+    for stale_task in &plan.stale_proposal_tasks {
+        engine.remove(stale_task.clone()).await.map_err(|err| {
+            ApiError::internal(format!("failed to remove stale proposal proof task: {err}"))
+        })?;
+    }
 
     for (index, proposal) in plan.proposals.iter().enumerate() {
         if matches!(plan.proposal_sources[index], ProposalPlanSource::Cached) {
@@ -1796,6 +1894,71 @@ async fn load_cached_proposal_artifact_for_route(
     }
 
     Ok(Some(material))
+}
+
+fn cached_proof_compatibility_id(
+    route: CanonicalProofRoute,
+    material: &ProofArtifactMaterial,
+) -> Option<String> {
+    match proof_compatibility_id(route.pipeline_key(), &material.proof) {
+        Ok(computed) => {
+            if material.record.proof_compatibility_id.as_deref() != Some(computed.as_str())
+                && let Some(stored) = material.record.proof_compatibility_id.as_deref()
+            {
+                warn!(
+                    network_pair = material.record.network_pair,
+                    proof_ref = material.record.proof_ref,
+                    stored_compatibility_id = stored,
+                    computed_compatibility_id = computed,
+                    "proof artifact compatibility id differs from stored value; using proof value"
+                );
+            }
+            Some(computed)
+        }
+        Err(err) => {
+            if let Some(stored) = material.record.proof_compatibility_id.clone() {
+                warn!(
+                    network_pair = material.record.network_pair,
+                    proof_ref = material.record.proof_ref,
+                    stored_compatibility_id = stored,
+                    error = %err,
+                    "failed to compute proof artifact compatibility id; using stored value"
+                );
+                Some(stored)
+            } else {
+                warn!(
+                    network_pair = material.record.network_pair,
+                    proof_ref = material.record.proof_ref,
+                    error = %err,
+                    "failed to compute proof artifact compatibility id"
+                );
+                None
+            }
+        }
+    }
+}
+
+async fn prune_stale_cached_proof_artifact(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::ProofArtifactRecord,
+    artifact_compatibility_id: Option<&str>,
+    target_compatibility_id: Option<&str>,
+) -> Result<(), ApiError> {
+    runtime
+        .delete_proof_artifact(&record.network_pair, &record.proof_ref)
+        .await
+        .map_err(|err| {
+            ApiError::internal(format!("failed to prune stale proof artifact: {err}"))
+        })?;
+    info!(
+        network_pair = record.network_pair,
+        proof_ref = record.proof_ref,
+        proof_path = record.proof_path,
+        artifact_compatibility_id = artifact_compatibility_id.unwrap_or("<unknown>"),
+        target_compatibility_id = target_compatibility_id.unwrap_or("<unknown>"),
+        "pruned stale proof artifact from cache registry"
+    );
+    Ok(())
 }
 
 async fn load_persisted_root_proof_material(
@@ -2783,6 +2946,7 @@ mod tests {
         pipeline_key: PipelineKey,
         proposals: Mutex<Vec<(ProposalTaskRequest, Vec<EngineTaskId>)>>,
         aggregate_inputs: Mutex<Vec<AggregateProofInput>>,
+        removed: Mutex<Vec<EngineTaskId>>,
     }
 
     impl RecordingEngine {
@@ -2791,6 +2955,7 @@ mod tests {
                 pipeline_key,
                 proposals: Mutex::new(Vec::new()),
                 aggregate_inputs: Mutex::new(Vec::new()),
+                removed: Mutex::new(Vec::new()),
             }
         }
     }
@@ -2839,7 +3004,10 @@ mod tests {
         }
 
         fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move {
+                self.removed.lock().expect("removed tasks mutex").push(_id);
+                Ok(())
+            })
         }
     }
 
@@ -2923,6 +3091,14 @@ mod tests {
         )
     }
 
+    fn sp1_local_route() -> CanonicalProofRoute {
+        CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Sp1, RunnerKind::Local),
+            PipelineKey::ShastaSp1,
+            ProofType::Sp1,
+        )
+    }
+
     fn sgx_remote_route() -> CanonicalProofRoute {
         CanonicalProofRoute::new(
             PipelineRoute::new(crate::config::GuestSystem::Sgx, RunnerKind::Remote),
@@ -2948,10 +3124,37 @@ mod tests {
         }
     }
 
+    fn valid_sp1_proof(uuid: &str) -> Proof {
+        Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            uuid: Some(uuid.to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": { "proof_carry_data": {} } })),
+            ..Proof::default()
+        }
+    }
+
     async fn write_test_proof_artifact(
         runtime: &RuntimeManager,
         network_pair: &str,
         proof_ref: &str,
+        proof: &Proof,
+    ) -> Result<()> {
+        write_test_proof_artifact_for_route(
+            runtime,
+            network_pair,
+            proof_ref,
+            native_local_route(),
+            proof,
+        )
+        .await
+    }
+
+    async fn write_test_proof_artifact_for_route(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        proof_ref: &str,
+        route: CanonicalProofRoute,
         proof: &Proof,
     ) -> Result<()> {
         let proof_path = runtime
@@ -2961,9 +3164,10 @@ mod tests {
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: network_pair.to_string(),
                 proof_ref: proof_ref.to_string(),
-                pipeline_key: PipelineKey::ShastaNative,
-                route: "native/local".parse().expect("route"),
+                pipeline_key: route.pipeline_key(),
+                route: route.route,
                 proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: proof_compatibility_id(route.pipeline_key(), proof).ok(),
             })
             .await?;
         Ok(())
@@ -3588,6 +3792,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregate_plan_prunes_stale_cached_artifacts_when_newer_identity_is_seen() -> Result<()>
+    {
+        let route = sp1_local_route();
+        let runtime = RuntimeManager::new(unique_test_runtime_root("stale-sp1-cache-plan"))
+            .expect("runtime manager");
+        let submission = canonical_multi_submission(route);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let initial_plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("initial submission plan");
+        let stale_ref = initial_plan.proposals[0].task_ref.clone();
+        let current_ref = initial_plan.proposals[1].task_ref.clone();
+
+        write_test_proof_artifact_for_route(
+            &runtime,
+            &submission.pair.key,
+            &stale_ref,
+            route,
+            &valid_sp1_proof("0x1111"),
+        )
+        .await?;
+        write_test_proof_artifact_for_route(
+            &runtime,
+            &submission.pair.key,
+            &current_ref,
+            route,
+            &valid_sp1_proof("0x2222"),
+        )
+        .await?;
+
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("submission plan");
+
+        assert!(matches!(
+            plan.proposal_sources[0],
+            ProposalPlanSource::Pending
+        ));
+        assert!(matches!(
+            plan.proposal_sources[1],
+            ProposalPlanSource::Cached
+        ));
+        assert!(
+            runtime
+                .get_proof_artifact(&submission.pair.key, &stale_ref)
+                .await?
+                .is_none(),
+            "stale proof artifact record should be pruned"
+        );
+
+        let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        enqueue_submission_plan(&engine, &plan)
+            .await
+            .expect("enqueue plan");
+
+        assert_eq!(
+            recorder
+                .removed
+                .lock()
+                .expect("removed tasks mutex")
+                .as_slice(),
+            &[initial_plan.proposals[0].task_id.clone()]
+        );
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].0.proposal_id, 7);
+        drop(proposals);
+
+        let aggregate_inputs = recorder.aggregate_inputs.lock().expect("aggregate inputs");
+        assert!(matches!(
+            aggregate_inputs[0],
+            AggregateProofInput::PendingProofArtifact { .. }
+        ));
+        assert!(matches!(
+            aggregate_inputs[1],
+            AggregateProofInput::ProofArtifact(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_plan_resets_pruned_missing_artifact_task() -> Result<()> {
+        let route = sp1_local_route();
+        let runtime = RuntimeManager::new(unique_test_runtime_root("pruned-cache-plan"))
+            .expect("runtime manager");
+        let submission = canonical_submission(route, true);
+        let request_fingerprint = batch_request_fingerprint_for_test(&submission)?;
+        let initial_plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("initial submission plan");
+        let task_ref = initial_plan.proposals[0].task_ref.clone();
+        runtime
+            .prune_proof_artifact(&submission.pair.key, &task_ref)
+            .await?;
+
+        let plan = build_submission_plan(&runtime, &submission, &request_fingerprint)
+            .await
+            .expect("submission plan");
+        assert!(matches!(
+            plan.proposal_sources[0],
+            ProposalPlanSource::Pending
+        ));
+
+        let recorder = Arc::new(RecordingEngine::new(route.pipeline_key()));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        enqueue_submission_plan(&engine, &plan)
+            .await
+            .expect("enqueue plan");
+
+        assert_eq!(
+            recorder
+                .removed
+                .lock()
+                .expect("removed tasks mutex")
+                .as_slice(),
+            &[initial_plan.proposals[0].task_id.clone()]
+        );
+        assert!(
+            !runtime
+                .take_proof_artifact_prune(&submission.pair.key, &task_ref)
+                .await?,
+            "prune marker should be consumed by planning"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn aggregate_recovery_only_reenqueues_aggregate_from_artifacts() -> Result<()> {
         let route = native_local_route();
         let runtime = RuntimeManager::new(unique_test_runtime_root("aggregate-recovery-artifacts"))
@@ -3724,6 +4056,7 @@ mod tests {
                 pipeline_key: PipelineKey::ShastaNative,
                 route: "native/local".parse().expect("route"),
                 proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: None,
             })
             .await
             .expect("register corrupt artifact");
@@ -3772,6 +4105,10 @@ mod tests {
             aggregate_input_proof_ref("0xfingerprint", 0)
         );
         assert_eq!(
+            artifacts[0].proof_compatibility_id.as_deref(),
+            Some("shasta-native:local")
+        );
+        assert_eq!(
             inputs,
             aggregate_inputs_from_artifacts("taiko_dev/ethereum", &artifacts)
         );
@@ -3781,6 +4118,10 @@ mod tests {
                 .await?
                 .expect("stored aggregate input proof");
         assert_eq!(stored.proof, proof);
+        assert_eq!(
+            stored.record.proof_compatibility_id.as_deref(),
+            Some("shasta-native:local")
+        );
         Ok(())
     }
 

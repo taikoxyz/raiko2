@@ -1,16 +1,17 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use raiko2_engine::{
-    EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
-    tasks::EngineTask,
+    AggregateProofInput, AggregationSource, EngineObserver, EngineTaskId, EngineTaskKey,
+    EngineTaskSuccess, ProofArtifactRef, ProposalStage, tasks::EngineTask,
 };
-use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
+use raiko2_prover::{BoundlessSubmissionResume, ProverProgress, proof_compatibility_id};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs;
 
 use crate::server::task_metadata::{
     TaskMetadata, TaskRuntimeMetadata, proposal_task_ref, stage_task_ref_for_stage,
@@ -30,6 +31,14 @@ pub(crate) struct RuntimeObserver {
 enum FailedRootPolicy {
     Exclude,
     Include,
+}
+
+struct AggregateInputCompatibility {
+    artifact: ProofArtifactRef,
+    compatibility_id: Option<String>,
+    updated_at: i64,
+    is_pending: bool,
+    input_index: usize,
 }
 
 impl RuntimeObserver {
@@ -372,6 +381,7 @@ impl RuntimeObserver {
             .await
             .context("failed to write proof artifact")?;
         let proof_path = proof_path.display().to_string();
+        let proof_compatibility_id = proof_compatibility_id(first_record.pipeline_key, proof).ok();
         self.runtime
             .upsert_proof_artifact(ProofArtifactRegistration {
                 network_pair: self.network_pair.clone(),
@@ -379,6 +389,7 @@ impl RuntimeObserver {
                 pipeline_key: first_record.pipeline_key,
                 route: first_record.route,
                 proof_path: proof_path.clone(),
+                proof_compatibility_id,
             })
             .await
             .context("failed to register proof artifact")?;
@@ -427,6 +438,172 @@ impl RuntimeObserver {
                 "failed to sync proof persistence failure"
             );
         }
+    }
+
+    async fn prune_stale_aggregate_input_artifacts(
+        &self,
+        id: &EngineTaskId,
+        task: &EngineTask,
+        expected_compatibility_id: Option<&str>,
+    ) -> Result<usize> {
+        let EngineTask::Aggregate {
+            source: AggregationSource::Inputs(inputs),
+            ..
+        } = task
+        else {
+            return Ok(0);
+        };
+
+        let pipeline_key = id.0.pipeline_key();
+        let mut loaded = Vec::with_capacity(inputs.len());
+        for (input_index, input) in inputs.iter().enumerate() {
+            let (artifact, is_pending) = match input {
+                AggregateProofInput::ProofArtifact(artifact) => (artifact, false),
+                AggregateProofInput::PendingProofArtifact { artifact, .. } => (artifact, true),
+            };
+            let Some(record) = self
+                .runtime
+                .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load aggregate proof artifact {}",
+                        artifact.proof_ref
+                    )
+                })?
+            else {
+                continue;
+            };
+            let proof = match fs::read(&record.proof_path).await {
+                Ok(bytes) => match serde_json::from_slice::<raiko2_primitives::Proof>(&bytes) {
+                    Ok(proof) => proof,
+                    Err(err) => {
+                        tracing::warn!(
+                            task = ?id,
+                            network_pair = record.network_pair,
+                            proof_ref = record.proof_ref,
+                            proof_path = record.proof_path,
+                            error = %err,
+                            "failed to parse aggregate proof artifact while pruning stale compatibility inputs"
+                        );
+                        continue;
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        task = ?id,
+                        network_pair = record.network_pair,
+                        proof_ref = record.proof_ref,
+                        proof_path = record.proof_path,
+                        error = %err,
+                        "failed to read aggregate proof artifact while pruning stale compatibility inputs"
+                    );
+                    continue;
+                }
+            };
+            let compatibility_id = match proof_compatibility_id(pipeline_key, &proof) {
+                Ok(compatibility_id) => Some(compatibility_id),
+                Err(err) => {
+                    if let Some(stored) = record.proof_compatibility_id.clone() {
+                        tracing::warn!(
+                            task = ?id,
+                            network_pair = record.network_pair,
+                            proof_ref = record.proof_ref,
+                            stored_compatibility_id = stored,
+                            error = %err,
+                            "failed to compute aggregate proof compatibility id while pruning; using stored value"
+                        );
+                        Some(stored)
+                    } else {
+                        tracing::warn!(
+                            task = ?id,
+                            network_pair = record.network_pair,
+                            proof_ref = record.proof_ref,
+                            error = %err,
+                            "failed to compute aggregate proof compatibility id while pruning"
+                        );
+                        None
+                    }
+                }
+            };
+            loaded.push(AggregateInputCompatibility {
+                artifact: artifact.clone(),
+                compatibility_id,
+                updated_at: record.updated_at,
+                is_pending,
+                input_index,
+            });
+        }
+
+        let target = if let Some(expected_compatibility_id) = expected_compatibility_id {
+            expected_compatibility_id.to_string()
+        } else {
+            let Some(target) = loaded
+                .iter()
+                .filter_map(|input| {
+                    input.compatibility_id.as_ref().map(|compatibility_id| {
+                        (
+                            compatibility_id.as_str(),
+                            input.is_pending,
+                            input.updated_at,
+                            input.input_index,
+                        )
+                    })
+                })
+                .max_by_key(|(_, is_pending, updated_at, input_index)| {
+                    (*is_pending, *updated_at, *input_index)
+                })
+                .map(|(compatibility_id, _, _, _)| compatibility_id.to_string())
+            else {
+                return Ok(0);
+            };
+            target
+        };
+
+        let mut pruned = 0;
+        let mut seen = HashSet::new();
+        for input in loaded {
+            if input.compatibility_id.as_deref() == Some(target.as_str()) {
+                continue;
+            }
+            if !seen.insert((
+                input.artifact.network_pair.clone(),
+                input.artifact.proof_ref.clone(),
+            )) {
+                continue;
+            }
+            self.runtime
+                .prune_proof_artifact(&input.artifact.network_pair, &input.artifact.proof_ref)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to prune stale proof artifact {}",
+                        input.artifact.proof_ref
+                    )
+                })?;
+            pruned += 1;
+            tracing::info!(
+                task = ?id,
+                network_pair = input.artifact.network_pair,
+                proof_ref = input.artifact.proof_ref,
+                artifact_compatibility_id = input.compatibility_id.as_deref().unwrap_or("<unknown>"),
+                target_compatibility_id = target.as_str(),
+                "pruned stale aggregate proof artifact after compatibility failure"
+            );
+        }
+        Ok(pruned)
+    }
+
+    fn expected_aggregate_child_compatibility_id(task: &EngineTask, error: &str) -> Option<String> {
+        if let EngineTask::Aggregate { request, .. } = task
+            && let Some(expected) = request
+                .prover_config
+                .expected_child_proof_compatibility_id
+                .clone()
+        {
+            return Some(expected);
+        }
+        parse_expected_child_compatibility_id(error)
     }
 
     fn root_completed_by_proof_success(
@@ -686,6 +863,24 @@ impl EngineObserver for RuntimeObserver {
         let task_id = Self::timing_key_for_task(id, task);
         self.observe_stage_terminal_metrics(id, &task_id, stage, "failed", finished_at_ms)
             .await;
+        let expected_compatibility_id =
+            Self::expected_aggregate_child_compatibility_id(task, error);
+        if matches!(task, EngineTask::Aggregate { .. })
+            && aggregate_compatibility_error(error)
+            && let Err(err) = self
+                .prune_stale_aggregate_input_artifacts(
+                    id,
+                    task,
+                    expected_compatibility_id.as_deref(),
+                )
+                .await
+        {
+            tracing::warn!(
+                task = ?id,
+                error = %err,
+                "failed to prune stale aggregate proof artifacts after compatibility failure"
+            );
+        }
         if let Err(err) = self
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Failed;
@@ -846,6 +1041,31 @@ fn now_ts() -> i64 {
         .cast_signed()
 }
 
+fn aggregate_compatibility_error(error: &str) -> bool {
+    error.contains("proofs do not share the same compatibility id")
+        || error.contains("expected proof compatibility id")
+        || error.contains("expected_child_proof_compatibility_id")
+        || error.contains("expected_proof_compatibility_id")
+}
+
+fn parse_expected_child_compatibility_id(error: &str) -> Option<String> {
+    [
+        "expected_child_proof_compatibility_id=",
+        "expected_proof_compatibility_id=",
+        "expected proof compatibility id ",
+    ]
+    .into_iter()
+    .find_map(|marker| {
+        let (_, tail) = error.split_once(marker)?;
+        let value = tail
+            .trim_start_matches([':', '=', ' ', '"', '\''])
+            .split(|ch: char| ch.is_ascii_whitespace() || [',', ';', '"', '\''].contains(&ch))
+            .next()?
+            .trim_matches([':', '=', ' ', '"', '\'']);
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -870,7 +1090,7 @@ mod tests {
         ProposalTask, RuntimeMetadata, aggregate_task_ref, proposal_task_ref, stage_task_ref,
     };
     use crate::server::telemetry;
-    use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest};
+    use raiko2_engine::{AggregationTaskRequest, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_prover::{
@@ -935,6 +1155,47 @@ mod tests {
             kzg_proof: None,
             extra_data: None,
         }
+    }
+
+    fn sp1_proof_fixture(uuid: &str) -> raiko2_primitives::Proof {
+        raiko2_primitives::Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(alloy_primitives::B256::ZERO),
+            uuid: Some(uuid.to_string()),
+            extra_data: Some(serde_json::json!({ "shasta": { "proof_carry_data": {} } })),
+            ..Default::default()
+        }
+    }
+
+    async fn register_sp1_proof_artifact(
+        runtime: &RuntimeManager,
+        network_pair: &str,
+        proof_ref: &str,
+        uuid: &str,
+    ) -> Result<ProofArtifactRef> {
+        let proof = sp1_proof_fixture(uuid);
+        let proof_path = runtime
+            .write_proof_artifact_bytes(
+                network_pair,
+                proof_ref,
+                &serde_json::to_vec_pretty(&proof)?,
+            )
+            .await?;
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: network_pair.to_string(),
+                proof_ref: proof_ref.to_string(),
+                pipeline_key: PipelineKey::ShastaSp1,
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: proof_compatibility_id(PipelineKey::ShastaSp1, &proof).ok(),
+            })
+            .await?;
+        Ok(ProofArtifactRef {
+            network_pair: network_pair.to_string(),
+            proof_ref: proof_ref.to_string(),
+            proof_path: proof_path.display().to_string(),
+        })
     }
 
     async fn register_observer_task(
@@ -1789,6 +2050,128 @@ mod tests {
                 .await
                 .as_deref(),
             Some("0xsp1-aggregate")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_prunes_stale_aggregate_artifacts_after_compatibility_failure()
+    -> Result<()> {
+        let network_pair = "taiko_dev/ethereum";
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-stale-aggregate-prune",
+        ))?);
+        let stale_artifact =
+            register_sp1_proof_artifact(&runtime, network_pair, "proposal-a", "0x1111").await?;
+        let current_artifact =
+            register_sp1_proof_artifact(&runtime, network_pair, "proposal-b", "0x2222").await?;
+        let current_dependency = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaSp1,
+            request: proposal_request_with_id(43),
+        });
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-stale".to_string(),
+            proposal_ids: vec![42, 43],
+            prover_config: Default::default(),
+        };
+        let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline: PipelineKey::ShastaSp1,
+            request: aggregate_request.clone(),
+        });
+        let task = EngineTask::Aggregate {
+            request: aggregate_request,
+            source: AggregationSource::Inputs(vec![
+                AggregateProofInput::ProofArtifact(stale_artifact.clone()),
+                AggregateProofInput::PendingProofArtifact {
+                    artifact: current_artifact.clone(),
+                    dependency: Box::new(current_dependency),
+                },
+            ]),
+        };
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
+
+        observer
+            .on_task_failed(
+                &aggregate_task_id,
+                &task,
+                "proofs do not share the same compatibility id",
+            )
+            .await;
+
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, &stale_artifact.proof_ref)
+                .await?
+                .is_none(),
+            "stale aggregate input should be pruned"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, &current_artifact.proof_ref)
+                .await?
+                .is_some(),
+            "current aggregate input should remain"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_prunes_all_inputs_that_do_not_match_expected_compatibility_id()
+    -> Result<()> {
+        let network_pair = "taiko_dev/ethereum";
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-expected-aggregate-prune",
+        ))?);
+        let first_artifact =
+            register_sp1_proof_artifact(&runtime, network_pair, "proposal-a", "0x1111").await?;
+        let second_artifact =
+            register_sp1_proof_artifact(&runtime, network_pair, "proposal-b", "0x1111").await?;
+        let expected =
+            proof_compatibility_id(PipelineKey::ShastaSp1, &sp1_proof_fixture("0x2222"))?;
+        let aggregate_request = AggregationTaskRequest {
+            request_id: "agg-expected-stale".to_string(),
+            proposal_ids: vec![42, 43],
+            prover_config: ProverTaskConfig {
+                expected_child_proof_compatibility_id: Some(expected.clone()),
+                ..Default::default()
+            },
+        };
+        let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
+            pipeline: PipelineKey::ShastaSp1,
+            request: aggregate_request.clone(),
+        });
+        let task = EngineTask::Aggregate {
+            request: aggregate_request,
+            source: AggregationSource::Inputs(vec![
+                AggregateProofInput::ProofArtifact(first_artifact.clone()),
+                AggregateProofInput::ProofArtifact(second_artifact.clone()),
+            ]),
+        };
+        let observer = RuntimeObserver::new(Arc::clone(&runtime), network_pair.to_string());
+
+        observer
+            .on_task_failed(
+                &aggregate_task_id,
+                &task,
+                &format!(
+                    "proof 0 compatibility id stale does not match expected proof compatibility id {expected}"
+                ),
+            )
+            .await;
+
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, &first_artifact.proof_ref)
+                .await?
+                .is_none(),
+            "first stale aggregate input should be pruned"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact(network_pair, &second_artifact.proof_ref)
+                .await?
+                .is_none(),
+            "second stale aggregate input should be pruned"
         );
         Ok(())
     }

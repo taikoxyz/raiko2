@@ -171,6 +171,7 @@ async fn write_e2e_proof_artifact(
             pipeline_key,
             route: route.parse().expect("route"),
             proof_path: proof_path_string.clone(),
+            proof_compatibility_id: None,
         })
         .await
         .expect("register proof artifact");

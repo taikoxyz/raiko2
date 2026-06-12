@@ -28,7 +28,11 @@ use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
-use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver};
+use raiko2_prover::{
+    BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver,
+    validate_aggregate_proof_compatibility_for_pipeline,
+    validate_aggregate_proof_expected_compatibility_for_pipeline,
+};
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
@@ -997,6 +1001,23 @@ where
                     source: source.clone(),
                 };
                 let proofs = self.resolve_aggregation_source(source).await?;
+                validate_aggregate_proof_compatibility_for_pipeline(
+                    self.inner.spec.pipeline_key(),
+                    &proofs,
+                )
+                .map_err(|e| e.to_string())?;
+                if let Some(expected) = request
+                    .prover_config
+                    .expected_child_proof_compatibility_id
+                    .as_deref()
+                {
+                    validate_aggregate_proof_expected_compatibility_for_pipeline(
+                        self.inner.spec.pipeline_key(),
+                        &proofs,
+                        expected,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 let proof = self
                     .inner
                     .spec
@@ -1100,7 +1121,9 @@ where
 mod tests {
     use std::time::Duration;
 
-    use alloy_primitives::Bytes;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use alloy_primitives::{B256, Bytes};
     use raiko2_pipeline::{
         NoopManifestBuilder, NoopValidation, PipelineKey, PipelineSpec, Preflight, ProofStage,
         ProverBackend,
@@ -1110,7 +1133,7 @@ mod tests {
         RaikoResult,
     };
     use raiko2_primitives_shasta::GuestInput;
-    use raiko2_prover::{GuestInputCodec, Prover};
+    use raiko2_prover::{GuestInputCodec, Prover, proof_compatibility_id};
     use raiko2_provider::Provider;
     use raiko2_queue::{RetryPolicy, SchedulerConfig, TaskState};
 
@@ -1402,6 +1425,35 @@ mod tests {
         }
     }
 
+    async fn write_test_proof_artifact(
+        proof_ref: &str,
+        proof: &Proof,
+    ) -> Result<ProofArtifactRef, Box<dyn std::error::Error>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let dir = std::env::temp_dir().join(format!("raiko2-engine-proof-{unique}"));
+        tokio::fs::create_dir_all(&dir).await?;
+        let proof_path = dir.join(format!("{proof_ref}.json"));
+        tokio::fs::write(&proof_path, serde_json::to_vec_pretty(proof)?).await?;
+        Ok(ProofArtifactRef {
+            network_pair: "taiko_dev/ethereum".to_string(),
+            proof_ref: proof_ref.to_string(),
+            proof_path: proof_path.display().to_string(),
+        })
+    }
+
+    fn sp1_aggregate_input_proof(uuid: &str) -> Proof {
+        Proof {
+            proof: Some("0xproof".to_string()),
+            input: Some(B256::repeat_byte(0x11)),
+            quote: Some("0xquote".to_string()),
+            uuid: Some(uuid.to_string()),
+            kzg_proof: None,
+            extra_data: Some(serde_json::json!({
+                "shasta": { "proof_carry_data": {} }
+            })),
+        }
+    }
+
     fn pending_proof_input(proof_ref: &str, dependency: EngineTaskId) -> AggregateProofInput {
         AggregateProofInput::PendingProofArtifact {
             artifact: proof_artifact(proof_ref),
@@ -1593,6 +1645,97 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("proposal tasks in this pipeline"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_execution_rejects_mixed_proof_compatibility_ids()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaSp1),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+        let first =
+            write_test_proof_artifact("sp1-first", &sp1_aggregate_input_proof("0x1111")).await?;
+        let second =
+            write_test_proof_artifact("sp1-second", &sp1_aggregate_input_proof("0x2222")).await?;
+        let aggregate_id = engine
+            .submit_aggregation_proof_from_inputs(
+                aggregation_request("agg-mixed-compatibility"),
+                vec![
+                    AggregateProofInput::ProofArtifact(first),
+                    AggregateProofInput::ProofArtifact(second),
+                ],
+            )
+            .await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        let view = engine
+            .get(aggregate_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected aggregate task view"))?;
+        match view.state {
+            TaskState::Failed { error, .. } => {
+                assert!(error.contains("proofs do not share the same compatibility id"));
+            }
+            other => {
+                return Err(
+                    std::io::Error::other(format!("unexpected task state: {other:?}")).into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aggregate_execution_rejects_proofs_that_do_not_match_expected_compatibility_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = Engine::with_store_and_scheduler_config(
+            TestSpec::new(MockProver).with_pipeline_key(PipelineKey::ShastaSp1),
+            test_context(),
+            raiko2_queue::MemoryStore::new(),
+            Engine::<TestSpec<MockProver>>::default_scheduler_config(),
+        );
+        let stale_proof = sp1_aggregate_input_proof("0x1111");
+        let expected =
+            proof_compatibility_id(PipelineKey::ShastaSp1, &sp1_aggregate_input_proof("0x2222"))?;
+        let first = write_test_proof_artifact("sp1-first-stale", &stale_proof).await?;
+        let second = write_test_proof_artifact("sp1-second-stale", &stale_proof).await?;
+        let aggregate_id = engine
+            .submit_aggregation_proof_from_inputs(
+                AggregationTaskRequest {
+                    request_id: "agg-expected-compatibility".to_string(),
+                    proposal_ids: vec![1, 2],
+                    prover_config: ProverTaskConfig {
+                        expected_child_proof_compatibility_id: Some(expected.clone()),
+                        ..Default::default()
+                    },
+                },
+                vec![
+                    AggregateProofInput::ProofArtifact(first),
+                    AggregateProofInput::ProofArtifact(second),
+                ],
+            )
+            .await?;
+
+        assert!(Box::pin(engine.run_one("w1")).await?);
+        let view = engine
+            .get(aggregate_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected aggregate task view"))?;
+        match view.state {
+            TaskState::Failed { error, .. } => {
+                assert!(error.contains("expected proof compatibility id"));
+                assert!(error.contains(&expected));
+            }
+            other => {
+                return Err(
+                    std::io::Error::other(format!("unexpected task state: {other:?}")).into(),
+                );
+            }
+        }
         Ok(())
     }
 

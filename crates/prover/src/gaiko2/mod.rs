@@ -222,9 +222,14 @@ impl Gaiko2Prover {
                     "gaiko2 request failed with status {status} and no error payload"
                 ))
             })?;
+            let expected = error
+                .expected_child_proof_compatibility_id
+                .as_deref()
+                .map(|id| format!(" expected_child_proof_compatibility_id={id}"))
+                .unwrap_or_default();
             return Err(RaikoError::Guest(format!(
-                "gaiko2 {}: {}",
-                error.code, error.message
+                "gaiko2 {}: {}{}",
+                error.code, error.message, expected
             )));
         }
 

@@ -96,3 +96,44 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
         Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
 }
+
+#[tokio::test]
+async fn gaiko2_prover_preserves_expected_child_compatibility_id_on_aggregate_error() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/prove/shasta-aggregate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
+                "status": "error",
+                "error": {
+                    "code": "proof_compatibility_mismatch",
+                    "message": "child proof identity is stale",
+                    "expected_child_proof_compatibility_id": "shasta-sp1:vkey:0xbbb"
+                }
+            }));
+    });
+
+    let prover = Gaiko2Prover::new(&Gaiko2Config {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+    })
+    .expect("build gaiko2 prover");
+
+    let err = prover
+        .aggregate(
+            AggregationGuestInput {
+                proofs: vec![fixture_aggregate_proof()],
+            },
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect_err("remote aggregate should fail");
+
+    mock.assert();
+    let message = err.to_string();
+    assert!(message.contains("proof_compatibility_mismatch"));
+    assert!(message.contains("expected_child_proof_compatibility_id=shasta-sp1:vkey:0xbbb"));
+}

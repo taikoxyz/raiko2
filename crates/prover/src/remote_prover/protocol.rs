@@ -159,4 +159,6 @@ pub struct Raiko2ProofResult {
 pub struct Raiko2ProofError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_child_proof_compatibility_id: Option<String>,
 }

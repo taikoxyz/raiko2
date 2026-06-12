@@ -49,7 +49,7 @@ use alloy::sol_types::SolValue;
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 use alloy_primitives::B256;
 use alloy_primitives::Bytes;
-use raiko2_pipeline::{PipelineRoute, ProverBackend};
+use raiko2_pipeline::{PipelineKey, PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
     ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
@@ -294,6 +294,183 @@ pub(crate) fn shasta_image_id_words_from_uuid(raw: &str) -> Result<[u32; 8], Str
     }
 }
 
+/// Returns the backend-specific identity that determines whether proposal proofs can be
+/// aggregated together under the same verifier/program contract.
+///
+/// For ZK backends this is the proposal program identity carried by `Proof::uuid`:
+/// SP1 stores its verifier key (or verifier-key digest fallback), while RISC0 stores the
+/// guest image ID. TEE routes prefer host metadata exported from the remote prover because
+/// the raw quote is not a stable cache key.
+///
+/// # Errors
+///
+/// Returns an error when a strict ZK route is missing a required compatibility identity. Remote
+/// TEE and legacy Boundless proofs without host-level identity metadata use explicit legacy
+/// compatibility buckets so new proofs do not silently mix with old cache records.
+pub fn proof_compatibility_id(
+    pipeline_key: PipelineKey,
+    proof: &Proof,
+) -> Result<String, RaikoError> {
+    match pipeline_key {
+        PipelineKey::ShastaNative => Ok("shasta-native:local".to_string()),
+        PipelineKey::ShastaSp1 => proof
+            .uuid
+            .as_deref()
+            .map(|uuid| compatibility_id("shasta-sp1", "vkey", uuid))
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "SP1 proof missing compatibility id: uuid/vkey".to_string(),
+                )
+            }),
+        PipelineKey::ShastaRisc0 => proof
+            .uuid
+            .as_deref()
+            .map(|uuid| compatibility_id("shasta-risc0", "image_id", uuid))
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "RISC0 proof missing compatibility id: image id".to_string(),
+                )
+            }),
+        PipelineKey::ShastaRisc0Network => Ok(proof
+            .uuid
+            .as_deref()
+            .or_else(|| extra_data_string(proof, "risc0", "image_id"))
+            .map(|image_id| compatibility_id("shasta-risc0-network", "image_id", image_id))
+            .unwrap_or_else(|| "shasta-risc0-network:image_id:legacy-missing".to_string())),
+        PipelineKey::ShastaSgx => Ok(tee_compatibility_id("shasta-sgx", proof)),
+        PipelineKey::ShastaSgxGeth => Ok(tee_compatibility_id("shasta-sgxgeth", proof)),
+    }
+}
+
+/// Route-based wrapper around [`proof_compatibility_id`].
+///
+/// # Errors
+///
+/// Returns an error if the route is unsupported or if the proof is missing identity metadata.
+pub fn proof_compatibility_id_for_route(
+    route: PipelineRoute,
+    proof: &Proof,
+) -> Result<String, RaikoError> {
+    proof_compatibility_id(
+        route
+            .pipeline_key()
+            .map_err(RaikoError::InvalidRequestConfig)?,
+        proof,
+    )
+}
+
+/// # Errors
+///
+/// Returns an error if the supplied proofs do not share the same backend compatibility id.
+pub fn validate_aggregate_proof_compatibility_for_pipeline(
+    pipeline_key: PipelineKey,
+    proofs: &[Proof],
+) -> Result<(), RaikoError> {
+    let mut expected: Option<String> = None;
+    for (index, proof) in proofs.iter().enumerate() {
+        let current = proof_compatibility_id(pipeline_key, proof).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "proof {index} compatibility check failed: {err}"
+            ))
+        })?;
+        match expected.as_ref() {
+            Some(first) if first != &current => {
+                return Err(RaikoError::InvalidRequestConfig(format!(
+                    "proofs do not share the same compatibility id: proof 0 uses {}, proof {index} uses {}",
+                    short_compatibility_id(first),
+                    short_compatibility_id(&current)
+                )));
+            }
+            Some(_) => {}
+            None => expected = Some(current),
+        }
+    }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns an error if any supplied proof does not match the expected child-proof compatibility id
+/// for the current aggregate prover.
+pub fn validate_aggregate_proof_expected_compatibility_for_pipeline(
+    pipeline_key: PipelineKey,
+    proofs: &[Proof],
+    expected_compatibility_id: &str,
+) -> Result<(), RaikoError> {
+    for (index, proof) in proofs.iter().enumerate() {
+        let current = proof_compatibility_id(pipeline_key, proof).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "proof {index} missing compatibility id while checking expected proof compatibility id {expected_compatibility_id}: {err}"
+            ))
+        })?;
+        if current != expected_compatibility_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "proof {index} compatibility id {current} does not match expected proof compatibility id {expected_compatibility_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns an error if the supplied proofs do not share the same route-specific
+/// backend compatibility id.
+pub fn validate_aggregate_proof_compatibility(
+    route: PipelineRoute,
+    proofs: &[Proof],
+) -> Result<(), RaikoError> {
+    validate_aggregate_proof_compatibility_for_pipeline(
+        route
+            .pipeline_key()
+            .map_err(RaikoError::InvalidRequestConfig)?,
+        proofs,
+    )
+}
+
+fn tee_compatibility_id(prefix: &str, proof: &Proof) -> String {
+    match (
+        extra_data_string(proof, "gaiko2", "public_key"),
+        extra_data_string(proof, "gaiko2", "instance_address"),
+    ) {
+        (Some(public_key), Some(instance_address)) => compatibility_id(
+            prefix,
+            "gaiko2",
+            &format!("{public_key}:{instance_address}"),
+        ),
+        (Some(public_key), None) => compatibility_id(prefix, "gaiko2_public_key", public_key),
+        (None, Some(instance_address)) => {
+            compatibility_id(prefix, "gaiko2_instance", instance_address)
+        }
+        (None, None) => format!("{prefix}:gaiko2:legacy-missing"),
+    }
+}
+
+fn extra_data_string<'a>(proof: &'a Proof, namespace: &str, key: &str) -> Option<&'a str> {
+    proof
+        .extra_data
+        .as_ref()?
+        .get(namespace)?
+        .get(key)?
+        .as_str()
+}
+
+fn compatibility_id(prefix: &str, kind: &str, raw: &str) -> String {
+    format!(
+        "{prefix}:{kind}:{}",
+        alloy_primitives::keccak256(raw.as_bytes())
+    )
+}
+
+fn short_compatibility_id(id: &str) -> String {
+    const MAX_LEN: usize = 48;
+    if id.len() <= MAX_LEN {
+        id.to_string()
+    } else {
+        format!("{}...", &id[..MAX_LEN])
+    }
+}
+
 /// # Errors
 ///
 /// Returns an error when the supplied proofs do not satisfy the route-specific external
@@ -440,7 +617,8 @@ mod tests {
     };
     use super::{
         encode_proof_carry_data, parse_shasta_aggregation_input_hash,
-        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+        parse_shasta_proposal_input_hash, validate_aggregate_proof_compatibility,
+        validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
@@ -495,6 +673,52 @@ mod tests {
                 encode_proof_carry_data(&ProofCarryData::default()).expect("encode carry data"),
             ),
         }
+    }
+
+    #[test]
+    fn aggregate_compatibility_rejects_mixed_sp1_verifier_identity() {
+        let route = "sp1/local".parse::<PipelineRoute>().expect("parse route");
+        let mut first = aggregate_proof_fixture();
+        first.uuid = Some("0x1111".to_string());
+        let mut second = aggregate_proof_fixture();
+        second.uuid = Some("0x2222".to_string());
+
+        let err = validate_aggregate_proof_compatibility(route, &[first, second])
+            .expect_err("mixed SP1 verifier identity should fail");
+
+        assert!(
+            err.to_string()
+                .contains("proofs do not share the same compatibility id")
+        );
+    }
+
+    #[test]
+    fn aggregate_compatibility_rejects_mixed_gaiko2_identity() {
+        let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
+        let mut first = aggregate_proof_fixture();
+        first.extra_data = Some(serde_json::json!({
+            "shasta": { "proof_carry_data": {} },
+            "gaiko2": {
+                "public_key": "0xaaa",
+                "instance_address": "0x111"
+            }
+        }));
+        let mut second = aggregate_proof_fixture();
+        second.extra_data = Some(serde_json::json!({
+            "shasta": { "proof_carry_data": {} },
+            "gaiko2": {
+                "public_key": "0xbbb",
+                "instance_address": "0x111"
+            }
+        }));
+
+        let err = validate_aggregate_proof_compatibility(route, &[first, second])
+            .expect_err("mixed gaiko2 identity should fail");
+
+        assert!(
+            err.to_string()
+                .contains("proofs do not share the same compatibility id")
+        );
     }
 
     #[test]

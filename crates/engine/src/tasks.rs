@@ -11,6 +11,8 @@ pub struct ProverTaskConfig {
     pub sp1: Option<Sp1ConfigOverrides>,
     #[serde(default)]
     pub sp1_system: Option<Sp1SystemConfig>,
+    #[serde(default)]
+    pub expected_child_proof_compatibility_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]

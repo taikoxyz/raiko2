@@ -17,7 +17,7 @@ use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, forks::shasta::ShastaSpec};
 use raiko2_primitives::{Proof, ProofType};
 use raiko2_prover::gaiko2::Gaiko2Prover;
-use raiko2_prover::validate_external_aggregate_proofs;
+use raiko2_prover::{proof_compatibility_id, validate_external_aggregate_proofs};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
@@ -377,7 +377,8 @@ async fn restore_proof_artifacts_from_runtime_task(
         .with_context(|| format!("failed to parse proof file {proof_path}"))?;
 
     if restored_refs.kind == ProofArtifactKind::Proposal
-        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
+        && let Err(err) =
+            validate_external_aggregate_proofs(record.route, std::slice::from_ref(&proof))
     {
         warn!(
             task_id = record.task_id,
@@ -388,6 +389,7 @@ async fn restore_proof_artifacts_from_runtime_task(
         return Ok(());
     }
 
+    let proof_compatibility = proof_compatibility_id(record.pipeline_key, &proof).ok();
     for proof_ref in restored_refs.refs {
         let artifact_path = runtime
             .write_proof_artifact_bytes(&metadata.network_pair, &proof_ref, &proof_bytes)
@@ -400,6 +402,7 @@ async fn restore_proof_artifacts_from_runtime_task(
                 pipeline_key: record.pipeline_key,
                 route: record.route,
                 proof_path: artifact_path.display().to_string(),
+                proof_compatibility_id: proof_compatibility.clone(),
             })
             .await?;
     }
@@ -446,7 +449,8 @@ async fn restore_cached_proof_artifact(
     let proof: Proof = serde_json::from_slice(&proof_bytes)
         .with_context(|| format!("failed to parse proof artifact for {proof_ref}"))?;
     if kind == ProofArtifactKind::Proposal
-        && let Err(err) = validate_external_aggregate_proofs(record.route, &[proof])
+        && let Err(err) =
+            validate_external_aggregate_proofs(record.route, std::slice::from_ref(&proof))
     {
         warn!(
             task_id = record.task_id,
@@ -457,6 +461,7 @@ async fn restore_cached_proof_artifact(
         return Ok(());
     }
 
+    let proof_compatibility = proof_compatibility_id(record.pipeline_key, &proof).ok();
     runtime
         .upsert_proof_artifact(ProofArtifactRegistration {
             network_pair: metadata.network_pair.clone(),
@@ -464,6 +469,7 @@ async fn restore_cached_proof_artifact(
             pipeline_key: record.pipeline_key,
             route: record.route,
             proof_path: proof_path.display().to_string(),
+            proof_compatibility_id: proof_compatibility,
         })
         .await?;
     Ok(())

@@ -42,6 +42,7 @@ pub struct ProofArtifactRegistration {
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
     pub proof_path: String,
+    pub proof_compatibility_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,7 @@ pub struct ProofArtifactRecord {
     pub pipeline_key: PipelineKey,
     pub route: PipelineRoute,
     pub proof_path: String,
+    pub proof_compatibility_id: Option<String>,
     pub updated_at: i64,
 }
 
@@ -440,12 +442,14 @@ impl RuntimeManager {
             conn.execute(
                 r"
                 INSERT INTO proof_artifacts (
-                    network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    network_pair, proof_ref, pipeline_key, route, proof_path,
+                    proof_compatibility_id, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
                     pipeline_key = excluded.pipeline_key,
                     route = excluded.route,
                     proof_path = excluded.proof_path,
+                    proof_compatibility_id = excluded.proof_compatibility_id,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -454,8 +458,16 @@ impl RuntimeManager {
                     registration.pipeline_key.as_str(),
                     registration.route.to_string(),
                     registration.proof_path,
+                    registration.proof_compatibility_id,
                     updated_at,
                 ],
+            )?;
+            conn.execute(
+                r"
+                    DELETE FROM proof_artifact_prunes
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                params![registration.network_pair, registration.proof_ref],
             )?;
             Ok(())
         })
@@ -480,7 +492,8 @@ impl RuntimeManager {
                 Ok(conn
                     .query_row(
                         r"
-                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path,
+                           proof_compatibility_id, updated_at
                     FROM proof_artifacts
                     WHERE network_pair = ?1 AND proof_ref = ?2
                     ",
@@ -492,6 +505,86 @@ impl RuntimeManager {
             .await
             .context("failed to query proof artifact")?;
         Ok(artifact)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be deleted.
+    pub async fn delete_proof_artifact(&self, network_pair: &str, proof_ref: &str) -> Result<()> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                    DELETE FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                params![network_pair, proof_ref],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to delete proof artifact")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record or prune marker cannot be stored.
+    pub async fn prune_proof_artifact(&self, network_pair: &str, proof_ref: &str) -> Result<()> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let pruned_at = now_ts();
+        conn.call(move |conn| {
+            conn.execute(
+                r"
+                    DELETE FROM proof_artifacts
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                params![network_pair.as_str(), proof_ref.as_str()],
+            )?;
+            conn.execute(
+                r"
+                    INSERT INTO proof_artifact_prunes (network_pair, proof_ref, pruned_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(network_pair, proof_ref) DO UPDATE SET
+                        pruned_at = excluded.pruned_at
+                    ",
+                params![network_pair.as_str(), proof_ref.as_str(), pruned_at],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("failed to prune proof artifact")?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the prune marker cannot be consumed.
+    pub async fn take_proof_artifact_prune(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let deleted = conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    r"
+                    DELETE FROM proof_artifact_prunes
+                    WHERE network_pair = ?1 AND proof_ref = ?2
+                    ",
+                    params![network_pair, proof_ref],
+                )?)
+            })
+            .await
+            .context("failed to consume proof artifact prune marker")?;
+        Ok(deleted > 0)
     }
 
     /// # Errors
@@ -867,7 +960,8 @@ fn proof_artifact_record_from_row(
         pipeline_key,
         route,
         proof_path: row.get(4)?,
-        updated_at: row.get(5)?,
+        proof_compatibility_id: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -901,13 +995,34 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
             pipeline_key TEXT NOT NULL,
             route TEXT NOT NULL,
             proof_path TEXT NOT NULL,
+            proof_compatibility_id TEXT,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(network_pair, proof_ref)
         );
         CREATE INDEX IF NOT EXISTS proof_artifacts_updated_at_idx
         ON proof_artifacts(updated_at);
+
+        CREATE TABLE IF NOT EXISTS proof_artifact_prunes (
+            network_pair TEXT NOT NULL,
+            proof_ref TEXT NOT NULL,
+            pruned_at INTEGER NOT NULL,
+            PRIMARY KEY(network_pair, proof_ref)
+        );
         ",
     )?;
+    let proof_compatibility_id_exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('proof_artifacts') WHERE name = 'proof_compatibility_id' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if proof_compatibility_id_exists.is_none() {
+        conn.execute(
+            "ALTER TABLE proof_artifacts ADD COLUMN proof_compatibility_id TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1103,6 +1218,7 @@ mod tests {
                 pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
                 route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
                 proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: Some("shasta-sp1:vkey:test".to_string()),
             })
             .await?;
 
@@ -1113,6 +1229,97 @@ mod tests {
         assert_eq!(artifact.proof_path, proof_path.display().to_string());
         assert_eq!(artifact.network_pair, "taiko_dev/ethereum");
         assert_eq!(artifact.proof_ref, "proposal_0xabc");
+        assert_eq!(
+            artifact.proof_compatibility_id.as_deref(),
+            Some("shasta-sp1:vkey:test")
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_prunes_proof_artifact_records() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-proof-artifact-prune");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", "proposal_0xabc");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: "proposal_0xabc".to_string(),
+                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: Some("shasta-sp1:vkey:test".to_string()),
+            })
+            .await?;
+
+        runtime
+            .delete_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
+            .await?;
+
+        assert!(
+            runtime
+                .get_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
+                .await?
+                .is_none()
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_tracks_pruned_proof_artifact_markers() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-proof-artifact-prune-marker");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+        let proof_path = runtime.proof_artifact_path("taiko_dev/ethereum", "proposal_0xabc");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: "proposal_0xabc".to_string(),
+                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: Some("shasta-sp1:vkey:test".to_string()),
+            })
+            .await?;
+
+        runtime
+            .prune_proof_artifact("taiko_dev/ethereum", "proposal_0xabc")
+            .await?;
+
+        assert!(
+            runtime
+                .take_proof_artifact_prune("taiko_dev/ethereum", "proposal_0xabc")
+                .await?
+        );
+        assert!(
+            !runtime
+                .take_proof_artifact_prune("taiko_dev/ethereum", "proposal_0xabc")
+                .await?
+        );
+
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: "taiko_dev/ethereum".to_string(),
+                proof_ref: "proposal_0xabc".to_string(),
+                pipeline_key: raiko2_pipeline::PipelineKey::ShastaSp1,
+                route: "sp1/local".parse::<PipelineRoute>().expect("parse route"),
+                proof_path: proof_path.display().to_string(),
+                proof_compatibility_id: Some("shasta-sp1:vkey:new".to_string()),
+            })
+            .await?;
+        assert!(
+            !runtime
+                .take_proof_artifact_prune("taiko_dev/ethereum", "proposal_0xabc")
+                .await?
+        );
 
         std::fs::remove_dir_all(root)?;
         Ok(())

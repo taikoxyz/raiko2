@@ -699,6 +699,7 @@ mod tests {
     use alloy_primitives::address;
 
     const MAINNET_SHASTA_TIMESTAMP: u64 = 1_775_135_700;
+    const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
 
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
@@ -920,6 +921,27 @@ mod tests {
         let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_hoodi_default_spec_sets_unzen_timestamp() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_hoodi")
+            .ok_or_else(|| anyhow!("missing taiko_hoodi spec"))?;
+
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(HOODI_UNZEN_TIMESTAMP))
+        );
+
+        let taiko = spec.to_taiko_chain_spec()?;
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+
+        assert!(unzen.active_at_timestamp(HOODI_UNZEN_TIMESTAMP));
+        assert!(!unzen.active_at_timestamp(HOODI_UNZEN_TIMESTAMP - 1));
         Ok(())
     }
 

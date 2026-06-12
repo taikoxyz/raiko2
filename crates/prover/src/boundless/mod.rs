@@ -1328,10 +1328,18 @@ fn validate_offer_params(
             (None, None, max_price_cap)
         }
     };
-    let lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
-    let timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let (lock_timeout, timeout) =
-        apply_dynamic_pricing_timeout_modifier(offer_spec, lock_timeout, timeout)?;
+    let derived_lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
+    let derived_timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
+    let (derived_lock_timeout, derived_timeout) =
+        apply_dynamic_pricing_timeout_modifier(offer_spec, derived_lock_timeout, derived_timeout)?;
+    // Fixed overrides are final values: deliberately not scaled by the modifier above.
+    let lock_timeout = offer_spec.lock_timeout_secs.unwrap_or(derived_lock_timeout);
+    let timeout = offer_spec.timeout_secs.unwrap_or(derived_timeout);
+    if timeout <= lock_timeout {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "timeout {timeout}s must be greater than lock timeout {lock_timeout}s for {mcycles_count} mcycles"
+        )));
+    }
     let ramp_up_period_secs = offer_spec
         .ramp_up_period_blocks
         .saturating_mul(block_time_sec);
@@ -1585,6 +1593,60 @@ mod tests {
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 1800);
         assert!(validated.timeout > validated.lock_timeout);
+    }
+
+    #[test]
+    fn validate_offer_params_uses_fixed_timeout_overrides() {
+        let mut offer = sample_offer();
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(3600);
+
+        let small = validate_offer_params(&offer, 100, 2, 1).expect("valid small offer");
+        let large = validate_offer_params(&offer, 5_000, 2, 1).expect("valid large offer");
+
+        assert_eq!(small.lock_timeout, 600);
+        assert_eq!(small.timeout, 3600);
+        assert_eq!(large.lock_timeout, 600);
+        assert_eq!(large.timeout, 3600);
+    }
+
+    #[test]
+    fn validate_offer_params_rejects_fixed_timeout_below_derived_lock_timeout() {
+        let mut offer = sample_offer();
+        // The derived lock timeout for 5000 mcycles is 1500s, above the fixed timeout.
+        offer.timeout_secs = Some(900);
+        let err = validate_offer_params(&offer, 5_000, 2, 1).unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn validate_offer_params_ramp_up_check_uses_fixed_lock_timeout() {
+        let mut offer = sample_offer();
+        // 60 blocks at 2s block time is a 120s ramp-up, while the derived lock
+        // timeout for 100 mcycles is only 30s; the fixed override lifts it.
+        assert!(validate_offer_params(&offer, 100, 2, 1).is_err());
+
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(3600);
+        let validated = validate_offer_params(&offer, 100, 2, 1).expect("valid offer");
+        assert_eq!(validated.lock_timeout, 600);
+        assert_eq!(validated.ramp_up_period_secs, 120);
+    }
+
+    #[test]
+    fn validate_offer_params_market_timeout_modifier_does_not_scale_fixed_overrides() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(3600);
+
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+
+        assert_eq!(validated.lock_timeout, 600);
+        assert_eq!(validated.timeout, 3600);
     }
 
     #[test]

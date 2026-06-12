@@ -71,6 +71,12 @@ jobs:
 
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
+      # sp1-prover-types 6.1.0 compiles protobuf definitions in its build script; the
+      # current ubuntu-latest runner image no longer ships protoc, and the well-known
+      # types (google/protobuf/*.proto) live in libprotobuf-dev on ubuntu 24.04.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+
       - name: print resolved revision
         run: |
           git rev-parse HEAD
@@ -127,6 +133,12 @@ jobs:
 
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
+      # sp1-prover-types 6.1.0 compiles protobuf definitions in its build script; the
+      # current ubuntu-latest runner image no longer ships protoc, and the well-known
+      # types (google/protobuf/*.proto) live in libprotobuf-dev on ubuntu 24.04.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+
       - name: print resolved revision
         run: |
           git rev-parse HEAD
@@ -182,6 +194,12 @@ jobs:
           toolchain: "1.94.0"
 
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      # sp1-prover-types 6.1.0 compiles protobuf definitions in its build script; the
+      # current ubuntu-latest runner image no longer ships protoc, and the well-known
+      # types (google/protobuf/*.proto) live in libprotobuf-dev on ubuntu 24.04.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - name: print resolved revision
         run: |

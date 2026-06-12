@@ -128,6 +128,7 @@ pub(crate) fn boundless_prover_config(
         batch_quoted_mcycles: boundless.batch_quoted_mcycles,
         batch_quote_strategy: boundless.batch_quote_strategy,
         aggregation_quoted_mcycles: boundless.aggregation_quoted_mcycles,
+        aggregation_quote_strategy: boundless.aggregation_quote_strategy,
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
@@ -234,6 +235,8 @@ mod tests {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
         config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
+        config.rpc.pairs[0].boundless.aggregation_quote_strategy =
+            Some(raiko2_prover::boundless::BatchQuoteStrategy::Evaluated);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
                 timeout_ms_per_mcycle: 500,
@@ -254,7 +257,11 @@ mod tests {
         let boundless = boundless_prover_config(&config, &pair);
 
         assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
-        assert_eq!(boundless.aggregation_quoted_mcycles, 320);
+        assert_eq!(boundless.aggregation_quoted_mcycles, Some(320));
+        assert_eq!(
+            boundless.aggregation_quote_strategy,
+            raiko2_prover::boundless::BatchQuoteStrategy::Evaluated
+        );
         assert_eq!(boundless.offer_params.batch.timeout_ms_per_mcycle, 500);
         assert_eq!(
             boundless.offer_params.aggregation.timeout_ms_per_mcycle,

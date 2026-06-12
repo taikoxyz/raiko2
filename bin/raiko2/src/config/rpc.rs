@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless::{BoundlessOfferParams, validate_offer_spec};
+use raiko2_prover::boundless::{BatchQuoteStrategy, BoundlessOfferParams, validate_offer_spec};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
@@ -107,6 +107,7 @@ pub struct ResolvedNetworkPair {
 pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
     pub aggregation_quoted_mcycles: Option<u32>,
+    pub aggregation_quote_strategy: Option<BatchQuoteStrategy>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
 

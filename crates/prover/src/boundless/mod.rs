@@ -46,6 +46,8 @@ use crate::{
 const MILLION_CYCLES: u64 = 1_000_000;
 const BATCH_QUOTED_MCYCLES_MIN: u32 = 2_000;
 const BATCH_QUOTED_MCYCLES_STEP: u32 = 1_000;
+const AGGREGATION_QUOTED_MCYCLES_MIN: u32 = 200;
+const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -139,6 +141,20 @@ const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
     };
     if rounded < BATCH_QUOTED_MCYCLES_MIN {
         BATCH_QUOTED_MCYCLES_MIN
+    } else {
+        rounded
+    }
+}
+
+const fn quote_aggregation_mcycles(evaluated_mcycles: u32) -> u32 {
+    let rounded = if evaluated_mcycles == 0 {
+        0
+    } else {
+        evaluated_mcycles.div_ceil(AGGREGATION_QUOTED_MCYCLES_STEP)
+            * AGGREGATION_QUOTED_MCYCLES_STEP
+    };
+    if rounded < AGGREGATION_QUOTED_MCYCLES_MIN {
+        AGGREGATION_QUOTED_MCYCLES_MIN
     } else {
         rounded
     }
@@ -1127,13 +1143,13 @@ where
 
 impl BoundlessProver {
     // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
-    const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
+    fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
         match elf_type {
             ElfType::Batch => {
                 if let Some(batch_quoted_mcycles) = self.config.batch_quoted_mcycles {
                     batch_quoted_mcycles
                 } else {
-                    match self.config.batch_quote_strategy {
+                    match self.config.batch_quote_strategy.clone() {
                         BatchQuoteStrategy::RaikoAgent => {
                             quote_batch_mcycles(evaluated_mcycles_count)
                         }
@@ -1141,7 +1157,18 @@ impl BoundlessProver {
                     }
                 }
             }
-            ElfType::Aggregation => self.config.aggregation_quoted_mcycles,
+            ElfType::Aggregation => {
+                if let Some(aggregation_quoted_mcycles) = self.config.aggregation_quoted_mcycles {
+                    aggregation_quoted_mcycles
+                } else {
+                    match self.config.aggregation_quote_strategy.clone() {
+                        BatchQuoteStrategy::RaikoAgent => {
+                            quote_aggregation_mcycles(evaluated_mcycles_count)
+                        }
+                        BatchQuoteStrategy::Evaluated => evaluated_mcycles_count,
+                    }
+                }
+            }
         }
     }
 }
@@ -1352,10 +1379,15 @@ mod tests {
     fn quoted_mcycles_count_matches_raiko_agent_strategy() {
         let prover = BoundlessProver::new(BoundlessConfig::default());
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
-        assert_eq!(
-            prover.quoted_mcycles_count(ElfType::Aggregation, 123),
-            BoundlessConfig::default().aggregation_quoted_mcycles
-        );
+    }
+
+    #[test]
+    fn aggregation_quoted_mcycles_matches_raiko_agent_strategy() {
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 0), 200);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 123), 200);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 200), 200);
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 201), 300);
     }
 
     #[test]
@@ -1380,9 +1412,23 @@ mod tests {
     }
 
     #[test]
+    fn aggregation_quoted_mcycles_can_use_evaluated_cycles_directly() {
+        let config = BoundlessConfig {
+            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
+            ..Default::default()
+        };
+        let prover = BoundlessProver::new(config);
+        assert_eq!(
+            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            1_188
+        );
+    }
+
+    #[test]
     fn aggregation_quoted_mcycles_can_use_fixed_override() {
         let config = BoundlessConfig {
-            aggregation_quoted_mcycles: 320,
+            aggregation_quoted_mcycles: Some(320),
+            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
             ..Default::default()
         };
         let prover = BoundlessProver::new(config);

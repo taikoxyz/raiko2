@@ -75,11 +75,13 @@ pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
+    pub submitted_at: u64,
     pub image_ref: String,
     pub deployment: String,
     pub offchain: bool,
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
+    pub max_price_multiplier: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +89,8 @@ pub struct BoundlessSubmissionResume {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
+    pub submitted_at: u64,
+    pub max_price_multiplier: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

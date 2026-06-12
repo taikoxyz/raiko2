@@ -805,6 +805,8 @@ impl EngineObserver for RuntimeObserver {
             provider_request_id: runtime.provider_request_id.clone()?,
             remote_tx_hash: runtime.remote_tx_hash.clone(),
             expires_at,
+            submitted_at: runtime.submitted_at?,
+            max_price_multiplier: runtime.max_price_multiplier?,
         })
     }
 }
@@ -1041,11 +1043,13 @@ mod tests {
                     provider_request_id: "0x1234".to_string(),
                     remote_tx_hash: Some("0xabcd".to_string()),
                     expires_at: future_expires_at,
+                    submitted_at: future_expires_at - 300,
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
                     offchain: false,
                     quoted_mcycles_count: Some(6_000),
                     evaluated_mcycles_count: Some(12_345),
+                    max_price_multiplier: 4,
                 }),
             )
             .await;
@@ -1065,9 +1069,11 @@ mod tests {
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
+        assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 300));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
+        assert_eq!(runtime_entry.max_price_multiplier, Some(4));
         let mut record = runtime
             .get_task("task_public")
             .await?
@@ -1087,6 +1093,8 @@ mod tests {
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(resumed.expires_at, future_expires_at);
+        assert_eq!(resumed.submitted_at, future_expires_at - 300);
+        assert_eq!(resumed.max_price_multiplier, 4);
 
         let mut record = runtime
             .get_task("task_public")

@@ -122,9 +122,13 @@ pub(crate) struct TaskRuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) submitted_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_multiplier: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<Sp1NetworkMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,7 +503,10 @@ impl TaskRuntimeMetadata {
     }
 
     const fn has_boundless_submission_resume(&self) -> bool {
-        self.provider_request_id.is_some() && self.expires_at.is_some()
+        self.provider_request_id.is_some()
+            && self.expires_at.is_some()
+            && self.submitted_at.is_some()
+            && self.max_price_multiplier.is_some()
     }
 
     const fn has_sp1_network_submission_progress(&self) -> bool {
@@ -525,8 +532,10 @@ impl TaskRuntimeMetadata {
         self.deployment = Some(progress.deployment.clone());
         self.offchain = Some(progress.offchain);
         self.expires_at = Some(progress.expires_at);
+        self.submitted_at = Some(progress.submitted_at);
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
+        self.max_price_multiplier = Some(progress.max_price_multiplier);
     }
 
     fn apply_sp1_network_submission(

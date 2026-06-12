@@ -255,9 +255,13 @@ pub(crate) struct TaskRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) submitted_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_multiplier: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

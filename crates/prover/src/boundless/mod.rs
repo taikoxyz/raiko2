@@ -51,10 +51,13 @@ const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-// Cap manual max-price escalation at 2 doublings (4x). Resubmitting an expired
-// request at the same price just repeats the same auction outcome; doubling the
-// cap per attempt clears transient capacity crunches without unbounded spend.
-const RETRY_PRICE_MAX_DOUBLINGS: u64 = 2;
+// Stop polling an unlocked low-price request after five minutes and resubmit at
+// a higher max price. Once a request is locked, keep waiting for that request to
+// avoid duplicate fills.
+const BOUNDLESS_NO_LOCK_REBID_DELAY: Duration = Duration::from_secs(5 * 60);
+// Cap manual max-price escalation at four doublings (16x). This gives an
+// initial quote plus four higher-price submissions.
+const RETRY_PRICE_MAX_DOUBLINGS: u64 = 4;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -131,6 +134,49 @@ const fn retry_price_multiplier(attempt: u64) -> u32 {
         doublings
     };
     1_u32 << doublings
+}
+
+fn attempt_for_price_multiplier(multiplier: u32) -> u64 {
+    let multiplier = multiplier.max(1);
+    let mut attempt = 1_u64;
+    while retry_price_multiplier(attempt) < multiplier
+        && attempt < RETRY_PRICE_MAX_DOUBLINGS.saturating_add(1)
+    {
+        attempt = attempt.saturating_add(1);
+    }
+    attempt
+}
+
+const fn should_rebid_unlocked_request(attempt: u64) -> bool {
+    attempt > 0 && attempt <= RETRY_PRICE_MAX_DOUBLINGS
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoLockTimeoutAction {
+    Rebid,
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NoLockTimeout {
+    delay: Duration,
+    action: NoLockTimeoutAction,
+}
+
+const fn no_lock_timeout_for_attempt(attempt: u64) -> NoLockTimeout {
+    let action = if should_rebid_unlocked_request(attempt) {
+        NoLockTimeoutAction::Rebid
+    } else {
+        NoLockTimeoutAction::Abort
+    };
+    NoLockTimeout {
+        delay: BOUNDLESS_NO_LOCK_REBID_DELAY,
+        action,
+    }
+}
+
+fn no_lock_deadline_elapsed(submitted_at: u64, timeout: NoLockTimeout, now_secs: u64) -> bool {
+    now_secs >= submitted_at.saturating_add(timeout.delay.as_secs())
 }
 
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
@@ -227,6 +273,8 @@ struct Submission {
     provider_request_id: String,
     remote_tx_hash: Option<String>,
     expires_at: u64,
+    submitted_at: u64,
+    max_price_multiplier: u32,
 }
 
 struct FreshSubmissionContext<'a> {
@@ -264,6 +312,7 @@ async fn publish_boundless_progress(
     offchain: bool,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
+    max_price_multiplier: u32,
 ) {
     if let Some(observer) = observer {
         observer
@@ -277,6 +326,8 @@ async fn publish_boundless_progress(
                     offchain,
                     quoted_mcycles_count: Some(quoted_mcycles_count),
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
+                    submitted_at: submission.submitted_at,
+                    max_price_multiplier,
                 },
             ))
             .await;
@@ -304,11 +355,18 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
                 "Invalid stored Boundless submission: missing expires_at".to_string(),
             ));
         }
+        if value.submitted_at == 0 {
+            return Err(RaikoError::Guest(
+                "Invalid stored Boundless submission: missing submitted_at".to_string(),
+            ));
+        }
         Ok(Self {
             market_request_id,
             provider_request_id: value.provider_request_id,
             remote_tx_hash: value.remote_tx_hash,
             expires_at: value.expires_at,
+            submitted_at: value.submitted_at,
+            max_price_multiplier: value.max_price_multiplier.max(1),
         })
     }
 }
@@ -592,6 +650,7 @@ impl BoundlessProver {
         &self,
         client: &Client,
         request: &ProofRequest,
+        max_price_multiplier: u32,
     ) -> RaikoResult<Submission> {
         let market_request_id = retry_external("submit boundless offchain request", || async {
             client
@@ -606,6 +665,8 @@ impl BoundlessProver {
             provider_request_id: format!("0x{market_request_id:x}"),
             remote_tx_hash: None,
             expires_at: request.expires_at(),
+            submitted_at: now_secs(),
+            max_price_multiplier,
         })
     }
 
@@ -619,6 +680,7 @@ impl BoundlessProver {
         deployment: &str,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
+        max_price_multiplier: u32,
     ) -> RaikoResult<Submission> {
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
@@ -655,6 +717,8 @@ impl BoundlessProver {
             provider_request_id: format!("0x{:x}", request.id),
             remote_tx_hash: None,
             expires_at: request.expires_at(),
+            submitted_at: now_secs(),
+            max_price_multiplier,
         };
         publish_boundless_progress(
             observer,
@@ -664,6 +728,7 @@ impl BoundlessProver {
             false,
             quoted_mcycles_count,
             evaluated_mcycles_count,
+            max_price_multiplier,
         )
         .await;
 
@@ -678,6 +743,7 @@ impl BoundlessProver {
                     false,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
+                    max_price_multiplier,
                 )
                 .await;
             }
@@ -713,7 +779,7 @@ impl BoundlessProver {
 
         if self.config.offchain {
             let submission = self
-                .submit_request_offchain(context.client, &request)
+                .submit_request_offchain(context.client, &request, context.max_price_multiplier)
                 .await?;
             publish_boundless_progress(
                 context.observer,
@@ -723,6 +789,7 @@ impl BoundlessProver {
                 true,
                 context.quoted_mcycles_count,
                 context.evaluated_mcycles_count,
+                context.max_price_multiplier,
             )
             .await;
             return Ok(submission);
@@ -736,6 +803,7 @@ impl BoundlessProver {
             context.deployment,
             context.quoted_mcycles_count,
             context.evaluated_mcycles_count,
+            context.max_price_multiplier,
         )
         .await
     }
@@ -752,6 +820,7 @@ impl BoundlessProver {
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
         proposal_carry_data: Option<&ProofCarryData>,
+        no_lock_timeout: NoLockTimeout,
     ) -> Result<Proof, BoundlessAttemptError> {
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms.max(1));
         let timeout = Duration::from_millis(self.config.timeout_ms.max(1));
@@ -796,7 +865,30 @@ impl BoundlessProver {
             };
 
             match status {
-                RequestStatus::Unknown | RequestStatus::Locked => {}
+                RequestStatus::Unknown => {
+                    if no_lock_deadline_elapsed(
+                        submission.submitted_at,
+                        no_lock_timeout,
+                        now_secs(),
+                    ) {
+                        let message = format!(
+                            "Boundless request {} was not locked within {} seconds",
+                            submission.provider_request_id,
+                            no_lock_timeout.delay.as_secs()
+                        );
+                        return match no_lock_timeout.action {
+                            NoLockTimeoutAction::Rebid => Err(BoundlessAttemptError::Retryable(
+                                format!("{message}; rebidding with higher max price"),
+                            )),
+                            NoLockTimeoutAction::Abort => {
+                                Err(BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
+                                    "{message}; exhausted boundless no-lock rebids"
+                                ))))
+                            }
+                        };
+                    }
+                }
+                RequestStatus::Locked => {}
                 RequestStatus::Expired => {
                     return Err(BoundlessAttemptError::Retryable(format!(
                         "Boundless request {} expired before fulfillment",
@@ -855,16 +947,18 @@ impl BoundlessProver {
                         )));
                     }
                     let stage_metadata = serde_json::json!({
-                        "zkvm": "risc0",
-                        "runner": "network",
-                        "proof_type": proof_type,
-                        "mcycles_count": quoted_mcycles_count,
-                        "quoted_mcycles_count": quoted_mcycles_count,
-                        "evaluated_mcycles_count": evaluated_mcycles_count,
+                                    "zkvm": "risc0",
+                                    "runner": "network",
+                                    "proof_type": proof_type,
+                                    "mcycles_count": quoted_mcycles_count,
+                                    "quoted_mcycles_count": quoted_mcycles_count,
+                                    "evaluated_mcycles_count": evaluated_mcycles_count,
                         "boundless": {
                             "provider_request_id": submission.provider_request_id,
                             "remote_tx_hash": submission.remote_tx_hash,
                             "expires_at": submission.expires_at,
+                            "submitted_at": submission.submitted_at,
+                            "max_price_multiplier": submission.max_price_multiplier,
                             "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                             "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
                             "offchain": self.config.offchain,
@@ -966,6 +1060,7 @@ impl BoundlessProver {
                     self.config.offchain,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
+                    submission.max_price_multiplier,
                 )
                 .await;
                 submission
@@ -986,13 +1081,18 @@ impl BoundlessProver {
                 }))
                 .await?
             };
+            attempt = attempt.max(attempt_for_price_multiplier(
+                submission.max_price_multiplier,
+            ));
 
             tracing::info!(
                 provider_request_id = %submission.provider_request_id,
                 expires_at = submission.expires_at,
                 attempt,
+                max_price_multiplier = submission.max_price_multiplier,
                 "Using Boundless market submission"
             );
+            let no_lock_timeout = no_lock_timeout_for_attempt(attempt);
 
             match self
                 .poll_until_fulfilled(
@@ -1005,6 +1105,7 @@ impl BoundlessProver {
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
                     proposal_carry_data.as_ref(),
+                    no_lock_timeout,
                 )
                 .await
             {
@@ -1364,8 +1465,11 @@ mod tests {
     use super::config::default_batch_offer_params;
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
-        DeploymentConfig, DeploymentType, ElfType, enforce_market_max_price_cap, parse_env_bool,
-        parse_env_url, quote_batch_mcycles, user_cycles_to_mcycles, validate_offer_params,
+        DeploymentConfig, DeploymentType, ElfType, NoLockTimeoutAction,
+        attempt_for_price_multiplier, enforce_market_max_price_cap, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
+        retry_price_multiplier, should_rebid_unlocked_request, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use alloy_primitives::{U256, address, utils::parse_ether};
     use boundless_market::price_oracle::{Amount, Asset};
@@ -1488,6 +1592,67 @@ mod tests {
     }
 
     #[test]
+    fn retry_price_multiplier_allows_four_rebid_doublings() {
+        assert_eq!(retry_price_multiplier(0), 1);
+        assert_eq!(retry_price_multiplier(1), 1);
+        assert_eq!(retry_price_multiplier(2), 2);
+        assert_eq!(retry_price_multiplier(3), 4);
+        assert_eq!(retry_price_multiplier(4), 8);
+        assert_eq!(retry_price_multiplier(5), 16);
+        assert_eq!(retry_price_multiplier(6), 16);
+    }
+
+    #[test]
+    fn attempt_for_price_multiplier_restores_rebid_state() {
+        assert_eq!(attempt_for_price_multiplier(0), 1);
+        assert_eq!(attempt_for_price_multiplier(1), 1);
+        assert_eq!(attempt_for_price_multiplier(2), 2);
+        assert_eq!(attempt_for_price_multiplier(4), 3);
+        assert_eq!(attempt_for_price_multiplier(8), 4);
+        assert_eq!(attempt_for_price_multiplier(16), 5);
+        assert_eq!(attempt_for_price_multiplier(32), 5);
+    }
+
+    #[test]
+    fn no_lock_deadline_uses_submission_wall_clock() {
+        let timeout = no_lock_timeout_for_attempt(1);
+
+        assert!(!no_lock_deadline_elapsed(1_000, timeout, 1_299));
+        assert!(no_lock_deadline_elapsed(1_000, timeout, 1_300));
+        assert!(no_lock_deadline_elapsed(1_000, timeout, 1_600));
+    }
+
+    #[test]
+    fn no_lock_rebid_stops_after_four_higher_price_requests() {
+        assert!(!should_rebid_unlocked_request(0));
+        assert!(should_rebid_unlocked_request(1));
+        assert!(should_rebid_unlocked_request(2));
+        assert!(should_rebid_unlocked_request(3));
+        assert!(should_rebid_unlocked_request(4));
+        assert!(!should_rebid_unlocked_request(5));
+    }
+
+    #[test]
+    fn no_lock_timeout_aborts_after_final_rebid_attempt() {
+        assert_eq!(
+            no_lock_timeout_for_attempt(1).action,
+            NoLockTimeoutAction::Rebid
+        );
+        assert_eq!(
+            no_lock_timeout_for_attempt(4).action,
+            NoLockTimeoutAction::Rebid
+        );
+        assert_eq!(
+            no_lock_timeout_for_attempt(5).action,
+            NoLockTimeoutAction::Abort
+        );
+        assert_eq!(
+            no_lock_timeout_for_attempt(6).action,
+            NoLockTimeoutAction::Abort
+        );
+    }
+
+    #[test]
     fn validate_offer_params_rejects_min_price_above_max_price() {
         let mut offer = sample_offer();
         offer.min_price_per_mcycle = Some("0.000001".to_string());
@@ -1536,8 +1701,9 @@ mod tests {
         assert_eq!(super::retry_price_multiplier(1), 1);
         assert_eq!(super::retry_price_multiplier(2), 2);
         assert_eq!(super::retry_price_multiplier(3), 4);
-        assert_eq!(super::retry_price_multiplier(4), 4);
-        assert_eq!(super::retry_price_multiplier(100), 4);
+        assert_eq!(super::retry_price_multiplier(4), 8);
+        assert_eq!(super::retry_price_multiplier(5), 16);
+        assert_eq!(super::retry_price_multiplier(100), 16);
     }
 
     #[test]

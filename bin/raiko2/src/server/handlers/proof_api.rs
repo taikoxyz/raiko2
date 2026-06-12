@@ -2253,8 +2253,10 @@ fn task_runtime_view(
         deployment: runtime.deployment,
         offchain: runtime.offchain,
         expires_at: runtime.expires_at,
+        submitted_at: runtime.submitted_at,
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
+        max_price_multiplier: runtime.max_price_multiplier,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),

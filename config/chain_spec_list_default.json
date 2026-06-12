@@ -245,7 +245,9 @@
             "SHASTA": {
                 "Timestamp": 1770296400
             },
-            "UNZEN": "TBD",
+            "UNZEN": {
+                "Timestamp": 1781787600
+            },
             "CANCUN": "TBD"
         },
         "eip_1559_constants": {

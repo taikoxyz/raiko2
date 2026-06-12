@@ -286,8 +286,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-block"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=ec1650bfc5925af4f763795cfeb7872f9e85813b#ec1650bfc5925af4f763795cfeb7872f9e85813b"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -318,8 +318,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-chainspec"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=ec1650bfc5925af4f763795cfeb7872f9e85813b#ec1650bfc5925af4f763795cfeb7872f9e85813b"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.0.4",
@@ -340,8 +340,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-consensus"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=ec1650bfc5925af4f763795cfeb7872f9e85813b#ec1650bfc5925af4f763795cfeb7872f9e85813b"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -361,8 +361,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-evm"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=ec1650bfc5925af4f763795cfeb7872f9e85813b#ec1650bfc5925af4f763795cfeb7872f9e85813b"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-primitives",
@@ -376,8 +376,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-primitives"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=ec1650bfc5925af4f763795cfeb7872f9e85813b#ec1650bfc5925af4f763795cfeb7872f9e85813b"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alloy-consensus 2.0.4",
  "alloy-primitives",
@@ -1899,15 +1899,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3378,7 +3369,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=fb8b852f4c91b397cfb95bfdbf0bcd0b708fb50c#fb8b852f4c91b397cfb95bfdbf0bcd0b708fb50c"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ffce7c8aea3867d3dbd52a7da50d776daa5774e2#ffce7c8aea3867d3dbd52a7da50d776daa5774e2"
 dependencies = [
  "alloy 1.8.3",
  "serde",
@@ -10244,7 +10235,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=fb8b852f4c91b397cfb95bfdbf0bcd0b708fb50c#fb8b852f4c91b397cfb95bfdbf0bcd0b708fb50c"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ffce7c8aea3867d3dbd52a7da50d776daa5774e2#ffce7c8aea3867d3dbd52a7da50d776daa5774e2"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",
@@ -10260,13 +10251,13 @@ dependencies = [
  "alloy-rpc-types 1.8.3",
  "alloy-rpc-types-engine",
  "anyhow",
- "arc-swap",
  "async-trait",
  "bindings",
  "dashmap",
  "event-scanner",
  "flate2",
  "k256",
+ "prometheus",
  "robust-provider",
  "serde",
  "thiserror 2.0.18",

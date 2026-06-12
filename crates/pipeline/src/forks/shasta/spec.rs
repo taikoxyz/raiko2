@@ -1849,6 +1849,7 @@ mod tests {
     #[test]
     fn extract_block_range_rejects_unzen_range_when_environment_has_no_activation() {
         let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_000;
         let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
@@ -1881,10 +1882,35 @@ mod tests {
     #[test]
     fn derivation_source_limit_uses_environment_hardfork_activation() {
         let mut ctx = sample_context(42, 11, 9);
-        let hoodi = super::chain_spec_from_context(&ctx);
+        ctx.request.l2_chain_id = 167_000;
+        let mainnet = super::chain_spec_from_context(&ctx);
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&hoodi, 1, u64::MAX),
+            super::derivation_source_max_blocks_for_chain_spec_at(&mainnet, 1, u64::MAX),
             super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+
+        ctx.request.l2_chain_id = 167_013;
+        let hoodi = super::chain_spec_from_context(&ctx);
+        let Some(ForkCondition::Timestamp(hoodi_unzen_timestamp)) =
+            hoodi.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
+        else {
+            panic!("taiko_hoodi should configure a timestamp-based Unzen fork");
+        };
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &hoodi,
+                1,
+                hoodi_unzen_timestamp.saturating_sub(1),
+            ),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
+        );
+        assert_eq!(
+            super::derivation_source_max_blocks_for_chain_spec_at(
+                &hoodi,
+                1,
+                *hoodi_unzen_timestamp
+            ),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_001;
@@ -1917,7 +1943,8 @@ mod tests {
 
     #[test]
     fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
-        let ctx = sample_context(42, 11, 9);
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_000;
         let chain_spec = super::chain_spec_from_context(&ctx);
 
         let err = super::validate_derivation_source_block_limit(

@@ -1227,34 +1227,26 @@ fn enforce_market_max_price_cap(
 
 fn apply_dynamic_pricing_timeout_modifier(
     offer_spec: &BoundlessOfferParams,
-    lock_timeout: u32,
     timeout: u32,
-) -> RaikoResult<(u32, u32)> {
+    field: &str,
+) -> RaikoResult<u32> {
     if offer_spec.pricing_mode != BoundlessPricingMode::Market {
-        return Ok((lock_timeout, timeout));
+        return Ok(timeout);
     }
     let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
-        return Ok((lock_timeout, timeout));
+        return Ok(timeout);
     };
 
-    let modified_lock_timeout = scale_timeout(lock_timeout, modifier, "lock_timeout")?;
-    let modified_timeout = scale_timeout(timeout, modifier, "timeout")?;
-    if modified_timeout <= modified_lock_timeout {
-        return Err(RaikoError::InvalidRequestConfig(
-            "dynamic_pricing_timeout_modifier produced a timeout that is not greater than lock_timeout"
-                .to_string(),
-        ));
-    }
+    let modified_timeout = scale_timeout(timeout, modifier, field)?;
 
     tracing::debug!(
         modifier,
-        lock_timeout,
-        modified_lock_timeout,
         timeout,
         modified_timeout,
+        field,
         "Applied Boundless dynamic-pricing timeout modifier"
     );
-    Ok((modified_lock_timeout, modified_timeout))
+    Ok(modified_timeout)
 }
 
 fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
@@ -1330,11 +1322,18 @@ fn validate_offer_params(
     };
     let derived_lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let derived_timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let (derived_lock_timeout, derived_timeout) =
-        apply_dynamic_pricing_timeout_modifier(offer_spec, derived_lock_timeout, derived_timeout)?;
-    // Fixed overrides are final values: deliberately not scaled by the modifier above.
-    let lock_timeout = offer_spec.lock_timeout_secs.unwrap_or(derived_lock_timeout);
-    let timeout = offer_spec.timeout_secs.unwrap_or(derived_timeout);
+    let lock_timeout = match offer_spec.lock_timeout_secs {
+        Some(lock_timeout) => lock_timeout,
+        None => apply_dynamic_pricing_timeout_modifier(
+            offer_spec,
+            derived_lock_timeout,
+            "lock_timeout",
+        )?,
+    };
+    let timeout = match offer_spec.timeout_secs {
+        Some(timeout) => timeout,
+        None => apply_dynamic_pricing_timeout_modifier(offer_spec, derived_timeout, "timeout")?,
+    };
     if timeout <= lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
             "timeout {timeout}s must be greater than lock timeout {lock_timeout}s for {mcycles_count} mcycles"
@@ -1640,6 +1639,22 @@ mod tests {
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
         offer.dynamic_pricing_timeout_modifier = Some(2.0);
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(3600);
+
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+
+        assert_eq!(validated.lock_timeout, 600);
+        assert_eq!(validated.timeout, 3600);
+    }
+
+    #[test]
+    fn validate_offer_params_skips_timeout_modifier_overflow_for_fixed_overrides() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.dynamic_pricing_timeout_modifier = Some(f64::from(u32::MAX));
         offer.lock_timeout_secs = Some(600);
         offer.timeout_secs = Some(3600);
 

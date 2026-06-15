@@ -76,7 +76,7 @@ Do not create the GitHub Release before both release paths complete:
 1. Run the source runtime release flow from `docs/operations.md` → `Source Releases`.
 2. Run the TEE provider release flow:
    `cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z`
-3. Verify all three image refs exist in the registry:
+3. Verify the runtime and all provider image refs exist in the registry:
    - `us-docker.pkg.dev/evmchain/images/raiko2:vX.Y.Z`
    - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`
    - every provider repository listed in `release/providers.toml` at `:vX.Y.Z`

@@ -91,9 +91,7 @@ Do not create the GitHub Release before both release paths complete:
 - Use the manifest helper in `scripts/release/write_release_manifest.py`.
 - Upload `release-manifest-*.json`, `guest-digests-summary.json`, and
   `tee-attestation-manifest-*.json` to the GitHub Release.
-- Do not assume `release-image` publishes SGX provider images; it only publishes the main runtime
-  image. `release-tee-providers` is mandatory for release tags unless the user explicitly scopes the
-  release to ZK-only.
+- Do not assume `release-image` publishes SGX provider images; it only publishes the main runtime image. `release-tee-providers` is mandatory for release tags.
 - Stop before rollout or `register-image --apply` unless the user explicitly asks for that as a
   separate task.
 

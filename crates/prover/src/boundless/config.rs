@@ -46,6 +46,14 @@ pub struct BoundlessOfferParams {
     pub ramp_up_period_blocks: u32,
     pub lock_timeout_ms_per_mcycle: u32,
     pub timeout_ms_per_mcycle: u32,
+    /// Fixed lock timeout in seconds. When set, it replaces the per-mcycle derived
+    /// lock timeout and is not scaled by `dynamic_pricing_timeout_modifier`.
+    #[serde(default)]
+    pub lock_timeout_secs: Option<u32>,
+    /// Fixed request timeout in seconds. When set, it replaces the per-mcycle derived
+    /// timeout and is not scaled by `dynamic_pricing_timeout_modifier`.
+    #[serde(default)]
+    pub timeout_secs: Option<u32>,
     #[serde(default)]
     pub dynamic_pricing_timeout_modifier: Option<f64>,
     #[serde(default)]
@@ -154,6 +162,8 @@ pub(super) fn default_batch_offer_params() -> BoundlessOfferParams {
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 300,
         timeout_ms_per_mcycle: 900,
+        lock_timeout_secs: None,
+        timeout_secs: None,
         dynamic_pricing_timeout_modifier: None,
         max_price_per_mcycle: Some("0.0000006".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
@@ -168,6 +178,8 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         ramp_up_period_blocks: 60,
         lock_timeout_ms_per_mcycle: 3000,
         timeout_ms_per_mcycle: 6000,
+        lock_timeout_secs: None,
+        timeout_secs: None,
         dynamic_pricing_timeout_modifier: None,
         max_price_per_mcycle: Some("0.0000008".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
@@ -215,6 +227,12 @@ pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), Stri
     validate_dynamic_pricing_timeout_modifier(offer_spec)?;
     if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
         return Err("timeout must be greater than lock_timeout".to_string());
+    }
+    if let (Some(lock_timeout_secs), Some(timeout_secs)) =
+        (offer_spec.lock_timeout_secs, offer_spec.timeout_secs)
+        && timeout_secs <= lock_timeout_secs
+    {
+        return Err("timeout_secs must be greater than lock_timeout_secs".to_string());
     }
     parse_staking_token(&offer_spec.lock_collateral).map_err(|err| err.to_string())?;
     Ok(())
@@ -277,8 +295,8 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessPricingMode, DeploymentConfig, DeploymentType,
-        validate_offer_spec,
+        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DeploymentConfig,
+        DeploymentType, validate_offer_spec,
     };
 
     #[test]
@@ -361,6 +379,49 @@ mod tests {
         offer.timeout_ms_per_mcycle = 300;
         let err = validate_offer_spec(&offer).expect_err("timeout not above lock_timeout");
         assert!(err.contains("timeout"));
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_timeout_secs_not_above_lock_timeout_secs() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(600);
+        let err = validate_offer_spec(&offer).expect_err("timeout_secs not above lock");
+        assert!(err.contains("timeout_secs"));
+    }
+
+    #[test]
+    fn validate_offer_spec_accepts_fixed_timeout_overrides() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.lock_timeout_secs = Some(600);
+        offer.timeout_secs = Some(3600);
+        validate_offer_spec(&offer).expect("valid fixed timeout overrides");
+    }
+
+    #[test]
+    fn offer_params_default_to_no_fixed_timeout_overrides() {
+        let batch = BoundlessConfig::default().offer_params.batch;
+        assert_eq!(batch.lock_timeout_secs, None);
+        assert_eq!(batch.timeout_secs, None);
+    }
+
+    #[test]
+    fn offer_params_deserialize_fixed_timeout_overrides() {
+        let offer: BoundlessOfferParams = serde_json::from_value(serde_json::json!({
+            "pricing_mode": "manual",
+            "max_price_per_mcycle": "0.0000006",
+            "min_price_per_mcycle": "0",
+            "ramp_up_start_sec": 0,
+            "ramp_up_period_blocks": 180,
+            "lock_timeout_ms_per_mcycle": 300,
+            "timeout_ms_per_mcycle": 900,
+            "lock_collateral": "50",
+            "lock_timeout_secs": 600,
+            "timeout_secs": 3600
+        }))
+        .expect("deserialize offer params with fixed timeout overrides");
+        assert_eq!(offer.lock_timeout_secs, Some(600));
+        assert_eq!(offer.timeout_secs, Some(3600));
     }
 
     #[test]

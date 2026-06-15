@@ -137,6 +137,11 @@ ramp_up_period_blocks = 60
 lock_timeout_ms_per_mcycle = 300
 timeout_ms_per_mcycle = 900
 lock_collateral = "20"
+# Optional: pin the request timeouts to fixed values in seconds instead of deriving
+# them from the quoted mcycles (prices still follow the quote strategy). A fixed
+# value is final: it is not scaled by dynamic_pricing_timeout_modifier.
+# lock_timeout_secs = 600
+# timeout_secs = 3600
 # pricing_mode = "manual", set both price fields. max price is a cap, not
 # paid price; provers lock the ramping auction price. Caps below ~0.0000001 ETH/mcycle
 # historically expired un-locked on Taiko market.

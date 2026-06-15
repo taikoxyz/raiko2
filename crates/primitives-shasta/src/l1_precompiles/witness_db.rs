@@ -258,5 +258,62 @@ mod tests {
             "expected TrieWitnessError, got: {msg}"
         );
     }
+
+    /// NMC PR #11732 (merged to `master` 2026-06-11, merge commit `0a643b0`) makes the
+    /// witness-header order an explicit contract: `proof_call` returns headers in
+    /// ascending block-number order, with the executed-against block header as the
+    /// last entry. raiko2's WitnessDb is HashMap-keyed by `header.number`, so the
+    /// internal decode is order-agnostic by construction — but pin that property
+    /// here so a future refactor that grows an order dependency (e.g. parent-hash
+    /// chain validation during decode) fails loudly in CI instead of in production
+    /// against the live wire format.
+    #[test]
+    fn test_block_hash_decode_is_order_agnostic() {
+        use alloy_rlp::Encodable;
+        let encode = |number: u64, marker: u8| {
+            let header = alloy_consensus::Header {
+                number,
+                extra_data: Bytes::from(vec![marker]),
+                ..alloy_consensus::Header::default()
+            };
+            let mut buf = Vec::new();
+            header.encode(&mut buf);
+            Bytes::from(buf)
+        };
+        let b100 = encode(100, 0xAA);
+        let b101 = encode(101, 0xBB);
+        let b102 = encode(102, 0xCC);
+        let expected = [
+            (100u64, alloy_primitives::keccak256(b100.as_ref())),
+            (101, alloy_primitives::keccak256(b101.as_ref())),
+            (102, alloy_primitives::keccak256(b102.as_ref())),
+        ];
+
+        let ascending = L1ExecutionWitness {
+            headers: vec![b100.clone(), b101.clone(), b102.clone()],
+            ..L1ExecutionWitness::default()
+        };
+        let descending = L1ExecutionWitness {
+            headers: vec![b102, b101, b100],
+            ..L1ExecutionWitness::default()
+        };
+
+        let mut db_asc =
+            WitnessDb::build(&ascending, alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
+        let mut db_desc =
+            WitnessDb::build(&descending, alloy_trie::EMPTY_ROOT_HASH, None).unwrap();
+        for (block, expected_hash) in expected {
+            assert_eq!(
+                db_asc.block_hash(block).unwrap(),
+                expected_hash,
+                "ascending input: block {block}"
+            );
+            assert_eq!(
+                db_desc.block_hash(block).unwrap(),
+                expected_hash,
+                "descending input: block {block} (must produce identical map)"
+            );
+        }
+    }
 }
 

@@ -33,8 +33,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-block"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=7679835db47b3fbb859dd2c73423256fd42ebff5#7679835db47b3fbb859dd2c73423256fd42ebff5"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -65,8 +65,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-chainspec"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=7679835db47b3fbb859dd2c73423256fd42ebff5#7679835db47b3fbb859dd2c73423256fd42ebff5"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alloy-chains",
  "alloy-consensus 2.0.4",
@@ -87,8 +87,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-consensus"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=7679835db47b3fbb859dd2c73423256fd42ebff5#7679835db47b3fbb859dd2c73423256fd42ebff5"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-evm",
@@ -108,8 +108,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-evm"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=7679835db47b3fbb859dd2c73423256fd42ebff5#7679835db47b3fbb859dd2c73423256fd42ebff5"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-primitives",
@@ -123,8 +123,8 @@ dependencies = [
 
 [[package]]
 name = "alethia-reth-primitives"
-version = "1.1.0"
-source = "git+https://github.com/taikoxyz/alethia-reth?rev=7679835db47b3fbb859dd2c73423256fd42ebff5#7679835db47b3fbb859dd2c73423256fd42ebff5"
+version = "1.2.0"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=1ed7c19d1f9652c5fed96185f4ab8f930e812dd3#1ed7c19d1f9652c5fed96185f4ab8f930e812dd3"
 dependencies = [
  "alloy-consensus 2.0.4",
  "alloy-primitives",
@@ -197,7 +197,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -223,7 +223,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -273,7 +273,7 @@ dependencies = [
  "futures",
  "futures-util",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -316,7 +316,7 @@ dependencies = [
  "alloy-rlp",
  "crc",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -343,7 +343,7 @@ dependencies = [
  "k256",
  "serde",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -418,7 +418,7 @@ dependencies = [
  "auto_impl",
  "derive_more",
  "revm",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -486,7 +486,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -513,7 +513,7 @@ dependencies = [
  "futures-utils-wasm",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -600,7 +600,7 @@ dependencies = [
  "pin-project",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "wasmtimer",
@@ -718,7 +718,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -738,7 +738,7 @@ dependencies = [
  "itertools 0.14.0",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -775,7 +775,7 @@ dependencies = [
  "either",
  "elliptic-curve",
  "k256",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -863,7 +863,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tower",
  "tracing",
@@ -899,7 +899,7 @@ dependencies = [
  "nybbles 0.4.8",
  "serde",
  "smallvec",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -941,15 +941,6 @@ name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
-
-[[package]]
-name = "arc-swap"
-version = "1.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
-dependencies = [
- "rustversion",
-]
 
 [[package]]
 name = "ark-bls12-381"
@@ -1676,7 +1667,7 @@ dependencies = [
  "semver 1.0.28",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1721,7 +1712,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3807,6 +3798,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "prometheus"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
+dependencies = [
+ "cfg-if",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "protobuf",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3826,9 +3832,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "protobuf"
+version = "2.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
+
+[[package]]
 name = "protocol"
 version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=23cddaecdf1b566779b13ac387b902555ad7d3d6#23cddaecdf1b566779b13ac387b902555ad7d3d6"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ffce7c8aea3867d3dbd52a7da50d776daa5774e2#ffce7c8aea3867d3dbd52a7da50d776daa5774e2"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",
@@ -3843,13 +3855,13 @@ dependencies = [
  "alloy-rpc-types",
  "alloy-rpc-types-engine",
  "anyhow",
- "arc-swap",
  "async-trait",
  "dashmap",
  "flate2",
  "k256",
+ "prometheus",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3933,6 +3945,7 @@ dependencies = [
  "alethia-reth-chainspec",
  "alloy-consensus 2.0.4",
  "alloy-eips 2.0.4",
+ "alloy-hardforks",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types-debug",
@@ -3949,7 +3962,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3993,7 +4006,7 @@ dependencies = [
  "protocol",
  "raiko2-protocol",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -4216,7 +4229,7 @@ dependencies = [
  "auto_impl",
  "reth-execution-types",
  "reth-primitives-traits",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4250,7 +4263,7 @@ dependencies = [
  "reth-consensus",
  "reth-execution-errors",
  "reth-storage-errors",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4346,7 +4359,7 @@ dependencies = [
  "alloy-rlp",
  "nybbles 0.4.8",
  "reth-storage-errors",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4373,7 +4386,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "serde_with",
- "thiserror",
+ "thiserror 2.0.18",
  "url",
 ]
 
@@ -4400,7 +4413,7 @@ dependencies = [
  "revm-state",
  "secp256k1",
  "serde",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4411,7 +4424,7 @@ dependencies = [
  "alloy-primitives",
  "derive_more",
  "strum",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -4486,7 +4499,7 @@ dependencies = [
  "reth-static-file-types",
  "revm-database-interface",
  "revm-state",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4598,7 +4611,7 @@ dependencies = [
  "either",
  "revm-primitives",
  "revm-state",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4839,7 +4852,7 @@ dependencies = [
  "alloy-trie 0.8.1",
  "arrayvec",
  "itertools 0.14.0",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5604,11 +5617,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

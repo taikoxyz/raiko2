@@ -12,6 +12,7 @@ use raiko2_primitives::{
 };
 use raiko2_primitives_shasta::{DEFAULT_GUEST_INPUT_ROOT, GuestInput, guest_input_proposal_path};
 use raiko2_provider::{DEFAULT_RPC_TIMEOUT_MS, NetworkProvider, RpcClientConfig, RpcRetryConfig};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -131,6 +132,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_logging();
     let args = Args::parse();
     if args.output.is_none() && !args.save_guest_input {
         anyhow::bail!("either --output or --save-guest-input is required");
@@ -246,6 +248,14 @@ async fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn init_logging() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_ansi(false))
+        .init();
 }
 
 #[derive(Debug)]

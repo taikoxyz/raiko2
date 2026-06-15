@@ -1,6 +1,10 @@
 use crate::proof_type::ProofType;
 pub use alethia_reth_chainspec::spec::TaikoChainSpec;
 use alethia_reth_chainspec::{TAIKO_DEVNET, TAIKO_HOODI, TAIKO_MAINNET, TAIKO_MASAYA};
+use alethia_reth_chainspec::{
+    hardfork::TaikoHardfork as AlethiaTaikoHardfork, spec::TaikoDevnetConfigExt,
+};
+use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
 use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
 use reth_revm::primitives::hardfork::SpecId;
@@ -205,7 +209,7 @@ impl ForkId {
         match self {
             Self::Standard(spec_id) => spec_id,
             Self::Taiko(TaikoFork::Unzen) => SpecId::OSAKA,
-            Self::Taiko(_) => SpecId::CANCUN,
+            Self::Taiko(_) => SpecId::SHANGHAI,
         }
     }
 
@@ -595,21 +599,93 @@ impl ChainSpec {
             );
         }
 
-        match self.chain_id {
-            167_000 => Ok(TAIKO_MAINNET.clone()),
-            167_001 => Ok(TAIKO_DEVNET.clone()),
-            167_011 => Ok(TAIKO_MASAYA.clone()),
-            167_013 => Ok(TAIKO_HOODI.clone()),
+        let base = match self.chain_id {
+            167_000 => TAIKO_MAINNET.clone(),
+            167_001 => TAIKO_DEVNET.clone(),
+            167_011 => TAIKO_MASAYA.clone(),
+            167_013 => TAIKO_HOODI.clone(),
             other => bail!(
                 "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
             ),
-        }
+        };
+
+        let mut spec = self.base_taiko_chain_spec_with_configured_devnet_unzen(base.as_ref())?;
+        self.apply_configured_taiko_forks(&mut spec);
+        Ok(Arc::new(spec))
     }
 
     #[must_use]
     pub fn network(&self) -> String {
         self.name.clone()
     }
+
+    fn base_taiko_chain_spec_with_configured_devnet_unzen(
+        &self,
+        base: &TaikoChainSpec,
+    ) -> Result<TaikoChainSpec> {
+        let Some(unzen) = self.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) else {
+            return Ok(base.clone());
+        };
+        if self.chain_id != 167_001 {
+            return Ok(base.clone());
+        }
+
+        match unzen {
+            ForkCondition::Timestamp(timestamp) => Ok(base
+                .clone_with_devnet_unzen_timestamp(*timestamp)
+                .unwrap_or_else(|| base.clone())),
+            other => bail!(
+                "unsupported devnet Unzen fork condition for chain {}: {other:?}",
+                self.name
+            ),
+        }
+    }
+
+    fn apply_configured_taiko_forks(&self, spec: &mut TaikoChainSpec) {
+        for (fork_id, condition) in &self.hard_forks {
+            let ForkId::Taiko(fork) = fork_id else {
+                continue;
+            };
+            let condition = alethia_fork_condition(condition);
+            let Some(alethia_fork) = alethia_taiko_fork(*fork) else {
+                continue;
+            };
+            spec.inner.hardforks.insert(alethia_fork, condition);
+            if *fork == TaikoFork::Unzen {
+                apply_unzen_eth_forks(spec, condition);
+            }
+        }
+    }
+}
+
+const fn alethia_taiko_fork(fork: TaikoFork) -> Option<AlethiaTaikoHardfork> {
+    match fork {
+        TaikoFork::Hekla => None,
+        TaikoFork::Ontake => Some(AlethiaTaikoHardfork::Ontake),
+        TaikoFork::Pacaya => Some(AlethiaTaikoHardfork::Pacaya),
+        TaikoFork::Shasta => Some(AlethiaTaikoHardfork::Shasta),
+        TaikoFork::Unzen => Some(AlethiaTaikoHardfork::Unzen),
+    }
+}
+
+const fn alethia_fork_condition(condition: &ForkCondition) -> AlethiaForkCondition {
+    match condition {
+        ForkCondition::Block(block) => AlethiaForkCondition::Block(*block),
+        ForkCondition::Timestamp(timestamp) => AlethiaForkCondition::Timestamp(*timestamp),
+        ForkCondition::Tbd => AlethiaForkCondition::Never,
+    }
+}
+
+fn apply_unzen_eth_forks(spec: &mut TaikoChainSpec, condition: AlethiaForkCondition) {
+    spec.inner
+        .hardforks
+        .insert(EthereumHardfork::Cancun, condition);
+    spec.inner
+        .hardforks
+        .insert(EthereumHardfork::Prague, condition);
+    spec.inner
+        .hardforks
+        .insert(EthereumHardfork::Osaka, condition);
 }
 
 #[cfg(test)]
@@ -618,10 +694,12 @@ mod tests {
     use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
         TAIKO_MASAYA_GENESIS_HASH,
+        hardfork::{TaikoHardfork, TaikoHardforks as _},
     };
     use alloy_primitives::address;
 
     const MAINNET_SHASTA_TIMESTAMP: u64 = 1_775_135_700;
+    const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
 
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
@@ -755,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let l1_spec = list
             .iter()
@@ -765,18 +843,19 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
-        let unzen_timestamp = 1_777_787_739;
+        let unzen_timestamp = 0;
 
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://example.com/taiko-dev-l1-rpc");
+        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://example.com/taiko-dev-l1-beacon")
+            Some("https://l1beacon.internal.taiko.xyz")
         );
-        assert_eq!(l1_spec.genesis_time, 1_779_670_900);
+        assert_eq!(l1_spec.genesis_time, 1_780_630_944);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
+        assert_eq!(l2_spec.rpc, "https://rpc.internal.taiko.xyz");
         assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))
@@ -788,6 +867,43 @@ mod tests {
         assert_eq!(
             l2_spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
             address!("b432bbe475e569b2adef4830ae43d587932f139c")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::SgxGeth)?,
+            address!("698ceB7EF2E001347B1672389d6ca6aCE04b13C8")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_shasta_helper_maps_to_shanghai_until_unzen() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+
+        assert_eq!(
+            spec.spec_id(5_412_478, MAINNET_SHASTA_TIMESTAMP),
+            Some(SpecId::SHANGHAI)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_devnet_to_alethia_chain_spec_enables_unzen_at_genesis() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_dev")
+            .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
+
+        let taiko = spec.to_taiko_chain_spec()?;
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+
+        assert!(
+            unzen.active_at_timestamp(0),
+            "Unzen must be active at genesis on internal devnet"
         );
         Ok(())
     }
@@ -805,6 +921,27 @@ mod tests {
         let taiko = spec.to_taiko_chain_spec()?;
 
         assert_eq!(taiko.inner.genesis_hash(), TAIKO_HOODI_GENESIS_HASH);
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_hoodi_default_spec_sets_unzen_timestamp() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_hoodi")
+            .ok_or_else(|| anyhow!("missing taiko_hoodi spec"))?;
+
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(HOODI_UNZEN_TIMESTAMP))
+        );
+
+        let taiko = spec.to_taiko_chain_spec()?;
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+
+        assert!(unzen.active_at_timestamp(HOODI_UNZEN_TIMESTAMP));
+        assert!(!unzen.active_at_timestamp(HOODI_UNZEN_TIMESTAMP - 1));
         Ok(())
     }
 

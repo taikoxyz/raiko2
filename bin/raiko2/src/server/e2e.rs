@@ -1755,6 +1755,12 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
             .is_some(),
         "missing public values: {res}"
     );
+    assert!(
+        res["data"]["proposals"][0]["extra_data"]["sp1"]["gas"]
+            .as_u64()
+            .is_some(),
+        "missing SP1 prover gas: {res}"
+    );
 }
 
 #[tokio::test]

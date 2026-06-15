@@ -2,6 +2,8 @@
   "chain_spec_list": "config/chain_spec_list_default.json",
   "l1_chain": "taiko_dev_l1",
   "l2_chain": "taiko_dev",
+  "l1_rpc": "https://l1rpc.internal.taiko.xyz",
+  "l2_rpc": "https://rpc.internal.taiko.xyz",
   "l1_contract_fork": "SHASTA",
   "event_abi": "../raiko/script/IInbox.json",
   "anchor_abi": "../raiko/script/Anchor.json",

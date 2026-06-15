@@ -1,6 +1,6 @@
 ---
 name: raiko2-release-cut
-description: Use when cutting a versioned raiko2 source release from this repository, including git tag creation, publishing runtime and TEE provider images, exporting guest digests and SGX attestation metadata, and creating a GitHub Release with release notes and manifest artifacts. Use when the workflow must stop before deployment or register-image apply.
+description: Use when cutting a versioned raiko2 source release from this repository, including git tag creation, publishing runtime and TEE provider images, exporting guest digests and SGX attestation metadata, and creating a GitHub Release with release notes and manifest artifacts. Use when the workflow must stop before deployment or register-image --apply.
 ---
 
 # Raiko2 Release Cut

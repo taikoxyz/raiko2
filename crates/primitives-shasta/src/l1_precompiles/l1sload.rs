@@ -5,6 +5,7 @@
 //! roots for each block in the range, then verifies every `L1StorageProof` against the
 //! matching state root before populating the alethia-reth-evm precompile cache.
 
+use alethia_reth_evm::precompiles::context::L1_PRECOMPILE_MAX_LOOKBACK;
 use alethia_reth_evm::precompiles::l1sload::{
     clear_l1_storage, set_l1_origin_block_id, set_l1_storage_value,
 };
@@ -156,7 +157,15 @@ pub fn clear_l1sload_cache() {
 ///
 /// `l1_headers` must be ordered oldest→newest, ending just below L1 origin (i.e. the last
 /// header's hash must equal `l1_origin_header.parent_hash` when walking backward).
-/// We walk in reverse, verifying parent_hash linkage at each step.
+/// We walk in reverse, verifying parent_hash linkage at **every** header.
+///
+/// State roots are recorded only for blocks inside the precompile read window
+/// `[origin − 256, origin]`, so a prover can never surface L1 state from outside it. Headers
+/// *below* that window are still parent-hash-verified (the caller reuses this same slice to
+/// build its BLOCKHASH header map) but receive no state root: an `L1STATICCALL` at the lower
+/// window edge whose callee runs `BLOCKHASH` legitimately needs ancestors below `origin − 256`,
+/// and those must be verifiable without being rejected. The walk is bounded at `2 × 256`
+/// because the deepest such ancestor a window-edge call can reach is `origin − 512`.
 pub fn build_verified_state_root_map(
     l1_origin_header: &Header,
     l1_headers: &[Header],
@@ -171,11 +180,14 @@ pub fn build_verified_state_root_map(
         return Ok(state_root_map);
     }
 
-    // Cap the backward walk at 256 so a prover cannot extend the verified window beyond
-    // the L1/L2-precompile-accepted `[l1_origin − 256, l1_origin]` range.
+    // Bound the backward walk at twice the lookback. State roots stay windowed below (so the
+    // verified-state window can't be extended past `[origin − 256, origin]`), but BLOCKHASH
+    // ancestors can sit up to 256 blocks below the window — an `origin − 256` call reaches
+    // `origin − 512` at most. Anything deeper is unreachable by any in-window call, so reject it.
+    const MAX_ANCESTORS: usize = 2 * L1_PRECOMPILE_MAX_LOOKBACK as usize;
     ensure!(
-        l1_headers.len() <= 256,
-        "L1 headers exceed 256-block lookback cap ({} provided)",
+        l1_headers.len() <= MAX_ANCESTORS,
+        "L1 headers exceed the {MAX_ANCESTORS}-block ancestor bound ({} provided)",
         l1_headers.len(),
     );
 
@@ -208,7 +220,12 @@ pub fn build_verified_state_root_map(
                 expected_hash
             );
         }
-        state_root_map.insert(header.number, header.state_root);
+        // Record the state root only for in-window blocks. Deeper headers are verified above
+        // (parent-hash linkage) so the caller's BLOCKHASH map can trust them, but they must not
+        // contribute a state root — that would widen the verified-state window past 256.
+        if l1_origin_number - header.number <= L1_PRECOMPILE_MAX_LOOKBACK {
+            state_root_map.insert(header.number, header.state_root);
+        }
         expected_hash = header.parent_hash;
         // Use `saturating_sub` to avoid `attempt to subtract with overflow` when the walk
         // reaches block 0 (the genesis block). The next loop iteration — if any — will fail
@@ -956,20 +973,55 @@ mod tests {
 
     // ── T10: build_verified_state_root_map boundary cases ─────────────
 
-    /// `l1_headers.len() > 256` must be rejected — the cap defends the trust window.
+    /// More than `2 × 256` ancestors must be rejected — no in-window call can reach below
+    /// `origin − 512` (an `origin − 256` call BLOCKHASHes down to `origin − 512` at most), so a
+    /// deeper slice is bounded out.
     #[test]
-    fn test_state_root_map_rejects_over_256_headers() {
-        let mut headers = Vec::with_capacity(257);
-        // Build a deeper-but-detached chain (parent_hash linkage doesn't matter — the cap
+    fn test_state_root_map_rejects_over_512_headers() {
+        let mut headers = Vec::with_capacity(513);
+        // Build a deeper-but-detached chain (parent_hash linkage doesn't matter — the bound
         // check fires first).
-        for i in 0..257u64 {
+        for i in 0..513u64 {
             headers.push(make_header(i, B256::from([(i as u8); 32]), B256::ZERO));
         }
-        let origin = make_header(257, B256::from([0x77u8; 32]), B256::ZERO);
+        let origin = make_header(513, B256::from([0x77u8; 32]), B256::ZERO);
         let err = build_verified_state_root_map(&origin, &headers).unwrap_err();
         assert!(
-            err.to_string().contains("exceed 256-block lookback cap"),
-            "expected 256-cap rejection, got: {err}"
+            err.to_string().contains("ancestor bound"),
+            "expected 512-ancestor-bound rejection, got: {err}"
+        );
+    }
+
+    /// Ancestors below the 256-block window (e.g. an `origin − 257` header pulled in to answer a
+    /// BLOCKHASH at the lower window edge) must still parent-hash-verify, but they receive **no**
+    /// state root: the verified-state window stays `[origin − 256, origin]` while deeper headers
+    /// remain available (and trusted) for the caller's BLOCKHASH map.
+    #[test]
+    fn test_state_root_map_verifies_deeper_headers_but_windows_state_roots() {
+        // 257 linked ancestors (blocks 0..=256) below origin 257. Block 0 is origin−257: one
+        // past the state-root window, but legitimately reachable by BLOCKHASH from an origin−256
+        // call.
+        let mut headers: Vec<Header> = Vec::with_capacity(257);
+        let mut prev_hash = B256::ZERO;
+        for i in 0..257u64 {
+            let h = make_header(i, B256::from([(i as u8); 32]), prev_hash);
+            prev_hash = h.hash_slow();
+            headers.push(h);
+        }
+        let origin = make_header(257, B256::from([0xAAu8; 32]), prev_hash);
+        let map = build_verified_state_root_map(&origin, &headers)
+            .expect("257 linked ancestors must verify — deeper-than-window headers are allowed");
+        // origin + the 256 in-window ancestors (blocks 1..=256); block 0 (origin−257) is
+        // verified but out of window, so it carries no state root.
+        assert_eq!(map.len(), 257, "origin + 256 in-window ancestors = 257 entries");
+        assert!(map.contains_key(&257), "origin itself must be present");
+        assert!(
+            map.contains_key(&1),
+            "origin−256 (window floor) must have a state root"
+        );
+        assert!(
+            !map.contains_key(&0),
+            "origin−257 is out of window — verified for BLOCKHASH but no state root"
         );
     }
 

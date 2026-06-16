@@ -183,6 +183,11 @@ async fn request_batch_shasta_proof_inner(
         proposal_ids = ?proposal_ids,
         "received hoodi shasta batch request proposal ids"
     );
+    resolve_engine(
+        &state,
+        &submission.pair.key,
+        submission.route.pipeline_key(),
+    )?;
 
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {

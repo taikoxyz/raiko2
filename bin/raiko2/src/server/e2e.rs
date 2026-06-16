@@ -29,9 +29,9 @@ use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
     app_with_engine, app_with_observed_native_fixture_engine,
     app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
-    app_with_risc0_fixture_engine, base_config, native_fixture_engine, risc0_fixture_engine,
-    sp1_fixture_engine, spawn_chain_id_rpc, state_with_observed_sp1_fixture_engine,
-    unique_runtime_root,
+    app_with_risc0_fixture_engine, base_config, native_fixture_engine_for_pipeline,
+    risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc,
+    state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
 use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
@@ -613,7 +613,7 @@ async fn e2e_proposal_proof_risc0_completes_from_fixture() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -680,7 +680,7 @@ async fn e2e_shasta_request_is_compatible_with_taiko_client_shape() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -763,7 +763,7 @@ async fn e2e_shasta_request_rejects_unknown_fields() {
 }
 
 #[tokio::test]
-async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
+async fn e2e_shasta_reports_unregistered_sgxgeth_pipeline() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
@@ -788,13 +788,12 @@ async fn e2e_shasta_rejects_sgxgeth_with_legacy_error() {
 
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
-    assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=sgxgeth is not supported");
+    assert_eq!(res["error"], "not_found");
     assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
-async fn e2e_proposal_proof_native_registers_with_risc0_network_default_route() {
+async fn e2e_proposal_proof_native_rejects_non_native_local_server_route() {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Risc0;
     config.prover.runner = RunnerKind::Network;
@@ -819,13 +818,13 @@ async fn e2e_proposal_proof_native_registers_with_risc0_network_default_route() 
     .await;
 
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
-    assert!(res["data"].get("task_id").is_none(), "{res}");
-    let id = single_report_task_id(&app).await;
-
-    let (status, res) = get_json(&app, &format!("/v3/tasks/{id}")).await;
-    assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["route"], "native/local");
+    assert_eq!(res["status"], "error");
+    assert_eq!(res["error"], "invalid_request_config");
+    assert_eq!(
+        res["message"],
+        "proof_type=native is only supported when the server prover route is native/local"
+    );
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -853,7 +852,7 @@ async fn e2e_proposal_proof_native_registers_when_server_route_is_native_local()
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{res}");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -1126,6 +1125,7 @@ async fn e2e_duplicate_shasta_post_recovers_registered_task_without_engine_child
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        requested_proof_type: None,
         prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
@@ -1520,7 +1520,7 @@ async fn e2e_zk_any_draws_sp1_and_registers_sp1_task() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(res["proof_type"], "sp1");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -1657,7 +1657,7 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
 
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["proof_type"], "sp1");
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     drive_engine_to_idle(&engine).await;
 }
 
@@ -1719,7 +1719,7 @@ async fn e2e_sp1_execute_returns_execution_metadata() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["data"]["status"], "registered");
+    assert_eq!(res["data"]["status"], "registered", "{res}");
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
@@ -2321,7 +2321,7 @@ async fn e2e_aggregate_rejects_zk_any() {
 }
 
 #[tokio::test]
-async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
+async fn e2e_aggregate_reports_unregistered_sgxgeth_pipeline() {
     let (app, _engine) = sp1_fixture_app();
 
     let (status, res) = post_json(
@@ -2341,8 +2341,7 @@ async fn e2e_aggregate_rejects_sgxgeth_with_legacy_error() {
 
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "error");
-    assert_eq!(res["error"], "invalid_request_config");
-    assert_eq!(res["message"], "proof_type=sgxgeth is not supported");
+    assert_eq!(res["error"], "not_found");
     assert!(report_task_ids(&app).await.is_empty());
 }
 
@@ -2653,7 +2652,7 @@ async fn e2e_sp1_hosted_api_accepts_network_verify_when_pair_enabled() {
 #[tokio::test]
 async fn e2e_sgx_batch_accepts_aggregate_requests() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
     let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
     let app = app::build_router(state);
 
@@ -2683,17 +2682,14 @@ async fn e2e_sgx_batch_accepts_aggregate_requests() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
-    assert_eq!(res["data"]["status"], "registered");
-    assert!(
-        res["data"]["task_id"].as_str().is_some(),
-        "missing task id: {res}"
-    );
+    assert_eq!(res["data"]["status"], "registered", "{res}");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
 }
 
 #[tokio::test]
 async fn e2e_sgx_accepts_aggregate_proof_requests() {
     let config = base_config();
-    let engine = native_fixture_engine();
+    let engine = native_fixture_engine_for_pipeline(PipelineKey::ShastaSgx, None);
     let state = app_with_engine(config, "taiko_dev/ethereum", PipelineKey::ShastaSgx, engine);
     let app = app::build_router(state);
 
@@ -2712,11 +2708,8 @@ async fn e2e_sgx_accepts_aggregate_proof_requests() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "unexpected response: {res}");
-    assert_eq!(res["data"]["status"], "registered");
-    assert!(
-        res["data"]["task_id"].as_str().is_some(),
-        "missing task id: {res}"
-    );
+    assert_eq!(res["data"]["status"], "registered", "{res}");
+    assert!(res["data"].get("task_id").is_none(), "{res}");
 }
 
 #[tokio::test]
@@ -2896,6 +2889,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        requested_proof_type: None,
         prover_type: None,
         execution_mode: None,
         aggregate_requested: false,
@@ -3066,6 +3060,7 @@ async fn e2e_completed_task_recovers_root_proof_from_persisted_path() {
         network: "taiko_dev".to_string(),
         l1_network: "ethereum".to_string(),
         proof_type: raiko2_primitives::ProofType::Risc0,
+        requested_proof_type: None,
         prover_type: None,
         execution_mode: None,
         aggregate_requested: false,

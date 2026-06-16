@@ -298,13 +298,16 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
                 // S3: lift the base-fee check so the zero-address caller (`gas_price = 0`)
                 // still passes when we populate the real basefee from the header.
                 cfg.disable_base_fee = true;
-                // NOTE: revm uses its default (latest) mainnet spec here. The `gas_used` assertion
-                // below requires that spec's gas schedule to match the L1 EL's at `block_number`
-                // — i.e. L1's active hardfork. They align today (devnet/Hoodi/mainnet run the
-                // latest fork), but if a proven L1 block predates revm's default across a
-                // gas-changing fork boundary, an honest witness would fail the gas check.
-                // Follow-up: derive `cfg.spec` from the L1 chainspec at `block_number` once the L1
-                // fork schedule is threaded into the guest (code-review-2026-06-01 R1).
+                // NOTE: revm uses its default (latest) mainnet spec and `chain_id = 1` here. The
+                // `gas_used` assertion below requires that spec's gas schedule to match the L1 EL's
+                // at `block_number` — i.e. L1's active hardfork — and a callee reading the CHAINID
+                // opcode would see `1` rather than the real L1 id. Both align today (devnet/Hoodi/
+                // mainnet run the latest fork, and no devnet callee reads CHAINID), but a proven L1
+                // block predating revm's default across a gas-changing fork boundary, or a CHAINID
+                // read on a non-mainnet L1, would fail an honest witness. Follow-up: thread the L1
+                // chain id and fork schedule into the guest and set `cfg.chain_id` + `cfg.spec`
+                // from the L1 chainspec at `block_number` (code-review-2026-06-01 R1). Deferred
+                // with the other GuestInput wire-format additions (D9) to avoid fixture churn.
             })
             .build_mainnet();
 
@@ -354,10 +357,24 @@ pub fn verify_and_populate_l1_staticcall_witnesses_with_headers(
             }
         );
 
-        // 5. Three-way assertion: output + gas_used + halt status
+        // 5. Three-way assertion: output + gas_used + status. We're on the non-reverted path
+        //    (reverted witnesses `continue` above after the gas==0/empty-data check), so
+        //    re-execution must report success. A revert here means the witness's `is_reverted`
+        //    flag disagrees with revm; reject it rather than caching the revert payload as a
+        //    successful return. (A forged success would otherwise be caught later by the L2 block
+        //    state-root check, but failing here keeps the cause local and legible.)
         let output: alloy_primitives::Bytes = match outcome.result {
             ExecutionResult::Success { output, .. } => output.into_data(),
-            ExecutionResult::Revert { output, .. } => output,
+            ExecutionResult::Revert { output, .. } => {
+                return Err(anyhow!(
+                    "L1STATICCALL #{i}: witness marked non-reverted but revm reverted after {gas_used} gas \
+                     (target={:?}, block={}, calldata=0x{}, revert_data=0x{})",
+                    w.target_address,
+                    w.block_number,
+                    alloy_primitives::hex::encode(&w.calldata),
+                    alloy_primitives::hex::encode(&output),
+                ));
+            }
             ExecutionResult::Halt { reason, .. } => {
                 return Err(anyhow!(
                     "L1STATICCALL #{i}: halted {reason:?} after {gas_used} gas (target={:?}, block={}, calldata=0x{})",

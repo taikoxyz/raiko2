@@ -22,4 +22,3 @@ reqwest = { workspace = true }
 reth-ethereum-primitives = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tracing-subscriber = { workspace = true }
-tracing = { workspace = true }

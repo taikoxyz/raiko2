@@ -17,6 +17,10 @@ cp config.example.toml config.toml
 cargo run -r -p raiko2 -- --config config.toml
 ```
 
+Dev-profile builds (`cargo build`, `cargo test`, `cargo clippy`) are tuned for compile speed:
+`opt-level = 0` with line-table-only debug info. Always use `--release` (unchanged settings) when
+runtime performance matters, such as serving real proving traffic or benchmarking.
+
 Recommended checks before opening a PR:
 
 ```bash

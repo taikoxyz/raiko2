@@ -257,14 +257,14 @@ impl RpcConfig {
                     pair.l1_rpc
                 );
             }
-            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc {
-                if !is_valid_url(beacon_rpc) {
-                    bail!(
-                        "{}: beacon_rpc = '{}'",
-                        validation::INVALID_RPC_URL,
-                        beacon_rpc
-                    );
-                }
+            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc
+                && !is_valid_url(beacon_rpc)
+            {
+                bail!(
+                    "{}: beacon_rpc = '{}'",
+                    validation::INVALID_RPC_URL,
+                    beacon_rpc
+                );
             }
             if pair.l1_spec.seconds_per_slot == 0 {
                 bail!("{}: L1 chain spec seconds_per_slot must be > 0", pair.key);

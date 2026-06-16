@@ -51,4 +51,14 @@ k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k2
 p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p256-13.2-sp1-6.0.0" }
 substrate-bn = { git = "https://github.com/sp1-patches/bn", package = "substrate-bn", tag = "patch-0.6.0-sp1-6.0.0-substrate-bn" }
 
+# Track companion PR taikoxyz/alethia-reth#195 (alethia-reth 1.2.0 line) until it merges, then
+# drop this and bump the base revs to the merge SHA. Mirrors guests/risc0/Cargo.toml so the SP1
+# guest resolves the same precompile sources as the root workspace.
+[patch."https://github.com/taikoxyz/alethia-reth"]
+alethia-reth-block = { git = "https://github.com/jmadibekov/alethia-reth", rev = "5333f16b48d11cdf7abba3453e5bdd7893c05a60" }
+alethia-reth-chainspec = { git = "https://github.com/jmadibekov/alethia-reth", rev = "5333f16b48d11cdf7abba3453e5bdd7893c05a60" }
+alethia-reth-consensus = { git = "https://github.com/jmadibekov/alethia-reth", rev = "5333f16b48d11cdf7abba3453e5bdd7893c05a60" }
+alethia-reth-evm = { git = "https://github.com/jmadibekov/alethia-reth", rev = "5333f16b48d11cdf7abba3453e5bdd7893c05a60" }
+alethia-reth-primitives = { git = "https://github.com/jmadibekov/alethia-reth", rev = "5333f16b48d11cdf7abba3453e5bdd7893c05a60" }
+
 [workspace]

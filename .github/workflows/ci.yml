@@ -77,7 +77,6 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -125,9 +124,6 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
-      RUSTFLAGS: -Cdebuginfo=0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -164,9 +160,6 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
-      RUSTFLAGS: -Cdebuginfo=0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -204,9 +197,6 @@ jobs:
       contents: read
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_OPT_LEVEL: "0"
-      CARGO_PROFILE_TEST_OPT_LEVEL: "1"
-      RUSTFLAGS: -Cdebuginfo=0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:

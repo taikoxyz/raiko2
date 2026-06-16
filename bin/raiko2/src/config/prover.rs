@@ -260,8 +260,10 @@ pub struct BoundlessConfig {
     pub batch_quoted_mcycles: Option<u32>,
     #[serde(default)]
     pub batch_quote_strategy: BatchQuoteStrategy,
-    #[serde(default = "default_aggregation_quoted_mcycles")]
-    pub aggregation_quoted_mcycles: u32,
+    #[serde(default)]
+    pub aggregation_quoted_mcycles: Option<u32>,
+    #[serde(default)]
+    pub aggregation_quote_strategy: BatchQuoteStrategy,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_boundless_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -280,7 +282,10 @@ impl Default for BoundlessConfig {
                 .batch_quoted_mcycles,
             batch_quote_strategy: raiko2_prover::boundless_config::BoundlessConfig::default()
                 .batch_quote_strategy,
-            aggregation_quoted_mcycles: default_aggregation_quoted_mcycles(),
+            aggregation_quoted_mcycles: raiko2_prover::boundless_config::BoundlessConfig::default()
+                .aggregation_quoted_mcycles,
+            aggregation_quote_strategy: raiko2_prover::boundless_config::BoundlessConfig::default()
+                .aggregation_quote_strategy,
             offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
@@ -294,7 +299,7 @@ impl BoundlessConfig {
         if matches!(self.batch_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.batch_quoted_mcycles must be > 0");
         }
-        if self.aggregation_quoted_mcycles == 0 {
+        if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
         }
         validate_offer_spec(&self.offer_params.batch)
@@ -313,7 +318,10 @@ impl BoundlessConfig {
             merged.batch_quoted_mcycles = Some(batch_quoted_mcycles);
         }
         if let Some(aggregation_quoted_mcycles) = pair.aggregation_quoted_mcycles {
-            merged.aggregation_quoted_mcycles = aggregation_quoted_mcycles;
+            merged.aggregation_quoted_mcycles = Some(aggregation_quoted_mcycles);
+        }
+        if let Some(aggregation_quote_strategy) = pair.aggregation_quote_strategy.clone() {
+            merged.aggregation_quote_strategy = aggregation_quote_strategy;
         }
         if let Some(batch) = &pair.offer_params.batch {
             merged.offer_params.batch = batch.clone();
@@ -336,10 +344,6 @@ const fn default_boundless_poll_interval_ms() -> u64 {
 
 const fn default_boundless_timeout_ms() -> u64 {
     3_600_000
-}
-
-fn default_aggregation_quoted_mcycles() -> u32 {
-    raiko2_prover::boundless_config::BoundlessConfig::default().aggregation_quoted_mcycles
 }
 
 #[cfg(test)]
@@ -407,7 +411,7 @@ mod tests {
     #[test]
     fn prover_config_rejects_zero_aggregation_quote() {
         let mut config = ProverConfig::default();
-        config.boundless.aggregation_quoted_mcycles = 0;
+        config.boundless.aggregation_quoted_mcycles = Some(0);
 
         assert!(
             config

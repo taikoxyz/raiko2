@@ -484,6 +484,13 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn list_tasks(
+            &self,
+        ) -> BoxFuture<'_, Result<Vec<crate::server::state::EngineQueueTaskView>, TaskStoreError>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
             let encoded = encode_task_id(&id).expect("encode task id");
             let cancelled = &self.cancelled;
@@ -812,6 +819,7 @@ mod tests {
             network: network.to_string(),
             l1_network: l1_network.to_string(),
             proof_type: ProofType::Risc0,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,

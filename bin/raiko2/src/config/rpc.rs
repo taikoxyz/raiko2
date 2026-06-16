@@ -1,7 +1,9 @@
 use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
-use raiko2_prover::boundless_config::{BoundlessOfferParams, validate_offer_spec};
+use raiko2_prover::boundless_config::{
+    BatchQuoteStrategy, BoundlessOfferParams, validate_offer_spec,
+};
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
     RpcRetryConfig as ProviderRpcRetryConfig,
@@ -57,7 +59,7 @@ pub(crate) fn is_valid_url(url: &str) -> bool {
 }
 
 /// Explicitly allowed L2/L1 network pair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPairConfig {
     pub network: String,
@@ -105,11 +107,12 @@ pub struct ResolvedNetworkPair {
 }
 
 /// Pair-specific Boundless overrides for RISC0 network routes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
     pub aggregation_quoted_mcycles: Option<u32>,
+    pub aggregation_quote_strategy: Option<BatchQuoteStrategy>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
 
@@ -141,7 +144,7 @@ impl BoundlessPairConfig {
 }
 
 /// Optional pair-specific overrides for the Boundless batch and aggregation offer params.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessOfferParamsOverride {
     pub batch: Option<BoundlessOfferParams>,

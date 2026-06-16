@@ -409,8 +409,8 @@ Do not:
 
 ## Release Images
 
-Use the `xtask` release entrypoint for runtime images. It ensures the checked-in guest ELFs are
-current, then builds and pushes the runtime image.
+Use the `xtask` release entrypoint for runtime images. It builds and pushes the runtime image with
+the guest ELFs already present in `crates/guests/elf`; guest refresh is explicit opt-in.
 
 ```bash
 just release-image risc0 release-20260507-1013
@@ -430,9 +430,13 @@ process starts and does not rebuild guest sources by itself. The image sets
 `RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf` so ELF lookup does not depend on the container
 working directory.
 
-If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
-before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
-release command so the image provenance still matches committed repo state.
+For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
+released artifacts, download ELF assets from GitHub Releases with
+`cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
+`release-image` only refreshes guest ELFs when called with `--refresh-guest-elves <risc0|sp1|all>`.
+If that explicit refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
+and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
+provenance still matches the committed repo state.
 
 ## Register Guest Digests
 
@@ -539,6 +543,10 @@ Operator notes:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
+  each resubmission doubles the offer's max price, capped at `4x` the configured
+  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
+  the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,

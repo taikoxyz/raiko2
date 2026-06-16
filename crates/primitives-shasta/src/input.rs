@@ -4,7 +4,7 @@ use alloy_consensus::Header;
 use alloy_primitives::map::B256Map;
 use alloy_primitives::{Address, B256};
 use raiko2_primitives::{
-    ExecutionWitness, RawProof, StatelessInput, WitnessHeader, WitnessStateNode,
+    ExecutionWitness, ProofType, RawProof, StatelessInput, WitnessHeader, WitnessStateNode,
 };
 use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -140,6 +140,14 @@ impl GuestInput {
     }
 }
 
+fn remove_guest_incompatible_verifiers(witnesses: &mut [StatelessInput]) {
+    for witness in witnesses {
+        witness
+            .chain_spec
+            .remove_fork_verifier_proof_type(ProofType::SgxGeth);
+    }
+}
+
 #[must_use]
 pub fn roll_proposal_ancestor_headers(
     current_headers: &[WitnessHeader],
@@ -219,6 +227,10 @@ impl Serialize for GuestInput {
             }
         }
 
+        if !serializer.is_human_readable() {
+            remove_guest_incompatible_verifiers(&mut guest_input.witnesses);
+        }
+
         guest_input.serialize(serializer)
     }
 }
@@ -267,8 +279,12 @@ pub struct ShastaRisc0AggregationGuestInput {
 mod tests {
     use super::{GuestInput, roll_proposal_ancestor_headers};
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes};
-    use raiko2_primitives::{ExecutionWitness, StatelessInput, WitnessHeader, WitnessStateNode};
+    use alloy_primitives::{Address, B256, Bytes};
+    use raiko2_primitives::chain_spec::{ForkCondition, ForkId, TaikoFork};
+    use raiko2_primitives::{
+        ChainSpec, ExecutionWitness, ProofType, StatelessInput, WitnessHeader, WitnessStateNode,
+    };
+    use std::collections::BTreeMap;
 
     fn sample_header(number: u64, parent_hash: B256) -> Header {
         Header {
@@ -426,6 +442,45 @@ mod tests {
             decoded.witnesses[1].witness.state_indices,
             vec![second_index]
         );
+    }
+
+    #[test]
+    fn bincode_serialize_omits_sgxgeth_verifiers_for_guest_compat() {
+        let mut verifiers = BTreeMap::new();
+        verifiers.insert(ProofType::Risc0, Some(Address::repeat_byte(0x11)));
+        verifiers.insert(ProofType::SgxGeth, Some(Address::repeat_byte(0x22)));
+
+        let mut verifier_address_forks = BTreeMap::new();
+        verifier_address_forks.insert(ForkId::Taiko(TaikoFork::Shasta), verifiers);
+
+        let mut hard_forks = BTreeMap::new();
+        hard_forks.insert(
+            ForkId::Taiko(TaikoFork::Shasta),
+            ForkCondition::Timestamp(0),
+        );
+
+        let mut input = GuestInput::default();
+        input.witnesses.push(StatelessInput {
+            chain_spec: ChainSpec {
+                hard_forks,
+                verifier_address_forks,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert!(
+            input.witnesses[0].chain_spec.verifier_address_forks[&ForkId::Taiko(TaikoFork::Shasta)]
+                .contains_key(&ProofType::SgxGeth)
+        );
+
+        let bytes = bincode::serialize(&input).expect("serialize guest input");
+        let decoded: GuestInput = bincode::deserialize(&bytes).expect("deserialize guest input");
+        let decoded_verifiers = &decoded.witnesses[0].chain_spec.verifier_address_forks
+            [&ForkId::Taiko(TaikoFork::Shasta)];
+
+        assert!(decoded_verifiers.contains_key(&ProofType::Risc0));
+        assert!(!decoded_verifiers.contains_key(&ProofType::SgxGeth));
     }
 
     #[test]

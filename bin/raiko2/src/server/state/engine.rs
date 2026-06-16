@@ -28,8 +28,38 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>>;
+    fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>>;
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EngineQueueTaskState {
+    Pending,
+    Ready,
+    Retrying,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EngineQueueTaskView {
+    pub(crate) id: EngineTaskId,
+    pub(crate) state: EngineQueueTaskState,
+}
+
+fn queue_task_state<I>(state: &TaskState<I, EngineTaskKey>) -> EngineQueueTaskState {
+    match state {
+        TaskState::Pending { .. } => EngineQueueTaskState::Pending,
+        TaskState::Ready => EngineQueueTaskState::Ready,
+        TaskState::Retrying { .. } => EngineQueueTaskState::Retrying,
+        TaskState::Running { .. } => EngineQueueTaskState::Running,
+        TaskState::Succeeded { .. } => EngineQueueTaskState::Succeeded,
+        TaskState::Failed { .. } => EngineQueueTaskState::Failed,
+        TaskState::Cancelled => EngineQueueTaskState::Cancelled,
+    }
 }
 
 fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineStatusView {
@@ -109,6 +139,20 @@ where
         Box::pin(async move {
             let view = self.get(id).await?;
             Ok(view.map(summarize_task))
+        })
+    }
+
+    fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+        Box::pin(async move {
+            self.list_tasks().await.map(|views| {
+                views
+                    .into_iter()
+                    .map(|view| EngineQueueTaskView {
+                        id: view.id,
+                        state: queue_task_state(&view.state),
+                    })
+                    .collect()
+            })
         })
     }
 

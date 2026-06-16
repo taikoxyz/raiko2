@@ -100,10 +100,6 @@ pub struct Cli {
     /// Scheduler maintenance tick interval in milliseconds
     #[arg(long, env = "RAIKO2_QUEUE_MAINTENANCE_INTERVAL_MS")]
     pub queue_maintenance_interval_ms: Option<u64>,
-
-    /// Task execution timeout in seconds, applied regardless of proof type
-    #[arg(long, env = "RAIKO2_QUEUE_TASK_TIMEOUT_SECS")]
-    pub queue_task_timeout_secs: Option<u64>,
 }
 
 #[cfg(feature = "fixture-server")]

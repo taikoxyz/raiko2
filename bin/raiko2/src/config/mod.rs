@@ -113,9 +113,6 @@ impl Config {
         if let Some(interval_ms) = cli.queue_maintenance_interval_ms {
             config.queue.maintenance_interval_ms = interval_ms;
         }
-        if let Some(timeout_secs) = cli.queue_task_timeout_secs {
-            config.queue.task_timeout_secs = timeout_secs;
-        }
         if let Some(redis_url) = &cli.redis_url {
             config.queue.redis_url = Some(redis_url.clone());
         }

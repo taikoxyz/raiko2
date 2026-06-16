@@ -192,7 +192,6 @@ async fn redis_store_requeues_task_after_lease_expires() -> Result<(), Box<dyn s
         store,
         SchedulerConfig {
             lease_duration: Duration::from_millis(50),
-            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::None,
         },
     );
@@ -228,71 +227,6 @@ async fn redis_store_requeues_task_after_lease_expires() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
-async fn redis_store_retry_attempts_share_task_deadline() -> Result<(), Box<dyn std::error::Error>>
-{
-    if !docker_available() {
-        eprintln!("skipping redis store test: docker unavailable");
-        return Ok(());
-    }
-
-    let container = GenericImage::new("redis", "7-alpine")
-        .with_exposed_port(6379.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-        .start()
-        .await?;
-    let port = container.get_host_port_ipv4(6379).await?;
-    let url = format!("redis://127.0.0.1:{port}/");
-    let namespace = format!(
-        "test-deadline-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    );
-
-    let store =
-        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
-            .await?;
-    let sched: Scheduler<String, String, u64> = Scheduler::with_config(
-        store,
-        SchedulerConfig {
-            lease_duration: Duration::from_secs(30),
-            task_timeout: Duration::from_secs(60),
-            retry: RetryPolicy::Fixed {
-                max_attempts: 2,
-                delay: Duration::ZERO,
-            },
-        },
-    );
-
-    let id = sched
-        .submit(
-            TaskId::new(1),
-            NewTask {
-                priority: Priority::Medium,
-                payload: "hello".to_string(),
-            },
-            vec![],
-        )
-        .await?;
-
-    let first = sched
-        .next_ready("worker-a")
-        .await?
-        .ok_or_else(|| std::io::Error::other("expected first lease"))?;
-    let deadline_at_ms = first.deadline_at_ms;
-    sched.complete(first, Err("transient".to_string())).await?;
-
-    let second = sched
-        .next_ready("worker-b")
-        .await?
-        .ok_or_else(|| std::io::Error::other("expected retry lease"))?;
-    assert_eq!(second.id, id);
-    assert_eq!(second.attempt, 2);
-    assert_eq!(second.deadline_at_ms, deadline_at_ms);
-    Ok(())
-}
-
-#[tokio::test]
 async fn redis_store_delayed_retry_preserves_ready_sort_member()
 -> Result<(), Box<dyn std::error::Error>> {
     if !docker_available() {
@@ -321,7 +255,6 @@ async fn redis_store_delayed_retry_preserves_ready_sort_member()
         store,
         SchedulerConfig {
             lease_duration: Duration::from_secs(30),
-            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::Fixed {
                 max_attempts: 2,
                 delay: Duration::from_millis(10),

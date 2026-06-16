@@ -16,11 +16,11 @@ const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
 pub(crate) enum ImageBackend {
     /// Host-only runtime image. Guest ELF refresh is opt-in.
     Host,
-    /// Runtime image with RISC0 guest ELF release refresh.
+    /// Runtime image backend label. Guest ELF refresh is opt-in.
     Risc0,
-    /// Runtime image with SP1 guest ELF release refresh.
+    /// Runtime image backend label. Guest ELF refresh is opt-in.
     Sp1,
-    /// Runtime image with all guest ELF release refreshes.
+    /// Runtime image backend label. Guest ELF refresh is opt-in.
     All,
 }
 
@@ -48,7 +48,7 @@ pub(crate) struct ReleaseImageArgs {
     #[arg(long, default_value_t = false)]
     pub(crate) skip_guest_refresh: bool,
 
-    /// For backend=host, optionally refresh checked-in guest ELFs before building the host image.
+    /// Optionally refresh checked-in guest ELFs before building the image.
     #[arg(long, value_enum)]
     pub(crate) refresh_guest_elves: Option<GuestBackend>,
 }
@@ -97,7 +97,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     } else if args.skip_guest_refresh {
         println!("[INFO] Guest ELF refresh skipped by --skip-guest-refresh");
     } else {
-        println!("[INFO] Guest ELF refresh skipped for backend=host");
+        println!("[INFO] Guest ELF refresh skipped; use --refresh-guest-elves to opt in");
     }
 
     println!(
@@ -172,26 +172,11 @@ fn resolve_guest_refresh_backend(
     }
 
     match image_backend {
-        ImageBackend::Host => {
+        ImageBackend::Host | ImageBackend::Risc0 | ImageBackend::Sp1 | ImageBackend::All => {
             if force_rebuild_guests && refresh_guest_elves.is_none() {
-                bail!("--force-rebuild-guests requires --refresh-guest-elves for backend=host");
+                bail!("--force-rebuild-guests requires --refresh-guest-elves");
             }
             Ok(refresh_guest_elves)
-        }
-        ImageBackend::Risc0 | ImageBackend::Sp1 | ImageBackend::All => {
-            if refresh_guest_elves.is_some() {
-                bail!("--refresh-guest-elves is only supported for backend=host");
-            }
-            if skip_guest_refresh {
-                Ok(None)
-            } else {
-                Ok(Some(match image_backend {
-                    ImageBackend::Risc0 => GuestBackend::Risc0,
-                    ImageBackend::Sp1 => GuestBackend::Sp1,
-                    ImageBackend::All => GuestBackend::All,
-                    ImageBackend::Host => unreachable!("host handled above"),
-                }))
-            }
         }
     }
 }
@@ -423,26 +408,31 @@ mod tests {
     }
 
     #[test]
-    fn host_image_rejects_force_rebuild_without_refresh_backend() {
+    fn image_release_rejects_force_rebuild_without_refresh_backend() {
         let err = resolve_guest_refresh_backend(ImageBackend::Host, true, false, None)
             .expect_err("force rebuild needs a selected guest backend");
 
         assert!(
             err.to_string()
-                .contains("--force-rebuild-guests requires --refresh-guest-elves for backend=host")
+                .contains("--force-rebuild-guests requires --refresh-guest-elves")
         );
     }
 
     #[test]
-    fn non_host_image_rejects_explicit_refresh_backend() {
-        let err =
-            resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(GuestBackend::All))
-                .expect_err("non-host backend owns its guest refresh backend already");
+    fn non_host_image_skips_guest_refresh_by_default() {
+        let refresh = resolve_guest_refresh_backend(ImageBackend::All, false, false, None)
+            .expect("runtime image should not require guest refresh");
 
-        assert!(
-            err.to_string()
-                .contains("--refresh-guest-elves is only supported for backend=host")
-        );
+        assert_eq!(refresh, None);
+    }
+
+    #[test]
+    fn non_host_image_can_refresh_selected_guest_elves() {
+        let refresh =
+            resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(GuestBackend::All))
+                .expect("runtime image can opt in to explicit guest refresh");
+
+        assert_eq!(refresh, Some(GuestBackend::All));
     }
 
     #[test]

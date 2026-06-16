@@ -31,14 +31,17 @@ use super::proof_route::{
     public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
 };
 use super::proof_types::{
-    AggregateProofRequest, AggregateStatus, ApiOk, BatchProofType, BatchShastaRequest,
+    AggregateProofRequest, AggregateStatus, ApiData, ApiOk, BatchProofType, BatchShastaRequest,
     CanonicalProposal, LegacyProofData, LegacyProofEnvelope, LegacyProofError, LegacyTaskStatus,
-    ProposalStatus, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState, ShastaProposal,
-    TaskData, TaskRuntime,
+    ProposalStatus, ProverNetworkStatus, ProverStatus, ProverTaskStatusCounts, PruneStatus,
+    PublicProverArgs, RootRuntime, RootTaskState, ShastaProposal, TaskData, TaskRuntime,
 };
 use crate::config::ResolvedNetworkPair;
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
-use crate::server::state::{AppState, EngineHandle, EngineStatusView, ProofStatus};
+use crate::server::state::{
+    AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, EngineStatusView,
+    ProofStatus,
+};
 use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
 };
@@ -55,6 +58,7 @@ struct CanonicalBatchSubmission {
     public_task_id: String,
     pair: ResolvedNetworkPair,
     route: CanonicalProofRoute,
+    requested_proof_type: BatchProofType,
     proposals: Vec<CanonicalProposal>,
     aggregate_requested: bool,
     prover_config: ProverTaskConfig,
@@ -284,6 +288,57 @@ pub async fn cancel_task(
     get_task(State(state), Path(id)).await
 }
 
+pub async fn get_prover_status(
+    State(state): State<AppState>,
+) -> Result<Json<ApiData<ProverStatus>>, ApiError> {
+    let (tasks, network) = collect_prover_status(&state).await?;
+    Ok(Json(ApiData {
+        status: "ok",
+        data: ProverStatus {
+            clean: tasks.is_clean() && network.is_clean(),
+            tasks,
+            network,
+        },
+    }))
+}
+
+pub async fn clear_prover(State(state): State<AppState>) -> Result<Json<PruneStatus>, ApiError> {
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+
+    for record in records {
+        if is_terminal_runtime_status(record.runner_status) {
+            continue;
+        }
+        let metadata = parse_task_metadata(&record)?;
+        if !is_zk_any_metadata(&metadata) {
+            continue;
+        }
+        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
+        cancel_registered_tasks(
+            &state.runtime,
+            &engine,
+            &record.task_id,
+            record.pipeline_key,
+            &metadata,
+        )
+        .await
+        .map_err(|err| ApiError::internal(err.to_string()))?;
+        state
+            .runtime
+            .sync_status(&record.task_id, RuntimeRunnerStatus::Cancelled, None, None)
+            .await
+            .map_err(|err| {
+                ApiError::internal(format!("failed to sync runtime cancellation: {err}"))
+            })?;
+    }
+
+    Ok(Json(PruneStatus { status: "ok" }))
+}
+
 pub async fn report_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
     let tasks = load_all_task_data(&state).await?;
     Ok(Json(tasks))
@@ -385,6 +440,7 @@ fn build_canonical_batch_submission(
         public_task_id: String::new(),
         pair,
         route,
+        requested_proof_type: req.proof_type,
         proposals,
         aggregate_requested: req.aggregate,
         prover_config: requested_prover_config,
@@ -933,6 +989,7 @@ fn build_batch_task_registration(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            requested_proof_type: Some(submission.requested_proof_type.as_str()),
             prover_type: submission.prover_type,
             execution_mode: submission.execution_mode,
             aggregate_requested: submission.aggregate_requested,
@@ -977,6 +1034,7 @@ async fn register_external_aggregate_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            requested_proof_type: None,
             prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
@@ -1015,6 +1073,7 @@ fn build_task_metadata(
         network: params.network.to_string(),
         l1_network: params.l1_network.to_string(),
         proof_type: params.proof_type,
+        requested_proof_type: params.requested_proof_type.map(str::to_string),
         prover_type: params.prover_type,
         execution_mode: params.execution_mode,
         aggregate_requested: params.aggregate_requested,
@@ -1095,6 +1154,7 @@ async fn cleanup_submission_plan(
         network: String::new(),
         l1_network: String::new(),
         proof_type: ProofType::Native,
+        requested_proof_type: None,
         prover_type: None,
         execution_mode: None,
         aggregate_requested: plan.aggregate.is_some(),
@@ -1604,6 +1664,7 @@ async fn handle_created_external_aggregate_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
+            requested_proof_type: None,
             prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
@@ -1893,6 +1954,137 @@ async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError>
         tasks.push(load_task_data(state, &record.task_id).await?);
     }
     Ok(tasks)
+}
+
+async fn collect_prover_status(
+    state: &AppState,
+) -> Result<(ProverTaskStatusCounts, ProverNetworkStatus), ApiError> {
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+    let mut tasks = ProverTaskStatusCounts::default();
+    let mut network = ProverNetworkStatus::default();
+
+    for record in records {
+        let metadata = parse_task_metadata(&record)?;
+        if !is_zk_any_metadata(&metadata) {
+            continue;
+        }
+
+        if is_terminal_runtime_status(record.runner_status) {
+            continue;
+        }
+        count_network_inflight(&metadata, &mut network);
+        let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
+        let task_ids = metadata_queue_task_ids(&metadata, record.pipeline_key);
+        let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
+        if counted == 0 && !metadata.has_remote_submission_progress() {
+            tasks.pending = tasks.pending.saturating_add(1);
+        }
+    }
+
+    Ok((tasks, network))
+}
+
+fn parse_task_metadata(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+) -> Result<TaskMetadata, ApiError> {
+    serde_json::from_value(record.metadata.clone()).map_err(|err| {
+        ApiError::internal(format!(
+            "failed parse runtime task metadata {}: {err}",
+            record.task_id
+        ))
+    })
+}
+
+fn is_terminal_runtime_status(status: RuntimeRunnerStatus) -> bool {
+    matches!(
+        status,
+        RuntimeRunnerStatus::Completed
+            | RuntimeRunnerStatus::Failed
+            | RuntimeRunnerStatus::Cancelled
+    )
+}
+
+fn is_zk_any_metadata(metadata: &TaskMetadata) -> bool {
+    metadata.requested_proof_type.as_deref() == Some("zk_any")
+}
+
+fn metadata_queue_task_ids(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> HashSet<EngineTaskId> {
+    let mut task_ids = HashSet::new();
+    for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
+        task_ids.extend(proposal_task_chain_ids(&task_id));
+    }
+    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
+        task_ids.insert(task_id);
+    }
+    task_ids
+}
+
+async fn count_matching_queue_tasks(
+    engine: &Arc<dyn EngineHandle>,
+    task_ids: &HashSet<EngineTaskId>,
+    counts: &mut ProverTaskStatusCounts,
+) -> Result<usize, ApiError> {
+    if task_ids.is_empty() {
+        return Ok(0);
+    }
+    let views = engine
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list queue tasks: {err}")))?;
+    let mut counted = 0usize;
+    for view in views {
+        if !task_ids.contains(&view.id) {
+            continue;
+        }
+        if count_queue_task_state(view, counts) {
+            counted = counted.saturating_add(1);
+        }
+    }
+    Ok(counted)
+}
+
+fn count_queue_task_state(view: EngineQueueTaskView, counts: &mut ProverTaskStatusCounts) -> bool {
+    match view.state {
+        EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
+        EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
+        EngineQueueTaskState::Retrying => counts.retrying = counts.retrying.saturating_add(1),
+        EngineQueueTaskState::Running => counts.running = counts.running.saturating_add(1),
+        EngineQueueTaskState::Succeeded
+        | EngineQueueTaskState::Failed
+        | EngineQueueTaskState::Cancelled => return false,
+    }
+    true
+}
+
+fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkStatus) {
+    for runtime in metadata.runtime.proposals.values() {
+        count_runtime_network_inflight(runtime, network);
+    }
+    if let Some(runtime) = metadata.runtime.aggregate.as_ref() {
+        count_runtime_network_inflight(runtime, network);
+    }
+}
+
+fn count_runtime_network_inflight(
+    runtime: &TaskRuntimeMetadata,
+    network: &mut ProverNetworkStatus,
+) {
+    if runtime.has_sp1_network_submission_progress() {
+        network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
+    }
+    if runtime.has_boundless_submission_resume() {
+        network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
+    }
 }
 
 async fn load_task_lookup(state: &AppState, id: &str) -> Result<TaskLookup, ApiError> {
@@ -2256,8 +2448,10 @@ fn task_runtime_view(
         deployment: runtime.deployment,
         offchain: runtime.offchain,
         expires_at: runtime.expires_at,
+        submitted_at: runtime.submitted_at,
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
+        max_price_multiplier: runtime.max_price_multiplier,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),
@@ -2306,6 +2500,7 @@ fn batch_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<St
     let payload = serde_json::json!({
         "pair_key": submission.pair.key.as_str(),
         "route": submission.route.route.to_string(),
+        "requested_proof_type": submission.requested_proof_type.as_str(),
         "proof_type": submission.route.proof_type().to_string(),
         "prover_type": submission.prover_type.map(ProverType::as_str),
         "aggregate_requested": submission.aggregate_requested,
@@ -2770,6 +2965,10 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
             Box::pin(async { Ok(()) })
         }
@@ -2834,6 +3033,10 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
+        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
             Box::pin(async { Ok(()) })
         }
@@ -2873,6 +3076,7 @@ mod tests {
             public_task_id: format!("task-{aggregate_requested}"),
             pair: resolved_pair(),
             route,
+            requested_proof_type: BatchProofType::Risc0,
             proposals: vec![CanonicalProposal {
                 proposal_id: 7,
                 checkpoint: None,
@@ -3038,6 +3242,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Risc0,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: true,
@@ -3105,6 +3310,8 @@ mod tests {
             TaskRuntimeMetadata {
                 provider_request_id: Some("0x1234".to_string()),
                 expires_at: Some(123_456),
+                submitted_at: Some(123_000),
+                max_price_multiplier: Some(1),
                 ..TaskRuntimeMetadata::default()
             },
         );
@@ -3124,6 +3331,25 @@ mod tests {
                 "{pipeline_key}"
             );
         }
+    }
+
+    #[test]
+    fn failed_submission_with_legacy_boundless_resume_metadata_is_reenqueueable_for_failed_prove_stage()
+     {
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0x1234".to_string()),
+                expires_at: Some(123_456),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
+        record.provider_request_id = Some("0x1234".to_string());
+        assert!(should_reenqueue_existing_submission_without_engine(
+            &record, &metadata
+        ));
     }
 
     #[test]
@@ -3211,6 +3437,37 @@ mod tests {
         assert!(!stale_nonterminal_runtime_is_reenqueueable(
             &record, &metadata, false
         ));
+    }
+
+    #[tokio::test]
+    async fn prover_status_skips_terminal_network_inflight_roots() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "terminal-network-status",
+        ))?);
+        let mut metadata = task_metadata_with_stage(Some("prove"));
+        metadata.requested_proof_type = Some("zk_any".to_string());
+        metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0x1234".to_string()),
+                expires_at: Some(123_456),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        let record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
+        runtime.upsert_task(&record).await?;
+        let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
+
+        let (tasks, network) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(tasks.is_clean());
+        assert!(network.is_clean());
+        assert_eq!(network.risc0.inflight_orders, 0);
+        assert_eq!(network.sp1.inflight_orders, 0);
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -3317,6 +3574,7 @@ mod tests {
                 network: &submission.pair.network,
                 l1_network: &submission.pair.l1_network,
                 proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
                 prover_type: submission.prover_type,
                 execution_mode: submission.execution_mode,
                 aggregate_requested: false,
@@ -3427,6 +3685,8 @@ mod tests {
         metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
             provider_request_id: Some("0xaggregate".to_string()),
             expires_at: Some(456_789),
+            submitted_at: Some(456_000),
+            max_price_multiplier: Some(1),
             ..TaskRuntimeMetadata::default()
         });
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
@@ -3613,6 +3873,7 @@ mod tests {
                 network: &submission.pair.network,
                 l1_network: &submission.pair.l1_network,
                 proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
                 prover_type: submission.prover_type,
                 execution_mode: submission.execution_mode,
                 aggregate_requested: true,
@@ -3664,6 +3925,7 @@ mod tests {
                 network: &submission.pair.network,
                 l1_network: &submission.pair.l1_network,
                 proof_type: submission.route.proof_type(),
+                requested_proof_type: Some(submission.requested_proof_type.as_str()),
                 prover_type: submission.prover_type,
                 execution_mode: submission.execution_mode,
                 aggregate_requested: true,
@@ -3932,6 +4194,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Sp1,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,

@@ -44,9 +44,10 @@ Configuration is loaded from `--config` or `RAIKO2_CONFIG`. CLI flags and enviro
 override values from the file. The real server checks configured RPC endpoints and hosted prover
 capabilities before it starts, so replace example RPC endpoints and set required prover secrets
 such as `NETWORK_PRIVATE_KEY` for SP1 network proving or a Boundless signer key when the selected
-route is `risc0/network`. The prover also loads guest ELF files from the fixed `crates/guests/elf`
-path at startup. Packaged deployments can set `RAIKO2_GUEST_ELF_DIR` to anchor that location
-independently of the process working directory.
+route is `risc0/network`. The prover loads guest ELF files from `RAIKO2_GUEST_ELF_DIR` when set,
+otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally with
+`just build-guest all`. Packaged deployments can download released ELF assets with
+`cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
 
 ## Core Flow
 

@@ -6,7 +6,7 @@ mod runtime_observer;
 mod setup;
 mod types;
 
-pub(crate) use engine::EngineHandle;
+pub(crate) use engine::{EngineHandle, EngineQueueTaskState, EngineQueueTaskView};
 pub use factory::{PipelineFactory, StaticPipelineFactory};
 pub(crate) use runtime_observer::RuntimeObserver;
 pub use types::{EngineStatusView, ProofStatus};
@@ -224,7 +224,7 @@ async fn register_pair_pipelines(
                 .clone()
                 .expect("sp1 prover must be initialized for local prover hosts"),
             registration.shasta_backends.sp1.clone(),
-            registration.scheduler_config.clone(),
+            setup::sp1_scheduler_config(registration.config),
             Arc::clone(&runtime_observer),
         )
         .await?;
@@ -943,6 +943,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
@@ -1018,6 +1019,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: true,

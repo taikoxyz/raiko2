@@ -78,8 +78,19 @@ pub(crate) fn build_provider(
 pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
     SchedulerConfig {
         lease_duration: task_lease_duration(config),
-        task_timeout: Duration::from_secs(config.queue.task_timeout_secs),
         retry: RetryPolicy::None,
+    }
+}
+
+#[allow(clippy::missing_const_for_fn)]
+#[cfg(feature = "local-provers")]
+pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
+    SchedulerConfig {
+        lease_duration: task_lease_duration(config),
+        retry: RetryPolicy::Fixed {
+            max_attempts: 21,
+            delay: Duration::from_secs(5 * 60),
+        },
     }
 }
 
@@ -106,8 +117,8 @@ fn task_lease_duration(config: &Config) -> Duration {
         .saturating_add(30_000);
 
     // Preflight and local witness generation can run longer than a single RPC timeout,
-    // especially when provider retries are enabled. Keep lease renewal aligned with the
-    // effective RPC wait window, while execution timeout remains the queue-level task timeout.
+    // especially when provider retries are enabled. Keep worker lease renewal aligned with the
+    // effective RPC wait window; proof backends own any stage-specific timeout or retry policy.
     Duration::from_millis(lease_ms.max(60_000))
 }
 
@@ -149,6 +160,7 @@ pub(crate) fn boundless_prover_config(
         batch_quoted_mcycles: boundless.batch_quoted_mcycles,
         batch_quote_strategy: boundless.batch_quote_strategy,
         aggregation_quoted_mcycles: boundless.aggregation_quoted_mcycles,
+        aggregation_quote_strategy: boundless.aggregation_quote_strategy,
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
@@ -176,6 +188,8 @@ pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: Pipel
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "local-provers")]
+    use super::sp1_scheduler_config;
     use super::{
         boundless_prover_config, boundless_scheduler_config, build_context, risc0_prover_config,
         scheduler_config,
@@ -215,8 +229,7 @@ mod tests {
 
     #[test]
     fn boundless_scheduler_uses_general_task_policy() {
-        let mut config = Config::default();
-        config.queue.task_timeout_secs = 321;
+        let config = Config::default();
 
         assert_eq!(
             boundless_scheduler_config(&config),
@@ -225,12 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_task_timeout_uses_queue_config() {
+    fn scheduler_lease_duration_uses_rpc_retry_config() {
         let mut config = Config::default();
-        config.queue.task_timeout_secs = 321;
+        config.rpc.client.timeout_ms = 20_000;
+        config.rpc.client.retry.max_attempts = 1;
+        config.rpc.client.retry.initial_backoff_ms = 500;
 
         let scheduler = scheduler_config(&config);
-        assert_eq!(scheduler.task_timeout, Duration::from_secs(321));
+        assert_eq!(scheduler.lease_duration, Duration::from_millis(70_500));
     }
 
     #[test]
@@ -239,6 +254,19 @@ mod tests {
         let scheduler = scheduler_config(&config);
 
         assert_eq!(scheduler.retry, RetryPolicy::None);
+    }
+
+    #[cfg(feature = "local-provers")]
+    #[test]
+    fn sp1_scheduler_retries_twenty_times_every_five_minutes() {
+        let scheduler = sp1_scheduler_config(&Config::default());
+        assert_eq!(
+            scheduler.retry,
+            RetryPolicy::Fixed {
+                max_attempts: 21,
+                delay: Duration::from_secs(5 * 60),
+            }
+        );
     }
 
     #[test]
@@ -285,6 +313,8 @@ mod tests {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
         config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
+        config.rpc.pairs[0].boundless.aggregation_quote_strategy =
+            Some(raiko2_prover::boundless::BatchQuoteStrategy::Evaluated);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
                 timeout_ms_per_mcycle: 500,
@@ -305,7 +335,11 @@ mod tests {
         let boundless = boundless_prover_config(&config, &pair);
 
         assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
-        assert_eq!(boundless.aggregation_quoted_mcycles, 320);
+        assert_eq!(boundless.aggregation_quoted_mcycles, Some(320));
+        assert_eq!(
+            boundless.aggregation_quote_strategy,
+            raiko2_prover::boundless::BatchQuoteStrategy::Evaluated
+        );
         assert_eq!(boundless.offer_params.batch.timeout_ms_per_mcycle, 500);
         assert_eq!(
             boundless.offer_params.aggregation.timeout_ms_per_mcycle,

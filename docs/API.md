@@ -28,14 +28,11 @@ The public API surface is:
 - `GET /metrics`
 - `GET /ready`
 
-ACL-protected API surface requires `x-api-key` with a key that allows the listed feature:
+ACL-protected API surface requires an `x-api-key` whose ACL allows the listed feature:
 
 - `POST /v3/prover/clear` requires `prover.clear`
-
-The optional admin surface is disabled unless `server.admin_api_key` is configured:
-
-- `GET /admin/ballot`
-- `POST /admin/ballot`
+- `GET /admin/ballot` requires `admin.ballot.read`
+- `POST /admin/ballot` requires `admin.ballot.write`
 
 `/v1/...` routes are removed.
 
@@ -79,12 +76,13 @@ Terminal counters and duration histograms also include `status`.
 ```http
 GET /admin/ballot
 POST /admin/ballot
-x-api-key: <server.admin_api_key>
+x-api-key: <server.acl.keys[].key with allow=["admin.ballot.read" or "admin.ballot.write"]>
 ```
 
-These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any`. The payload is a
-JSON object whose keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples.
-Only those two proof types are accepted.
+These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any`. `GET` requires
+`admin.ballot.read`; `POST` requires `admin.ballot.write`. The payload is a JSON object whose
+keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples. Only those two
+proof types are accepted.
 
 ## Submit Shasta Batch Proof
 

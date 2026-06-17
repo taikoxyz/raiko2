@@ -572,12 +572,12 @@ at admission time and either routes the request to `sp1` / `risc0` or returns
 `zk_any` is only accepted when `aggregate = false`; aggregate requests must specify a concrete
 proof type such as `sp1` or `risc0`.
 
-Operators can adjust the in-memory `zk_any` ballot without restarting the server when
-`server.admin_api_key` is configured:
+Operators can adjust the in-memory `zk_any` ballot without restarting the server when an ACL key
+grants `admin.ballot.read` and `admin.ballot.write`:
 
 ```bash
-curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/ballot
-curl -X POST -H "x-api-key: $RAIKO2_ADMIN_API_KEY" -H "content-type: application/json" \
+curl -H "x-api-key: $RAIKO2_ACL_API_KEY" http://localhost:8080/admin/ballot
+curl -X POST -H "x-api-key: $RAIKO2_ACL_API_KEY" -H "content-type: application/json" \
   --data '{"Risc0":[0.1,10],"Sp1":[0.0,0]}' \
   http://localhost:8080/admin/ballot
 ```

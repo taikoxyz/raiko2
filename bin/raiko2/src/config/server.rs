@@ -12,8 +12,6 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default)]
     pub acl: ServerAclConfig,
-    #[serde(default)]
-    pub admin_api_key: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -33,6 +31,10 @@ pub struct ServerAclKey {
 
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ServerAclFeature {
+    #[serde(rename = "admin.ballot.read")]
+    AdminBallotRead,
+    #[serde(rename = "admin.ballot.write")]
+    AdminBallotWrite,
     #[serde(rename = "prover.clear")]
     ProverClear,
 }
@@ -43,24 +45,21 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             acl: ServerAclConfig::default(),
-            admin_api_key: None,
         }
     }
 }
 
 impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let admin_api_key = self.admin_api_key.as_ref().map(|_| "<redacted>");
         let acl_keys = if self.acl.keys.is_empty() {
             "[]".to_string()
         } else {
-            format!("{} redacted key(s)", self.acl.keys.len())
+            format!("{} <redacted> key(s)", self.acl.keys.len())
         };
         f.debug_struct("ServerConfig")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("acl.keys", &acl_keys)
-            .field("admin_api_key", &admin_api_key)
             .finish()
     }
 }
@@ -75,13 +74,6 @@ impl ServerConfig {
             bail!("{}", validation::INVALID_PORT);
         }
         self.acl.validate()?;
-        if self
-            .admin_api_key
-            .as_ref()
-            .is_some_and(std::string::String::is_empty)
-        {
-            bail!("server.admin_api_key must not be empty when set");
-        }
         Ok(())
     }
 }

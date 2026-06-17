@@ -10,14 +10,10 @@
 [server]
 host = "0.0.0.0"
 port = 8080
-# Optional: enables `GET /admin/ballot` and `POST /admin/ballot`.
-# Keep unset to disable the admin API.
-# admin_api_key = "change-me"
-
-# Optional: enables `POST /v3/prover/clear`.
+# Optional: enables ACL-protected endpoints.
 # [server.acl]
 # keys = [
-#   { id = "ops-clear", key = "change-me", allow = ["prover.clear"] },
+#   { id = "ops", key = "change-me", allow = ["admin.ballot.read", "admin.ballot.write", "prover.clear"] },
 # ]
 
 [rpc]

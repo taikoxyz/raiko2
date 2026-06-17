@@ -1,18 +1,20 @@
 use axum::{
     Json,
     extract::{FromRequestParts, State},
-    http::{HeaderMap, request::Parts},
+    http::request::Parts,
 };
 use serde::Serialize;
 use std::future::Future;
 use tracing::info;
 
-use super::auth::header_api_key_matches;
+use super::auth::authorize_acl_feature;
 use super::errors::ApiError;
+use crate::config::ServerAclFeature;
 use crate::server::sampling::{BallotConfig, ZkAnySampler};
 use crate::server::state::AppState;
 
-pub(crate) struct AdminAuth;
+pub(crate) struct AdminBallotReadAuth;
+pub(crate) struct AdminBallotWriteAuth;
 
 #[derive(Serialize)]
 pub(crate) struct AdminStatus {
@@ -20,7 +22,7 @@ pub(crate) struct AdminStatus {
 }
 
 pub(crate) async fn get_ballot(
-    _: AdminAuth,
+    _: AdminBallotReadAuth,
     State(state): State<AppState>,
 ) -> Result<Json<BallotConfig>, ApiError> {
     let sampler = state
@@ -31,7 +33,7 @@ pub(crate) async fn get_ballot(
 }
 
 pub(crate) async fn set_ballot(
-    _: AdminAuth,
+    _: AdminBallotWriteAuth,
     State(state): State<AppState>,
     Json(ballot): Json<BallotConfig>,
 ) -> Result<Json<AdminStatus>, ApiError> {
@@ -51,27 +53,30 @@ pub(crate) async fn set_ballot(
     Ok(Json(AdminStatus { status: "ok" }))
 }
 
-impl FromRequestParts<AppState> for AdminAuth {
+impl FromRequestParts<AppState> for AdminBallotReadAuth {
     type Rejection = ApiError;
 
     fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let result = authorize_admin(state, &parts.headers).map(|()| Self);
+        let result =
+            authorize_acl_feature(state, &parts.headers, ServerAclFeature::AdminBallotRead)
+                .map(|()| Self);
         async move { result }
     }
 }
 
-fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let Some(expected_key) = state.config.server.admin_api_key.as_deref() else {
-        return Err(ApiError::not_found("admin API is not enabled"));
-    };
-    let Some(matches) = header_api_key_matches(headers, expected_key) else {
-        return Err(ApiError::unauthorized("missing admin API key"));
-    };
-    if !matches {
-        return Err(ApiError::unauthorized("invalid admin API key"));
+impl FromRequestParts<AppState> for AdminBallotWriteAuth {
+    type Rejection = ApiError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let result =
+            authorize_acl_feature(state, &parts.headers, ServerAclFeature::AdminBallotWrite)
+                .map(|()| Self);
+        async move { result }
     }
-    Ok(())
 }

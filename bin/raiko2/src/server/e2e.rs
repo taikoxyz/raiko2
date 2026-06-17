@@ -75,7 +75,15 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
     read_json(res).await
 }
 
-async fn get_json_with_admin_key(app: &Router, uri: &str, key: &str) -> (StatusCode, Value) {
+fn acl_key(id: &str, key: &str, allow: Vec<ServerAclFeature>) -> ServerAclKey {
+    ServerAclKey {
+        id: id.to_string(),
+        key: key.to_string(),
+        allow,
+    }
+}
+
+async fn get_json_with_api_key(app: &Router, uri: &str, key: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("GET")
         .uri(uri)
@@ -124,7 +132,7 @@ async fn post_json_with_api_key(
     read_json(res).await
 }
 
-async fn post_raw_json_text_with_optional_admin_key(
+async fn post_raw_json_text_with_optional_api_key(
     app: &Router,
     uri: &str,
     key: Option<&str>,
@@ -1576,28 +1584,28 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
     let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, body) =
-        post_raw_json_text_with_optional_admin_key(&app, "/admin/ballot", None, "{not-json").await;
+        post_raw_json_text_with_optional_api_key(&app, "/admin/ballot", None, "{not-json").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
     let mut config = base_config();
-    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    config.server.acl.keys = vec![acl_key(
+        "ops-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::AdminBallotWrite],
+    )];
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
     let (status, body) =
-        post_raw_json_text_with_optional_admin_key(&app, "/admin/ballot", None, "{not-json").await;
+        post_raw_json_text_with_optional_api_key(&app, "/admin/ballot", None, "{not-json").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
-    let (status, body) = post_raw_json_text_with_optional_admin_key(
-        &app,
-        "/admin/ballot",
-        Some("wrong"),
-        "{not-json",
-    )
-    .await;
+    let (status, body) =
+        post_raw_json_text_with_optional_api_key(&app, "/admin/ballot", Some("wrong"), "{not-json")
+            .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
-    let (status, body) = post_raw_json_text_with_optional_admin_key(
+    let (status, body) = post_raw_json_text_with_optional_api_key(
         &app,
         "/admin/ballot",
         Some("secret-admin-key"),
@@ -1610,12 +1618,29 @@ async fn e2e_admin_ballot_authenticates_before_body_parse() {
 #[tokio::test]
 async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let mut config = base_config();
-    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    config.server.acl.keys = vec![
+        acl_key(
+            "ops-admin",
+            "secret-admin-key",
+            vec![
+                ServerAclFeature::AdminBallotRead,
+                ServerAclFeature::AdminBallotWrite,
+            ],
+        ),
+        acl_key(
+            "ops-clear",
+            "secret-clear-key",
+            vec![ServerAclFeature::ProverClear],
+        ),
+    ];
     let (state, engine) = state_with_observed_sp1_fixture_engine(config);
     let app = app::build_router(state);
 
     let (status, res) = get_json(&app, "/admin/ballot").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-clear-key").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
 
     let (status, res) = post_json_with_api_key(
         &app,
@@ -1630,7 +1655,7 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "ok");
 
-    let (status, res) = get_json_with_admin_key(&app, "/admin/ballot", "secret-admin-key").await;
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-admin-key").await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["Sp1"][0], 1.0);
     assert_eq!(res["Sp1"][1], 0);
@@ -1664,7 +1689,11 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
 #[tokio::test]
 async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
     let mut config = base_config();
-    config.server.admin_api_key = Some("secret-admin-key".to_string());
+    config.server.acl.keys = vec![acl_key(
+        "ops-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::AdminBallotWrite],
+    )];
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
@@ -1697,11 +1726,18 @@ async fn e2e_prover_clear_requires_clear_api_key() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{res}");
 
     let mut config = base_config();
-    config.server.acl.keys = vec![ServerAclKey {
-        id: "ops-clear".to_string(),
-        key: "secret-clear-key".to_string(),
-        allow: vec![ServerAclFeature::ProverClear],
-    }];
+    config.server.acl.keys = vec![
+        acl_key(
+            "ops-admin",
+            "secret-admin-key",
+            vec![ServerAclFeature::AdminBallotRead],
+        ),
+        acl_key(
+            "ops-clear",
+            "secret-clear-key",
+            vec![ServerAclFeature::ProverClear],
+        ),
+    ];
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
@@ -1710,6 +1746,10 @@ async fn e2e_prover_clear_requires_clear_api_key() {
 
     let (status, res) = post_json_with_api_key(&app, "/v3/prover/clear", "wrong", json!({})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
 
     let (status, res) =
         post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;

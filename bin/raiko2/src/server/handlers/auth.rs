@@ -6,13 +6,6 @@ use crate::server::state::AppState;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
 
-pub(crate) fn header_api_key_matches(headers: &HeaderMap, expected_key: &str) -> Option<bool> {
-    headers
-        .get(API_KEY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(|actual_key| constant_time_eq(actual_key, expected_key))
-}
-
 pub(crate) fn authorize_acl_feature(
     state: &AppState,
     headers: &HeaderMap,
@@ -36,17 +29,24 @@ pub(crate) fn authorize_acl_feature(
         return Err(ApiError::unauthorized("missing API key"));
     };
 
+    let mut key_known = false;
     let mut authorized = false;
     for key in &state.config.server.acl.keys {
-        if key.allow.contains(&feature) {
-            authorized |= constant_time_eq(actual_key, &key.key);
-        }
+        let matches = constant_time_eq(actual_key, &key.key);
+        key_known |= matches;
+        authorized |= matches && key.allow.contains(&feature);
     }
-    if !authorized {
-        return Err(ApiError::unauthorized("invalid API key"));
+    if authorized {
+        return Ok(());
     }
 
-    Ok(())
+    if key_known {
+        return Err(ApiError::forbidden(
+            "API key is not allowed for this feature",
+        ));
+    }
+
+    Err(ApiError::unauthorized("invalid API key"))
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {

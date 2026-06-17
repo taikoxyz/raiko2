@@ -273,12 +273,10 @@ mod tests {
                     allow: vec![ServerAclFeature::ProverClear],
                 }],
             },
-            admin_api_key: Some("secret-admin-key".to_string()),
         };
 
         let debug = format!("{config:?}");
         assert!(!debug.contains("secret-clear-key"));
-        assert!(!debug.contains("secret-admin-key"));
         assert!(debug.contains("<redacted>"));
     }
 
@@ -294,7 +292,22 @@ mod tests {
                     allow: vec![ServerAclFeature::ProverClear],
                 }],
             },
-            admin_api_key: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_invalid_empty_acl_allow() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![ServerAclKey {
+                    id: "ops-clear".to_string(),
+                    key: "secret-clear-key".to_string(),
+                    allow: vec![],
+                }],
+            },
         };
         assert!(config.validate().is_err());
     }
@@ -305,7 +318,6 @@ mod tests {
             host: "".to_string(),
             port: 8080,
             acl: Default::default(),
-            admin_api_key: None,
         };
         assert!(config.validate().is_err());
     }
@@ -316,7 +328,6 @@ mod tests {
             host: "localhost".to_string(),
             port: 0,
             acl: Default::default(),
-            admin_api_key: None,
         };
         assert!(config.validate().is_err());
     }

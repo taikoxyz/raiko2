@@ -4,7 +4,10 @@ use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{Header, transaction::Transaction as _};
+use alloy_consensus::{
+    Header,
+    transaction::{SignerRecoverable, Transaction as _},
+};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
@@ -47,6 +50,7 @@ sol! {
 
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
 const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
+const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
 #[cfg(not(test))]
 const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
@@ -451,8 +455,33 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-fn collect_preflight_account_targets(_block: &reth_ethereum_primitives::Block) -> Vec<Address> {
-    vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]
+const fn preflight_uses_canonical_witness_for_tx_lists(chain_spec: &ChainSpec) -> bool {
+    chain_spec.chain_id == TAIKO_MAINNET_CHAIN_ID
+}
+
+fn derived_tx_list_signers(tx_list: &Bytes) -> RaikoResult<Vec<Address>> {
+    let transactions: Vec<reth_ethereum_primitives::TransactionSigned> =
+        alloy_rlp::decode_exact(tx_list.as_ref()).map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed decode derived tx list for signer proofs: {err}"
+            ))
+        })?;
+
+    Ok(transactions
+        .iter()
+        .skip(1)
+        .filter_map(|tx| tx.recover_signer().ok())
+        .collect())
+}
+
+fn collect_preflight_account_targets(tx_list: Option<&Bytes>) -> RaikoResult<Vec<Address>> {
+    let mut targets = vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)];
+    if let Some(tx_list) = tx_list {
+        targets.extend(derived_tx_list_signers(tx_list)?);
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    Ok(targets)
 }
 
 async fn fetch_preflight_chunk<P: Provider>(
@@ -479,9 +508,13 @@ async fn fetch_preflight_chunk<P: Provider>(
         tx_list_witness = tx_lists.is_some(),
         "starting shasta preflight chunk"
     );
+    let use_canonical_witness =
+        tx_lists.is_some() && preflight_uses_canonical_witness_for_tx_lists(&chain_spec);
     let witnesses = async {
         let started_at = Instant::now();
-        let witnesses = if let Some(tx_lists) = tx_lists {
+        let witnesses = if let Some(tx_lists) = tx_lists
+            && !use_canonical_witness
+        {
             provider
                 .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
                 .await
@@ -492,8 +525,11 @@ async fn fetch_preflight_chunk<P: Provider>(
     };
     let account_targets = blocks
         .iter()
-        .map(collect_preflight_account_targets)
-        .collect::<Vec<_>>();
+        .enumerate()
+        .map(|(index, _)| {
+            collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
+        })
+        .collect::<RaikoResult<Vec<_>>>()?;
     let accounts = async {
         let started_at = Instant::now();
         let accounts = provider
@@ -1315,8 +1351,8 @@ mod tests {
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
-        ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
-        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
+        ChainSpec, ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType,
+        ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -1471,6 +1507,38 @@ mod tests {
         .into()
     }
 
+    fn sample_derived_tx() -> reth_ethereum_primitives::TransactionSigned {
+        TxEip1559 {
+            chain_id: 167_013,
+            nonce: 1,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::from([0x44; 20])),
+            value: U256::from(1),
+            access_list: Vec::default().into(),
+            input: Bytes::new(),
+        }
+        .into_signed(Signature::test_signature())
+        .into()
+    }
+
+    fn sample_unrecoverable_tx() -> reth_ethereum_primitives::TransactionSigned {
+        TxEip1559 {
+            chain_id: 167_013,
+            nonce: 1,
+            gas_limit: 21_000,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::from([0x55; 20])),
+            value: U256::ZERO,
+            access_list: Vec::default().into(),
+            input: Bytes::new(),
+        }
+        .into_signed(Signature::new(U256::ZERO, U256::ZERO, false))
+        .into()
+    }
+
     fn sample_l1_header(number: u64, state_root: B256) -> Header {
         Header {
             number,
@@ -1607,6 +1675,14 @@ mod tests {
     }
 
     fn add_invalid_inline_shasta_source_with_transaction(provider: &mut TestProvider) {
+        let tx = sample_derived_tx();
+        add_inline_shasta_source_with_transactions(provider, vec![tx]);
+    }
+
+    fn add_inline_shasta_source_with_transactions(
+        provider: &mut TestProvider,
+        transactions: Vec<reth_ethereum_primitives::TransactionSigned>,
+    ) {
         provider.proposal_event.proposal.sources = vec![DerivationSource {
             isForcedInclusion: false,
             blobSlice: BlobSlice {
@@ -1615,21 +1691,19 @@ mod tests {
                 timestamp: 0u64.try_into().expect("fits in uint48"),
             },
         }];
-        let anchor_tx = provider
-            .block
-            .body
-            .transactions()
-            .next()
-            .expect("sample block has anchor transaction");
-        let manifest_tx = alloy_rlp::decode_exact(alloy_rlp::encode(anchor_tx))
-            .expect("anchor transaction decodes as manifest transaction");
         let manifest = DerivationSourceManifest {
             blocks: vec![BlockManifest {
                 timestamp: 0,
                 coinbase: Address::ZERO,
                 anchor_block_number: 0,
                 gas_limit: 0,
-                transactions: vec![manifest_tx],
+                transactions: transactions
+                    .into_iter()
+                    .map(|tx| {
+                        alloy_rlp::decode_exact(alloy_rlp::encode(tx))
+                            .expect("transaction decodes manifest transaction")
+                    })
+                    .collect(),
             }],
         };
         provider.data_sources = vec![InputDataSource {
@@ -1748,6 +1822,118 @@ mod tests {
             &*account_inputs,
             &[vec![Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)]]
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_fetches_derived_tx_signer_account_state() {
+        let provider = sample_provider();
+        let tx = sample_derived_tx();
+        let manifest_tx = alloy_rlp::decode_exact(alloy_rlp::encode(tx))
+            .expect("transaction decodes manifest transaction");
+        let tx_lists = vec![
+            super::encode_replay_tx_list(
+                &provider.block,
+                &BlockManifest {
+                    timestamp: provider.block.header.timestamp,
+                    coinbase: provider.block.header.beneficiary,
+                    anchor_block_number: 10,
+                    gas_limit: provider.block.header.gas_limit,
+                    transactions: vec![manifest_tx],
+                },
+            )
+            .expect("encode tx list"),
+        ];
+        let signers =
+            super::derived_tx_list_signers(&tx_lists[0]).expect("recover derived tx list signers");
+        assert!(!signers.is_empty());
+        let chain_spec = ChainSpec {
+            name: "taiko_hoodi".to_string(),
+            chain_id: 167_013,
+            ..Default::default()
+        };
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+        let account_inputs = provider.account_inputs.lock().expect("account inputs lock");
+        assert_eq!(account_inputs.len(), 1);
+        assert!(account_inputs[0].contains(&Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS)));
+        for signer in signers {
+            assert!(account_inputs[0].contains(&signer));
+        }
+    }
+
+    #[test]
+    fn derived_tx_list_signers_skip_unrecoverable_transactions() {
+        let provider = sample_provider();
+        let manifest_tx = alloy_rlp::decode_exact(alloy_rlp::encode(sample_unrecoverable_tx()))
+            .expect("transaction decodes manifest transaction");
+        let tx_list = super::encode_replay_tx_list(
+            &provider.block,
+            &BlockManifest {
+                timestamp: provider.block.header.timestamp,
+                coinbase: provider.block.header.beneficiary,
+                anchor_block_number: 10,
+                gas_limit: provider.block.header.gas_limit,
+                transactions: vec![manifest_tx],
+            },
+        )
+        .expect("encode tx list");
+
+        let signers =
+            super::derived_tx_list_signers(&tx_list).expect("decode derived tx list signers");
+
+        assert!(signers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mainnet_tx_list_preflight_uses_canonical_witness() {
+        let provider = sample_provider();
+        let tx_lists = vec![
+            super::encode_replay_tx_list(
+                &provider.block,
+                &BlockManifest {
+                    timestamp: provider.block.header.timestamp,
+                    coinbase: provider.block.header.beneficiary,
+                    anchor_block_number: 10,
+                    gas_limit: provider.block.header.gas_limit,
+                    transactions: Vec::new(),
+                },
+            )
+            .expect("encode tx list"),
+        ];
+        let chain_spec = ChainSpec {
+            name: "taiko_mainnet".to_string(),
+            chain_id: super::TAIKO_MAINNET_CHAIN_ID,
+            ..Default::default()
+        };
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

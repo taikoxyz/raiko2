@@ -595,6 +595,15 @@ All API errors use the Hoodi-style envelope:
 - Queue tasks use a renewable lease for worker ownership but no global wall-clock timeout. RISC0
   network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
   root tasks up to twenty times with a fixed five-minute delay.
+- Boundless storage upload is environment-driven. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
+  `GCS_BUCKET=taiko-boundless-prover-boundless-input-temp`, and
+  `GCS_PUBLIC_URL=false` to reuse the existing Taiko private GCS bucket. The GCP
+  project is selected by gcloud/ADC, for example `taiko-boundless-prover`, and is
+  not a raiko2 config value. `GCS_PUBLIC_URL=false` returns private `gs://` URLs,
+  so downstream downloaders need GCS credentials. Set `GCS_PUBLIC_URL=true` only
+  for publicly readable buckets. `STORAGE_UPLOADER` remains accepted for
+  compatibility. Optional `GCS_URL` supports custom endpoints, and
+  `GCS_CREDENTIALS_JSON` can provide service account JSON when ADC is not used.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
 - `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.

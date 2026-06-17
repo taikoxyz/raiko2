@@ -213,7 +213,7 @@ itertools = "0.14"
 revm = { version = "38.0.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.1" }
 risc0-ethereum-contracts-boundless = { package = "risc0-ethereum-contracts", version = "=3.0.1" }
-boundless-market = { version = "=2.0.0" }
+boundless-market = { version = "=2.0.0", features = ["gcs"] }
 
 # kzg
 c-kzg = { version = "2.1.7", default-features = false, features = [

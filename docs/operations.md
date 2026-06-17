@@ -461,6 +461,31 @@ Current behavior:
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
+## Boundless Storage Upload
+
+Boundless storage uploader selection is environment-driven. Reuse the existing private
+bucket in the Taiko Boundless Prover project:
+
+```bash
+BOUNDLESS_STORAGE_UPLOADER=gcs
+GCS_BUCKET=taiko-boundless-prover-boundless-input-temp
+GCS_PUBLIC_URL=false
+```
+
+The GCP project is selected by the current gcloud/ADC context, for example
+`taiko-boundless-prover`; raiko2 does not carry a separate project id setting. The
+existing bucket enforces public access prevention, so `GCS_PUBLIC_URL=false` returns
+private `gs://` URLs and Boundless downloaders must have GCS credentials. Set
+`GCS_PUBLIC_URL=true` only for a publicly readable bucket that should return HTTPS
+URLs.
+
+Authentication uses Google ADC from the active environment
+(`GOOGLE_APPLICATION_CREDENTIALS`, workload identity, metadata server, or local
+application-default credentials). Inline service account JSON through
+`GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
+supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
+alias, and existing S3/Pinata/File settings continue to work.
+
 ## Release TEE Provider Metadata
 
 TEE-backed remote prover images have a separate pre-release metadata flow.

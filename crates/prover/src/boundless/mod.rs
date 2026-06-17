@@ -418,18 +418,22 @@ fn env_url(name: &str) -> RaikoResult<Option<Url>> {
 
 fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     let mut config = StorageUploaderConfig::default();
-    let selected = env_var("STORAGE_UPLOADER").map(|value| value.to_ascii_lowercase());
+    let selected = env_var("BOUNDLESS_STORAGE_UPLOADER")
+        .or_else(|| env_var("STORAGE_UPLOADER"))
+        .map(|value| value.to_ascii_lowercase());
     config.storage_uploader = match selected.as_deref() {
         Some("s3") => StorageUploaderType::S3,
+        Some("gcs") => StorageUploaderType::Gcs,
         Some("pinata") => StorageUploaderType::Pinata,
         Some("file") => StorageUploaderType::File,
         Some("none") => StorageUploaderType::None,
         Some(other) => {
             return Err(RaikoError::InvalidRequestConfig(format!(
-                "Invalid STORAGE_UPLOADER value {other}"
+                "Invalid BOUNDLESS_STORAGE_UPLOADER/STORAGE_UPLOADER value {other}"
             )));
         }
         None if env_var("S3_BUCKET").is_some() => StorageUploaderType::S3,
+        None if env_var("GCS_BUCKET").is_some() => StorageUploaderType::Gcs,
         None if env_var("PINATA_JWT").is_some() => StorageUploaderType::Pinata,
         None if env_var("FILE_PATH").is_some() => StorageUploaderType::File,
         None => StorageUploaderType::None,
@@ -441,6 +445,15 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     config.aws_region = env_var("AWS_REGION");
     config.s3_presigned = env_bool("S3_PRESIGNED")?;
     config.s3_public_url = env_bool("S3_PUBLIC_URL")?;
+    config.gcs_bucket = env_var("GCS_BUCKET");
+    config.gcs_url = env_var("GCS_URL");
+    config.gcs_credentials_json = env_var("GCS_CREDENTIALS_JSON");
+    let gcs_public_url = env_bool("GCS_PUBLIC_URL")?;
+    config.gcs_public_url = if config.storage_uploader == StorageUploaderType::Gcs {
+        Some(gcs_public_url.unwrap_or(false))
+    } else {
+        gcs_public_url
+    };
     config.pinata_jwt = env_var("PINATA_JWT");
     config.pinata_api_url = env_url("PINATA_API_URL")?;
     config.ipfs_gateway_url = env_url("IPFS_GATEWAY_URL")?;
@@ -1476,13 +1489,97 @@ mod tests {
         DeploymentConfig, DeploymentType, ElfType, NoLockTimeoutAction,
         attempt_for_price_multiplier, enforce_market_max_price_cap, no_lock_deadline_elapsed,
         no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        retry_price_multiplier, should_rebid_unlocked_request, user_cycles_to_mcycles,
-        validate_offer_params,
+        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
-    use boundless_market::price_oracle::{Amount, Asset};
+    use boundless_market::{
+        price_oracle::{Amount, Asset},
+        storage::StorageUploaderType,
+    };
     use raiko2_primitives::Proof;
+    use std::{
+        env,
+        sync::{Mutex, MutexGuard},
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const STORAGE_ENV_VARS: &[&str] = &[
+        "BOUNDLESS_STORAGE_UPLOADER",
+        "STORAGE_UPLOADER",
+        "S3_BUCKET",
+        "S3_URL",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "S3_PRESIGNED",
+        "S3_PUBLIC_URL",
+        "GCS_BUCKET",
+        "GCS_URL",
+        "GCS_CREDENTIALS_JSON",
+        "GCS_PUBLIC_URL",
+        "PINATA_JWT",
+        "PINATA_API_URL",
+        "IPFS_GATEWAY_URL",
+        "FILE_PATH",
+    ];
+
+    #[allow(unsafe_code)]
+    fn set_test_env_var(name: &str, value: &str) {
+        // SAFETY: StorageEnvGuard serializes all env mutation in these tests.
+        unsafe {
+            env::set_var(name, value);
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn remove_test_env_var(name: &str) {
+        // SAFETY: StorageEnvGuard serializes all env mutation in these tests.
+        unsafe {
+            env::remove_var(name);
+        }
+    }
+
+    struct StorageEnvGuard {
+        originals: Vec<(&'static str, Option<String>)>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl StorageEnvGuard {
+        fn new(vars: &[(&'static str, &str)]) -> Self {
+            let lock = ENV_LOCK.lock().expect("storage env lock");
+            let originals = STORAGE_ENV_VARS
+                .iter()
+                .map(|name| (*name, env::var(name).ok()))
+                .collect();
+
+            for name in STORAGE_ENV_VARS {
+                remove_test_env_var(name);
+            }
+            for (name, value) in vars {
+                set_test_env_var(name, value);
+            }
+
+            Self {
+                originals,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for StorageEnvGuard {
+        fn drop(&mut self) {
+            for (name, original) in &self.originals {
+                if let Some(value) = original {
+                    set_test_env_var(name, value);
+                } else {
+                    remove_test_env_var(name);
+                }
+            }
+        }
+    }
 
     fn sample_offer() -> super::BoundlessOfferParams {
         default_batch_offer_params()
@@ -1886,6 +1983,94 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Invalid S3_PRESIGNED boolean value")
+        );
+    }
+
+    #[test]
+    fn storage_uploader_config_selects_gcs_from_boundless_env() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "gcs"),
+            ("GCS_BUCKET", "raiko-boundless"),
+            ("GCS_URL", "http://127.0.0.1:4443"),
+            ("GCS_CREDENTIALS_JSON", "{}"),
+            ("GCS_PUBLIC_URL", "false"),
+        ]);
+
+        let config = storage_uploader_config_from_env().expect("storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
+        assert_eq!(config.gcs_bucket.as_deref(), Some("raiko-boundless"));
+        assert_eq!(config.gcs_url.as_deref(), Some("http://127.0.0.1:4443"));
+        assert_eq!(config.gcs_credentials_json.as_deref(), Some("{}"));
+        assert_eq!(config.gcs_public_url, Some(false));
+    }
+
+    #[test]
+    fn storage_uploader_config_auto_selects_gcs_from_bucket() {
+        let _guard = StorageEnvGuard::new(&[("GCS_BUCKET", "raiko-boundless")]);
+
+        let config = storage_uploader_config_from_env().expect("storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
+        assert_eq!(config.gcs_bucket.as_deref(), Some("raiko-boundless"));
+        assert_eq!(config.gcs_public_url, Some(false));
+    }
+
+    #[test]
+    fn storage_uploader_config_prefers_boundless_storage_env() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "gcs"),
+            ("STORAGE_UPLOADER", "s3"),
+            ("S3_BUCKET", "s3-bucket"),
+            ("GCS_BUCKET", "gcs-bucket"),
+        ]);
+
+        let config = storage_uploader_config_from_env().expect("storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
+        assert_eq!(config.gcs_bucket.as_deref(), Some("gcs-bucket"));
+        assert_eq!(config.gcs_public_url, Some(false));
+    }
+
+    #[test]
+    fn storage_uploader_config_still_accepts_legacy_storage_env() {
+        let _guard = StorageEnvGuard::new(&[
+            ("STORAGE_UPLOADER", "gcs"),
+            ("GCS_BUCKET", "raiko-boundless"),
+            ("GCS_PUBLIC_URL", "true"),
+        ]);
+
+        let config = storage_uploader_config_from_env().expect("storage config");
+
+        assert_eq!(config.storage_uploader, StorageUploaderType::Gcs);
+        assert_eq!(config.gcs_public_url, Some(true));
+    }
+
+    #[test]
+    fn storage_uploader_config_rejects_invalid_boundless_storage_env() {
+        let _guard = StorageEnvGuard::new(&[("BOUNDLESS_STORAGE_UPLOADER", "ftp")]);
+
+        let err = storage_uploader_config_from_env().expect_err("invalid storage uploader");
+
+        assert!(
+            err.to_string()
+                .contains("Invalid BOUNDLESS_STORAGE_UPLOADER/STORAGE_UPLOADER value ftp")
+        );
+    }
+
+    #[test]
+    fn storage_uploader_config_rejects_invalid_gcs_public_url() {
+        let _guard = StorageEnvGuard::new(&[
+            ("BOUNDLESS_STORAGE_UPLOADER", "gcs"),
+            ("GCS_BUCKET", "raiko-boundless"),
+            ("GCS_PUBLIC_URL", "maybe"),
+        ]);
+
+        let err = storage_uploader_config_from_env().expect_err("invalid GCS_PUBLIC_URL");
+
+        assert!(
+            err.to_string()
+                .contains("Invalid GCS_PUBLIC_URL boolean value")
         );
     }
 

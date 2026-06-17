@@ -106,9 +106,10 @@ impl ProverConfig {
         ) {
             if self.remote_sgx.base_url.trim().is_empty()
                 && self.remote_sgx.sgxgeth_base_url.trim().is_empty()
+                && self.remote_sgx.tdx_base_url.trim().is_empty()
             {
                 bail!(
-                    "either prover.remote_sgx.base_url or prover.remote_sgx.sgxgeth_base_url must not be empty"
+                    "one of prover.remote_sgx.base_url, prover.remote_sgx.sgxgeth_base_url, or prover.remote_sgx.tdx_base_url must not be empty"
                 );
             }
             if self.remote_sgx.timeout_ms == 0 {
@@ -201,6 +202,7 @@ impl Default for ZkAnyTargetConfig {
 pub struct RemoteSgxConfig {
     pub base_url: String,
     pub sgxgeth_base_url: String,
+    pub tdx_base_url: String,
     pub timeout_ms: u64,
 }
 
@@ -210,6 +212,7 @@ impl Default for RemoteSgxConfig {
         Self {
             base_url: defaults.base_url,
             sgxgeth_base_url: String::new(),
+            tdx_base_url: String::new(),
             timeout_ms: if defaults.timeout_ms == 0 {
                 300_000
             } else {

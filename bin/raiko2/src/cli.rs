@@ -49,6 +49,13 @@ pub struct Cli {
     )]
     pub remote_sgx_sgxgeth_base_url: Option<String>,
 
+    /// Remote TDX prover base URL used by the `tdx` lane
+    #[arg(
+        long = "remote-sgx-tdx-base-url",
+        env = "RAIKO2_REMOTE_SGX_TDX_BASE_URL"
+    )]
+    pub remote_sgx_tdx_base_url: Option<String>,
+
     /// Remote SGX prover timeout in milliseconds used by the `sgx/remote` route
     #[arg(long = "remote-sgx-timeout-ms", env = "RAIKO2_REMOTE_SGX_TIMEOUT_MS")]
     pub remote_sgx_timeout_ms: Option<u64>,

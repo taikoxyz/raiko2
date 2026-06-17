@@ -76,6 +76,7 @@ lock_collateral = "20"
 [prover.remote_sgx]
 base_url = "http://raiko2-sgx:8080"
 sgxgeth_base_url = "http://gaiko2-sgxgeth:8080"
+tdx_base_url = ""
 timeout_ms = 300000
 
 [queue]

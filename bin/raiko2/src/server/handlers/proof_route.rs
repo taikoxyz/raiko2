@@ -66,7 +66,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Sgx | BatchProofType::SgxGeth => {
+        BatchProofType::Sgx | BatchProofType::SgxGeth | BatchProofType::Tdx => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
         BatchProofType::Native => native_route_for_request(state)?,
@@ -99,6 +99,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Native => PipelineKey::ShastaNative,
         BatchProofType::Sgx => PipelineKey::ShastaSgx,
         BatchProofType::SgxGeth => PipelineKey::ShastaSgxGeth,
+        BatchProofType::Tdx => PipelineKey::ShastaTdx,
         BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
@@ -109,6 +110,7 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Native => ProofType::Native,
         BatchProofType::Sgx => ProofType::Sgx,
         BatchProofType::SgxGeth => ProofType::SgxGeth,
+        BatchProofType::Tdx => ProofType::Tdx,
         BatchProofType::Boundless | BatchProofType::ZkAny => {
             unreachable!("unsupported proof type is filtered before canonical route build")
         }
@@ -131,8 +133,10 @@ pub(super) fn validate_hosted_proof_type(
             guest_system: GuestSystem::Sgx,
             runner: RunnerKind::Remote,
         }
-    ) && !matches!(proof_type, BatchProofType::Sgx | BatchProofType::SgxGeth)
-    {
+    ) && !matches!(
+        proof_type,
+        BatchProofType::Sgx | BatchProofType::SgxGeth | BatchProofType::Tdx
+    ) {
         return Err(ApiError::bad_request(format!(
             "proof_type={} is not supported when the server prover route is sgx/remote",
             proof_type.as_str()
@@ -230,6 +234,7 @@ impl BatchProofType {
             ProofType::Sp1 => Self::Sp1,
             ProofType::Sgx => Self::Sgx,
             ProofType::SgxGeth => Self::SgxGeth,
+            ProofType::Tdx => Self::Tdx,
             ProofType::Risc0 => Self::Risc0,
         }
     }
@@ -311,6 +316,22 @@ mod tests {
             selection.proof_type(),
             raiko2_primitives::ProofType::SgxGeth
         );
+    }
+
+    #[test]
+    fn route_for_proof_type_selects_tdx_remote_pipeline() {
+        let state = test_state();
+        let selection = route_for_proof_type(
+            &state,
+            BatchProofType::Tdx,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .unwrap();
+
+        assert_eq!(selection.route.to_string(), "sgx/remote");
+        assert_eq!(selection.pipeline_key(), PipelineKey::ShastaTdx);
+        assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Tdx);
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub(super) enum BatchProofType {
     Sgx,
     #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
     SgxGeth,
+    #[serde(alias = "TDX")]
+    Tdx,
     ZkAny,
 }
 
@@ -29,6 +31,7 @@ impl BatchProofType {
             Self::Boundless => "boundless",
             Self::Sgx => "sgx",
             Self::SgxGeth => "sgxgeth",
+            Self::Tdx => "tdx",
             Self::ZkAny => "zk_any",
         }
     }
@@ -36,12 +39,21 @@ impl BatchProofType {
     pub(super) const fn is_public_batch_request_type(self) -> bool {
         matches!(
             self,
-            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
+            Self::Native
+                | Self::Sp1
+                | Self::Risc0
+                | Self::Sgx
+                | Self::SgxGeth
+                | Self::Tdx
+                | Self::ZkAny
         )
     }
 
     pub(super) const fn is_concrete_public_proof_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth)
+        matches!(
+            self,
+            Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::Tdx
+        )
     }
 }
 
@@ -314,6 +326,25 @@ mod tests {
         .expect("deserialize request");
 
         assert!(matches!(req.proof_type, BatchProofType::SgxGeth));
+    }
+
+    #[test]
+    fn shasta_batch_request_accepts_tdx_json_variant() {
+        let req: BatchShastaRequest = serde_json::from_value(serde_json::json!({
+            "proposals": [{
+                "proposal_id": 1,
+                "l1_inclusion_block_number": 2,
+                "l2_block_numbers": [3],
+                "last_anchor_block_number": 1
+            }],
+            "aggregate": false,
+            "proof_type": "tdx",
+            "network": "taiko_mainnet",
+            "l1_network": "ethereum"
+        }))
+        .expect("deserialize request");
+
+        assert!(matches!(req.proof_type, BatchProofType::Tdx));
     }
 
     #[test]

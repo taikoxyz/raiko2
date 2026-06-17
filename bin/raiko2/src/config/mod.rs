@@ -95,6 +95,9 @@ impl Config {
                 .sgxgeth_base_url
                 .clone_from(base_url);
         }
+        if let Some(base_url) = &cli.remote_sgx_tdx_base_url {
+            config.prover.remote_sgx.tdx_base_url.clone_from(base_url);
+        }
         if let Some(timeout_ms) = cli.remote_sgx_timeout_ms {
             config.prover.remote_sgx.timeout_ms = timeout_ms;
         }
@@ -562,6 +565,17 @@ mod tests {
     }
 
     #[test]
+    fn test_sgx_remote_route_accepts_tdx_only_config() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.remote_sgx.tdx_base_url = "http://127.0.0.1:8070".to_string();
+        config.prover.remote_sgx.timeout_ms = 30_000;
+
+        assert!(config.prover.validate().is_ok());
+    }
+
+    #[test]
     fn test_sgx_remote_route_env_overrides_remote_sgx_config() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let config_toml = r#"
@@ -581,6 +595,7 @@ runner = "remote"
 [prover.remote_sgx]
 base_url = "http://127.0.0.1:8080"
 sgxgeth_base_url = "http://127.0.0.1:8090"
+tdx_base_url = "http://127.0.0.1:8070"
 timeout_ms = 300000
 
 [queue]
@@ -596,6 +611,8 @@ maintenance_interval_ms = 200
             "RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL",
             "http://127.0.0.1:19091",
         );
+        let _tdx_base_url_guard =
+            EnvVarGuard::set("RAIKO2_REMOTE_SGX_TDX_BASE_URL", "http://127.0.0.1:19092");
         let _timeout_guard = EnvVarGuard::set("RAIKO2_REMOTE_SGX_TIMEOUT_MS", "12345");
 
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -605,6 +622,10 @@ maintenance_interval_ms = 200
         assert_eq!(
             config.prover.remote_sgx.sgxgeth_base_url,
             "http://127.0.0.1:19091"
+        );
+        assert_eq!(
+            config.prover.remote_sgx.tdx_base_url,
+            "http://127.0.0.1:19092"
         );
         assert_eq!(config.prover.remote_sgx.timeout_ms, 12_345);
 

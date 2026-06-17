@@ -316,10 +316,11 @@ pub fn validate_external_aggregate_proofs(
                 }
             }
             raiko2_pipeline::PipelineKey::ShastaSgx
-            | raiko2_pipeline::PipelineKey::ShastaSgxGeth => {
+            | raiko2_pipeline::PipelineKey::ShastaSgxGeth
+            | raiko2_pipeline::PipelineKey::ShastaTdx => {
                 if proof.input.is_none() || proof.extra_data.is_none() || proof.proof.is_none() {
                     return Err(RaikoError::InvalidRequestConfig(format!(
-                        "proof {index} is missing SGX aggregation metadata"
+                        "proof {index} is missing TEE aggregation metadata"
                     )));
                 }
             }
@@ -521,7 +522,7 @@ mod tests {
             validate_external_aggregate_proofs(route, &[proof]).expect_err("missing proof bytes");
         assert!(
             err.to_string()
-                .contains("proof 0 is missing SGX aggregation metadata")
+                .contains("proof 0 is missing TEE aggregation metadata")
         );
     }
 

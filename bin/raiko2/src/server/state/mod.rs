@@ -286,12 +286,27 @@ async fn register_remote_sgx_pipelines(
             config: registration.config,
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
-            observer: runtime_observer,
+            observer: Arc::clone(&runtime_observer),
             workers: registration.workers,
             maintenance_interval: registration.maintenance_interval,
             pipeline_key: PipelineKey::ShastaSgxGeth,
             proof_type: ProofType::SgxGeth,
             base_url: &registration.config.prover.remote_sgx.sgxgeth_base_url,
+        },
+    )
+    .await?;
+    register_remote_sgx_engine(
+        factory,
+        RemoteSgxRegistration {
+            config: registration.config,
+            pair: registration.pair,
+            scheduler_config: registration.scheduler_config.clone(),
+            observer: runtime_observer,
+            workers: registration.workers,
+            maintenance_interval: registration.maintenance_interval,
+            pipeline_key: PipelineKey::ShastaTdx,
+            proof_type: ProofType::Tdx,
+            base_url: &registration.config.prover.remote_sgx.tdx_base_url,
         },
     )
     .await?;

@@ -17,20 +17,24 @@ pub(crate) struct StartupSummary {
     remote_sgx_base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_sgx_sgxgeth_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_sgx_tdx_base_url: Option<String>,
 }
 
 pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> StartupSummary {
-    let (remote_sgx_base_url, remote_sgx_sgxgeth_base_url) = if config.prover.is_remote_sgx_route()
-    {
-        (
-            (!config.prover.remote_sgx.base_url.trim().is_empty())
-                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url)),
-            (!config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
-                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url)),
-        )
-    } else {
-        (None, None)
-    };
+    let (remote_sgx_base_url, remote_sgx_sgxgeth_base_url, remote_sgx_tdx_base_url) =
+        if config.prover.is_remote_sgx_route() {
+            (
+                (!config.prover.remote_sgx.base_url.trim().is_empty())
+                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url)),
+                (!config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
+                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url)),
+                (!config.prover.remote_sgx.tdx_base_url.trim().is_empty())
+                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.tdx_base_url)),
+            )
+        } else {
+            (None, None, None)
+        };
 
     StartupSummary {
         listen: net::bind_addr(config),
@@ -47,6 +51,7 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
         json_logs,
         remote_sgx_base_url,
         remote_sgx_sgxgeth_base_url,
+        remote_sgx_tdx_base_url,
     }
 }
 
@@ -65,59 +70,20 @@ pub(crate) fn log_startup_readiness_passed(config: &Config, json_logs: bool) {
 }
 
 fn log_summary(message: &'static str, summary: &StartupSummary) {
-    match (
-        summary.remote_sgx_base_url.as_deref(),
-        summary.remote_sgx_sgxgeth_base_url.as_deref(),
-    ) {
-        (Some(base_url), Some(sgxgeth_base_url)) => info!(
-            listen = %summary.listen,
-            route = %summary.route,
-            pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
-            queue_backend = %summary.queue_backend,
-            queue_workers = summary.queue_workers,
-            json_logs = summary.json_logs,
-            remote_sgx_base_url = %base_url,
-            remote_sgx_sgxgeth_base_url = %sgxgeth_base_url,
-            "{}",
-            message
-        ),
-        (Some(base_url), None) => info!(
-            listen = %summary.listen,
-            route = %summary.route,
-            pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
-            queue_backend = %summary.queue_backend,
-            queue_workers = summary.queue_workers,
-            json_logs = summary.json_logs,
-            remote_sgx_base_url = %base_url,
-            "{}",
-            message
-        ),
-        (None, Some(sgxgeth_base_url)) => info!(
-            listen = %summary.listen,
-            route = %summary.route,
-            pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
-            queue_backend = %summary.queue_backend,
-            queue_workers = summary.queue_workers,
-            json_logs = summary.json_logs,
-            remote_sgx_sgxgeth_base_url = %sgxgeth_base_url,
-            "{}",
-            message
-        ),
-        (None, None) => info!(
-            listen = %summary.listen,
-            route = %summary.route,
-            pairs = ?summary.pairs,
-            runtime_root = %summary.runtime_root,
-            queue_backend = %summary.queue_backend,
-            queue_workers = summary.queue_workers,
-            json_logs = summary.json_logs,
-            "{}",
-            message
-        ),
-    }
+    info!(
+        listen = %summary.listen,
+        route = %summary.route,
+        pairs = ?summary.pairs,
+        runtime_root = %summary.runtime_root,
+        queue_backend = %summary.queue_backend,
+        queue_workers = summary.queue_workers,
+        json_logs = summary.json_logs,
+        remote_sgx_base_url = ?summary.remote_sgx_base_url,
+        remote_sgx_sgxgeth_base_url = ?summary.remote_sgx_sgxgeth_base_url,
+        remote_sgx_tdx_base_url = ?summary.remote_sgx_tdx_base_url,
+        "{}",
+        message
+    );
 }
 
 const fn queue_backend_name(backend: QueueBackend) -> &'static str {
@@ -194,6 +160,7 @@ mod tests {
         config.prover.runner = RunnerKind::Remote;
         config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
         config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
+        config.prover.remote_sgx.tdx_base_url = "http://example.com:8070".to_string();
 
         let summary = summary_json(&config, true);
 
@@ -202,6 +169,10 @@ mod tests {
         assert_eq!(
             summary["remote_sgx_sgxgeth_base_url"],
             "http://example.com:8090"
+        );
+        assert_eq!(
+            summary["remote_sgx_tdx_base_url"],
+            "http://example.com:8070"
         );
         assert_eq!(summary["json_logs"], true);
     }

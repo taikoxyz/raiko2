@@ -113,6 +113,8 @@ timeout_ms = 3600000
 base_url = "http://127.0.0.1:8081"
 # For `proof_type=sgxgeth`, point this at the external geth-backed remote SGX server.
 sgxgeth_base_url = "http://127.0.0.1:8090"
+# For `proof_type=tdx`, point this at a TDX remote prover that replays Shasta guest input.
+tdx_base_url = ""
 timeout_ms = 300000
 
 [prover.boundless.deployment]

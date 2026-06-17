@@ -253,6 +253,7 @@ The optional dockerized `raiko2` service is prewired with both remote SGX URLs:
 
 - `proof_type=sgx` uses `RAIKO2_REMOTE_SGX_BASE_URL`
 - `proof_type=sgxgeth` uses `RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL`
+- `proof_type=tdx` uses `RAIKO2_REMOTE_SGX_TDX_BASE_URL`
 
 The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
 both SGX lanes can boot and prove without an onchain registration step. Replace them with the real
@@ -275,6 +276,10 @@ Then choose the lane per request:
 
 - `proof_type=sgx` targets `raiko2-sgx-prover`
 - `proof_type=sgxgeth` targets the external geth-backed remote SGX server
+- `proof_type=tdx` targets a TDX remote prover that replays canonical Shasta guest input
+
+Chain-verifiable TDX proofs require the selected chain spec to configure a `TDX` verifier address
+for the active Shasta fork. `proof_type=tdx` does not silently reuse the `SGX` verifier address.
 
 ### Main-Service Wiring
 

@@ -42,6 +42,7 @@ pub enum PipelineKey {
     ShastaRisc0Network,
     ShastaSgx,
     ShastaSgxGeth,
+    ShastaTdx,
 }
 
 impl PipelineKey {
@@ -54,6 +55,7 @@ impl PipelineKey {
             PipelineKey::ShastaRisc0Network => "shasta-risc0-network",
             PipelineKey::ShastaSgx => "shasta-sgx-remote",
             PipelineKey::ShastaSgxGeth => "shasta-sgxgeth-remote",
+            PipelineKey::ShastaTdx => "shasta-tdx-remote",
         }
     }
 
@@ -63,7 +65,7 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaSgx | Self::ShastaSgxGeth => {
+            Self::ShastaSgx | Self::ShastaSgxGeth | Self::ShastaTdx => {
                 PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
             }
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
@@ -87,6 +89,7 @@ impl FromStr for PipelineKey {
             "shasta-native-local" => Ok(Self::ShastaNative),
             "shasta-sgx-remote" => Ok(Self::ShastaSgx),
             "shasta-sgxgeth-remote" => Ok(Self::ShastaSgxGeth),
+            "shasta-tdx-remote" => Ok(Self::ShastaTdx),
             "shasta-risc0-network" | "shasta-risc0-boundless" => Ok(Self::ShastaRisc0Network),
             _ => Err(format!("Unknown pipeline key: {s}")),
         }
@@ -347,6 +350,10 @@ mod route_tests {
                 .parse::<PipelineKey>()
                 .expect("sgxgeth key"),
             PipelineKey::ShastaSgxGeth
+        );
+        assert_eq!(
+            "shasta-tdx-remote".parse::<PipelineKey>().expect("tdx key"),
+            PipelineKey::ShastaTdx
         );
     }
 }

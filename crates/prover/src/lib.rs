@@ -513,6 +513,12 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_validator_accepts_tdx_remote_proof() {
+        let route = "tdx/remote".parse::<PipelineRoute>().expect("parse route");
+        assert!(validate_external_aggregate_proofs(route, &[aggregate_proof_fixture()]).is_ok());
+    }
+
+    #[test]
     fn aggregate_validator_rejects_missing_sgx_remote_proof_bytes() {
         let route = "sgx/remote".parse::<PipelineRoute>().expect("parse route");
         let mut proof = aggregate_proof_fixture();

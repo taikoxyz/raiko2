@@ -783,9 +783,16 @@ fn task_registration_pipeline_key(registration: &TaskRegistration) -> Result<Pip
 fn pipeline_key_matches_route(pipeline_key: PipelineKey, route: PipelineRoute) -> bool {
     match (pipeline_key, route) {
         (
-            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth | PipelineKey::ShastaTdx,
+            PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth,
             PipelineRoute {
                 guest_system: raiko2_pipeline::GuestSystem::Sgx,
+                runner: raiko2_pipeline::RunnerKind::Remote,
+            },
+        ) => true,
+        (
+            PipelineKey::ShastaTdx,
+            PipelineRoute {
+                guest_system: raiko2_pipeline::GuestSystem::Tdx,
                 runner: raiko2_pipeline::RunnerKind::Remote,
             },
         ) => true,

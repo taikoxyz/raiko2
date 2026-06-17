@@ -29,7 +29,7 @@
 **Steps:**
 1. Write failing tests for `proof_type=tdx` JSON parsing and route selection.
 2. Run targeted tests and confirm they fail.
-3. Map `proof_type=tdx` to `PipelineKey::ShastaTdx`, `ProofType::Tdx`, and the existing remote prover route.
+3. Map `proof_type=tdx` to `PipelineKey::ShastaTdx`, `ProofType::Tdx`, and the `tdx/remote` route while reusing the existing remote prover adapter.
 4. Run targeted tests and confirm they pass.
 
 ### Task 3: Register TDX Remote Engine Using Existing Gaiko2 Adapter
@@ -42,7 +42,7 @@
 - Modify: `bin/raiko2/src/server/startup.rs`
 
 **Steps:**
-1. Write failing tests for `tdx_base_url` config/env and startup summary.
+1. Write failing tests for `remote_tdx.base_url` config/env and startup summary.
 2. Run targeted tests and confirm they fail.
 3. Register `ShastaTdx` with the same remote prover adapter used by SGX/Gaiko2.
 4. Run targeted tests and confirm they pass.

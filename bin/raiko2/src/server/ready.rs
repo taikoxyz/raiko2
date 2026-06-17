@@ -189,7 +189,7 @@ fn check_prover(config: &Config) -> Result<()> {
 }
 
 const fn requires_risc0_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_remote_tdx_route()
 }
 
 fn check_risc0_capability(config: &Config) -> Result<()> {
@@ -203,7 +203,7 @@ fn check_risc0_capability(config: &Config) -> Result<()> {
 }
 
 const fn requires_sp1_capability_check(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_remote_tdx_route()
 }
 
 fn check_sp1_capability(config: &Config) -> Result<()> {
@@ -324,7 +324,7 @@ mod tests {
         Sp1RemoteVerifyConfig, check_prover, requires_sp1_capability_check,
         sp1_effective_pair_config,
     };
-    use crate::config::{Config, GuestSystem, RunnerKind};
+    use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
 
     #[test]
     fn sp1_effective_pair_config_honors_global_remote_verify() {
@@ -382,6 +382,20 @@ mod tests {
         config.prover.guest_system = GuestSystem::Sgx;
         config.prover.runner = RunnerKind::Remote;
         config.prover.remote_sgx.base_url = "http://127.0.0.1:9090".to_string();
+
+        assert!(!requires_sp1_capability_check(&config));
+        assert!(check_prover(&config).is_ok());
+    }
+
+    #[test]
+    fn remote_tdx_route_does_not_require_sp1_capability_check() {
+        let mut config = Config::default();
+        let route = "tdx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse tdx route");
+        config.prover.guest_system = route.guest_system;
+        config.prover.runner = route.runner;
+        config.prover.remote_tdx.base_url = "http://127.0.0.1:8070".to_string();
 
         assert!(!requires_sp1_capability_check(&config));
         assert!(check_prover(&config).is_ok());

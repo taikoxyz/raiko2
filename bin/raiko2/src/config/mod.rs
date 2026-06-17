@@ -95,11 +95,14 @@ impl Config {
                 .sgxgeth_base_url
                 .clone_from(base_url);
         }
-        if let Some(base_url) = &cli.remote_sgx_tdx_base_url {
-            config.prover.remote_sgx.tdx_base_url.clone_from(base_url);
-        }
         if let Some(timeout_ms) = cli.remote_sgx_timeout_ms {
             config.prover.remote_sgx.timeout_ms = timeout_ms;
+        }
+        if let Some(base_url) = &cli.remote_tdx_base_url {
+            config.prover.remote_tdx.base_url.clone_from(base_url);
+        }
+        if let Some(timeout_ms) = cli.remote_tdx_timeout_ms {
+            config.prover.remote_tdx.timeout_ms = timeout_ms;
         }
 
         if let Some(queue_backend) = &cli.queue_backend {
@@ -497,6 +500,13 @@ mod tests {
             "sgx/remote".parse::<PipelineRoute>().unwrap(),
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         );
+        assert_eq!(
+            "tdx/remote"
+                .parse::<PipelineRoute>()
+                .expect("parse tdx route")
+                .to_string(),
+            "tdx/remote"
+        );
         assert!("invalid".parse::<PipelineRoute>().is_err());
     }
 
@@ -565,14 +575,59 @@ mod tests {
     }
 
     #[test]
-    fn test_sgx_remote_route_accepts_tdx_only_config() {
+    fn test_tdx_remote_route_accepts_configured_remote_tdx() {
         let mut config = Config::default();
-        config.prover.guest_system = GuestSystem::Sgx;
-        config.prover.runner = RunnerKind::Remote;
-        config.prover.remote_sgx.tdx_base_url = "http://127.0.0.1:8070".to_string();
-        config.prover.remote_sgx.timeout_ms = 30_000;
+        let route = "tdx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse tdx route");
+        config.prover.guest_system = route.guest_system;
+        config.prover.runner = route.runner;
+        config.prover.remote_tdx.base_url = "http://127.0.0.1:8070".to_string();
+        config.prover.remote_tdx.timeout_ms = 30_000;
 
         assert!(config.prover.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tdx_remote_route_env_overrides_remote_tdx_config() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let config_toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[rpc]
+pairs = [
+  { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "http://localhost:8545", l2_rpc = "http://localhost:9545" },
+]
+
+[prover]
+guest_system = "tdx"
+runner = "remote"
+
+[prover.remote_tdx]
+base_url = "http://127.0.0.1:8070"
+timeout_ms = 300000
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+        let _base_url_guard =
+            EnvVarGuard::set("RAIKO2_REMOTE_TDX_BASE_URL", "http://127.0.0.1:19092");
+        let _timeout_guard = EnvVarGuard::set("RAIKO2_REMOTE_TDX_TIMEOUT_MS", "12345");
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        assert_eq!(config.prover.route().to_string(), "tdx/remote");
+        assert_eq!(config.prover.remote_tdx.base_url, "http://127.0.0.1:19092");
+        assert_eq!(config.prover.remote_tdx.timeout_ms, 12_345);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -595,7 +650,6 @@ runner = "remote"
 [prover.remote_sgx]
 base_url = "http://127.0.0.1:8080"
 sgxgeth_base_url = "http://127.0.0.1:8090"
-tdx_base_url = "http://127.0.0.1:8070"
 timeout_ms = 300000
 
 [queue]
@@ -611,8 +665,6 @@ maintenance_interval_ms = 200
             "RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL",
             "http://127.0.0.1:19091",
         );
-        let _tdx_base_url_guard =
-            EnvVarGuard::set("RAIKO2_REMOTE_SGX_TDX_BASE_URL", "http://127.0.0.1:19092");
         let _timeout_guard = EnvVarGuard::set("RAIKO2_REMOTE_SGX_TIMEOUT_MS", "12345");
 
         let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
@@ -622,10 +674,6 @@ maintenance_interval_ms = 200
         assert_eq!(
             config.prover.remote_sgx.sgxgeth_base_url,
             "http://127.0.0.1:19091"
-        );
-        assert_eq!(
-            config.prover.remote_sgx.tdx_base_url,
-            "http://127.0.0.1:19092"
         );
         assert_eq!(config.prover.remote_sgx.timeout_ms, 12_345);
 

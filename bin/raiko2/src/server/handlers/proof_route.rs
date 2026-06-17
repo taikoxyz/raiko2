@@ -66,9 +66,10 @@ pub(super) fn route_for_proof_type(
         BatchProofType::Risc0 => {
             PipelineRoute::new(GuestSystem::Risc0, default_risc0_runner(state))
         }
-        BatchProofType::Sgx | BatchProofType::SgxGeth | BatchProofType::Tdx => {
+        BatchProofType::Sgx | BatchProofType::SgxGeth => {
             PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
         }
+        BatchProofType::Tdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote),
         BatchProofType::Native => native_route_for_request(state)?,
         BatchProofType::Boundless => {
             return Err(ApiError::bad_request(format!(
@@ -133,12 +134,23 @@ pub(super) fn validate_hosted_proof_type(
             guest_system: GuestSystem::Sgx,
             runner: RunnerKind::Remote,
         }
-    ) && !matches!(
-        proof_type,
-        BatchProofType::Sgx | BatchProofType::SgxGeth | BatchProofType::Tdx
-    ) {
+    ) && !matches!(proof_type, BatchProofType::Sgx | BatchProofType::SgxGeth)
+    {
         return Err(ApiError::bad_request(format!(
             "proof_type={} is not supported when the server prover route is sgx/remote",
+            proof_type.as_str()
+        )));
+    }
+    if matches!(
+        route,
+        PipelineRoute {
+            guest_system: GuestSystem::Tdx,
+            runner: RunnerKind::Remote,
+        }
+    ) && !matches!(proof_type, BatchProofType::Tdx)
+    {
+        return Err(ApiError::bad_request(format!(
+            "proof_type={} is not supported when the server prover route is tdx/remote",
             proof_type.as_str()
         )));
     }
@@ -329,7 +341,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(selection.route.to_string(), "sgx/remote");
+        assert_eq!(selection.route.to_string(), "tdx/remote");
         assert_eq!(selection.pipeline_key(), PipelineKey::ShastaTdx);
         assert_eq!(selection.proof_type(), raiko2_primitives::ProofType::Tdx);
     }
@@ -408,6 +420,53 @@ mod tests {
 
         assert!(
             err.message.contains("proof_type=sp1"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_tdx_on_remote_sgx_host() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Sgx;
+        config.prover.runner = RunnerKind::Remote;
+        let state = test_state_with_config(config);
+
+        let err = route_for_proof_type(
+            &state,
+            BatchProofType::Tdx,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect_err("remote sgx host should reject tdx");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("sgx/remote"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn route_for_proof_type_rejects_sgx_on_remote_tdx_host() {
+        let route = "tdx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse tdx route");
+        let mut config = Config::default();
+        config.prover.guest_system = route.guest_system;
+        config.prover.runner = route.runner;
+        let state = test_state_with_config(config);
+
+        let err = route_for_proof_type(
+            &state,
+            BatchProofType::Sgx,
+            &ProverTaskConfig::default(),
+            Sp1RequestContext::ProposalBatch { aggregate: false },
+        )
+        .expect_err("remote tdx host should reject sgx");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("tdx/remote"),
             "unexpected error: {err:?}"
         );
     }

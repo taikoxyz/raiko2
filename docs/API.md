@@ -90,8 +90,8 @@ Content-Type: application/json
 
 Registers a Shasta batch root task. The server expands it into proposal prove tasks and, when
 `aggregate=true`, an aggregation task. For remote SGX lanes, configure `[prover.remote_sgx]`:
-`base_url` backs `proof_type=sgx`, `sgxgeth_base_url` backs `proof_type=sgxgeth`, and
-`tdx_base_url` backs `proof_type=tdx`.
+`base_url` backs `proof_type=sgx` and `sgxgeth_base_url` backs `proof_type=sgxgeth`.
+For TDX, configure `[prover.remote_tdx] base_url`; it backs `proof_type=tdx`.
 
 ### Request
 
@@ -151,7 +151,9 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
   - `tdx -> sgx/remote` backed by a TDX remote prover that replays canonical Shasta guest input
   - `boundless -> unsupported legacy error response`
 - When the server prover route is `sgx/remote`, the hosted public API only accepts
-  `proof_type=sgx`, `proof_type=sgxgeth`, and `proof_type=tdx`.
+  `proof_type=sgx` and `proof_type=sgxgeth`.
+- When the server prover route is `tdx/remote`, the hosted public API only accepts
+  `proof_type=tdx`.
 - `proof_type=zk_any` is only supported on `POST /v3/proof/batch/shasta`.
 - `proof_type=zk_any` is only valid when `aggregate=false`. It is an admission-time draw for
   proposal proving. When drawn, the selected concrete proof type (`sp1` or `risc0`) is the

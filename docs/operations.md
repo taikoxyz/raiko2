@@ -253,7 +253,7 @@ The optional dockerized `raiko2` service is prewired with both remote SGX URLs:
 
 - `proof_type=sgx` uses `RAIKO2_REMOTE_SGX_BASE_URL`
 - `proof_type=sgxgeth` uses `RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL`
-- `proof_type=tdx` uses `RAIKO2_REMOTE_SGX_TDX_BASE_URL`
+- `proof_type=tdx` uses `RAIKO2_REMOTE_TDX_BASE_URL`
 
 The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
 both SGX lanes can boot and prove without an onchain registration step. Replace them with the real

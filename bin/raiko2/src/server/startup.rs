@@ -18,23 +18,29 @@ pub(crate) struct StartupSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_sgx_sgxgeth_base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    remote_sgx_tdx_base_url: Option<String>,
+    remote_tdx_base_url: Option<String>,
 }
 
 pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> StartupSummary {
-    let (remote_sgx_base_url, remote_sgx_sgxgeth_base_url, remote_sgx_tdx_base_url) =
-        if config.prover.is_remote_sgx_route() {
-            (
-                (!config.prover.remote_sgx.base_url.trim().is_empty())
-                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url)),
-                (!config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
-                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url)),
-                (!config.prover.remote_sgx.tdx_base_url.trim().is_empty())
-                    .then(|| sanitize_url_for_log(&config.prover.remote_sgx.tdx_base_url)),
-            )
-        } else {
-            (None, None, None)
-        };
+    let (remote_sgx_base_url, remote_sgx_sgxgeth_base_url) = if config.prover.is_remote_sgx_route()
+    {
+        (
+            (!config.prover.remote_sgx.base_url.trim().is_empty())
+                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.base_url)),
+            (!config.prover.remote_sgx.sgxgeth_base_url.trim().is_empty())
+                .then(|| sanitize_url_for_log(&config.prover.remote_sgx.sgxgeth_base_url)),
+        )
+    } else {
+        (None, None)
+    };
+    let remote_tdx_base_url = config
+        .prover
+        .is_remote_tdx_route()
+        .then(|| {
+            (!config.prover.remote_tdx.base_url.trim().is_empty())
+                .then(|| sanitize_url_for_log(&config.prover.remote_tdx.base_url))
+        })
+        .flatten();
 
     StartupSummary {
         listen: net::bind_addr(config),
@@ -51,7 +57,7 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
         json_logs,
         remote_sgx_base_url,
         remote_sgx_sgxgeth_base_url,
-        remote_sgx_tdx_base_url,
+        remote_tdx_base_url,
     }
 }
 
@@ -80,7 +86,7 @@ fn log_summary(message: &'static str, summary: &StartupSummary) {
         json_logs = summary.json_logs,
         remote_sgx_base_url = ?summary.remote_sgx_base_url,
         remote_sgx_sgxgeth_base_url = ?summary.remote_sgx_sgxgeth_base_url,
-        remote_sgx_tdx_base_url = ?summary.remote_sgx_tdx_base_url,
+        remote_tdx_base_url = ?summary.remote_tdx_base_url,
         "{}",
         message
     );
@@ -160,7 +166,6 @@ mod tests {
         config.prover.runner = RunnerKind::Remote;
         config.prover.remote_sgx.base_url = "http://example.com:9090".to_string();
         config.prover.remote_sgx.sgxgeth_base_url = "http://example.com:8090".to_string();
-        config.prover.remote_sgx.tdx_base_url = "http://example.com:8070".to_string();
 
         let summary = summary_json(&config, true);
 
@@ -170,11 +175,25 @@ mod tests {
             summary["remote_sgx_sgxgeth_base_url"],
             "http://example.com:8090"
         );
-        assert_eq!(
-            summary["remote_sgx_tdx_base_url"],
-            "http://example.com:8070"
-        );
+        assert!(summary.get("remote_tdx_base_url").is_none());
         assert_eq!(summary["json_logs"], true);
+    }
+
+    #[test]
+    fn startup_summary_includes_remote_tdx_url_for_remote_tdx_route() {
+        let mut config = sample_config();
+        let route = "tdx/remote"
+            .parse::<crate::config::PipelineRoute>()
+            .expect("parse tdx route");
+        config.prover.guest_system = route.guest_system;
+        config.prover.runner = route.runner;
+        config.prover.remote_tdx.base_url = "http://example.com:8070".to_string();
+
+        let summary = summary_json(&config, true);
+
+        assert_eq!(summary["route"], "tdx/remote");
+        assert_eq!(summary["remote_tdx_base_url"], "http://example.com:8070");
+        assert!(summary.get("remote_sgx_base_url").is_none());
     }
 
     #[test]

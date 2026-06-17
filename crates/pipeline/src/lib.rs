@@ -65,9 +65,10 @@ impl PipelineKey {
             Self::ShastaRisc0 => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
             Self::ShastaSp1 => PipelineRoute::new(GuestSystem::Sp1, RunnerKind::Local),
             Self::ShastaNative => PipelineRoute::new(GuestSystem::Native, RunnerKind::Local),
-            Self::ShastaSgx | Self::ShastaSgxGeth | Self::ShastaTdx => {
+            Self::ShastaSgx | Self::ShastaSgxGeth => {
                 PipelineRoute::new(GuestSystem::Sgx, RunnerKind::Remote)
             }
+            Self::ShastaTdx => PipelineRoute::new(GuestSystem::Tdx, RunnerKind::Remote),
             Self::ShastaRisc0Network => PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Network),
         }
     }
@@ -105,6 +106,7 @@ pub enum GuestSystem {
     Sp1,
     Native,
     Sgx,
+    Tdx,
 }
 
 impl GuestSystem {
@@ -115,6 +117,7 @@ impl GuestSystem {
             Self::Sp1 => "sp1",
             Self::Native => "native",
             Self::Sgx => "sgx",
+            Self::Tdx => "tdx",
         }
     }
 }
@@ -134,6 +137,7 @@ impl FromStr for GuestSystem {
             "sp1" => Ok(Self::Sp1),
             "native" => Ok(Self::Native),
             "sgx" => Ok(Self::Sgx),
+            "tdx" => Ok(Self::Tdx),
             _ => Err(format!("Unknown guest_system: {s}")),
         }
     }
@@ -202,6 +206,7 @@ impl PipelineRoute {
             GuestSystem::Sp1 => raiko2_primitives::ProofType::Sp1,
             GuestSystem::Native => raiko2_primitives::ProofType::Native,
             GuestSystem::Sgx => raiko2_primitives::ProofType::Sgx,
+            GuestSystem::Tdx => raiko2_primitives::ProofType::Tdx,
         }
     }
 
@@ -226,6 +231,13 @@ impl PipelineRoute {
             }
             (GuestSystem::Sgx, RunnerKind::Network) => {
                 Err("Unsupported proving route: sgx/network".to_string())
+            }
+            (GuestSystem::Tdx, RunnerKind::Remote) => Ok(PipelineKey::ShastaTdx),
+            (GuestSystem::Tdx, RunnerKind::Local) => {
+                Err("Unsupported proving route: tdx/local".to_string())
+            }
+            (GuestSystem::Tdx, RunnerKind::Network) => {
+                Err("Unsupported proving route: tdx/network".to_string())
             }
             (GuestSystem::Sp1, RunnerKind::Remote) => {
                 Err("Unsupported proving route: sp1/remote".to_string())
@@ -354,6 +366,23 @@ mod route_tests {
         assert_eq!(
             "shasta-tdx-remote".parse::<PipelineKey>().expect("tdx key"),
             PipelineKey::ShastaTdx
+        );
+    }
+
+    #[test]
+    fn tdx_remote_route_uses_tdx_pipeline() {
+        let route = "tdx/remote"
+            .parse::<PipelineRoute>()
+            .expect("parse tdx route");
+
+        assert_eq!(route.to_string(), "tdx/remote");
+        assert_eq!(
+            route.pipeline_key().expect("supported route"),
+            PipelineKey::ShastaTdx
+        );
+        assert_eq!(
+            PipelineRoute::from_pipeline_key(PipelineKey::ShastaTdx).to_string(),
+            "tdx/remote"
         );
     }
 }

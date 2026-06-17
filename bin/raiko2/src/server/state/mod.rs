@@ -153,7 +153,7 @@ struct PairPipelineRegistration<'a> {
 
 #[cfg(feature = "local-provers")]
 const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
-    !config.prover.is_remote_sgx_route()
+    !config.prover.is_remote_sgx_route() && !config.prover.is_remote_tdx_route()
 }
 
 async fn register_pair_pipelines(
@@ -166,6 +166,14 @@ async fn register_pair_pipelines(
             registration.pair.key.clone(),
         ));
         register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        return Ok(());
+    }
+    if registration.config.prover.is_remote_tdx_route() {
+        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+            Arc::clone(&registration.runtime),
+            registration.pair.key.clone(),
+        ));
+        register_remote_tdx_pipeline(factory, &registration, runtime_observer).await?;
         return Ok(());
     }
 
@@ -255,7 +263,9 @@ async fn register_pair_pipelines(
             Arc::new(native_engine),
         );
 
-        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+        register_remote_sgx_pipelines(factory, &registration, Arc::clone(&runtime_observer))
+            .await?;
+        register_remote_tdx_pipeline(factory, &registration, runtime_observer).await?;
         Ok(())
     }
 }
@@ -265,9 +275,9 @@ async fn register_remote_sgx_pipelines(
     registration: &PairPipelineRegistration<'_>,
     runtime_observer: Arc<dyn EngineObserver>,
 ) -> Result<()> {
-    register_remote_sgx_engine(
+    register_remote_tee_engine(
         factory,
-        RemoteSgxRegistration {
+        RemoteTeeRegistration {
             config: registration.config,
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
@@ -277,12 +287,13 @@ async fn register_remote_sgx_pipelines(
             pipeline_key: PipelineKey::ShastaSgx,
             proof_type: ProofType::Sgx,
             base_url: &registration.config.prover.remote_sgx.base_url,
+            timeout_ms: registration.config.prover.remote_sgx.timeout_ms,
         },
     )
     .await?;
-    register_remote_sgx_engine(
+    register_remote_tee_engine(
         factory,
-        RemoteSgxRegistration {
+        RemoteTeeRegistration {
             config: registration.config,
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
@@ -292,12 +303,21 @@ async fn register_remote_sgx_pipelines(
             pipeline_key: PipelineKey::ShastaSgxGeth,
             proof_type: ProofType::SgxGeth,
             base_url: &registration.config.prover.remote_sgx.sgxgeth_base_url,
+            timeout_ms: registration.config.prover.remote_sgx.timeout_ms,
         },
     )
     .await?;
-    register_remote_sgx_engine(
+    Ok(())
+}
+
+async fn register_remote_tdx_pipeline(
+    factory: &mut StaticPipelineFactory,
+    registration: &PairPipelineRegistration<'_>,
+    runtime_observer: Arc<dyn EngineObserver>,
+) -> Result<()> {
+    register_remote_tee_engine(
         factory,
-        RemoteSgxRegistration {
+        RemoteTeeRegistration {
             config: registration.config,
             pair: registration.pair,
             scheduler_config: registration.scheduler_config.clone(),
@@ -306,14 +326,14 @@ async fn register_remote_sgx_pipelines(
             maintenance_interval: registration.maintenance_interval,
             pipeline_key: PipelineKey::ShastaTdx,
             proof_type: ProofType::Tdx,
-            base_url: &registration.config.prover.remote_sgx.tdx_base_url,
+            base_url: &registration.config.prover.remote_tdx.base_url,
+            timeout_ms: registration.config.prover.remote_tdx.timeout_ms,
         },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
-struct RemoteSgxRegistration<'a> {
+struct RemoteTeeRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
@@ -323,17 +343,18 @@ struct RemoteSgxRegistration<'a> {
     pipeline_key: PipelineKey,
     proof_type: ProofType,
     base_url: &'a str,
+    timeout_ms: u64,
 }
 
-async fn register_remote_sgx_engine(
+async fn register_remote_tee_engine(
     factory: &mut StaticPipelineFactory,
-    registration: RemoteSgxRegistration<'_>,
+    registration: RemoteTeeRegistration<'_>,
 ) -> Result<()> {
     if registration.base_url.trim().is_empty() {
         return Ok(());
     }
 
-    let engine = build_remote_sgx_engine(
+    let engine = build_remote_tee_engine(
         registration.config,
         registration.pair,
         registration.scheduler_config,
@@ -341,6 +362,7 @@ async fn register_remote_sgx_engine(
         registration.pipeline_key,
         registration.proof_type,
         registration.base_url.to_string(),
+        registration.timeout_ms,
     )
     .await?;
     engine.start_workers_with_maintenance_interval(
@@ -825,7 +847,7 @@ async fn build_boundless_engine(
 }
 
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
-async fn build_remote_sgx_engine(
+async fn build_remote_tee_engine(
     config: &Config,
     pair: &ResolvedNetworkPair,
     scheduler_config: SchedulerConfig,
@@ -833,9 +855,9 @@ async fn build_remote_sgx_engine(
     pipeline_key: PipelineKey,
     proof_type: ProofType,
     base_url: String,
+    timeout_ms: u64,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let gaiko2_config =
-        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
+    let gaiko2_config = setup::remote_tee_prover_config(base_url, timeout_ms);
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

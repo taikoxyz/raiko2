@@ -3596,8 +3596,8 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 
 [[package]]
 name = "protocol"
-version = "2.0.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=ffce7c8aea3867d3dbd52a7da50d776daa5774e2#ffce7c8aea3867d3dbd52a7da50d776daa5774e2"
+version = "2.1.0"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=8db186096f7f1700064c96dfb6ea6467fa1582bd#8db186096f7f1700064c96dfb6ea6467fa1582bd"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",
@@ -3712,7 +3712,6 @@ dependencies = [
  "reth-chainspec",
  "reth-consensus",
  "reth-ethereum-primitives",
- "reth-primitives-traits",
  "reth-revm",
  "serde",
  "serde_json",
@@ -3730,14 +3729,11 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "bincode",
- "hex",
  "raiko2-primitives",
  "raiko2-protocol",
  "raiko2-protocol-shasta",
- "reth-ethereum-primitives",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

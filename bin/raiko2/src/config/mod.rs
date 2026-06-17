@@ -19,7 +19,7 @@ pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
-pub use server::ServerConfig;
+pub use server::{ServerAclConfig, ServerAclFeature, ServerAclKey, ServerConfig};
 
 #[cfg(test)]
 use raiko2_provider::L2ProviderKind;
@@ -262,16 +262,41 @@ mod tests {
     }
 
     #[test]
-    fn test_server_config_debug_redacts_admin_key() {
+    fn test_server_config_debug_redacts_api_keys() {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![ServerAclKey {
+                    id: "ops-clear".to_string(),
+                    key: "secret-clear-key".to_string(),
+                    allow: vec![ServerAclFeature::ProverClear],
+                }],
+            },
             admin_api_key: Some("secret-admin-key".to_string()),
         };
 
         let debug = format!("{config:?}");
+        assert!(!debug.contains("secret-clear-key"));
         assert!(!debug.contains("secret-admin-key"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn test_server_config_invalid_clear_api_key() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![ServerAclKey {
+                    id: "ops-clear".to_string(),
+                    key: String::new(),
+                    allow: vec![ServerAclFeature::ProverClear],
+                }],
+            },
+            admin_api_key: None,
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -279,6 +304,7 @@ mod tests {
         let config = ServerConfig {
             host: "".to_string(),
             port: 8080,
+            acl: Default::default(),
             admin_api_key: None,
         };
         assert!(config.validate().is_err());
@@ -289,6 +315,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 0,
+            acl: Default::default(),
             admin_api_key: None,
         };
         assert!(config.validate().is_err());

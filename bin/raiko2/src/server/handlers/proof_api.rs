@@ -2,7 +2,7 @@ use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use raiko2_engine::{
@@ -25,6 +25,7 @@ use std::{collections::HashSet, future::Future};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
+use super::super::auth::authorize_acl_feature;
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
@@ -36,7 +37,7 @@ use super::proof_types::{
     ProposalStatus, ProverNetworkStatus, ProverStatus, ProverTaskStatusCounts, PruneStatus,
     PublicProverArgs, RootRuntime, RootTaskState, ShastaProposal, TaskData, TaskRuntime,
 };
-use crate::config::ResolvedNetworkPair;
+use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
 use crate::server::state::{
     AppState, EngineHandle, EngineQueueTaskState, EngineQueueTaskView, EngineStatusView,
@@ -307,7 +308,12 @@ pub async fn get_prover_status(
     }))
 }
 
-pub async fn clear_prover(State(state): State<AppState>) -> Result<Json<PruneStatus>, ApiError> {
+pub async fn clear_prover(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PruneStatus>, ApiError> {
+    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)?;
+
     let records = state
         .runtime
         .list_tasks()

@@ -1,6 +1,7 @@
 //! HTTP request handlers.
 
 mod admin;
+mod auth;
 mod errors;
 mod health;
 mod metrics;

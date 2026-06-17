@@ -22,12 +22,15 @@ The public API surface is:
 - `GET /v3/proof/list`
 - `POST /v3/proof/prune`
 - `GET /v3/prover/status`
-- `POST /v3/prover/clear`
 - `GET /v3/tasks/{id}` (`raiko2` extension)
 - `POST /v3/tasks/{id}/cancel` (`raiko2` extension)
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
+
+ACL-protected API surface requires `x-api-key` with a key that allows the listed feature:
+
+- `POST /v3/prover/clear` requires `prover.clear`
 
 The optional admin surface is disabled unless `server.admin_api_key` is configured:
 
@@ -415,10 +418,12 @@ non-terminal roots.
 
 ```http
 POST /v3/prover/clear
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"]>
 ```
 
-Cancels every non-terminal root originally submitted with `proof_type=zk_any`, cascades cancellation
-to owned proposal and aggregation queue tasks, and marks the root runtime state `cancelled`.
+Requires an ACL key that allows `prover.clear`. Cancels every non-terminal root originally submitted
+with `proof_type=zk_any`, cascades cancellation to owned proposal and aggregation queue tasks, and
+marks the root runtime state `cancelled`.
 
 Shared child tasks still referenced by another live root are left running.
 Already submitted upstream SP1 or RISC0/Boundless orders cannot be cancelled, but cleared or

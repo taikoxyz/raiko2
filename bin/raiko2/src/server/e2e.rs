@@ -38,7 +38,7 @@ use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
     ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
 };
-use crate::config::{GuestSystem, RunnerKind};
+use crate::config::{GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
 
 async fn read_json(res: axum::response::Response) -> (StatusCode, Value) {
@@ -107,7 +107,7 @@ async fn post_json(app: &Router, uri: &str, payload: Value) -> (StatusCode, Valu
     read_json(res).await
 }
 
-async fn post_json_with_admin_key(
+async fn post_json_with_api_key(
     app: &Router,
     uri: &str,
     key: &str,
@@ -1617,7 +1617,7 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let (status, res) = get_json(&app, "/admin/ballot").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
 
-    let (status, res) = post_json_with_admin_key(
+    let (status, res) = post_json_with_api_key(
         &app,
         "/admin/ballot",
         "secret-admin-key",
@@ -1668,7 +1668,7 @@ async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
-    let (status, res) = post_json_with_admin_key(
+    let (status, res) = post_json_with_api_key(
         &app,
         "/admin/ballot",
         "secret-admin-key",
@@ -1685,6 +1685,36 @@ async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
             .expect("message")
             .contains("not supported for zk_any")
     );
+}
+
+#[tokio::test]
+async fn e2e_prover_clear_requires_clear_api_key() {
+    let config = base_config();
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) = post_json(&app, "/v3/prover/clear", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{res}");
+
+    let mut config = base_config();
+    config.server.acl.keys = vec![ServerAclKey {
+        id: "ops-clear".to_string(),
+        key: "secret-clear-key".to_string(),
+        allow: vec![ServerAclFeature::ProverClear],
+    }];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) = post_json(&app, "/v3/prover/clear", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) = post_json_with_api_key(&app, "/v3/prover/clear", "wrong", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "ok");
 }
 
 #[tokio::test]

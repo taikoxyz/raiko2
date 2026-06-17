@@ -21,6 +21,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 1234,
+                acl: Default::default(),
                 admin_api_key: None,
             },
             ..Default::default()
@@ -35,6 +36,7 @@ mod tests {
             server: ServerConfig {
                 host: "::1".to_string(),
                 port: 1234,
+                acl: Default::default(),
                 admin_api_key: None,
             },
             ..Default::default()

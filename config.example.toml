@@ -14,6 +14,12 @@ port = 8080
 # Keep unset to disable the admin API.
 # admin_api_key = "change-me"
 
+# Optional: enables `POST /v3/prover/clear`.
+# [server.acl]
+# keys = [
+#   { id = "ops-clear", key = "change-me", allow = ["prover.clear"] },
+# ]
+
 [rpc]
 # Explicitly allowed (network, l1_network) combinations for the hoodi-compatible API.
 # Canonical configs should declare RPC endpoints here.

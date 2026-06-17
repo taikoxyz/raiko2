@@ -48,6 +48,8 @@ route is `risc0/network`. The prover loads guest ELF files from `RAIKO2_GUEST_EL
 otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally with
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
+When intentionally running v0.1.0 release guest ELFs with a newer host, set
+`prover.guest_input_abi = "v0_1_0"`; the default is `current`.
 
 ## Core Flow
 

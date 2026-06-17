@@ -63,6 +63,9 @@ inactive_ttl_secs = 7200
 #   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
 guest_system = "risc0"
 runner = "local"
+# Guest input ABI emitted by host preflight.
+# Use "v0_1_0" only when intentionally running already released v0.1.0 guest ELFs.
+guest_input_abi = "current"
 
 [prover.risc0]
 bonsai = true

@@ -20,6 +20,10 @@ use crate::util;
 
 #[derive(Args)]
 pub struct GuestDigestsArgs {
+    /// Guest ELF directory to inspect. Defaults to crates/guests/elf under the repository root.
+    #[arg(long)]
+    pub guest_elf_dir: Option<PathBuf>,
+
     /// Output path for the JSON summary.
     #[arg(long)]
     pub output: Option<PathBuf>,
@@ -64,7 +68,7 @@ pub struct GuestDigestSummary {
 }
 
 pub fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
-    let summary = collect_guest_digests(root)?;
+    let summary = collect_guest_digests_with_dir(root, args.guest_elf_dir.as_deref())?;
     let output_path = resolve_output_path(root, args.output.as_deref())?;
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)
@@ -76,7 +80,16 @@ pub fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
 }
 
 pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
-    let elf_dir = root.join(DEFAULT_GUEST_ELF_DIR);
+    collect_guest_digests_with_dir(root, None)
+}
+
+pub fn collect_guest_digests_with_dir(
+    root: &Path,
+    guest_elf_dir: Option<&Path>,
+) -> Result<GuestDigestSummary> {
+    let elf_dir = guest_elf_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join(DEFAULT_GUEST_ELF_DIR));
     let risc0_elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load RISC0 guest ELFs from {}", elf_dir.display()))?;
     let sp1_elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir)
@@ -89,7 +102,9 @@ pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
 
     Ok(GuestDigestSummary {
         created_at_unix: unix_timestamp(),
-        guest_elf_dir: DEFAULT_GUEST_ELF_DIR.to_string(),
+        guest_elf_dir: guest_elf_dir
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| DEFAULT_GUEST_ELF_DIR.to_string()),
         digests,
     })
 }
@@ -275,6 +290,7 @@ mod tests {
         super::run(
             &root,
             super::GuestDigestsArgs {
+                guest_elf_dir: None,
                 output: Some(output.clone()),
             },
         )

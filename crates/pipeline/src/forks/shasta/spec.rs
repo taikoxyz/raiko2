@@ -15,7 +15,7 @@ use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
     ChainSpec, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError, RaikoResult,
     StatelessInput, SupportedChainSpecs,
-    chain_spec::{ForkCondition, ForkId, TaikoFork},
+    chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
 };
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
@@ -112,7 +112,7 @@ where
     ) -> RaikoResult<GuestInput> {
         let preflight_started_at = Instant::now();
         let proof_type = proof_type_from_context(ctx);
-        let chain_spec = chain_spec_from_context(ctx);
+        let chain_spec = chain_spec_from_context(ctx)?;
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
         let blocks = fetch_preflight_blocks(provider, &block_numbers).await?;
@@ -797,14 +797,28 @@ fn validate_fetched_block_numbers(
     Ok(())
 }
 
-fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
-    SupportedChainSpecs::default()
+fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    let guest_input_abi = guest_input_abi_from_context(ctx)?;
+    let chain_spec = SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
         .unwrap_or_else(|| ChainSpec {
             name: "unknown".to_string(),
             chain_id: ctx.request.l2_chain_id,
             ..Default::default()
-        })
+        });
+    Ok(chain_spec.project_for_guest_input_abi(guest_input_abi))
+}
+
+fn guest_input_abi_from_context(ctx: &ProofContext) -> RaikoResult<GuestInputAbi> {
+    let Some(value) = ctx.config.get("guest_input_abi") else {
+        return Ok(GuestInputAbi::default());
+    };
+    if value.is_null() {
+        return Ok(GuestInputAbi::default());
+    }
+    serde_json::from_value(value.clone()).map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("invalid prover.guest_input_abi: {err}"))
+    })
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
@@ -1589,6 +1603,52 @@ mod tests {
     }
 
     #[test]
+    fn chain_spec_from_context_defaults_to_current_guest_input_abi() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_000;
+        let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+
+        assert_ne!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(1_775_393_399))
+        );
+        assert!(
+            spec.verifier_address_forks
+                .values()
+                .any(|verifiers| verifiers.contains_key(&ProofType::SgxGeth))
+        );
+    }
+
+    #[test]
+    fn chain_spec_from_context_projects_v0_1_0_guest_input_abi() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.request.l2_chain_id = 167_000;
+        ctx.config = serde_json::json!({ "guest_input_abi": "v0_1_0" });
+
+        let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(1_775_393_399))
+        );
+        assert!(
+            spec.verifier_address_forks
+                .values()
+                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
+        );
+    }
+
+    #[test]
+    fn chain_spec_from_context_rejects_invalid_guest_input_abi() {
+        let mut ctx = sample_context(42, 11, 9);
+        ctx.config = serde_json::json!({ "guest_input_abi": "legacy" });
+
+        let err = super::chain_spec_from_context(&ctx).expect_err("invalid abi");
+
+        assert!(err.to_string().contains("invalid prover.guest_input_abi"));
+    }
+
+    #[test]
     fn l1_chain_spec_from_context_uses_preflight_override() {
         let mut ctx = sample_context(42, 11, 9);
         let mut l1_spec = SupportedChainSpecs::default()
@@ -1990,7 +2050,7 @@ mod tests {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_block_range = None;
 
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
         let err = super::extract_block_range(&ctx, &chain_spec).expect_err("missing range");
 
         assert!(
@@ -2007,7 +2067,7 @@ mod tests {
             end: u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
         });
 
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
         let (blocks, proposal_id) =
             super::extract_block_range(&ctx, &chain_spec).expect("valid range");
 
@@ -2024,7 +2084,7 @@ mod tests {
             end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
         });
 
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
         let (blocks, proposal_id) =
             super::extract_block_range(&ctx, &chain_spec).expect("valid range");
 
@@ -2041,7 +2101,7 @@ mod tests {
             start: 1,
             end: max_blocks + 1,
         });
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
 
         let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
 
@@ -2058,7 +2118,7 @@ mod tests {
             start: 1,
             end: max_blocks + 1,
         });
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
 
         let err = super::extract_block_range(&ctx, &chain_spec).expect_err("oversized range");
 
@@ -2069,14 +2129,14 @@ mod tests {
     fn derivation_source_limit_uses_environment_hardfork_activation() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
-        let mainnet = super::chain_spec_from_context(&ctx);
+        let mainnet = super::chain_spec_from_context(&ctx).expect("chain spec");
         assert_eq!(
             super::derivation_source_max_blocks_for_chain_spec_at(&mainnet, 1, u64::MAX),
             super::DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_013;
-        let hoodi = super::chain_spec_from_context(&ctx);
+        let hoodi = super::chain_spec_from_context(&ctx).expect("chain spec");
         let Some(ForkCondition::Timestamp(hoodi_unzen_timestamp)) =
             hoodi.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
         else {
@@ -2100,7 +2160,7 @@ mod tests {
         );
 
         ctx.request.l2_chain_id = 167_001;
-        let devnet = super::chain_spec_from_context(&ctx);
+        let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
         let Some(ForkCondition::Timestamp(devnet_unzen_timestamp)) =
             devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
         else {
@@ -2116,13 +2176,13 @@ mod tests {
         );
 
         ctx.request.l2_chain_id = 167_011;
-        let masaya = super::chain_spec_from_context(&ctx);
+        let masaya = super::chain_spec_from_context(&ctx).expect("chain spec");
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_799),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
+            masaya.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 1_778_158_800),
+            super::derivation_source_max_blocks_for_chain_spec_at(&masaya, 1, 0),
             super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
     }
@@ -2131,7 +2191,7 @@ mod tests {
     fn validate_derivation_source_block_limit_rejects_inactive_unzen_environment() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
-        let chain_spec = super::chain_spec_from_context(&ctx);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
 
         let err = super::validate_derivation_source_block_limit(
             super::DERIVATION_SOURCE_MAX_BLOCKS + 1,
@@ -2148,7 +2208,7 @@ mod tests {
     async fn preflight_rejects_pre_unzen_range_before_witness_fetch() {
         let provider = sample_provider();
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_011;
+        ctx.request.l2_chain_id = 167_013;
         let max_blocks = u64::try_from(super::DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,

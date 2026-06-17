@@ -554,6 +554,8 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
+- `prover.guest_input_abi` defaults to `current`. Set `v0_1_0` only when intentionally
+  running v0.1.0 release guest ELFs with a newer host.
 - `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
   when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.

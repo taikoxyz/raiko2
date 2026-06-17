@@ -5,8 +5,9 @@ use alethia_reth_chainspec::{
     hardfork::TaikoHardfork as AlethiaTaikoHardfork, spec::TaikoDevnetConfigExt,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
-use alloy_primitives::{Address, BlockNumber, ChainId, U256, map::HashMap, uint};
+use alloy_primitives::{Address, BlockNumber, ChainId, U256, address, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
+use reth_chainspec::{ChainSpec as RethChainSpec, HOODI as RETH_HOODI, MAINNET as RETH_MAINNET};
 use reth_revm::primitives::hardfork::SpecId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -275,6 +276,23 @@ fn parse_spec_id_str(value: &str) -> Result<SpecId, String> {
     ForkId::from_str(value).map(ForkId::as_spec_id)
 }
 
+fn deserialize_optional_spec_id<'de, D>(deserializer: D) -> Result<Option<SpecId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if !deserializer.is_human_readable() {
+        return Option::<SpecId>::deserialize(deserializer);
+    }
+
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    parse_spec_id_str(&value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 /// Custom deserializer for `SpecId` that handles Taiko-specific fork names.
 fn deserialize_spec_id<'de, D>(deserializer: D) -> Result<SpecId, D::Error>
 where
@@ -314,6 +332,30 @@ where
     Ok(spec_id_map)
 }
 
+fn deserialize_optional_fork_id_map<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<ForkId, T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    if !deserializer.is_human_readable() {
+        return Option::<BTreeMap<ForkId, T>>::deserialize(deserializer);
+    }
+
+    let Some(string_map) = Option::<BTreeMap<String, T>>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    let mut spec_id_map = BTreeMap::new();
+    for (key, value) in string_map {
+        let spec_id = ForkId::from_str(&key).map_err(serde::de::Error::custom)?;
+        spec_id_map.insert(spec_id, value);
+    }
+
+    Ok(Some(spec_id_map))
+}
+
 /// Specification of a specific chain.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct ChainSpec {
@@ -336,7 +378,468 @@ pub struct ChainSpec {
     pub is_taiko: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestInputAbi {
+    #[default]
+    Current,
+    V0_1_0,
+}
+
 type VerifierAddressForks = BTreeMap<ForkId, BTreeMap<ProofType, Option<Address>>>;
+
+#[derive(Deserialize)]
+struct BinaryChainSpecHelper {
+    name: String,
+    chain_id: ChainId,
+    #[serde(deserialize_with = "deserialize_spec_id")]
+    max_spec_id: SpecId,
+    #[serde(deserialize_with = "deserialize_fork_id_map")]
+    hard_forks: BTreeMap<ForkId, ForkCondition>,
+    eip_1559_constants: Eip1559Constants,
+    #[serde(default, deserialize_with = "deserialize_fork_id_map")]
+    l1_contract: BTreeMap<ForkId, Address>,
+    l2_contract: Option<Address>,
+    rpc: String,
+    beacon_rpc: Option<String>,
+    #[serde(deserialize_with = "deserialize_verifier_address_forks")]
+    verifier_address_forks: VerifierAddressForks,
+    genesis_time: u64,
+    seconds_per_slot: u64,
+    is_taiko: bool,
+}
+
+impl From<BinaryChainSpecHelper> for ChainSpec {
+    fn from(helper: BinaryChainSpecHelper) -> Self {
+        Self {
+            name: helper.name,
+            chain_id: helper.chain_id,
+            max_spec_id: helper.max_spec_id,
+            hard_forks: helper.hard_forks,
+            eip_1559_constants: helper.eip_1559_constants,
+            l1_contract: helper.l1_contract,
+            l2_contract: helper.l2_contract,
+            rpc: helper.rpc,
+            beacon_rpc: helper.beacon_rpc,
+            verifier_address_forks: helper.verifier_address_forks,
+            genesis_time: helper.genesis_time,
+            seconds_per_slot: helper.seconds_per_slot,
+            is_taiko: helper.is_taiko,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct JsonChainSpecHelper {
+    name: String,
+    #[serde(default)]
+    chain_id: Option<ChainId>,
+    #[serde(default, deserialize_with = "deserialize_optional_spec_id")]
+    max_spec_id: Option<SpecId>,
+    #[serde(default, deserialize_with = "deserialize_optional_fork_id_map")]
+    hard_forks: Option<BTreeMap<ForkId, ForkCondition>>,
+    #[serde(default)]
+    eip_1559_constants: Option<Eip1559Constants>,
+    #[serde(default, deserialize_with = "deserialize_fork_id_map")]
+    l1_contract: BTreeMap<ForkId, Address>,
+    l2_contract: Option<Address>,
+    rpc: String,
+    beacon_rpc: Option<String>,
+    #[serde(deserialize_with = "deserialize_verifier_address_forks")]
+    verifier_address_forks: VerifierAddressForks,
+    genesis_time: u64,
+    seconds_per_slot: u64,
+    #[serde(default)]
+    is_taiko: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalChainSpec {
+    chain_id: ChainId,
+    max_spec_id: SpecId,
+    hard_forks: BTreeMap<ForkId, ForkCondition>,
+    eip_1559_constants: Eip1559Constants,
+    is_taiko: bool,
+}
+
+const ETHEREUM_EXECUTION_FORKS: &[(EthereumHardfork, SpecId)] = &[
+    (EthereumHardfork::Frontier, SpecId::FRONTIER),
+    (EthereumHardfork::Homestead, SpecId::HOMESTEAD),
+    (EthereumHardfork::Dao, SpecId::DAO_FORK),
+    (EthereumHardfork::Tangerine, SpecId::TANGERINE),
+    (EthereumHardfork::SpuriousDragon, SpecId::SPURIOUS_DRAGON),
+    (EthereumHardfork::Byzantium, SpecId::BYZANTIUM),
+    (EthereumHardfork::Constantinople, SpecId::CONSTANTINOPLE),
+    (EthereumHardfork::Petersburg, SpecId::PETERSBURG),
+    (EthereumHardfork::Istanbul, SpecId::ISTANBUL),
+    (EthereumHardfork::MuirGlacier, SpecId::MUIR_GLACIER),
+    (EthereumHardfork::Berlin, SpecId::BERLIN),
+    (EthereumHardfork::London, SpecId::LONDON),
+    (EthereumHardfork::ArrowGlacier, SpecId::ARROW_GLACIER),
+    (EthereumHardfork::GrayGlacier, SpecId::GRAY_GLACIER),
+    (EthereumHardfork::Paris, SpecId::MERGE),
+    (EthereumHardfork::Shanghai, SpecId::SHANGHAI),
+    (EthereumHardfork::Cancun, SpecId::CANCUN),
+    (EthereumHardfork::Prague, SpecId::PRAGUE),
+    (EthereumHardfork::Osaka, SpecId::OSAKA),
+    (EthereumHardfork::Amsterdam, SpecId::AMSTERDAM),
+];
+
+const TAIKO_EXECUTION_FORKS: &[(AlethiaTaikoHardfork, TaikoFork)] = &[
+    (AlethiaTaikoHardfork::Ontake, TaikoFork::Ontake),
+    (AlethiaTaikoHardfork::Pacaya, TaikoFork::Pacaya),
+    (AlethiaTaikoHardfork::Shasta, TaikoFork::Shasta),
+    (AlethiaTaikoHardfork::Unzen, TaikoFork::Unzen),
+];
+
+fn canonical_chain_spec(name: &str) -> Option<CanonicalChainSpec> {
+    match name {
+        "ethereum" => Some(canonical_l1_chain_spec(RETH_MAINNET.as_ref())),
+        "hoodi" => Some(canonical_l1_chain_spec(RETH_HOODI.as_ref())),
+        "taiko_mainnet" => Some(canonical_taiko_chain_spec(TAIKO_MAINNET.as_ref())),
+        "taiko_dev" => Some(canonical_taiko_chain_spec(TAIKO_DEVNET.as_ref())),
+        "taiko_masaya" => Some(canonical_taiko_chain_spec(TAIKO_MASAYA.as_ref())),
+        "taiko_hoodi" => Some(canonical_taiko_chain_spec(TAIKO_HOODI.as_ref())),
+        _ => None,
+    }
+}
+
+fn canonical_l1_chain_spec(spec: &RethChainSpec) -> CanonicalChainSpec {
+    let hard_forks = ETHEREUM_EXECUTION_FORKS
+        .iter()
+        .filter_map(|(fork, spec_id)| {
+            let condition = spec.inner_hardfork_condition(*fork)?;
+            Some((ForkId::Standard(*spec_id), condition))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    CanonicalChainSpec {
+        chain_id: spec.chain.id(),
+        max_spec_id: max_spec_id(&hard_forks),
+        hard_forks,
+        eip_1559_constants: Eip1559Constants::default(),
+        is_taiko: false,
+    }
+}
+
+fn canonical_taiko_chain_spec(spec: &TaikoChainSpec) -> CanonicalChainSpec {
+    let hard_forks = TAIKO_EXECUTION_FORKS
+        .iter()
+        .map(|(alethia_fork, taiko_fork)| {
+            (
+                ForkId::Taiko(*taiko_fork),
+                from_alethia_fork_condition(spec.inner.hardforks.fork(*alethia_fork)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    CanonicalChainSpec {
+        chain_id: spec.inner.chain.id(),
+        max_spec_id: max_spec_id(&hard_forks),
+        hard_forks,
+        eip_1559_constants: Eip1559Constants::default(),
+        is_taiko: true,
+    }
+}
+
+trait RethChainSpecExt {
+    fn inner_hardfork_condition(&self, fork: EthereumHardfork) -> Option<ForkCondition>;
+}
+
+impl RethChainSpecExt for RethChainSpec {
+    fn inner_hardfork_condition(&self, fork: EthereumHardfork) -> Option<ForkCondition> {
+        let condition = self.hardforks.get(fork)?;
+        Some(from_alethia_fork_condition(condition))
+    }
+}
+
+fn from_alethia_fork_condition(condition: AlethiaForkCondition) -> ForkCondition {
+    match condition {
+        AlethiaForkCondition::Block(block) => ForkCondition::Block(block),
+        AlethiaForkCondition::TTD {
+            activation_block_number,
+            fork_block,
+            ..
+        } => ForkCondition::Block(fork_block.unwrap_or(activation_block_number)),
+        AlethiaForkCondition::Timestamp(timestamp) => ForkCondition::Timestamp(timestamp),
+        AlethiaForkCondition::Never => ForkCondition::Tbd,
+    }
+}
+
+fn max_spec_id(hard_forks: &BTreeMap<ForkId, ForkCondition>) -> SpecId {
+    hard_forks
+        .keys()
+        .map(|fork_id| fork_id.as_spec_id())
+        .max()
+        .unwrap_or(SpecId::FRONTIER)
+}
+
+fn chain_spec_from_json_helper<E>(helper: JsonChainSpecHelper) -> Result<ChainSpec, E>
+where
+    E: serde::de::Error,
+{
+    let canonical = canonical_chain_spec(&helper.name);
+    let chain_id = helper
+        .chain_id
+        .or_else(|| canonical.as_ref().map(|spec| spec.chain_id))
+        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "chain_id"))?;
+    let max_spec_id = helper
+        .max_spec_id
+        .or_else(|| canonical.as_ref().map(|spec| spec.max_spec_id))
+        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "max_spec_id"))?;
+    let hard_forks = helper
+        .hard_forks
+        .or_else(|| canonical.as_ref().map(|spec| spec.hard_forks.clone()))
+        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "hard_forks"))?;
+    let eip_1559_constants = helper
+        .eip_1559_constants
+        .or_else(|| canonical.as_ref().map(|spec| spec.eip_1559_constants))
+        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "eip_1559_constants"))?;
+    let is_taiko = helper
+        .is_taiko
+        .or_else(|| canonical.as_ref().map(|spec| spec.is_taiko))
+        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "is_taiko"))?;
+
+    Ok(ChainSpec {
+        name: helper.name,
+        chain_id,
+        max_spec_id,
+        hard_forks,
+        eip_1559_constants,
+        l1_contract: helper.l1_contract,
+        l2_contract: helper.l2_contract,
+        rpc: helper.rpc,
+        beacon_rpc: helper.beacon_rpc,
+        verifier_address_forks: helper.verifier_address_forks,
+        genesis_time: helper.genesis_time,
+        seconds_per_slot: helper.seconds_per_slot,
+        is_taiko,
+    })
+}
+
+fn missing_chain_spec_field<E>(name: &str, field: &str) -> E
+where
+    E: serde::de::Error,
+{
+    serde::de::Error::custom(format!("missing {field} for unknown chain spec {name}"))
+}
+
+fn v0_1_0_guest_input_hard_forks(name: &str) -> Option<(SpecId, BTreeMap<ForkId, ForkCondition>)> {
+    let hard_forks = match name {
+        "ethereum" => BTreeMap::from([
+            (ForkId::Standard(SpecId::FRONTIER), ForkCondition::Block(0)),
+            (
+                ForkId::Standard(SpecId::MERGE),
+                ForkCondition::Block(15_537_394),
+            ),
+            (
+                ForkId::Standard(SpecId::SHANGHAI),
+                ForkCondition::Block(17_034_870),
+            ),
+            (
+                ForkId::Standard(SpecId::CANCUN),
+                ForkCondition::Timestamp(1_710_338_135),
+            ),
+        ]),
+        "hoodi" => BTreeMap::from([
+            (ForkId::Standard(SpecId::FRONTIER), ForkCondition::Block(0)),
+            (
+                ForkId::Standard(SpecId::SHANGHAI),
+                ForkCondition::Timestamp(1_696_000_704),
+            ),
+            (
+                ForkId::Standard(SpecId::CANCUN),
+                ForkCondition::Timestamp(1_707_305_664),
+            ),
+        ]),
+        "taiko_mainnet" => BTreeMap::from([
+            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
+            (
+                ForkId::Taiko(TaikoFork::Ontake),
+                ForkCondition::Block(538_304),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Pacaya),
+                ForkCondition::Block(1_166_000),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                ForkCondition::Timestamp(1_775_393_399),
+            ),
+            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd),
+            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
+        ]),
+        "taiko_dev" => BTreeMap::from([
+            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Timestamp(0)),
+            (
+                ForkId::Standard(SpecId::CANCUN),
+                ForkCondition::Timestamp(0),
+            ),
+        ]),
+        "taiko_masaya" => BTreeMap::from([
+            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
+            (ForkId::Taiko(TaikoFork::Ontake), ForkCondition::Block(0)),
+            (ForkId::Taiko(TaikoFork::Pacaya), ForkCondition::Block(0)),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                ForkCondition::Timestamp(0),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Unzen),
+                ForkCondition::Timestamp(1_778_158_800),
+            ),
+            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
+        ]),
+        "taiko_hoodi" => BTreeMap::from([
+            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
+            (ForkId::Taiko(TaikoFork::Ontake), ForkCondition::Block(0)),
+            (ForkId::Taiko(TaikoFork::Pacaya), ForkCondition::Block(0)),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                ForkCondition::Timestamp(1_770_296_400),
+            ),
+            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd),
+            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
+        ]),
+        _ => return None,
+    };
+
+    Some((max_spec_id(&hard_forks), hard_forks))
+}
+
+fn v0_1_0_guest_input_l1_contracts(name: &str) -> Option<BTreeMap<ForkId, Address>> {
+    match name {
+        "taiko_mainnet" => Some(BTreeMap::from([
+            (
+                ForkId::Taiko(TaikoFork::Pacaya),
+                address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a"),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"),
+            ),
+        ])),
+        "taiko_dev" => Some(BTreeMap::from([(
+            ForkId::Standard(SpecId::CANCUN),
+            address!("12100faa7b157e9947340b44409fc7e27ec0abef"),
+        )])),
+        "taiko_masaya" => Some(BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9"),
+        )])),
+        "taiko_hoodi" => Some(BTreeMap::from([
+            (
+                ForkId::Taiko(TaikoFork::Pacaya),
+                address!("f6eA848c7d7aC83de84db45Ae28EAbf377fe0eF9"),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                address!("eF4bB7A442Bd68150A3aa61A6a097B86b91700BF"),
+            ),
+        ])),
+        _ => None,
+    }
+}
+
+fn v0_1_0_guest_input_verifier_address_forks(name: &str) -> Option<VerifierAddressForks> {
+    match name {
+        "taiko_mainnet" => Some(BTreeMap::from([
+            (
+                ForkId::Taiko(TaikoFork::Pacaya),
+                verifiers([
+                    (
+                        ProofType::Sgx,
+                        Some(address!("9e322fC59b8f4A29e6b25c3a166ac1892AA30136")),
+                    ),
+                    (
+                        ProofType::Sp1,
+                        Some(address!("bee1040D0Aab17AE19454384904525aE4A3602B9")),
+                    ),
+                    (
+                        ProofType::Risc0,
+                        Some(address!("73Ee496dA20e5C65340c040B0D8c3C891C1f74AE")),
+                    ),
+                ]),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                same_verifier(address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")),
+            ),
+        ])),
+        "taiko_dev" => Some(BTreeMap::from([(
+            ForkId::Standard(SpecId::CANCUN),
+            verifiers([
+                (
+                    ProofType::Sgx,
+                    Some(address!("2184bace3e668bf0eecb22c5ccf02cfca87c8a67")),
+                ),
+                (
+                    ProofType::Sp1,
+                    Some(address!("9d351f6e72e3095f24dd854c9b8ca69f99a2c538")),
+                ),
+                (
+                    ProofType::Risc0,
+                    Some(address!("fe3edf3e778a647c0955f2a5f79565e272e6afdb")),
+                ),
+            ]),
+        )])),
+        "taiko_masaya" => Some(BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            same_verifier(address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")),
+        )])),
+        "taiko_hoodi" => Some(BTreeMap::from([
+            (
+                ForkId::Taiko(TaikoFork::Pacaya),
+                verifiers([
+                    (
+                        ProofType::Sgx,
+                        Some(address!("d46c13B67396cD1e74Bb40e298fbABeA7DC01f11")),
+                    ),
+                    (
+                        ProofType::Sp1,
+                        Some(address!("3B3bb4A1Cb8B1A0D65F96a5A93415375C039Eda3")),
+                    ),
+                    (
+                        ProofType::Risc0,
+                        Some(address!("bf285Dd2FD56BF4893D207Fba4c738D1029edFfd")),
+                    ),
+                ]),
+            ),
+            (
+                ForkId::Taiko(TaikoFork::Shasta),
+                verifiers([
+                    (
+                        ProofType::Sgx,
+                        Some(address!("40CcAFC1C2D14bdD70984b221F2b49af5e7C6114")),
+                    ),
+                    (
+                        ProofType::Risc0,
+                        Some(address!("fa0e7dAFe9785627df034c123A9B87497EB06b41")),
+                    ),
+                    (
+                        ProofType::Sp1,
+                        Some(address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7")),
+                    ),
+                ]),
+            ),
+        ])),
+        _ => None,
+    }
+}
+
+fn verifiers<const N: usize>(
+    entries: [(ProofType, Option<Address>); N],
+) -> BTreeMap<ProofType, Option<Address>> {
+    BTreeMap::from(entries)
+}
+
+fn same_verifier(address: Address) -> BTreeMap<ProofType, Option<Address>> {
+    verifiers([
+        (ProofType::Sgx, Some(address)),
+        (ProofType::Sp1, Some(address)),
+        (ProofType::Risc0, Some(address)),
+    ])
+}
 
 fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
     match value {
@@ -388,47 +891,43 @@ impl<'de> Deserialize<'de> for ChainSpec {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct ChainSpecHelper {
-            name: String,
-            chain_id: ChainId,
-            #[serde(deserialize_with = "deserialize_spec_id")]
-            max_spec_id: SpecId,
-            #[serde(deserialize_with = "deserialize_fork_id_map")]
-            hard_forks: BTreeMap<ForkId, ForkCondition>,
-            eip_1559_constants: Eip1559Constants,
-            #[serde(default, deserialize_with = "deserialize_fork_id_map")]
-            l1_contract: BTreeMap<ForkId, Address>,
-            l2_contract: Option<Address>,
-            rpc: String,
-            beacon_rpc: Option<String>,
-            #[serde(deserialize_with = "deserialize_verifier_address_forks")]
-            verifier_address_forks: VerifierAddressForks,
-            genesis_time: u64,
-            seconds_per_slot: u64,
-            is_taiko: bool,
+        if !deserializer.is_human_readable() {
+            let helper = BinaryChainSpecHelper::deserialize(deserializer)?;
+            return Ok(helper.into());
         }
 
-        let helper = ChainSpecHelper::deserialize(deserializer)?;
-        Ok(ChainSpec {
-            name: helper.name,
-            chain_id: helper.chain_id,
-            max_spec_id: helper.max_spec_id,
-            hard_forks: helper.hard_forks,
-            eip_1559_constants: helper.eip_1559_constants,
-            l1_contract: helper.l1_contract,
-            l2_contract: helper.l2_contract,
-            rpc: helper.rpc,
-            beacon_rpc: helper.beacon_rpc,
-            verifier_address_forks: helper.verifier_address_forks,
-            genesis_time: helper.genesis_time,
-            seconds_per_slot: helper.seconds_per_slot,
-            is_taiko: helper.is_taiko,
-        })
+        let helper = JsonChainSpecHelper::deserialize(deserializer)?;
+        chain_spec_from_json_helper(helper)
     }
 }
 
 impl ChainSpec {
+    #[must_use]
+    pub fn project_for_guest_input_abi(&self, abi: GuestInputAbi) -> Self {
+        let mut spec = self.clone();
+        match abi {
+            GuestInputAbi::Current => {}
+            GuestInputAbi::V0_1_0 => spec.apply_v0_1_0_guest_input_compat(),
+        }
+        spec
+    }
+
+    fn apply_v0_1_0_guest_input_compat(&mut self) {
+        if let Some((max_spec_id, hard_forks)) = v0_1_0_guest_input_hard_forks(&self.name) {
+            self.max_spec_id = max_spec_id;
+            self.hard_forks = hard_forks;
+        }
+        if let Some(l1_contract) = v0_1_0_guest_input_l1_contracts(&self.name) {
+            self.l1_contract = l1_contract;
+        }
+        if let Some(verifier_address_forks) = v0_1_0_guest_input_verifier_address_forks(&self.name)
+        {
+            self.verifier_address_forks = verifier_address_forks;
+        }
+
+        self.remove_fork_verifier_proof_type(ProofType::SgxGeth);
+    }
+
     /// Removes a verifier proof type from every configured fork.
     pub fn remove_fork_verifier_proof_type(&mut self, proof_type: ProofType) {
         for fork_verifier in self.verifier_address_forks.values_mut() {
@@ -735,6 +1234,42 @@ mod tests {
     }
 
     #[test]
+    fn l1_specs_hydrate_reth_execution_forks() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let ethereum = list
+            .iter()
+            .find(|spec| spec.name == "ethereum")
+            .ok_or_else(|| anyhow!("missing ethereum spec"))?;
+        let hoodi = list
+            .iter()
+            .find(|spec| spec.name == "hoodi")
+            .ok_or_else(|| anyhow!("missing hoodi spec"))?;
+
+        assert_eq!(ethereum.chain_id, RETH_MAINNET.chain.id());
+        assert_eq!(ethereum.max_spec_id, SpecId::OSAKA);
+        assert_eq!(
+            ethereum.hard_forks.get(&ForkId::Standard(SpecId::PRAGUE)),
+            Some(&ForkCondition::Timestamp(1_746_612_311))
+        );
+        assert_eq!(
+            ethereum.hard_forks.get(&ForkId::Standard(SpecId::OSAKA)),
+            Some(&ForkCondition::Timestamp(1_764_798_551))
+        );
+
+        assert_eq!(hoodi.chain_id, RETH_HOODI.chain.id());
+        assert_eq!(hoodi.max_spec_id, SpecId::OSAKA);
+        assert_eq!(
+            hoodi.hard_forks.get(&ForkId::Standard(SpecId::PRAGUE)),
+            Some(&ForkCondition::Timestamp(1_742_999_832))
+        );
+        assert_eq!(
+            hoodi.hard_forks.get(&ForkId::Standard(SpecId::OSAKA)),
+            Some(&ForkCondition::Timestamp(1_761_677_592))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_mainnet".to_string(),
@@ -751,19 +1286,45 @@ mod tests {
     }
 
     #[test]
-    fn taiko_mainnet_uses_shasta_only_config() -> Result<()> {
+    fn taiko_mainnet_hydrates_alethia_hardforks_from_overlay() -> Result<()> {
+        let raw_list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let raw_spec = raw_list
+            .iter()
+            .find(|spec| spec.get("name") == Some(&Value::String("taiko_mainnet".to_string())))
+            .ok_or_else(|| anyhow!("missing raw taiko_mainnet spec"))?;
+        assert!(raw_spec.get("chain_id").is_none());
+        assert!(raw_spec.get("max_spec_id").is_none());
+        assert!(raw_spec.get("hard_forks").is_none());
+        assert!(raw_spec.get("eip_1559_constants").is_none());
+        assert!(raw_spec.get("is_taiko").is_none());
+
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
             .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
-        assert_eq!(spec.hard_forks.len(), 1);
-        assert_eq!(spec.l1_contract.len(), 1);
+        assert_eq!(spec.chain_id, 167_000);
+        assert_eq!(spec.max_spec_id, SpecId::OSAKA);
+        assert!(spec.is_taiko);
+        assert_eq!(spec.hard_forks.len(), 4);
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Ontake)),
+            Some(&ForkCondition::Block(538_304))
+        );
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Pacaya)),
+            Some(&ForkCondition::Block(1_166_000))
+        );
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
         );
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Tbd)
+        );
+        assert_eq!(spec.l1_contract.len(), 1);
         let err = spec
             .get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)
             .expect_err("mainnet config should only activate at Shasta");
@@ -795,6 +1356,70 @@ mod tests {
             spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
             Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn v0_1_0_guest_input_projection_removes_sgx_geth_and_uses_legacy_forks() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+
+        assert!(
+            spec.verifier_address_forks
+                .values()
+                .any(|verifiers| verifiers.contains_key(&ProofType::SgxGeth))
+        );
+        assert_eq!(
+            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
+        );
+
+        let projected = spec.project_for_guest_input_abi(GuestInputAbi::V0_1_0);
+
+        assert!(
+            projected
+                .verifier_address_forks
+                .values()
+                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
+        );
+        assert_eq!(projected.max_spec_id, SpecId::OSAKA);
+        assert_eq!(
+            projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Hekla)),
+            Some(&ForkCondition::Block(0))
+        );
+        assert_eq!(
+            projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(1_775_393_399))
+        );
+        assert_eq!(
+            projected.hard_forks.get(&ForkId::Standard(SpecId::CANCUN)),
+            Some(&ForkCondition::Tbd)
+        );
+        assert_eq!(
+            projected.l1_contract.get(&ForkId::Taiko(TaikoFork::Pacaya)),
+            Some(&address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a"))
+        );
+        assert_eq!(
+            projected.l1_contract.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"))
+        );
+        assert_eq!(
+            projected.get_fork_verifier_address(1_166_000, 0, ProofType::Risc0,)?,
+            address!("73Ee496dA20e5C65340c040B0D8c3C891C1f74AE")
+        );
+        assert_eq!(
+            projected.get_fork_verifier_address(5_412_478, 1_775_393_399, ProofType::Sp1,)?,
+            address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+        );
+
+        let bytes = bincode::serialize(&projected)
+            .map_err(|e| anyhow!("bincode serialize projected ChainSpec: {e}"))?;
+        let decoded: ChainSpec = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow!("bincode deserialize projected ChainSpec: {e}"))?;
+        assert_eq!(decoded, projected);
         Ok(())
     }
 

@@ -433,6 +433,9 @@ working directory.
 For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
 released artifacts, download ELF assets from GitHub Releases with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
+When running v0.1.0 release guest ELFs with a newer host, set
+`prover.guest_input_abi = "v0_1_0"`; leave the default `current` for locally built or current
+release ELFs.
 `release-image` only refreshes guest ELFs when called with `--refresh-guest-elves <risc0|sp1|all>`.
 If that explicit refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-use raiko2_primitives::ProofType;
+use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
         BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec,
@@ -20,6 +20,9 @@ pub struct ProverConfig {
     pub guest_system: GuestSystem,
     #[serde(default)]
     pub runner: RunnerKind,
+    /// Guest input ABI emitted by host preflight.
+    #[serde(default)]
+    pub guest_input_abi: GuestInputAbi,
     /// RISC0 specific configuration.
     #[serde(default)]
     pub risc0: Risc0Config,

@@ -4,7 +4,7 @@ use alloy_consensus::Header;
 use alloy_primitives::map::B256Map;
 use alloy_primitives::{Address, B256};
 use raiko2_primitives::{
-    ExecutionWitness, ProofType, RawProof, StatelessInput, WitnessHeader, WitnessStateNode,
+    ExecutionWitness, RawProof, StatelessInput, WitnessHeader, WitnessStateNode,
 };
 use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -140,14 +140,6 @@ impl GuestInput {
     }
 }
 
-fn remove_guest_incompatible_verifiers(witnesses: &mut [StatelessInput]) {
-    for witness in witnesses {
-        witness
-            .chain_spec
-            .remove_fork_verifier_proof_type(ProofType::SgxGeth);
-    }
-}
-
 #[must_use]
 pub fn roll_proposal_ancestor_headers(
     current_headers: &[WitnessHeader],
@@ -225,10 +217,6 @@ impl Serialize for GuestInput {
                 witness.witness.state.clear();
                 witness.witness.state_indices = state_indices;
             }
-        }
-
-        if !serializer.is_human_readable() {
-            remove_guest_incompatible_verifiers(&mut guest_input.witnesses);
         }
 
         guest_input.serialize(serializer)
@@ -445,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn bincode_serialize_omits_sgxgeth_verifiers_for_guest_compat() {
+    fn bincode_serialize_preserves_sgxgeth_verifiers() {
         let mut verifiers = BTreeMap::new();
         verifiers.insert(ProofType::Risc0, Some(Address::repeat_byte(0x11)));
         verifiers.insert(ProofType::SgxGeth, Some(Address::repeat_byte(0x22)));
@@ -480,7 +468,7 @@ mod tests {
             [&ForkId::Taiko(TaikoFork::Shasta)];
 
         assert!(decoded_verifiers.contains_key(&ProofType::Risc0));
-        assert!(!decoded_verifiers.contains_key(&ProofType::SgxGeth));
+        assert!(decoded_verifiers.contains_key(&ProofType::SgxGeth));
     }
 
     #[test]

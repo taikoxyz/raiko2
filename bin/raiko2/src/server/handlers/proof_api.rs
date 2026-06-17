@@ -2010,7 +2010,7 @@ fn parse_task_metadata(
     })
 }
 
-fn is_terminal_runtime_status(status: RuntimeRunnerStatus) -> bool {
+const fn is_terminal_runtime_status(status: RuntimeRunnerStatus) -> bool {
     matches!(
         status,
         RuntimeRunnerStatus::Completed
@@ -2057,14 +2057,17 @@ async fn count_matching_queue_tasks(
         if !task_ids.contains(&view.id) {
             continue;
         }
-        if count_queue_task_state(view, counts) {
+        if count_queue_task_state(&view, counts) {
             counted = counted.saturating_add(1);
         }
     }
     Ok(counted)
 }
 
-fn count_queue_task_state(view: EngineQueueTaskView, counts: &mut ProverTaskStatusCounts) -> bool {
+const fn count_queue_task_state(
+    view: &EngineQueueTaskView,
+    counts: &mut ProverTaskStatusCounts,
+) -> bool {
     match view.state {
         EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
         EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
@@ -2086,6 +2089,7 @@ fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkSt
     }
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn count_runtime_network_inflight(
     runtime: &TaskRuntimeMetadata,
     network: &mut ProverNetworkStatus,

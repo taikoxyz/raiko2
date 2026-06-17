@@ -174,7 +174,11 @@ const fn no_lock_timeout_for_attempt(attempt: u64) -> NoLockTimeout {
     }
 }
 
-fn no_lock_deadline_elapsed(submitted_at: u64, timeout: NoLockTimeout, now_secs: u64) -> bool {
+const fn no_lock_deadline_elapsed(
+    submitted_at: u64,
+    timeout: NoLockTimeout,
+    now_secs: u64,
+) -> bool {
     now_secs >= submitted_at.saturating_add(timeout.delay.as_secs())
 }
 
@@ -1017,7 +1021,11 @@ impl BoundlessProver {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::large_futures,
+        clippy::too_many_arguments,
+        clippy::too_many_lines
+    )]
     async fn prove_boundless(
         &self,
         elf_type: ElfType,
@@ -1365,6 +1373,7 @@ fn apply_dynamic_pricing_timeout_modifier(
     Ok(modified_timeout)
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
     if !modifier.is_finite() || modifier < 1.0 {
         return Err(RaikoError::InvalidRequestConfig(
@@ -1372,13 +1381,13 @@ fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
                 .to_string(),
         ));
     }
-    let modified = (f64::from(value) * modifier).ceil();
-    if modified > f64::from(u32::MAX) {
+    let scaled_timeout = (f64::from(value) * modifier).ceil();
+    if scaled_timeout > f64::from(u32::MAX) {
         return Err(RaikoError::InvalidRequestConfig(format!(
             "dynamic_pricing_timeout_modifier overflows {field}"
         )));
     }
-    Ok(modified as u32)
+    Ok(scaled_timeout as u32)
 }
 
 fn validate_offer_params(

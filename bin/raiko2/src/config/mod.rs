@@ -19,7 +19,9 @@ pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
-pub use server::{ServerAclConfig, ServerAclFeature, ServerAclKey, ServerConfig};
+#[cfg(any(test, feature = "fixture-server"))]
+pub use server::{ServerAclConfig, ServerAclKey};
+pub use server::{ServerAclFeature, ServerConfig};
 
 #[cfg(test)]
 use raiko2_provider::L2ProviderKind;

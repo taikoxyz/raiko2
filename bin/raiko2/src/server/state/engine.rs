@@ -50,7 +50,7 @@ pub(crate) struct EngineQueueTaskView {
     pub(crate) state: EngineQueueTaskState,
 }
 
-fn queue_task_state<I>(state: &TaskState<I, EngineTaskKey>) -> EngineQueueTaskState {
+const fn queue_task_state<I>(state: &TaskState<I, EngineTaskKey>) -> EngineQueueTaskState {
     match state {
         TaskState::Pending { .. } => EngineQueueTaskState::Pending,
         TaskState::Ready => EngineQueueTaskState::Ready,

@@ -34,7 +34,6 @@ const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
 pub struct Gaiko2Config {
     pub base_url: String,
     pub timeout_ms: u64,
-    pub include_guest_input: bool,
 }
 
 impl Gaiko2Config {
@@ -49,7 +48,13 @@ pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
-    include_guest_input: bool,
+    request_encoding: ShastaRequestEncoding,
+}
+
+#[derive(Clone, Copy)]
+enum ShastaRequestEncoding {
+    ReplayPacket,
+    GuestInput,
 }
 
 impl Gaiko2Prover {
@@ -58,6 +63,21 @@ impl Gaiko2Prover {
     /// Returns an error when the gaiko2 base URL is empty, malformed, or the HTTP client
     /// cannot be constructed.
     pub fn new(config: &Gaiko2Config) -> RaikoResult<Self> {
+        Self::new_with_encoding(config, ShastaRequestEncoding::ReplayPacket)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the remote SGX base URL is empty, malformed, or the HTTP client
+    /// cannot be constructed.
+    pub fn new_for_guest_input(config: &Gaiko2Config) -> RaikoResult<Self> {
+        Self::new_with_encoding(config, ShastaRequestEncoding::GuestInput)
+    }
+
+    fn new_with_encoding(
+        config: &Gaiko2Config,
+        request_encoding: ShastaRequestEncoding,
+    ) -> RaikoResult<Self> {
         if config.base_url.trim().is_empty() {
             return Err(RaikoError::InvalidRequestConfig(
                 "gaiko2.base_url must not be empty".to_string(),
@@ -84,17 +104,16 @@ impl Gaiko2Prover {
             client,
             prove_url,
             aggregate_url,
-            include_guest_input: config.include_guest_input,
+            request_encoding,
         })
     }
 }
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let packet = if self.include_guest_input {
-            build_shasta_packet_with_guest_input(input)?
-        } else {
-            build_shasta_packet(input)?
+        let packet = match self.request_encoding {
+            ShastaRequestEncoding::ReplayPacket => build_shasta_packet(input)?,
+            ShastaRequestEncoding::GuestInput => build_shasta_packet_with_guest_input(input)?,
         };
         let payload = serde_json::to_vec(&packet)
             .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;

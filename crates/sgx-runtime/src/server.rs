@@ -86,11 +86,10 @@ const fn proposal_id_from_request(
 fn shasta_request_block_count(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
 ) -> usize {
-    request
-        .payload
-        .guest_input
-        .as_ref()
-        .map_or_else(|| request.payload.blocks.len(), |input| input.witnesses.len())
+    request.payload.guest_input.as_ref().map_or_else(
+        || request.payload.blocks.len(),
+        |input| input.witnesses.len(),
+    )
 }
 
 fn aggregate_proposal_id_summary(

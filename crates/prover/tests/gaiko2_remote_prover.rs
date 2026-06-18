@@ -66,7 +66,6 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
-        include_guest_input: false,
     })
     .expect("build gaiko2 prover");
 
@@ -113,10 +112,9 @@ async fn gaiko2_prover_can_post_full_guest_input_for_raiko2_sgx_runtime() {
             }));
     });
 
-    let prover = Gaiko2Prover::new(&Gaiko2Config {
+    let prover = Gaiko2Prover::new_for_guest_input(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
-        include_guest_input: true,
     })
     .expect("build gaiko2 prover");
 
@@ -153,7 +151,6 @@ async fn gaiko2_prover_surfaces_remote_error_envelope() {
     let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
-        include_guest_input: false,
     })
     .expect("build gaiko2 prover");
 

@@ -158,12 +158,10 @@ pub(crate) fn boundless_prover_config(
 pub(crate) const fn remote_sgx_prover_config(
     base_url: String,
     timeout_ms: u64,
-    include_guest_input: bool,
 ) -> raiko2_prover::gaiko2::Gaiko2Config {
     raiko2_prover::gaiko2::Gaiko2Config {
         base_url,
         timeout_ms,
-        include_guest_input,
     }
 }
 

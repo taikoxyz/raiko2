@@ -3712,7 +3712,6 @@ dependencies = [
  "reth-chainspec",
  "reth-consensus",
  "reth-ethereum-primitives",
- "reth-primitives-traits",
  "reth-revm",
  "serde",
  "serde_json",
@@ -3730,14 +3729,11 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "bincode",
- "hex",
  "raiko2-primitives",
  "raiko2-protocol",
  "raiko2-protocol-shasta",
- "reth-ethereum-primitives",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

@@ -23,9 +23,10 @@ These files define the strict `raiko2`-owned request contract for:
 Remote prover implementations are expected to accept byte-for-byte equivalent payloads for these
 fixtures. Provider-specific repositories may keep their own copies, but `raiko2` owns the canonical
 request goldens and validates them in `crates/prover/tests/remote_prover_fixture.rs`.
-These replay-packet fixtures target `gaiko2`/`sgxgeth`-style providers. They are not valid
-`raiko2-sgx-prover` proposal proof requests, because `raiko2-sgx-prover` requires the full
-`GuestInput` envelope and reruns Shasta guest validation before signing.
+These replay-packet fixtures target providers whose proposal input is the gaiko2/sgxgeth replay
+packet. That packet is valid input for gaiko2 because gaiko2 executes it internally. It is not the
+`raiko2-sgx-prover` proposal input, because `raiko2-sgx-prover` requires the full
+`raiko2_primitives_shasta::GuestInput` envelope and reruns Shasta guest validation before signing.
 
 ## Provenance
 

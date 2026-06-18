@@ -66,6 +66,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
+        include_guest_input: false,
     })
     .expect("build gaiko2 prover");
 
@@ -92,6 +93,47 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
 }
 
 #[tokio::test]
+async fn gaiko2_prover_can_post_full_guest_input_for_raiko2_sgx_runtime() {
+    let server = MockServer::start();
+    let expected_input = format!("0x{}", hex::encode([0x55; 32]));
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/prove/shasta")
+            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA)
+            .body_contains("\"guest_input\"");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xproof",
+                    "input": expected_input,
+                }
+            }));
+    });
+
+    let prover = Gaiko2Prover::new(&Gaiko2Config {
+        base_url: server.base_url(),
+        timeout_ms: 5_000,
+        include_guest_input: true,
+    })
+    .expect("build gaiko2 prover");
+
+    let proof = prover
+        .prove(
+            fixture_guest_input(),
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect("remote prove");
+
+    mock.assert();
+    assert_eq!(proof.input, Some(B256::from([0x55; 32])));
+}
+
+#[tokio::test]
 async fn gaiko2_prover_surfaces_remote_error_envelope() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {
@@ -111,6 +153,7 @@ async fn gaiko2_prover_surfaces_remote_error_envelope() {
     let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
+        include_guest_input: false,
     })
     .expect("build gaiko2 prover");
 

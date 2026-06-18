@@ -819,8 +819,11 @@ async fn build_remote_sgx_engine(
     proof_type: ProofType,
     base_url: String,
 ) -> Result<Engine<Gaiko2Spec>> {
-    let gaiko2_config =
-        setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
+    let gaiko2_config = setup::remote_sgx_prover_config(
+        base_url,
+        config.prover.remote_sgx.timeout_ms,
+        matches!(proof_type, ProofType::Sgx),
+    );
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

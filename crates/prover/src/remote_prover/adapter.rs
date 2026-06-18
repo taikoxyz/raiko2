@@ -12,16 +12,7 @@ use crate::remote_prover::protocol::{
 /// Returns an error when the guest input has no witnesses or the replay packet cannot be
 /// assembled from the witness state.
 pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaRequest> {
-    let first_witness = input.witnesses.first().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
-            "cannot build remote prover shasta packet without witnesses".to_string(),
-        )
-    })?;
-    let chain_id = if input.proof_carry_data.chain_id != 0 {
-        input.proof_carry_data.chain_id
-    } else {
-        first_witness.chain_spec.chain_id
-    };
+    let chain_id = shasta_packet_chain_id(input)?;
 
     let shared_state_nodes = input.proposal_state_nodes();
     let mut ancestor_headers = input.initial_proposal_ancestor_headers();
@@ -47,8 +38,41 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaReques
             chain_id,
             blocks,
             proof_carry_data: input.proof_carry_data.clone(),
+            guest_input: None,
         },
     })
+}
+
+/// # Errors
+///
+/// Returns an error when the guest input has no witnesses.
+pub fn build_shasta_packet_with_guest_input(
+    input: &GuestInput,
+) -> RaikoResult<Raiko2ShastaRequest> {
+    let chain_id = shasta_packet_chain_id(input)?;
+
+    Ok(Raiko2ShastaRequest {
+        schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+        payload: Raiko2ShastaPayload {
+            chain_id,
+            blocks: Vec::new(),
+            proof_carry_data: input.proof_carry_data.clone(),
+            guest_input: Some(input.clone()),
+        },
+    })
+}
+
+fn shasta_packet_chain_id(input: &GuestInput) -> RaikoResult<u64> {
+    let first_witness = input.witnesses.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot build remote prover shasta packet without witnesses".to_string(),
+        )
+    })?;
+    if input.proof_carry_data.chain_id != 0 {
+        Ok(input.proof_carry_data.chain_id)
+    } else {
+        Ok(first_witness.chain_spec.chain_id)
+    }
 }
 
 /// # Errors

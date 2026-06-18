@@ -160,23 +160,25 @@ cargo run -r -p guest-launcher -- \
   --output /tmp/proposal-17771.native-proof.json
 ```
 
-For a direct SGX remote check without a `raiko2` server, convert the guest input into the gaiko2
-Shasta request envelope and post it to the SGX prover:
+For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input into a
+Shasta request envelope that includes the full `GuestInput` and post it to the SGX prover:
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
+  --include-guest-input \
   /tmp/proposal-17771.json \
-  /tmp/proposal-17771.gaiko2-request.json
+  /tmp/proposal-17771.raiko2-sgx-request.json
 
 curl -sS \
   -H 'content-type: application/json' \
-  --data-binary @/tmp/proposal-17771.gaiko2-request.json \
+  --data-binary @/tmp/proposal-17771.raiko2-sgx-request.json \
   "${RAIKO2_REMOTE_SGX_BASE_URL:-http://127.0.0.1:9090}/prove/shasta"
 ```
 
 SGX checks still require the SGX prover stack or a remote SGX prover. `preflight` only builds and
-optionally validates the `GuestInput`; it does not launch SGX by itself. For `sgxgeth`, point the
-same request at the geth-backed remote SGX service instead of `raiko2-sgx-prover`.
+optionally validates the `GuestInput`; it does not launch SGX by itself. For `sgxgeth`, omit
+`--include-guest-input` and point the replay request at the geth-backed remote SGX service instead
+of `raiko2-sgx-prover`.
 
 For a fixed Masaya fork-boundary replay case, use the checked-in
 `taiko_masaya/shasta_unzen_transition` fixture suite. It captures proposals `25125`, `25126`,

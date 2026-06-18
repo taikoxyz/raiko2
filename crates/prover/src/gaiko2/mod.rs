@@ -14,7 +14,9 @@ use raiko2_primitives_shasta::GuestInput;
 use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
 
 use crate::remote_prover::{
-    adapter::{build_shasta_aggregate_request, build_shasta_packet},
+    adapter::{
+        build_shasta_aggregate_request, build_shasta_packet, build_shasta_packet_with_guest_input,
+    },
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
         RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
@@ -32,6 +34,7 @@ const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
 pub struct Gaiko2Config {
     pub base_url: String,
     pub timeout_ms: u64,
+    pub include_guest_input: bool,
 }
 
 impl Gaiko2Config {
@@ -46,6 +49,7 @@ pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
+    include_guest_input: bool,
 }
 
 impl Gaiko2Prover {
@@ -80,13 +84,18 @@ impl Gaiko2Prover {
             client,
             prove_url,
             aggregate_url,
+            include_guest_input: config.include_guest_input,
         })
     }
 }
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let packet = build_shasta_packet(input)?;
+        let packet = if self.include_guest_input {
+            build_shasta_packet_with_guest_input(input)?
+        } else {
+            build_shasta_packet(input)?
+        };
         let payload = serde_json::to_vec(&packet)
             .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;
         Ok(Bytes::from(payload))

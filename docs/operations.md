@@ -165,13 +165,10 @@ cargo run -r -p raiko2-sgx-prover -- \
 Native mode treats `bootstrap` as a no-op, `check` as a lightweight no-op, and falls back to the
 mock instance id `0xDEAD_C0DE` when `--instance-id` is omitted.
 
-You can smoke-test the live server with the checked-in fixture:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8080/prove/shasta \
-  -H 'content-type: application/json' \
-  --data-binary @tests/fixtures/shasta_remote_request_fixture_chain_167013_block_42.json
-```
+Use `GET /health` for simple liveness checks. `POST /prove/shasta` is not a lightweight signing
+smoke endpoint: `raiko2-sgx-prover` requires a complete `GuestInput` request envelope and runs the
+same Shasta guest validation path as the zk guests before signing the resulting public input.
+Use the main `raiko2` service or the regression scripts to build that request.
 
 ### Docker Compose
 

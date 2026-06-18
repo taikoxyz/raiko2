@@ -1,7 +1,7 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, Proof, StatelessInput};
-use raiko2_primitives_shasta::proof_carry_from_proof;
+use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,8 @@ pub struct Raiko2ShastaPayload {
     pub chain_id: u64,
     pub blocks: Vec<Raiko2ReplayBlock>,
     pub proof_carry_data: ProofCarryData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_input: Option<GuestInput>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

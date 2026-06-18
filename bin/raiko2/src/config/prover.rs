@@ -396,16 +396,18 @@ mod tests {
 
     #[test]
     fn prover_config_accepts_valid_zk_any_policy() {
-        let mut config = ProverConfig::default();
-        config.zk_any = ZkAnyConfig {
-            sp1: Some(ZkAnyTargetConfig {
-                probability: 0.3,
-                per_day: 100,
-            }),
-            risc0: Some(ZkAnyTargetConfig {
-                probability: 0.4,
-                per_day: 0,
-            }),
+        let config = ProverConfig {
+            zk_any: ZkAnyConfig {
+                sp1: Some(ZkAnyTargetConfig {
+                    probability: 0.3,
+                    per_day: 100,
+                }),
+                risc0: Some(ZkAnyTargetConfig {
+                    probability: 0.4,
+                    per_day: 0,
+                }),
+            },
+            ..Default::default()
         };
 
         config.validate().expect("valid zk_any policy");

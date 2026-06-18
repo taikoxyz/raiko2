@@ -317,9 +317,9 @@ mod tests {
     #[test]
     fn test_server_config_invalid_host() {
         let config = ServerConfig {
-            host: "".to_string(),
+            host: String::new(),
             port: 8080,
-            acl: Default::default(),
+            acl: ServerAclConfig::default(),
         };
         assert!(config.validate().is_err());
     }
@@ -329,7 +329,7 @@ mod tests {
         let config = ServerConfig {
             host: "localhost".to_string(),
             port: 0,
-            acl: Default::default(),
+            acl: ServerAclConfig::default(),
         };
         assert!(config.validate().is_err());
     }

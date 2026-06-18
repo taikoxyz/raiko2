@@ -17,6 +17,8 @@ use crate::server::task_metadata::{
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
+use raiko2_engine::ProverTaskConfig;
+#[cfg(test)]
 use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
@@ -902,7 +904,7 @@ mod tests {
             blob_proof_type: None,
             prover: None,
             graffiti: None,
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         }
     }
 
@@ -987,6 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_records_boundless_submission_metadata_immediately() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer",
@@ -1173,7 +1176,7 @@ mod tests {
         let aggregate_request = AggregationTaskRequest {
             request_id: "agg-42".to_string(),
             proposal_ids: vec![42],
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         };
         let aggregate_ref = aggregate_task_ref(pipeline, &aggregate_request);
         runtime
@@ -1517,6 +1520,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_records_sp1_network_submission_metadata() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-sp1",
@@ -1627,6 +1631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_loads_proposal_request_id_from_task_metadata_only() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-sp1-load-proposal",
@@ -1749,7 +1754,7 @@ mod tests {
         let aggregate_request = AggregationTaskRequest {
             request_id: "agg-42".to_string(),
             proposal_ids: vec![42, 43],
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         };
         let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
             pipeline: PipelineKey::ShastaSp1,
@@ -1841,6 +1846,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_does_not_decrement_inflight_after_process_restart() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-no-negative-gauge",

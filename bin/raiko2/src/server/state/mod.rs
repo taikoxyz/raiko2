@@ -13,7 +13,9 @@ pub use types::{EngineStatusView, ProofStatus};
 
 #[cfg(all(feature = "host", not(feature = "local-provers")))]
 use crate::config::PipelineRoute;
-use crate::config::{Config, GuestSystem, QueueBackend, ResolvedNetworkPair, RunnerKind};
+#[cfg(feature = "host")]
+use crate::config::RunnerKind;
+use crate::config::{Config, GuestSystem, QueueBackend, ResolvedNetworkPair};
 use anyhow::{Context, Result};
 use raiko2_engine::{Engine, EngineObserver};
 use raiko2_pipeline::{NativeBackend, PipelineKey, forks::shasta::ShastaSpec};
@@ -95,19 +97,9 @@ impl AppState {
         #[cfg(all(feature = "host", not(feature = "local-provers")))]
         let sp1_backend = load_sp1_shasta_backend().map_err(anyhow::Error::msg)?;
         #[cfg(feature = "host")]
-        let sp1_prover = if should_eagerly_initialize_sp1(&config) {
+        let sp1_prover = if should_create_sp1_prover(&config) {
             let sp1_config = setup::sp1_prover_config(&config);
-            #[cfg(feature = "local-provers")]
-            let sp1_backend = shasta_backends.sp1.clone();
-            #[cfg(not(feature = "local-provers"))]
-            let sp1_backend = sp1_backend.clone();
-            Some(
-                tokio::task::spawn_blocking(move || {
-                    Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
-                })
-                .await
-                .context("SP1 setup task panicked")??,
-            )
+            Some(Sp1Prover::new(sp1_config))
         } else {
             None
         };
@@ -173,16 +165,20 @@ struct PairPipelineRegistration<'a> {
 }
 
 #[cfg(feature = "host")]
-fn should_eagerly_initialize_sp1(config: &Config) -> bool {
+const fn should_create_sp1_prover(config: &Config) -> bool {
     matches!(
         config.prover.route(),
         raiko2_pipeline::PipelineRoute {
             guest_system: GuestSystem::Sp1,
+            ..
+        } | raiko2_pipeline::PipelineRoute {
+            guest_system: GuestSystem::Risc0,
             runner: RunnerKind::Network,
         }
     ) || (cfg!(feature = "local-provers") && !config.prover.is_remote_sgx_route())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn register_pair_pipelines(
     factory: &mut StaticPipelineFactory,
     registration: PairPipelineRegistration<'_>,
@@ -203,58 +199,67 @@ async fn register_pair_pipelines(
             registration.pair.key.clone(),
         ));
 
-        match registration.config.prover.route() {
+        let route = registration.config.prover.route();
+        let register_risc0_network = matches!(
+            route,
             PipelineRoute {
                 guest_system: GuestSystem::Risc0,
                 runner: RunnerKind::Network,
-            } => {
-                let boundless_engine = build_boundless_engine(
-                    registration.config,
-                    registration.pair,
-                    registration.boundless_backend.clone(),
-                    setup::boundless_scheduler_config(registration.config),
-                    Arc::clone(&runtime_observer),
-                )
-                .await?;
-                boundless_engine.start_workers_with_maintenance_interval(
-                    registration.workers,
-                    registration.maintenance_interval,
-                );
-                factory.insert(
-                    registration.pair.key.clone(),
-                    PipelineKey::ShastaRisc0Network,
-                    Arc::new(boundless_engine),
-                );
             }
+        );
+        let register_sp1_network = matches!(
+            route,
             PipelineRoute {
-                guest_system: GuestSystem::Sp1,
+                guest_system: GuestSystem::Risc0 | GuestSystem::Sp1,
                 runner: RunnerKind::Network,
-            } => {
-                let sp1_engine = build_sp1_engine(
-                    registration.config,
-                    registration.pair,
-                    registration
-                        .sp1_prover
-                        .clone()
-                        .expect("sp1 prover must be initialized for sp1/network hosts"),
-                    registration.sp1_backend.clone(),
-                    setup::sp1_scheduler_config(registration.config),
-                    Arc::clone(&runtime_observer),
-                )
-                .await?;
-                sp1_engine.start_workers_with_maintenance_interval(
-                    registration.workers,
-                    registration.maintenance_interval,
-                );
-                factory.insert(
-                    registration.pair.key.clone(),
-                    PipelineKey::ShastaSp1,
-                    Arc::new(sp1_engine),
-                );
             }
-            _ => {
-                anyhow::bail!("local prover routes require building raiko2 with `local-provers`");
-            }
+        );
+        if !register_risc0_network && !register_sp1_network {
+            anyhow::bail!("local prover routes require building raiko2 with `local-provers`");
+        }
+
+        if register_risc0_network {
+            let boundless_engine = build_boundless_engine(
+                registration.config,
+                registration.pair,
+                registration.boundless_backend.clone(),
+                setup::boundless_scheduler_config(registration.config),
+                Arc::clone(&runtime_observer),
+            )
+            .await?;
+            boundless_engine.start_workers_with_maintenance_interval(
+                registration.workers,
+                registration.maintenance_interval,
+            );
+            factory.insert(
+                registration.pair.key.clone(),
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(boundless_engine),
+            );
+        }
+
+        if register_sp1_network {
+            let sp1_engine = build_sp1_engine(
+                registration.config,
+                registration.pair,
+                registration
+                    .sp1_prover
+                    .clone()
+                    .expect("sp1 prover must be initialized for network hosts"),
+                registration.sp1_backend.clone(),
+                setup::sp1_scheduler_config(registration.config),
+                Arc::clone(&runtime_observer),
+            )
+            .await?;
+            sp1_engine.start_workers_with_maintenance_interval(
+                registration.workers,
+                registration.maintenance_interval,
+            );
+            factory.insert(
+                registration.pair.key.clone(),
+                PipelineKey::ShastaSp1,
+                Arc::new(sp1_engine),
+            );
         }
 
         return Ok(());
@@ -1170,21 +1175,30 @@ mod tests {
     }
 
     #[test]
-    fn remote_sgx_route_does_not_eagerly_initialize_sp1() {
+    fn remote_sgx_route_does_not_create_sp1_prover() {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Sgx;
         config.prover.runner = RunnerKind::Remote;
 
-        assert!(!should_eagerly_initialize_sp1(&config));
+        assert!(!should_create_sp1_prover(&config));
     }
 
     #[test]
-    fn sp1_route_still_eagerly_initializes_sp1() {
+    fn sp1_route_still_creates_sp1_prover() {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Sp1;
         config.prover.runner = RunnerKind::Local;
 
-        assert!(should_eagerly_initialize_sp1(&config));
+        assert!(should_create_sp1_prover(&config));
+    }
+
+    #[test]
+    fn risc0_network_route_creates_sp1_handle_for_explicit_sp1_requests() {
+        let mut config = Config::default();
+        config.prover.guest_system = GuestSystem::Risc0;
+        config.prover.runner = RunnerKind::Network;
+
+        assert!(should_create_sp1_prover(&config));
     }
 
     fn valid_native_proof() -> Proof {

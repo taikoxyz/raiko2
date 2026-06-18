@@ -20,8 +20,10 @@ fn shasta_packet_roundtrip_preserves_schema_and_payload() {
         alloy_consensus::TrieAccount::default(),
     );
 
-    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData::default();
-    proof_carry_data.chain_id = 167_013;
+    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData {
+        chain_id: 167_013,
+        ..Default::default()
+    };
     proof_carry_data.transition_input.proposal_id = 7;
     proof_carry_data.transition_input.parent_block_hash = B256::from([0x44; 32]);
 
@@ -75,8 +77,10 @@ fn proof_response_roundtrip_preserves_success_payload() {
 
 #[test]
 fn shasta_aggregate_packet_roundtrip_preserves_schema_and_payload() {
-    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData::default();
-    proof_carry_data.chain_id = 167_013;
+    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData {
+        chain_id: 167_013,
+        ..Default::default()
+    };
     proof_carry_data.transition_input.proposal_id = 7;
 
     let packet = Raiko2ShastaAggregateRequest {

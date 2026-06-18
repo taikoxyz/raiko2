@@ -170,7 +170,7 @@ mod tests {
     use super::summarize_task;
     use crate::server::state::types::ProofStatus;
     use raiko2_engine::tasks::EngineOutput;
-    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
+    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::GuestInput;
@@ -203,7 +203,7 @@ mod tests {
                     blob_proof_type: None,
                     prover: None,
                     graffiti: None,
-                    prover_config: Default::default(),
+                    prover_config: ProverTaskConfig::default(),
                 },
             }),
             state: TaskState::Succeeded { output },

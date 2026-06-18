@@ -877,9 +877,10 @@ mod tests {
     }
 
     fn now_ts() -> i64 {
-        SystemTime::now()
+        let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64
+            .as_secs();
+        i64::try_from(secs).unwrap_or(i64::MAX)
     }
 }

@@ -10,6 +10,7 @@ use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "digests")]
 pub mod guest_digests;
 mod util;
 

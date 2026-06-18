@@ -608,9 +608,9 @@ All API errors use the Hoodi-style envelope:
   network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
   root tasks up to twenty times with a fixed five-minute delay.
 - Boundless storage upload is environment-driven. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
-  `GCS_BUCKET=taiko-boundless-prover-boundless-input-temp`, and
-  `GCS_PUBLIC_URL=false` to reuse the existing Taiko private GCS bucket. The GCP
-  project is selected by gcloud/ADC, for example `taiko-boundless-prover`, and is
+  `GCS_BUCKET=<your-gcs-bucket>`, and
+  `GCS_PUBLIC_URL=false` to use a private GCS bucket. The GCP
+  project is selected by gcloud/ADC, for example `<your-gcp-project>`, and is
   not a raiko2 config value. `GCS_PUBLIC_URL=false` returns private `gs://` URLs,
   so downstream downloaders need GCS credentials. Set `GCS_PUBLIC_URL=true` only
   for publicly readable buckets. `STORAGE_UPLOADER` remains accepted for

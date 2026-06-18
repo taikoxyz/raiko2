@@ -466,18 +466,18 @@ Current behavior:
 
 ## Boundless Storage Upload
 
-Boundless storage uploader selection is environment-driven. Reuse the existing private
-bucket in the Taiko Boundless Prover project:
+Boundless storage uploader selection is environment-driven. Use your private GCS
+bucket:
 
 ```bash
 BOUNDLESS_STORAGE_UPLOADER=gcs
-GCS_BUCKET=taiko-boundless-prover-boundless-input-temp
+GCS_BUCKET=<your-gcs-bucket>
 GCS_PUBLIC_URL=false
 ```
 
 The GCP project is selected by the current gcloud/ADC context, for example
-`taiko-boundless-prover`; raiko2 does not carry a separate project id setting. The
-existing bucket enforces public access prevention, so `GCS_PUBLIC_URL=false` returns
+`<your-gcp-project>`; raiko2 does not carry a separate project id setting. The
+bucket should enforce public access prevention, so `GCS_PUBLIC_URL=false` returns
 private `gs://` URLs and Boundless downloaders must have GCS credentials. Set
 `GCS_PUBLIC_URL=true` only for a publicly readable bucket that should return HTTPS
 URLs.

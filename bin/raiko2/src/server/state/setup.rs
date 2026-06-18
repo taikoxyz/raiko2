@@ -85,7 +85,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "host")]
 pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
     SchedulerConfig {
         lease_duration: task_lease_duration(config),
@@ -97,7 +97,7 @@ pub(crate) fn sp1_scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "host")]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -137,13 +137,13 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "host")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     config.prover.sp1.clone()
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "host")]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -193,8 +193,7 @@ mod tests {
     #[cfg(feature = "local-provers")]
     use super::sp1_scheduler_config;
     use super::{
-        boundless_prover_config, boundless_scheduler_config, build_context, risc0_prover_config,
-        scheduler_config,
+        boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
     };
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
     use raiko2_primitives::{GuestInputAbi, ProofType, SupportedChainSpecs};
@@ -316,11 +315,9 @@ mod tests {
             .pop()
             .expect("default pair");
 
-        let risc0 = risc0_prover_config(&config);
         let boundless = boundless_prover_config(&config, &pair);
 
-        assert_eq!(risc0.execution_po2, 24);
-        assert_eq!(boundless.execution_po2, risc0.execution_po2);
+        assert_eq!(boundless.execution_po2, 24);
     }
 
     #[test]

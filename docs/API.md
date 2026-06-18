@@ -403,14 +403,18 @@ under the original `zk_any` request for this operator view.
       "risc0": {
         "inflight_orders": 1
       }
+    },
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 1
     }
   }
 }
 ```
 
 `clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
-`retrying`, or `running` state and no resumable SP1 or RISC0 network submissions for
-non-terminal roots.
+`retrying`, or `running` state, no resumable SP1 or RISC0 network submissions, and
+no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
 ## Clear Prover
 
@@ -431,7 +435,13 @@ otherwise terminal roots are no longer counted in this local status view.
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "cancelled": 2,
+  "skipped": {
+    "invalid_metadata": 0,
+    "unavailable_pipeline": 1
+  },
+  "failed": 0
 }
 ```
 

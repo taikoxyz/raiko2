@@ -33,9 +33,10 @@ use super::proof_route::{
 };
 use super::proof_types::{
     AggregateProofRequest, AggregateStatus, ApiData, ApiOk, BatchProofType, BatchShastaRequest,
-    CanonicalProposal, LegacyProofData, LegacyProofEnvelope, LegacyProofError, LegacyTaskStatus,
-    ProposalStatus, ProverNetworkStatus, ProverStatus, ProverTaskStatusCounts, PruneStatus,
-    PublicProverArgs, RootRuntime, RootTaskState, ShastaProposal, TaskData, TaskRuntime,
+    CanonicalProposal, ClearProverStatus, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
+    LegacyTaskStatus, ProposalStatus, ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus,
+    ProverTaskStatusCounts, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState,
+    ShastaProposal, TaskData, TaskRuntime,
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
@@ -297,13 +298,14 @@ pub async fn cancel_task(
 pub async fn get_prover_status(
     State(state): State<AppState>,
 ) -> Result<Json<ApiData<ProverStatus>>, ApiError> {
-    let (tasks, network) = collect_prover_status(&state).await?;
+    let (tasks, network, skipped) = collect_prover_status(&state).await?;
     Ok(Json(ApiData {
         status: "ok",
         data: ProverStatus {
-            clean: tasks.is_clean() && network.is_clean(),
+            clean: tasks.is_clean() && network.is_clean() && skipped.is_clean(),
             tasks,
             network,
+            skipped,
         },
     }))
 }
@@ -311,7 +313,7 @@ pub async fn get_prover_status(
 pub async fn clear_prover(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<PruneStatus>, ApiError> {
+) -> Result<Json<ClearProverStatus>, ApiError> {
     authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)?;
 
     let records = state
@@ -320,16 +322,49 @@ pub async fn clear_prover(
         .await
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
 
+    let mut status = ClearProverStatus {
+        status: "ok",
+        cancelled: 0,
+        skipped: ProverSkippedStatusCounts::default(),
+        failed: 0,
+    };
+
     for record in records {
         if is_terminal_runtime_status(record.runner_status) {
             continue;
         }
-        let metadata = parse_task_metadata(&record)?;
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                status.skipped.invalid_metadata = status.skipped.invalid_metadata.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping prover clear record with invalid metadata"
+                );
+                continue;
+            }
+        };
         if !is_zk_any_metadata(&metadata) {
             continue;
         }
-        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
-        cancel_registered_tasks(
+        let engine = match resolve_engine(&state, &metadata.network_pair, record.pipeline_key) {
+            Ok(engine) => engine,
+            Err(err) if err.status == StatusCode::NOT_FOUND => {
+                status.skipped.unavailable_pipeline =
+                    status.skipped.unavailable_pipeline.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    network_pair = %metadata.network_pair,
+                    pipeline = %record.pipeline_key,
+                    error = %err.message,
+                    "skipping prover clear record with unavailable pipeline"
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        if let Err(err) = cancel_registered_tasks(
             &state.runtime,
             &engine,
             &record.task_id,
@@ -337,17 +372,32 @@ pub async fn clear_prover(
             &metadata,
         )
         .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-        state
+        {
+            status.failed = status.failed.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed to cancel prover record"
+            );
+            continue;
+        }
+        if let Err(err) = state
             .runtime
             .sync_status(&record.task_id, RuntimeRunnerStatus::Cancelled, None, None)
             .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to sync runtime cancellation: {err}"))
-            })?;
+        {
+            status.failed = status.failed.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed to sync prover clear cancellation"
+            );
+            continue;
+        }
+        status.cancelled = status.cancelled.saturating_add(1);
     }
 
-    Ok(Json(PruneStatus { status: "ok" }))
+    Ok(Json(status))
 }
 
 pub async fn report_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
@@ -1969,7 +2019,14 @@ async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError>
 
 async fn collect_prover_status(
     state: &AppState,
-) -> Result<(ProverTaskStatusCounts, ProverNetworkStatus), ApiError> {
+) -> Result<
+    (
+        ProverTaskStatusCounts,
+        ProverNetworkStatus,
+        ProverSkippedStatusCounts,
+    ),
+    ApiError,
+> {
     let records = state
         .runtime
         .list_tasks()
@@ -1977,9 +2034,21 @@ async fn collect_prover_status(
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
     let mut tasks = ProverTaskStatusCounts::default();
     let mut network = ProverNetworkStatus::default();
+    let mut skipped = ProverSkippedStatusCounts::default();
 
     for record in records {
-        let metadata = parse_task_metadata(&record)?;
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                skipped.invalid_metadata = skipped.invalid_metadata.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping prover status record with invalid metadata"
+                );
+                continue;
+            }
+        };
         if !is_zk_any_metadata(&metadata) {
             continue;
         }
@@ -1988,7 +2057,21 @@ async fn collect_prover_status(
             continue;
         }
         count_network_inflight(&metadata, &mut network);
-        let engine = resolve_engine(state, &metadata.network_pair, record.pipeline_key)?;
+        let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
+            Ok(engine) => engine,
+            Err(err) if err.status == StatusCode::NOT_FOUND => {
+                skipped.unavailable_pipeline = skipped.unavailable_pipeline.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    network_pair = %metadata.network_pair,
+                    pipeline = %record.pipeline_key,
+                    error = %err.message,
+                    "skipping prover status record with unavailable pipeline"
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         let task_ids = metadata_queue_task_ids(&metadata, record.pipeline_key);
         let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
         if counted == 0 && !metadata.has_remote_submission_progress() {
@@ -1996,7 +2079,7 @@ async fn collect_prover_status(
         }
     }
 
-    Ok((tasks, network))
+    Ok((tasks, network, skipped))
 }
 
 fn parse_task_metadata(
@@ -2931,7 +3014,7 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BoundlessPairConfig, Config};
+    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
     use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
@@ -3280,6 +3363,147 @@ mod tests {
         }
     }
 
+    fn zk_any_metadata(stage: Option<&str>) -> TaskMetadata {
+        let mut metadata = task_metadata_with_stage(stage);
+        metadata.requested_proof_type = Some("zk_any".to_string());
+        metadata
+    }
+
+    async fn upsert_test_record(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        runner_status: RuntimeRunnerStatus,
+        metadata: &TaskMetadata,
+        pipeline_key: PipelineKey,
+    ) -> Result<()> {
+        let mut record = runtime_record(runner_status, metadata);
+        record.task_id = task_id.to_string();
+        record.pipeline_key = pipeline_key;
+        record.request_fingerprint = Some(format!("fingerprint-{task_id}"));
+        runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    async fn upsert_invalid_metadata_record(runtime: &RuntimeManager, task_id: &str) -> Result<()> {
+        let mut record = runtime_record(
+            RuntimeRunnerStatus::Running,
+            &zk_any_metadata(Some("prove")),
+        );
+        record.task_id = task_id.to_string();
+        record.request_fingerprint = Some(format!("fingerprint-{task_id}"));
+        record.metadata = serde_json::json!({ "invalid": true });
+        runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    fn test_state_with_acl(
+        runtime: Arc<RuntimeManager>,
+        engines: impl IntoIterator<Item = (PipelineKey, Arc<dyn EngineHandle>)>,
+    ) -> AppState {
+        let mut config = Config::default();
+        config.server.acl.keys.push(ServerAclKey {
+            id: "ops".to_string(),
+            key: "secret".to_string(),
+            allow: vec![ServerAclFeature::ProverClear],
+        });
+        let mut factory = StaticPipelineFactory::default();
+        for (pipeline_key, engine) in engines {
+            factory.insert("taiko_dev/ethereum", pipeline_key, engine);
+        }
+        AppState {
+            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
+            config: Arc::new(config),
+            pipelines: Arc::new(factory),
+            runtime,
+        }
+    }
+
+    #[tokio::test]
+    async fn prover_status_skips_invalid_metadata_and_missing_pipeline() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-skips",
+        ))?);
+        let metadata = zk_any_metadata(Some("prove"));
+        let mut missing_pipeline_metadata = metadata.clone();
+        missing_pipeline_metadata.network_pair = "missing/ethereum".to_string();
+        upsert_invalid_metadata_record(&runtime, "bad-metadata").await?;
+        upsert_test_record(
+            &runtime,
+            "missing-pipeline",
+            RuntimeRunnerStatus::Running,
+            &missing_pipeline_metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_engines(runtime, Vec::new());
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(tasks.is_clean());
+        assert!(network.is_clean());
+        assert_eq!(skipped.invalid_metadata, 1);
+        assert_eq!(skipped.unavailable_pipeline, 1);
+        assert!(!skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_prover_reports_skipped_records_and_keeps_clearing() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "clear-prover-skips",
+        ))?);
+        let metadata = zk_any_metadata(Some("prove"));
+        let mut missing_pipeline_metadata = metadata.clone();
+        missing_pipeline_metadata.network_pair = "missing/ethereum".to_string();
+        upsert_invalid_metadata_record(&runtime, "bad-metadata").await?;
+        upsert_test_record(
+            &runtime,
+            "missing-pipeline",
+            RuntimeRunnerStatus::Running,
+            &missing_pipeline_metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+        upsert_test_record(
+            &runtime,
+            "clearable",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_acl(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
+
+        let Json(status) = clear_prover(State(state), headers)
+            .await
+            .expect("clear prover should not fail on skipped records");
+
+        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.skipped.invalid_metadata, 1);
+        assert_eq!(status.skipped.unavailable_pipeline, 1);
+        let cleared = runtime
+            .get_task("clearable")
+            .await?
+            .expect("clearable record still present");
+        assert!(matches!(
+            cleared.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        Ok(())
+    }
+
     #[test]
     fn failed_submission_before_remote_progress_is_reenqueueable() {
         let metadata = task_metadata_with_stage(Some("preflight"));
@@ -3473,12 +3697,13 @@ mod tests {
         runtime.upsert_task(&record).await?;
         let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
 
-        let (tasks, network) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
         assert!(tasks.is_clean());
         assert!(network.is_clean());
+        assert!(skipped.is_clean());
         assert_eq!(network.risc0.inflight_orders, 0);
         assert_eq!(network.sp1.inflight_orders, 0);
 

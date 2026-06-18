@@ -286,10 +286,31 @@ pub(crate) struct PruneStatus {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ClearProverStatus {
+    pub(crate) status: &'static str,
+    pub(crate) cancelled: usize,
+    pub(crate) skipped: ProverSkippedStatusCounts,
+    pub(crate) failed: usize,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ProverStatus {
     pub(crate) clean: bool,
     pub(crate) tasks: ProverTaskStatusCounts,
     pub(crate) network: ProverNetworkStatus,
+    pub(crate) skipped: ProverSkippedStatusCounts,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ProverSkippedStatusCounts {
+    pub(crate) invalid_metadata: usize,
+    pub(crate) unavailable_pipeline: usize,
+}
+
+impl ProverSkippedStatusCounts {
+    pub(crate) const fn is_clean(&self) -> bool {
+        self.invalid_metadata == 0 && self.unavailable_pipeline == 0
+    }
 }
 
 #[derive(Default, Serialize)]
@@ -344,8 +365,9 @@ pub(super) struct RootTaskState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiData, BatchProofType, BatchShastaRequest, ProverNetworkBackendStatus,
-        ProverNetworkStatus, ProverStatus, ProverTaskStatusCounts, PruneStatus,
+        ApiData, BatchProofType, BatchShastaRequest, ClearProverStatus, ProverNetworkBackendStatus,
+        ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus, ProverTaskStatusCounts,
+        PruneStatus,
     };
 
     #[test]
@@ -388,6 +410,7 @@ mod tests {
                     sp1: ProverNetworkBackendStatus { inflight_orders: 3 },
                     risc0: ProverNetworkBackendStatus { inflight_orders: 0 },
                 },
+                skipped: ProverSkippedStatusCounts::default(),
             },
         })
         .expect("serialize status");
@@ -395,7 +418,30 @@ mod tests {
         assert_eq!(status["data"]["tasks"]["ready"], 2);
         assert_eq!(status["data"]["network"]["sp1"]["inflight_orders"], 3);
 
-        let clear = serde_json::to_value(PruneStatus { status: "ok" }).expect("serialize clear");
-        assert_eq!(clear, serde_json::json!({ "status": "ok" }));
+        let clear = serde_json::to_value(ClearProverStatus {
+            status: "ok",
+            cancelled: 2,
+            skipped: ProverSkippedStatusCounts {
+                invalid_metadata: 1,
+                unavailable_pipeline: 3,
+            },
+            failed: 4,
+        })
+        .expect("serialize clear");
+        assert_eq!(
+            clear,
+            serde_json::json!({
+                "status": "ok",
+                "cancelled": 2,
+                "skipped": {
+                    "invalid_metadata": 1,
+                    "unavailable_pipeline": 3
+                },
+                "failed": 4
+            })
+        );
+
+        let prune = serde_json::to_value(PruneStatus { status: "ok" }).expect("serialize prune");
+        assert_eq!(prune, serde_json::json!({ "status": "ok" }));
     }
 }

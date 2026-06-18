@@ -3070,7 +3070,7 @@ dependencies = [
 [[package]]
 name = "bindings"
 version = "2.1.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=48caa9e385f52659deee6a85faeb1b04f81df48a#48caa9e385f52659deee6a85faeb1b04f81df48a"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ff002a4516b489c7146675f7036d699b07a7f785#ff002a4516b489c7146675f7036d699b07a7f785"
 dependencies = [
  "alloy 1.8.3",
  "serde",
@@ -6025,7 +6025,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -8448,7 +8448,7 @@ checksum = "106dd99e98437432fed6519dedecfade6a06a73bb7b2a1e019fdd2bee5778d94"
 [[package]]
 name = "protocol"
 version = "2.1.0"
-source = "git+https://github.com/taikoxyz/taiko-mono?rev=48caa9e385f52659deee6a85faeb1b04f81df48a#48caa9e385f52659deee6a85faeb1b04f81df48a"
+source = "git+https://github.com/taikoxyz/taiko-mono?rev=ff002a4516b489c7146675f7036d699b07a7f785#ff002a4516b489c7146675f7036d699b07a7f785"
 dependencies = [
  "alethia-reth-chainspec",
  "alethia-reth-consensus",
@@ -8513,7 +8513,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.38",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -8551,7 +8551,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -13783,7 +13783,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

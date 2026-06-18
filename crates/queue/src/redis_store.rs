@@ -1,7 +1,7 @@
 use crate::{
-    Priority, ReadyQueueSort, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStore,
-    TaskStoreError, decode_task_id, encode_task_id, encoded_from_zset_member, sort_prefix_hex,
-    zset_member_from_encoded,
+    Priority, ReadyQueueSort, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind,
+    TaskStore, TaskStoreError, decode_task_id, encode_task_id, encoded_from_zset_member,
+    sort_prefix_hex, zset_member_from_encoded,
 };
 use async_trait::async_trait;
 use redis::AsyncCommands;
@@ -34,6 +34,21 @@ const STATE_RETRYING: &str = "retrying";
 const STATE_SUCCEEDED: &str = "succeeded";
 const STATE_FAILED: &str = "failed";
 const STATE_CANCELLED: &str = "cancelled";
+
+fn task_state_kind(raw: &str) -> StoreResult<TaskStateKind> {
+    match raw {
+        STATE_PENDING => Ok(TaskStateKind::Pending),
+        STATE_READY => Ok(TaskStateKind::Ready),
+        STATE_RUNNING => Ok(TaskStateKind::Running),
+        STATE_RETRYING => Ok(TaskStateKind::Retrying),
+        STATE_SUCCEEDED => Ok(TaskStateKind::Succeeded),
+        STATE_FAILED => Ok(TaskStateKind::Failed),
+        STATE_CANCELLED => Ok(TaskStateKind::Cancelled),
+        other => Err(TaskStoreError::corrupt_msg(format!(
+            "unknown task state: {other}"
+        ))),
+    }
+}
 
 const SET_STATE_IF_RUNNING_SCRIPT: &str = r"
 local state = redis.call('HGET', KEYS[1], ARGV[1])
@@ -354,7 +369,7 @@ if exists == 1 then
       ARGV[9], ARGV[10],
       ARGV[11], ARGV[12],
       ARGV[13], ARGV[14])
-                    redis.call('HDEL', KEYS[1], ARGV[15], ARGV[16], ARGV[17], ARGV[18], ARGV[19], ARGV[20], ARGV[21])
+                    redis.call('HDEL', KEYS[1], ARGV[15], ARGV[16], ARGV[17], ARGV[18], ARGV[19], ARGV[20])
     return 2
   end
   return 0
@@ -1047,40 +1062,66 @@ return 1
         Ok(Some((state, priority)))
     }
 
-    async fn list_views(&self) -> StoreResult<Vec<(TaskId<Id>, TaskState<O, Id>, Priority)>> {
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
         let pattern = format!("{}*", self.task_key_prefix());
         let prefix = self.task_key_prefix();
         let mut cursor = 0u64;
-        let mut ids = Vec::new();
-        let mut conn = self.conn.lock().await;
+        let mut views = Vec::new();
         loop {
-            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(128)
-                .query_async(&mut *conn)
-                .await
-                .map_err(TaskStoreError::backend)?;
+            let (next_cursor, keys): (u64, Vec<String>) = {
+                let mut conn = self.conn.lock().await;
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(128)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?
+            };
+
+            let mut batch = Vec::with_capacity(keys.len());
             for key in keys {
                 let Some(encoded) = key.strip_prefix(&prefix) else {
                     continue;
                 };
-                ids.push(Self::decode_id(encoded)?);
+                let id = Self::decode_id(encoded)?;
+                batch.push((key, id));
             }
+
+            if !batch.is_empty() {
+                let mut pipe = redis::pipe();
+                for (key, _) in &batch {
+                    pipe.cmd("HMGET")
+                        .arg(key)
+                        .arg(FIELD_STATE)
+                        .arg(FIELD_PRIORITY);
+                }
+                let rows: Vec<(Option<String>, Option<String>)> = {
+                    let mut conn = self.conn.lock().await;
+                    pipe.query_async(&mut *conn)
+                        .await
+                        .map_err(TaskStoreError::backend)?
+                };
+                for ((_, id), (state, priority)) in batch.into_iter().zip(rows) {
+                    let Some(state) = state else {
+                        continue;
+                    };
+                    let Some(priority) = priority else {
+                        continue;
+                    };
+                    let priority = Priority::parse(priority.as_str()).ok_or_else(|| {
+                        TaskStoreError::corrupt_msg(format!("unknown priority: {priority}"))
+                    })?;
+                    views.push((id, task_state_kind(state.as_str())?, priority));
+                }
+            }
+
             if next_cursor == 0 {
                 break;
             }
             cursor = next_cursor;
-        }
-        drop(conn);
-
-        let mut views = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some((state, priority)) = self.get_view(&id).await? {
-                views.push((id, state, priority));
-            }
         }
         Ok(views)
     }

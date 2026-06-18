@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use raiko2_queue::{
     NewTask, Priority, ReadyQueueSort, RedisStore, RetryPolicy, Scheduler, SchedulerConfig, TaskId,
-    TaskState,
+    TaskState, encode_task_id,
 };
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use testcontainers::{
     GenericImage,
@@ -418,5 +419,84 @@ async fn redis_store_equal_sort_prefix_keeps_fifo() -> Result<(), Box<dyn std::e
         assert_eq!(lease.payload, expected.to_string());
     }
     assert!(sched.next_ready("w").await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn redis_store_resubmitting_cancelled_task_clears_stale_running_member()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !docker_available() {
+        eprintln!("skipping redis store test: docker unavailable");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("redis", "7-alpine")
+        .with_exposed_port(6379.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+        .start()
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
+    let url = format!("redis://127.0.0.1:{port}/");
+    let namespace = format!(
+        "test-resubmit-running-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await?;
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
+    let id = TaskId::new(7);
+    sched
+        .submit(
+            id.clone(),
+            NewTask {
+                priority: Priority::Medium,
+                payload: "first".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+    let _lease = sched
+        .next_ready("w")
+        .await?
+        .ok_or_else(|| std::io::Error::other("expected running task"))?;
+    sched.cancel(id.clone()).await?;
+
+    let encoded = encode_task_id(&id)?;
+    let task_key = format!("{namespace}:task:{encoded}");
+    let running_key = format!("{namespace}:running");
+    let stale_member = format!("{:020}{encoded}", 1);
+    let client = redis::Client::open(url.as_str())?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let _: () = redis::pipe()
+        .cmd("HSET")
+        .arg(&task_key)
+        .arg("running_member")
+        .arg(&stale_member)
+        .ignore()
+        .cmd("ZADD")
+        .arg(&running_key)
+        .arg(1)
+        .arg(&stale_member)
+        .ignore()
+        .query_async(&mut conn)
+        .await?;
+
+    sched
+        .submit(
+            id,
+            NewTask {
+                priority: Priority::Medium,
+                payload: "second".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+
+    let running_count: usize = conn.zcard(running_key).await?;
+    assert_eq!(running_count, 0);
     Ok(())
 }

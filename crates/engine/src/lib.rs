@@ -32,7 +32,7 @@ use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverPro
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
-    TaskState, TaskStoreError, TaskView,
+    TaskState, TaskStoreError, TaskView, TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -431,9 +431,7 @@ where
     /// # Errors
     ///
     /// Returns an error if task store cannot list tasks.
-    pub async fn list_tasks(
-        &self,
-    ) -> Result<Vec<TaskView<EngineOutput<S::GuestInput>, EngineTaskKey>>, TaskStoreError> {
+    pub async fn list_tasks(&self) -> Result<Vec<TaskViewState<EngineTaskKey>>, TaskStoreError> {
         self.inner.scheduler.list().await
     }
 

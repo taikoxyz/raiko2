@@ -1,5 +1,5 @@
 use crate::ready_sort::insert_ready_sorted;
-use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState};
+use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -126,7 +126,7 @@ where
         Ok(updated)
     }
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
-    async fn list_views(&self) -> StoreResult<Vec<(TaskId<Id>, TaskState<O, Id>, Priority)>>;
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
     async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
     async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>>;
@@ -581,11 +581,17 @@ where
         Ok(record.map(|r| (r.state.clone(), r.priority)))
     }
 
-    async fn list_views(&self) -> StoreResult<Vec<(TaskId<Id>, TaskState<O, Id>, Priority)>> {
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
         let g = self.inner.lock().await;
         Ok(g.tasks
             .iter()
-            .map(|(id, record)| (id.clone(), record.state.clone(), record.priority))
+            .map(|(id, record)| {
+                (
+                    id.clone(),
+                    TaskStateKind::from(&record.state),
+                    record.priority,
+                )
+            })
             .collect())
     }
 

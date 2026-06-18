@@ -71,8 +71,8 @@ That flow owns:
 
 ## Guest ELF Rule
 
-`release-image` does not refresh guest ELF artifacts by default. Host image publication and guest ELF
-publication are decoupled. For unreleased testing, build local ELFs with `just build-guest all` or
+`release-image` refreshes guest ELF artifacts by default for non-host runtime images. Host image
+publication and guest ELF publication are decoupled. For unreleased testing, build local ELFs with `just build-guest all` or
 `cargo run -r -p xtask -- build-guest all`. Published guest ELFs are GitHub Release assets and can be
 downloaded separately:
 
@@ -80,8 +80,8 @@ downloaded separately:
 cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf
 ```
 
-Use `--refresh-guest-elves <risc0|sp1|all>` only when the release task explicitly needs to rebuild
-or validate checked-in guest ELF artifacts before image publication. If a refresh leaves tracked
+Use `--skip-guest-refresh` only when intentionally composing an image from already committed guest
+ELFs. Use `--refresh-guest-elves <risc0|sp1|all>` to override the default guest set. If a refresh leaves tracked
 changes in `crates/guests/elf`, `release-image` stops before publishing; review and commit those
 artifacts before retrying.
 

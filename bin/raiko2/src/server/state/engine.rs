@@ -2,7 +2,7 @@ use raiko2_engine::{
     AggregateProofInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
     ProposalTaskRequest,
 };
-use raiko2_queue::{TaskState, TaskStoreError, TaskView};
+use raiko2_queue::{TaskState, TaskStateKind, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -50,15 +50,15 @@ pub(crate) struct EngineQueueTaskView {
     pub(crate) state: EngineQueueTaskState,
 }
 
-const fn queue_task_state<I>(state: &TaskState<I, EngineTaskKey>) -> EngineQueueTaskState {
+const fn queue_task_state(state: TaskStateKind) -> EngineQueueTaskState {
     match state {
-        TaskState::Pending { .. } => EngineQueueTaskState::Pending,
-        TaskState::Ready => EngineQueueTaskState::Ready,
-        TaskState::Retrying { .. } => EngineQueueTaskState::Retrying,
-        TaskState::Running { .. } => EngineQueueTaskState::Running,
-        TaskState::Succeeded { .. } => EngineQueueTaskState::Succeeded,
-        TaskState::Failed { .. } => EngineQueueTaskState::Failed,
-        TaskState::Cancelled => EngineQueueTaskState::Cancelled,
+        TaskStateKind::Pending => EngineQueueTaskState::Pending,
+        TaskStateKind::Ready => EngineQueueTaskState::Ready,
+        TaskStateKind::Retrying => EngineQueueTaskState::Retrying,
+        TaskStateKind::Running => EngineQueueTaskState::Running,
+        TaskStateKind::Succeeded => EngineQueueTaskState::Succeeded,
+        TaskStateKind::Failed => EngineQueueTaskState::Failed,
+        TaskStateKind::Cancelled => EngineQueueTaskState::Cancelled,
     }
 }
 
@@ -149,7 +149,7 @@ where
                     .into_iter()
                     .map(|view| EngineQueueTaskView {
                         id: view.id,
-                        state: queue_task_state(&view.state),
+                        state: queue_task_state(view.state),
                     })
                     .collect()
             })

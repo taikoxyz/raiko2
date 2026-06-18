@@ -38,6 +38,7 @@ pub(crate) struct DownloadGuestElvesArgs {
 pub(crate) fn run(root: &std::path::Path, args: DownloadGuestElvesArgs) -> Result<()> {
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repo", &args.repo)?;
+    ensure_gh_available()?;
     let dir = if args.dir.is_absolute() {
         args.dir
     } else {
@@ -61,6 +62,18 @@ pub(crate) fn run(root: &std::path::Path, args: DownloadGuestElvesArgs) -> Resul
     }
 
     Ok(())
+}
+
+fn ensure_gh_available() -> Result<()> {
+    match Command::new("gh").arg("--version").status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => bail!(
+            "GitHub CLI `gh` is required to download guest ELFs; install it and run `gh auth login` (gh --version exited with {status})"
+        ),
+        Err(err) => bail!(
+            "GitHub CLI `gh` is required to download guest ELFs; install it and run `gh auth login`: {err}"
+        ),
+    }
 }
 
 fn asset_patterns(backend: GuestElfBackend) -> &'static [&'static str] {

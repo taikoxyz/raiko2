@@ -4,7 +4,7 @@ mod types;
 
 pub use config::{SchedulerConfig, TaskExecutionPolicy};
 pub use retry::RetryPolicy;
-pub use types::{NewTask, TaskLease, TaskView};
+pub use types::{NewTask, TaskLease, TaskView, TaskViewState};
 
 use crate::{Priority, TaskId, TaskState, TaskStore, TaskStoreError};
 use std::collections::{HashSet, VecDeque};
@@ -362,11 +362,11 @@ where
     /// # Errors
     ///
     /// Returns `TaskStoreError` if underlying store fails.
-    pub async fn list(&self) -> Result<Vec<TaskView<O, Id>>, TaskStoreError> {
-        self.store.list_views().await.map(|views| {
+    pub async fn list(&self) -> Result<Vec<TaskViewState<Id>>, TaskStoreError> {
+        self.store.list_view_states().await.map(|views| {
             views
                 .into_iter()
-                .map(|(id, state, priority)| TaskView {
+                .map(|(id, state, priority)| TaskViewState {
                     id,
                     state,
                     priority,
@@ -631,14 +631,20 @@ mod tests {
             Ok(Some((record.state.clone(), record.priority)))
         }
 
-        async fn list_views(
+        async fn list_view_states(
             &self,
-        ) -> StoreResult<Vec<(TestTaskId, TaskState<O, TestId>, Priority)>> {
+        ) -> StoreResult<Vec<(TestTaskId, crate::TaskStateKind, Priority)>> {
             let guard = self.inner.lock().await;
             Ok(guard
                 .tasks
                 .iter()
-                .map(|(id, record)| (id.clone(), record.state.clone(), record.priority))
+                .map(|(id, record)| {
+                    (
+                        id.clone(),
+                        crate::TaskStateKind::from(&record.state),
+                        record.priority,
+                    )
+                })
                 .collect())
         }
 
@@ -845,10 +851,10 @@ mod tests {
             self.inner.get_view(id).await
         }
 
-        async fn list_views(
+        async fn list_view_states(
             &self,
-        ) -> crate::StoreResult<Vec<(TestTaskId, TaskState<O, TestId>, Priority)>> {
-            self.inner.list_views().await
+        ) -> crate::StoreResult<Vec<(TestTaskId, crate::TaskStateKind, Priority)>> {
+            self.inner.list_view_states().await
         }
 
         async fn dependents_of(&self, dep: &TestTaskId) -> crate::StoreResult<Vec<TestTaskId>> {

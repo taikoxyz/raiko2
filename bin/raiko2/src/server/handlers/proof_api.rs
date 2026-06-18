@@ -21,7 +21,11 @@ use raiko2_runtime::{
     RunnerStatus as RuntimeRunnerStatus, RuntimeManager, TaskRegistration, TaskRegistrationOutcome,
 };
 use std::sync::Arc;
-use std::{collections::HashSet, future::Future};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
@@ -2035,6 +2039,10 @@ async fn collect_prover_status(
     let mut tasks = ProverTaskStatusCounts::default();
     let mut network = ProverNetworkStatus::default();
     let mut skipped = ProverSkippedStatusCounts::default();
+    let mut queue_groups: HashMap<ProverQueueKey, (Arc<dyn EngineHandle>, HashSet<EngineTaskId>)> =
+        HashMap::new();
+    let mut queue_roots = Vec::new();
+    let now_secs = unix_now_secs();
 
     for record in records {
         let metadata = match parse_task_metadata(&record) {
@@ -2056,7 +2064,7 @@ async fn collect_prover_status(
         if is_terminal_runtime_status(record.runner_status) {
             continue;
         }
-        count_network_inflight(&metadata, &mut network);
+        count_network_inflight(&metadata, &mut network, now_secs);
         let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
@@ -2072,14 +2080,46 @@ async fn collect_prover_status(
             }
             Err(err) => return Err(err),
         };
+        let engine_key = (metadata.network_pair.clone(), record.pipeline_key);
         let task_ids = metadata_queue_task_ids(&metadata, record.pipeline_key);
+        queue_groups
+            .entry(engine_key.clone())
+            .or_insert_with(|| (engine, HashSet::new()))
+            .1
+            .extend(task_ids.iter().cloned());
+        queue_roots.push(ProverQueueRoot {
+            engine_key,
+            task_ids,
+            has_remote_progress: metadata.has_remote_submission_progress(),
+        });
+    }
+
+    let mut counted_groups = HashMap::new();
+    for (engine_key, (engine, task_ids)) in queue_groups {
         let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
-        if counted == 0 && !metadata.has_remote_submission_progress() {
+        counted_groups.insert(engine_key, counted);
+    }
+
+    for root in queue_roots {
+        let has_counted_task = counted_groups.get(&root.engine_key).is_some_and(|counted| {
+            root.task_ids
+                .iter()
+                .any(|task_id| counted.contains(task_id))
+        });
+        if !has_counted_task && !root.has_remote_progress {
             tasks.pending = tasks.pending.saturating_add(1);
         }
     }
 
     Ok((tasks, network, skipped))
+}
+
+type ProverQueueKey = (String, PipelineKey);
+
+struct ProverQueueRoot {
+    engine_key: ProverQueueKey,
+    task_ids: HashSet<EngineTaskId>,
+    has_remote_progress: bool,
 }
 
 fn parse_task_metadata(
@@ -2127,21 +2167,21 @@ async fn count_matching_queue_tasks(
     engine: &Arc<dyn EngineHandle>,
     task_ids: &HashSet<EngineTaskId>,
     counts: &mut ProverTaskStatusCounts,
-) -> Result<usize, ApiError> {
+) -> Result<HashSet<EngineTaskId>, ApiError> {
     if task_ids.is_empty() {
-        return Ok(0);
+        return Ok(HashSet::new());
     }
     let views = engine
         .list_tasks()
         .await
         .map_err(|err| ApiError::internal(format!("failed to list queue tasks: {err}")))?;
-    let mut counted = 0usize;
+    let mut counted = HashSet::new();
     for view in views {
         if !task_ids.contains(&view.id) {
             continue;
         }
         if count_queue_task_state(&view, counts) {
-            counted = counted.saturating_add(1);
+            counted.insert(view.id);
         }
     }
     Ok(counted)
@@ -2163,12 +2203,16 @@ const fn count_queue_task_state(
     true
 }
 
-fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkStatus) {
+fn count_network_inflight(
+    metadata: &TaskMetadata,
+    network: &mut ProverNetworkStatus,
+    now_secs: u64,
+) {
     for runtime in metadata.runtime.proposals.values() {
-        count_runtime_network_inflight(runtime, network);
+        count_runtime_network_inflight(runtime, network, now_secs);
     }
     if let Some(runtime) = metadata.runtime.aggregate.as_ref() {
-        count_runtime_network_inflight(runtime, network);
+        count_runtime_network_inflight(runtime, network, now_secs);
     }
 }
 
@@ -2176,13 +2220,23 @@ fn count_network_inflight(metadata: &TaskMetadata, network: &mut ProverNetworkSt
 fn count_runtime_network_inflight(
     runtime: &TaskRuntimeMetadata,
     network: &mut ProverNetworkStatus,
+    now_secs: u64,
 ) {
     if runtime.has_sp1_network_submission_progress() {
         network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
     }
-    if runtime.has_boundless_submission_resume() {
+    if runtime.provider_request_id.is_some()
+        && matches!(runtime.expires_at, Some(expires_at) if expires_at > now_secs)
+    {
         network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
     }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn load_task_lookup(state: &AppState, id: &str) -> Result<TaskLookup, ApiError> {
@@ -3029,7 +3083,10 @@ mod tests {
     };
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -3065,6 +3122,59 @@ mod tests {
 
         fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
             Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct ListingEngine {
+        views: Vec<EngineQueueTaskView>,
+        list_calls: AtomicUsize,
+    }
+
+    impl ListingEngine {
+        fn new(views: Vec<EngineQueueTaskView>) -> Self {
+            Self {
+                views,
+                list_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EngineHandle for ListingEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregate submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+            self.list_calls.fetch_add(1, Ordering::Relaxed);
+            let views = self.views.clone();
+            Box::pin(async move { Ok(views) })
         }
 
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -3369,6 +3479,23 @@ mod tests {
         metadata
     }
 
+    fn test_proposal_request(proposal_id: u64) -> ProposalTaskRequest {
+        ProposalTaskRequest {
+            proposal_id,
+            l2_block_range: Some(L2BlockRange {
+                start: proposal_id,
+                end: proposal_id,
+            }),
+            l1_inclusion_block_number: 1,
+            last_anchor_block_number: proposal_id.saturating_sub(1),
+            checkpoint: None,
+            blob_proof_type: None,
+            prover: None,
+            graffiti: None,
+            prover_config: ProverTaskConfig::default(),
+        }
+    }
+
     async fn upsert_test_record(
         runtime: &RuntimeManager,
         task_id: &str,
@@ -3446,6 +3573,96 @@ mod tests {
         assert_eq!(skipped.invalid_metadata, 1);
         assert_eq!(skipped.unavailable_pipeline, 1);
         assert!(!skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_ignores_expired_boundless_inflight_order() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-expired-boundless",
+        ))?);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xexpired".to_string()),
+                expires_at: Some(unix_now_secs().saturating_sub(1)),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        upsert_test_record(
+            &runtime,
+            "expired-boundless",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (_, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(network.risc0.inflight_orders, 0);
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_lists_queue_once_per_engine_and_counts_unique_tasks() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-list-once",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request.clone());
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request,
+        });
+        upsert_test_record(
+            &runtime,
+            "root-a",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+        upsert_test_record(
+            &runtime,
+            "root-b",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
+            id: task_id,
+            state: EngineQueueTaskState::Running,
+        }]));
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::clone(&engine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(engine.list_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(tasks.running, 1);
+        assert!(network.is_clean());
+        assert!(skipped.is_clean());
         Ok(())
     }
 

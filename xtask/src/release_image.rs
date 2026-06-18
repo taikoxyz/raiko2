@@ -16,11 +16,11 @@ const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
 pub(crate) enum ImageBackend {
     /// Host-only runtime image. Guest ELF refresh is opt-in.
     Host,
-    /// Runtime image backend label. Guest ELF refresh is opt-in.
+    /// Runtime image backend label. Guest ELF refresh defaults to RISC0.
     Risc0,
-    /// Runtime image backend label. Guest ELF refresh is opt-in.
+    /// Runtime image backend label. Guest ELF refresh defaults to SP1.
     Sp1,
-    /// Runtime image backend label. Guest ELF refresh is opt-in.
+    /// Runtime image backend label. Guest ELF refresh defaults to all guests.
     All,
 }
 
@@ -171,14 +171,21 @@ fn resolve_guest_refresh_backend(
         bail!("--skip-guest-refresh cannot be combined with --refresh-guest-elves");
     }
 
-    match image_backend {
-        ImageBackend::Host | ImageBackend::Risc0 | ImageBackend::Sp1 | ImageBackend::All => {
-            if force_rebuild_guests && refresh_guest_elves.is_none() {
-                bail!("--force-rebuild-guests requires --refresh-guest-elves");
-            }
-            Ok(refresh_guest_elves)
-        }
+    if skip_guest_refresh {
+        return Ok(None);
     }
+
+    let default_refresh = match image_backend {
+        ImageBackend::Host => None,
+        ImageBackend::Risc0 => Some(GuestBackend::Risc0),
+        ImageBackend::Sp1 => Some(GuestBackend::Sp1),
+        ImageBackend::All => Some(GuestBackend::All),
+    };
+    let selected = refresh_guest_elves.or(default_refresh);
+    if force_rebuild_guests && selected.is_none() {
+        bail!("--force-rebuild-guests requires --refresh-guest-elves");
+    }
+    Ok(selected)
 }
 
 #[cfg(feature = "guest-tools")]
@@ -419,9 +426,17 @@ mod tests {
     }
 
     #[test]
-    fn non_host_image_skips_guest_refresh_by_default() {
+    fn non_host_image_refreshes_matching_guest_elves_by_default() {
         let refresh = resolve_guest_refresh_backend(ImageBackend::All, false, false, None)
-            .expect("runtime image should not require guest refresh");
+            .expect("runtime image should refresh guests by default");
+
+        assert_eq!(refresh, Some(GuestBackend::All));
+    }
+
+    #[test]
+    fn non_host_image_can_explicitly_skip_guest_refresh() {
+        let refresh = resolve_guest_refresh_backend(ImageBackend::All, false, true, None)
+            .expect("runtime image should allow explicit guest refresh skip");
 
         assert_eq!(refresh, None);
     }

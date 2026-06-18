@@ -652,23 +652,10 @@ fn v0_1_0_guest_input_hard_forks(name: &str) -> Option<(SpecId, BTreeMap<ForkId,
                 ForkCondition::Timestamp(1_707_305_664),
             ),
         ]),
-        "taiko_mainnet" => BTreeMap::from([
-            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
-            (
-                ForkId::Taiko(TaikoFork::Ontake),
-                ForkCondition::Block(538_304),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Pacaya),
-                ForkCondition::Block(1_166_000),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                ForkCondition::Timestamp(1_775_393_399),
-            ),
-            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd),
-            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
-        ]),
+        "taiko_mainnet" => BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            ForkCondition::Timestamp(1_775_135_700),
+        )]),
         "taiko_dev" => BTreeMap::from([
             (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Timestamp(0)),
             (
@@ -704,21 +691,20 @@ fn v0_1_0_guest_input_hard_forks(name: &str) -> Option<(SpecId, BTreeMap<ForkId,
         _ => return None,
     };
 
-    Some((max_spec_id(&hard_forks), hard_forks))
+    let max_spec_id = match name {
+        "taiko_mainnet" => SpecId::CANCUN,
+        _ => max_spec_id(&hard_forks),
+    };
+
+    Some((max_spec_id, hard_forks))
 }
 
 fn v0_1_0_guest_input_l1_contracts(name: &str) -> Option<BTreeMap<ForkId, Address>> {
     match name {
-        "taiko_mainnet" => Some(BTreeMap::from([
-            (
-                ForkId::Taiko(TaikoFork::Pacaya),
-                address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a"),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"),
-            ),
-        ])),
+        "taiko_mainnet" => Some(BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"),
+        )])),
         "taiko_dev" => Some(BTreeMap::from([(
             ForkId::Standard(SpecId::CANCUN),
             address!("12100faa7b157e9947340b44409fc7e27ec0abef"),
@@ -743,29 +729,23 @@ fn v0_1_0_guest_input_l1_contracts(name: &str) -> Option<BTreeMap<ForkId, Addres
 
 fn v0_1_0_guest_input_verifier_address_forks(name: &str) -> Option<VerifierAddressForks> {
     match name {
-        "taiko_mainnet" => Some(BTreeMap::from([
-            (
-                ForkId::Taiko(TaikoFork::Pacaya),
-                verifiers([
-                    (
-                        ProofType::Sgx,
-                        Some(address!("9e322fC59b8f4A29e6b25c3a166ac1892AA30136")),
-                    ),
-                    (
-                        ProofType::Sp1,
-                        Some(address!("bee1040D0Aab17AE19454384904525aE4A3602B9")),
-                    ),
-                    (
-                        ProofType::Risc0,
-                        Some(address!("73Ee496dA20e5C65340c040B0D8c3C891C1f74AE")),
-                    ),
-                ]),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                same_verifier(address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")),
-            ),
-        ])),
+        "taiko_mainnet" => Some(BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            verifiers([
+                (
+                    ProofType::Sgx,
+                    Some(address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")),
+                ),
+                (
+                    ProofType::Sp1,
+                    Some(address!("96337327648dcFA22b014009cf10A2D5E2F305f6")),
+                ),
+                (
+                    ProofType::Risc0,
+                    Some(address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")),
+                ),
+            ]),
+        )])),
         "taiko_dev" => Some(BTreeMap::from([(
             ForkId::Standard(SpecId::CANCUN),
             verifiers([
@@ -1360,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_1_0_guest_input_projection_removes_sgx_geth_and_uses_legacy_forks() -> Result<()> {
+    fn v0_1_0_guest_input_projection_uses_mainnet_branch_shasta_spec() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -1385,34 +1365,40 @@ mod tests {
                 .values()
                 .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
         );
-        assert_eq!(projected.max_spec_id, SpecId::OSAKA);
-        assert_eq!(
-            projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Hekla)),
-            Some(&ForkCondition::Block(0))
-        );
+        assert_eq!(projected.max_spec_id, SpecId::CANCUN);
+        assert_eq!(projected.hard_forks.len(), 1);
         assert_eq!(
             projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(1_775_393_399))
+            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
         );
-        assert_eq!(
-            projected.hard_forks.get(&ForkId::Standard(SpecId::CANCUN)),
-            Some(&ForkCondition::Tbd)
-        );
-        assert_eq!(
-            projected.l1_contract.get(&ForkId::Taiko(TaikoFork::Pacaya)),
-            Some(&address!("06a9Ab27c7e2255df1815E6CC0168d7755Feb19a"))
-        );
+        assert_eq!(projected.l1_contract.len(), 1);
         assert_eq!(
             projected.l1_contract.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"))
         );
         assert_eq!(
-            projected.get_fork_verifier_address(1_166_000, 0, ProofType::Risc0,)?,
-            address!("73Ee496dA20e5C65340c040B0D8c3C891C1f74AE")
+            projected.get_fork_verifier_address(
+                5_412_478,
+                MAINNET_SHASTA_TIMESTAMP,
+                ProofType::Sgx,
+            )?,
+            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
         );
         assert_eq!(
-            projected.get_fork_verifier_address(5_412_478, 1_775_393_399, ProofType::Sp1,)?,
-            address!("9cAa4948381590900FCdd8a4F06EB24138eD665d")
+            projected.get_fork_verifier_address(
+                5_412_478,
+                MAINNET_SHASTA_TIMESTAMP,
+                ProofType::Risc0,
+            )?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            projected.get_fork_verifier_address(
+                5_412_478,
+                MAINNET_SHASTA_TIMESTAMP,
+                ProofType::Sp1,
+            )?,
+            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
         );
 
         let bytes = bincode::serialize(&projected)

@@ -284,6 +284,22 @@ jobs:
             fi
           fi
 
+          # Guarded last-resort cache eviction: only when critically low on
+          # disk, drop the per-repo cargo cache volumes so the runner
+          # self-heals instead of OOMing mid-build. These volumes normally
+          # persist to keep guest compiles fast (~2 min); sacrifice them only
+          # under disk pressure.
+          if command -v docker >/dev/null 2>&1; then
+            threshold_kb=$((20 * 1024 * 1024))  # 20 GiB
+            avail_kb="$(df -Pk "${GITHUB_WORKSPACE:-$PWD}" | tail -1 | awk '{print $4}')"
+            if [ -n "${avail_kb:-}" ] && [ "${avail_kb}" -lt "${threshold_kb}" ]; then
+              echo "Low disk: ${avail_kb} KiB available (< ${threshold_kb} KiB); pruning cargo cache volumes"
+              # Substring match on per-repo cargo volume names (e.g. raiko2-cargo-risc0);
+              # safe on this dedicated single-tenant runner.
+              docker volume ls --quiet --filter 'name=-cargo-' | xargs -r docker volume rm || true
+            fi
+          fi
+
           df -h
 
       # Self-hosted runner workaround for actions/checkout#2008: when a

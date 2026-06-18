@@ -83,6 +83,16 @@ const fn proposal_id_from_request(
         .proposal_id
 }
 
+fn shasta_request_block_count(
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+) -> usize {
+    request
+        .payload
+        .guest_input
+        .as_ref()
+        .map_or_else(|| request.payload.blocks.len(), |input| input.witnesses.len())
+}
+
 fn aggregate_proposal_id_summary(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest,
 ) -> String {
@@ -127,7 +137,8 @@ where
                             schema = %request.schema,
                             proposal_id = proposal_id_from_request(&request),
                             chain_id = request.payload.chain_id,
-                            block_count = request.payload.blocks.len(),
+                            block_count = shasta_request_block_count(&request),
+                            replay_block_count = request.payload.blocks.len(),
                             instance_id = state.service_config.instance_id,
                             "completed sgx shasta prove request"
                         );
@@ -138,7 +149,8 @@ where
                     warn!(
                         schema = %request.schema,
                         chain_id = request.payload.chain_id,
-                        block_count = request.payload.blocks.len(),
+                        block_count = shasta_request_block_count(&request),
+                        replay_block_count = request.payload.blocks.len(),
                         instance_id = state.service_config.instance_id,
                         code = err.code,
                         message = %err.message,
@@ -229,7 +241,10 @@ mod tests {
     use secp256k1::SecretKey;
     use tower::util::ServiceExt;
 
-    use super::{SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router};
+    use super::{
+        SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router,
+        shasta_request_block_count,
+    };
     use crate::config::ServiceConfig;
     use crate::tee::TeeProvider;
 
@@ -266,6 +281,20 @@ mod tests {
                 guest_input: None,
             },
         }
+    }
+
+    #[test]
+    fn shasta_request_block_count_uses_guest_input_witnesses() {
+        let mut request = request_fixture();
+        request.payload.guest_input = Some(raiko2_primitives_shasta::GuestInput {
+            witnesses: vec![
+                raiko2_primitives::StatelessInput::default(),
+                raiko2_primitives::StatelessInput::default(),
+            ],
+            ..raiko2_primitives_shasta::GuestInput::default()
+        });
+
+        assert_eq!(shasta_request_block_count(&request), 2);
     }
 
     #[tokio::test]

@@ -45,6 +45,9 @@ pub struct BuildGuestArgs {
     /// Include benchmark binaries (requires bins in Cargo.toml).
     #[arg(long)]
     pub bench: bool,
+    /// Force rebuilding guests even if fingerprints match.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 }
 
 pub fn repo_root() -> PathBuf {
@@ -56,7 +59,7 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
-    build(root, args.backend, args.bench, None)?;
+    ensure_release_guest_elves(root, args.backend, args.bench, None, args.force)?;
     println!("[INFO] Build complete!");
     Ok(())
 }
@@ -128,18 +131,35 @@ struct GuestBuildFingerprint {
     fingerprint: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum GuestBuildDecision {
+    Skip,
+    Rebuild(GuestRebuildReason),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GuestRebuildReason {
+    Forced,
+    Changed,
+}
+
 pub fn ensure_release_guest_elves(
     root: &Path,
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
+    force_rebuild: bool,
 ) -> Result<()> {
     match backend {
-        Backend::Risc0 => ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag),
-        Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag),
+        Backend::Risc0 => {
+            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force_rebuild)
+        }
+        Backend::Sp1 => {
+            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force_rebuild)
+        }
         Backend::All => {
-            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
-            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
+            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force_rebuild)?;
+            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force_rebuild)
         }
     }
 }
@@ -189,6 +209,7 @@ fn ensure_release_backend(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
+    force_rebuild: bool,
 ) -> Result<()> {
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
@@ -200,26 +221,63 @@ fn ensure_release_backend(
         compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
     let fingerprint_path = guest_fingerprint_path(root, backend_key);
 
-    if outputs_exist
-        && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
-    {
-        println!("[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild.");
-        return Ok(());
+    match guest_build_decision(
+        &fingerprint_path,
+        backend_key,
+        bench,
+        &fingerprint,
+        outputs_exist,
+        force_rebuild,
+    )? {
+        GuestBuildDecision::Skip => {
+            println!(
+                "[INFO] Guest ELFs for backend `{backend_key}` match the fingerprint cache; skipping rebuild."
+            );
+            return Ok(());
+        }
+        GuestBuildDecision::Rebuild(GuestRebuildReason::Forced) => {
+            println!(
+                "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because rebuild was forced."
+            );
+        }
+        GuestBuildDecision::Rebuild(GuestRebuildReason::Changed) => {
+            println!(
+                "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because outputs are missing or fingerprints changed..."
+            );
+        }
     }
 
-    println!(
-        "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
-    );
     build(root, backend, bench, sp1_docker_tag)?;
     let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?;
     write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
     Ok(())
 }
 
+fn default_fingerprint_dir(root: &Path) -> PathBuf {
+    util::target_root(root).join("xtask/guest-fingerprints")
+}
+
 fn guest_fingerprint_path(root: &Path, backend_key: &str) -> PathBuf {
-    util::target_root(root)
-        .join("xtask/guest-fingerprints")
-        .join(format!("{backend_key}.json"))
+    default_fingerprint_dir(root).join(format!("{backend_key}.json"))
+}
+
+fn guest_build_decision(
+    fingerprint_path: &Path,
+    backend_key: &str,
+    bench: bool,
+    fingerprint: &str,
+    outputs_exist: bool,
+    force_rebuild: bool,
+) -> Result<GuestBuildDecision> {
+    if force_rebuild {
+        return Ok(GuestBuildDecision::Rebuild(GuestRebuildReason::Forced));
+    }
+    if outputs_exist
+        && matches_existing_fingerprint(fingerprint_path, backend_key, bench, fingerprint)?
+    {
+        return Ok(GuestBuildDecision::Skip);
+    }
+    Ok(GuestBuildDecision::Rebuild(GuestRebuildReason::Changed))
 }
 
 fn matches_existing_fingerprint(
@@ -1086,7 +1144,67 @@ fn read_manifest(path: &Path) -> Result<CargoManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BuildGuestArgs,
+    }
+
+    #[test]
+    fn build_guest_args_parse_force_flag() {
+        let cli = TestCli::parse_from(["test", "sp1", "--force"]);
+
+        assert_eq!(cli.args.backend, Backend::Sp1);
+        assert!(cli.args.force);
+    }
+
+    #[test]
+    fn build_guest_args_default_to_non_force() {
+        let cli = TestCli::parse_from(["test", "risc0"]);
+
+        assert_eq!(cli.args.backend, Backend::Risc0);
+        assert!(!cli.args.force);
+    }
+
+    #[test]
+    fn default_fingerprint_dir_uses_xtask_target_cache() {
+        let temp_root = temp_test_dir();
+
+        assert_eq!(
+            default_fingerprint_dir(&temp_root),
+            util::target_root(&temp_root).join("xtask/guest-fingerprints")
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn guest_build_decision_skips_matching_fingerprints_unless_forced() {
+        let temp_root = temp_test_dir();
+        let fingerprint_path = temp_root.join("fingerprint.json");
+        write_guest_fingerprint(&fingerprint_path, "sp1", false, "abc123").unwrap();
+
+        assert_eq!(
+            guest_build_decision(&fingerprint_path, "sp1", false, "abc123", true, false).unwrap(),
+            GuestBuildDecision::Skip
+        );
+        assert_eq!(
+            guest_build_decision(&fingerprint_path, "sp1", false, "abc123", true, true).unwrap(),
+            GuestBuildDecision::Rebuild(GuestRebuildReason::Forced)
+        );
+        assert_eq!(
+            guest_build_decision(&fingerprint_path, "sp1", false, "abc123", false, false).unwrap(),
+            GuestBuildDecision::Rebuild(GuestRebuildReason::Changed)
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
 
     #[test]
     fn sp1_guest_fingerprint_changes_with_docker_tag() {
@@ -1139,7 +1257,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = env::temp_dir().join(format!("raiko2-xtask-build-guest-test-{unique}"));
+        let counter = TEMP_TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "raiko2-xtask-build-guest-test-{}-{unique}-{counter}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).unwrap();
         path
     }

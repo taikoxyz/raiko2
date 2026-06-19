@@ -253,11 +253,7 @@ fn refresh_guest_elves(root: &Path, backend: GuestBackend, force_rebuild: bool) 
         GuestBackend::Sp1 => xtask_build_guest::Backend::Sp1,
         GuestBackend::All => xtask_build_guest::Backend::All,
     };
-    if force_rebuild {
-        xtask_build_guest::build(root, backend, false, None)
-    } else {
-        xtask_build_guest::ensure_release_guest_elves(root, backend, false, None)
-    }
+    xtask_build_guest::ensure_release_guest_elves(root, backend, false, None, force_rebuild)
 }
 
 #[cfg(not(feature = "guest-tools"))]

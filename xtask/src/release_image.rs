@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::Command;
 
@@ -55,6 +56,18 @@ pub(crate) struct ReleaseImageArgs {
     /// For backend=host, optionally refresh checked-in guest ELFs before building the host image.
     #[arg(long, value_enum)]
     pub(crate) refresh_guest_elves: Option<GuestBackend>,
+
+    /// Runtime image platform passed to docker buildx build.
+    #[arg(long)]
+    pub(crate) platform: Option<String>,
+
+    /// Limit Cargo parallelism inside the Docker build.
+    #[arg(long, value_name = "N")]
+    pub(crate) cargo_build_jobs: Option<NonZeroUsize>,
+
+    /// Build and load the image locally without pushing or resolving a registry digest.
+    #[arg(long, default_value_t = false)]
+    pub(crate) no_push: bool,
 }
 
 pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> {
@@ -63,6 +76,9 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     util::ensure_docker_buildx_builder(DEFAULT_BUILDX_BUILDER)?;
     ensure_non_empty("tag", &args.tag)?;
     ensure_non_empty("repository", &args.repository)?;
+    if let Some(platform) = &args.platform {
+        ensure_non_empty("platform", platform)?;
+    }
     let guest_refresh_backend = resolve_guest_refresh_backend(
         args.backend,
         args.force_rebuild_guests,
@@ -109,13 +125,23 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
         buildx_cache_current
     );
     let source_revision = source_revision(root)?;
+    let platform = resolve_runtime_platform(
+        args.platform.as_deref(),
+        args.backend,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    let build_options = RuntimeImageBuildOptions {
+        platform,
+        cargo_build_jobs: args.cargo_build_jobs,
+        push: !args.no_push,
+    };
     let mut build_cmd = Command::new("docker");
     build_cmd
         .arg("buildx")
         .arg("build")
         .arg("--builder")
-        .arg(DEFAULT_BUILDX_BUILDER)
-        .arg("--load");
+        .arg(DEFAULT_BUILDX_BUILDER);
     if buildx_cache_current.join("index.json").exists() {
         build_cmd
             .arg("--cache-from")
@@ -127,20 +153,31 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
             "type=local,dest={},mode=max",
             buildx_cache_next.display()
         ))
-        .args(build_image_flags(args.backend, &source_revision))
+        .args(build_image_flags(
+            args.backend,
+            &source_revision,
+            &build_options,
+        ))
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
     util::run(build_cmd)?;
-    promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
-    println!("[INFO] Pushing runtime image `{image_ref}`...");
-    let mut push_cmd = Command::new("docker");
-    push_cmd.arg("push").arg(&image_ref);
-    util::run(push_cmd)?;
+    let digest_ref = if args.no_push {
+        None
+    } else {
+        Some(image_digest(&image_ref, &args.repository)?)
+    };
+    promote_local_cache_after_build(
+        &buildx_cache_current,
+        &buildx_cache_next,
+        digest_ref.as_deref(),
+    )?;
 
-    let digest_ref = resolve_repo_digest(&image_ref, &args.repository)?;
-    write_release_summary(io::stdout(), &digest_ref)?;
+    if args.no_push {
+        println!("[INFO] Runtime image `{image_ref}` loaded locally; push skipped by --no-push");
+    }
+    write_release_summary(io::stdout(), digest_ref.as_deref())?;
 
     Ok(())
 }
@@ -235,8 +272,49 @@ fn ensure_non_empty(name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn release_summary_lines(digest_ref: &str) -> Vec<String> {
-    vec![format!("[INFO] Image pushed: {digest_ref}")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeImageBuildOptions<'a> {
+    platform: Option<&'a str>,
+    cargo_build_jobs: Option<NonZeroUsize>,
+    push: bool,
+}
+
+impl Default for RuntimeImageBuildOptions<'_> {
+    fn default() -> Self {
+        Self {
+            platform: None,
+            cargo_build_jobs: None,
+            push: true,
+        }
+    }
+}
+
+fn default_runtime_platform(backend: ImageBackend, os: &str, arch: &str) -> Option<&'static str> {
+    match (backend, os, arch) {
+        (ImageBackend::Host, _, _) => None,
+        (_, "macos", "aarch64") => Some("linux/amd64"),
+        _ => None,
+    }
+}
+
+fn resolve_runtime_platform<'a>(
+    explicit_platform: Option<&'a str>,
+    backend: ImageBackend,
+    os: &str,
+    arch: &str,
+) -> Option<&'a str> {
+    explicit_platform.or_else(|| default_runtime_platform(backend, os, arch))
+}
+
+fn release_summary_lines(digest_ref: Option<&str>) -> Vec<String> {
+    match digest_ref {
+        Some(digest_ref) => vec![format!("[INFO] Image pushed: {digest_ref}")],
+        None => vec![
+            "[INFO] Image push skipped by --no-push".to_string(),
+            "[INFO] Image digest unavailable because --no-push skips registry publication"
+                .to_string(),
+        ],
+    }
 }
 
 fn build_metadata_flags(source_revision: &str) -> Vec<String> {
@@ -246,16 +324,31 @@ fn build_metadata_flags(source_revision: &str) -> Vec<String> {
     ]
 }
 
-fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<String> {
-    let mut flags = build_metadata_flags(source_revision);
+fn build_image_flags(
+    image_backend: ImageBackend,
+    source_revision: &str,
+    options: &RuntimeImageBuildOptions<'_>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if let Some(platform) = options.platform {
+        flags.extend(["--platform".to_string(), platform.to_string()]);
+    }
+    flags.extend(build_metadata_flags(source_revision));
     flags.extend([
         "--build-arg".to_string(),
         format!("BIN_FEATURES={}", runtime_bin_features(image_backend)),
     ]);
+    if let Some(cargo_build_jobs) = options.cargo_build_jobs {
+        flags.extend([
+            "--build-arg".to_string(),
+            format!("CARGO_BUILD_JOBS={}", cargo_build_jobs.get()),
+        ]);
+    }
+    flags.push(if options.push { "--push" } else { "--load" }.to_string());
     flags
 }
 
-fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: &str) -> io::Result<()> {
+fn write_release_summary<W: io::Write>(mut writer: W, digest_ref: Option<&str>) -> io::Result<()> {
     for line in release_summary_lines(digest_ref) {
         writeln!(writer, "{line}")?;
     }
@@ -310,25 +403,49 @@ fn ensure_clean_source_tree(root: &Path, requirement: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_repo_digest(image_ref: &str, repository: &str) -> Result<String> {
+fn image_digest(image_ref: &str, repository: &str) -> Result<String> {
     let output = Command::new("docker")
-        .arg("image")
+        .arg("buildx")
+        .arg("imagetools")
         .arg("inspect")
-        .arg("--format")
-        .arg("{{json .RepoDigests}}")
         .arg(image_ref)
         .output()
         .with_context(|| format!("failed to inspect pushed image {image_ref}"))?;
     if !output.status.success() {
-        bail!("docker image inspect failed for {image_ref}");
+        bail!("docker buildx imagetools inspect failed for {image_ref}");
     }
 
-    let repo_digests: Vec<String> = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("failed to parse RepoDigests for {image_ref}"))?;
-    repo_digests
-        .into_iter()
-        .find(|value| value.starts_with(&format!("{repository}@sha256:")))
-        .ok_or_else(|| anyhow!("missing pushed digest for repository {repository}"))
+    let stdout = String::from_utf8(output.stdout).with_context(|| {
+        format!("docker buildx imagetools inspect produced non-utf8 output for {image_ref}")
+    })?;
+    let digest = parse_imagetools_digest(&stdout)
+        .ok_or_else(|| anyhow!("missing pushed digest for image {image_ref}"))?;
+    Ok(format!("{repository}@{digest}"))
+}
+
+fn parse_imagetools_digest(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix("Digest:")
+            .map(str::trim)
+            .filter(|digest| digest.starts_with("sha256:") && digest.len() > "sha256:".len())
+    })
+}
+
+fn promote_local_cache_after_build(
+    current: &Path,
+    next: &Path,
+    pushed_digest_ref: Option<&str>,
+) -> Result<()> {
+    promote_local_cache(current, next).with_context(|| match pushed_digest_ref {
+        Some(digest_ref) => {
+            format!(
+                "failed to promote buildx local cache after runtime image was already pushed as {digest_ref}"
+            )
+        }
+        None => "failed to promote buildx local cache after loading runtime image locally"
+            .to_string(),
+    })
 }
 
 fn reset_dir(path: &Path) -> Result<()> {
@@ -362,22 +479,24 @@ fn promote_local_cache(current: &Path, next: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        GuestBackend, ImageBackend, build_image_flags, build_metadata_flags, release_summary_lines,
-        resolve_guest_refresh_backend, write_release_summary,
+        GuestBackend, ImageBackend, RuntimeImageBuildOptions, build_image_flags,
+        build_metadata_flags, default_runtime_platform, release_summary_lines,
+        resolve_guest_refresh_backend, resolve_runtime_platform, write_release_summary,
     };
 
     #[test]
     fn release_summary_lines_do_not_reference_rollout() {
         let digest_ref = "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let lines = release_summary_lines(digest_ref);
+        let lines = release_summary_lines(Some(digest_ref));
         let mut output = Vec::new();
 
-        write_release_summary(&mut output, digest_ref).expect("summary output should render");
+        write_release_summary(&mut output, Some(digest_ref)).expect("summary output should render");
         let output = String::from_utf8(output).expect("summary output should be valid utf-8");
 
         assert_eq!(lines, vec![format!("[INFO] Image pushed: {digest_ref}")]);
@@ -385,6 +504,26 @@ mod tests {
         assert!(!output.contains("kubectl"));
         assert!(!output.contains("rollout"));
         assert!(!output.contains("deployment/"));
+    }
+
+    #[test]
+    fn no_push_release_summary_reports_skipped_digest() {
+        let lines = release_summary_lines(None);
+        let mut output = Vec::new();
+
+        write_release_summary(&mut output, None).expect("summary output should render");
+        let output = String::from_utf8(output).expect("summary output should be valid utf-8");
+
+        assert_eq!(
+            lines,
+            vec![
+                "[INFO] Image push skipped by --no-push".to_string(),
+                "[INFO] Image digest unavailable because --no-push skips registry publication"
+                    .to_string(),
+            ]
+        );
+        assert!(output.contains("--no-push"));
+        assert!(output.contains("digest unavailable"));
     }
 
     #[test]
@@ -399,7 +538,11 @@ mod tests {
 
     #[test]
     fn host_image_flags_select_host_features() {
-        let flags = build_image_flags(ImageBackend::Host, "26eff23");
+        let flags = build_image_flags(
+            ImageBackend::Host,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
 
         assert_eq!(
             flags,
@@ -408,13 +551,18 @@ mod tests {
                 "VCS_REF=26eff23".to_string(),
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features host".to_string(),
+                "--push".to_string(),
             ]
         );
     }
 
     #[test]
     fn risc0_image_flags_select_local_risc0_features() {
-        let flags = build_image_flags(ImageBackend::Risc0, "26eff23");
+        let flags = build_image_flags(
+            ImageBackend::Risc0,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
 
         assert_eq!(
             flags,
@@ -423,13 +571,18 @@ mod tests {
                 "VCS_REF=26eff23".to_string(),
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features local-prover-risc0".to_string(),
+                "--push".to_string(),
             ]
         );
     }
 
     #[test]
     fn sp1_image_flags_select_local_sp1_features() {
-        let flags = build_image_flags(ImageBackend::Sp1, "26eff23");
+        let flags = build_image_flags(
+            ImageBackend::Sp1,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
 
         assert_eq!(
             flags,
@@ -438,13 +591,18 @@ mod tests {
                 "VCS_REF=26eff23".to_string(),
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features local-prover-sp1".to_string(),
+                "--push".to_string(),
             ]
         );
     }
 
     #[test]
     fn all_image_flags_select_local_risc0_and_sp1_features() {
-        let flags = build_image_flags(ImageBackend::All, "26eff23");
+        let flags = build_image_flags(
+            ImageBackend::All,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
 
         assert_eq!(
             flags,
@@ -454,17 +612,113 @@ mod tests {
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features local-prover-risc0,local-prover-sp1"
                     .to_string(),
+                "--push".to_string(),
             ]
         );
     }
 
     #[test]
     fn all_image_flags_do_not_include_boundless_features() {
-        let flags = build_image_flags(ImageBackend::All, "26eff23");
+        let flags = build_image_flags(
+            ImageBackend::All,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
 
         assert!(
             flags.iter().all(|flag| !flag.contains("boundless")),
             "all local release image flags must not include boundless: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn platform_flag_is_included_when_resolved() {
+        let options = RuntimeImageBuildOptions {
+            platform: Some("linux/amd64"),
+            ..RuntimeImageBuildOptions::default()
+        };
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23", &options);
+
+        assert!(
+            flags
+                .windows(2)
+                .any(|pair| pair == ["--platform", "linux/amd64"])
+        );
+    }
+
+    #[test]
+    fn platform_flag_is_omitted_when_unresolved() {
+        let flags = build_image_flags(
+            ImageBackend::Risc0,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
+
+        assert!(!flags.iter().any(|flag| flag == "--platform"));
+        assert!(!flags.iter().any(|flag| flag == "linux/amd64"));
+    }
+
+    #[test]
+    fn apple_silicon_defaults_non_host_runtime_to_amd64() {
+        let platform = default_runtime_platform(ImageBackend::Risc0, "macos", "aarch64");
+
+        assert_eq!(platform, Some("linux/amd64"));
+    }
+
+    #[test]
+    fn apple_silicon_host_runtime_has_no_default_platform() {
+        let platform = default_runtime_platform(ImageBackend::Host, "macos", "aarch64");
+
+        assert_eq!(platform, None);
+    }
+
+    #[test]
+    fn explicit_platform_overrides_default_platform() {
+        let platform =
+            resolve_runtime_platform(Some("linux/arm64"), ImageBackend::Risc0, "macos", "aarch64");
+
+        assert_eq!(platform, Some("linux/arm64"));
+    }
+
+    #[test]
+    fn no_push_image_flags_load_without_push() {
+        let options = RuntimeImageBuildOptions {
+            push: false,
+            ..RuntimeImageBuildOptions::default()
+        };
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23", &options);
+
+        assert!(flags.iter().any(|flag| flag == "--load"));
+        assert!(!flags.iter().any(|flag| flag == "--push"));
+    }
+
+    #[test]
+    fn cargo_build_jobs_arg_is_included_when_set() {
+        let options = RuntimeImageBuildOptions {
+            cargo_build_jobs: Some(NonZeroUsize::new(8).expect("8 is non-zero")),
+            ..RuntimeImageBuildOptions::default()
+        };
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23", &options);
+
+        assert!(
+            flags
+                .windows(2)
+                .any(|pair| pair == ["--build-arg", "CARGO_BUILD_JOBS=8"])
+        );
+    }
+
+    #[test]
+    fn cargo_build_jobs_arg_is_omitted_when_unset() {
+        let flags = build_image_flags(
+            ImageBackend::Risc0,
+            "26eff23",
+            &RuntimeImageBuildOptions::default(),
+        );
+
+        assert!(
+            !flags
+                .iter()
+                .any(|flag| flag.starts_with("CARGO_BUILD_JOBS="))
         );
     }
 
@@ -510,6 +764,22 @@ mod tests {
             err.to_string()
                 .contains("--refresh-guest-elves is only supported for backend=host")
         );
+    }
+
+    #[test]
+    fn cache_promotion_error_includes_already_pushed_digest() {
+        let repo_root = temp_git_repo("cache-promotion-digest");
+        let current = repo_root.join("current");
+        let next = repo_root.join("next");
+        let digest_ref = "us-docker.pkg.dev/evmchain/images/raiko2@sha256:0123456789abcdef";
+        fs::create_dir_all(&next).expect("should create incomplete next cache");
+
+        let err = super::promote_local_cache_after_build(&current, &next, Some(digest_ref))
+            .expect_err("missing cache index should fail promotion");
+        let err = err.to_string();
+
+        assert!(err.contains("already pushed"));
+        assert!(err.contains(digest_ref));
     }
 
     #[test]

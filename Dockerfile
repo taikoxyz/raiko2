@@ -4,10 +4,11 @@
 FROM rust:1.94.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
+ARG CARGO_BUILD_JOBS
 ARG CARGO_CHEF_VERSION=0.1.77
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
+ENV RUSTUP_TOOLCHAIN=1.94.0
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -38,9 +39,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 
+ARG CARGO_BUILD_JOBS
+
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY --from=planner /app/recipe.json ./recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
+RUN if [ -z "${CARGO_BUILD_JOBS}" ]; then unset CARGO_BUILD_JOBS; else export CARGO_BUILD_JOBS; fi && \
+    cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
@@ -50,7 +54,8 @@ COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
 
-RUN cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
+RUN if [ -z "${CARGO_BUILD_JOBS}" ]; then unset CARGO_BUILD_JOBS; else export CARGO_BUILD_JOBS; fi && \
+    cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
 
 FROM debian:bookworm-slim AS runtime
 

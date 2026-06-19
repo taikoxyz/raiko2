@@ -35,5 +35,6 @@ guest-tools = [
     "dep:risc0-zkvm",
     "dep:sp1-sdk",
     "dep:xtask-build-guest",
+    "xtask-build-guest/digests",
 ]
 image-release = []

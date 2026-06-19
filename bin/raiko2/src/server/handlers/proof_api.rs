@@ -2171,15 +2171,15 @@ async fn count_matching_queue_tasks(
     if task_ids.is_empty() {
         return Ok(HashSet::new());
     }
-    let views = engine
-        .list_tasks()
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to list queue tasks: {err}")))?;
     let mut counted = HashSet::new();
-    for view in views {
-        if !task_ids.contains(&view.id) {
+    for task_id in task_ids {
+        let Some(view) = engine
+            .get_task_state(task_id.clone())
+            .await
+            .map_err(|err| ApiError::internal(format!("failed to load queue task: {err}")))?
+        else {
             continue;
-        }
+        };
         if count_queue_task_state(&view, counts) {
             counted.insert(view.id);
         }
@@ -3120,8 +3120,11 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
-            Box::pin(async { Ok(Vec::new()) })
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
         }
 
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -3171,10 +3174,13 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+        fn get_task_state(
+            &self,
+            id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
             self.list_calls.fetch_add(1, Ordering::Relaxed);
-            let views = self.views.clone();
-            Box::pin(async move { Ok(views) })
+            let view = self.views.iter().find(|view| view.id == id).cloned();
+            Box::pin(async move { Ok(view) })
         }
 
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -3241,8 +3247,11 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
-            Box::pin(async { Ok(Vec::new()) })
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
         }
 
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -3718,6 +3727,27 @@ mod tests {
             cleared.runner_status,
             RuntimeRunnerStatus::Cancelled
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_prover_rejects_oversized_api_key() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "oversized-api-key",
+        ))?);
+        let state = test_state_with_acl(Arc::clone(&runtime), []);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            axum::http::HeaderValue::from_static("secret-with-extra-bytes"),
+        );
+
+        let err = match clear_prover(State(state), headers).await {
+            Ok(_) => panic!("oversized API key should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "invalid API key");
         Ok(())
     }
 

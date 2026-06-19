@@ -430,6 +430,16 @@ where
 
     /// # Errors
     ///
+    /// error if task store cannot fetch task state.
+    pub async fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> Result<Option<TaskViewState<EngineTaskKey>>, TaskStoreError> {
+        self.inner.scheduler.get_state(id).await
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if task store cannot list tasks.
     pub async fn list_tasks(&self) -> Result<Vec<TaskViewState<EngineTaskKey>>, TaskStoreError> {
         self.inner.scheduler.list().await

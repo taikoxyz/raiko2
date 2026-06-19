@@ -88,7 +88,7 @@ pub fn collect_guest_digests_with_dir(
     guest_elf_dir: Option<&Path>,
 ) -> Result<GuestDigestSummary> {
     let elf_dir = guest_elf_dir
-        .map(Path::to_path_buf)
+        .map(|path| resolve_input_path(root, path))
         .unwrap_or_else(|| root.join(DEFAULT_GUEST_ELF_DIR));
     let risc0_elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load RISC0 guest ELFs from {}", elf_dir.display()))?;
@@ -107,6 +107,14 @@ pub fn collect_guest_digests_with_dir(
             .unwrap_or_else(|| DEFAULT_GUEST_ELF_DIR.to_string()),
         digests,
     })
+}
+
+fn resolve_input_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
 }
 
 fn resolve_output_path(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
@@ -224,6 +232,7 @@ fn b256_hex(value: B256) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use raiko2_guests::DEFAULT_GUEST_ELF_DIR;
 
@@ -271,6 +280,19 @@ mod tests {
                 "VkHashBytes".to_string()
             )),
             Some(&1)
+        );
+    }
+
+    #[test]
+    fn relative_guest_elf_dir_resolves_from_repo_root() {
+        let root = PathBuf::from("/repo/root");
+        assert_eq!(
+            super::resolve_input_path(&root, Path::new("crates/guests/elf")),
+            root.join("crates/guests/elf")
+        );
+        assert_eq!(
+            super::resolve_input_path(&root, Path::new("/tmp/guest-elf")),
+            PathBuf::from("/tmp/guest-elf")
         );
     }
 

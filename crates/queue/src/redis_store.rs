@@ -1062,6 +1062,30 @@ return 1
         Ok(Some((state, priority)))
     }
 
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>> {
+        let task_key = self.task_key(id)?;
+        let mut conn = self.conn.lock().await;
+        let (state, priority): (Option<String>, Option<String>) = redis::cmd("HMGET")
+            .arg(&task_key)
+            .arg(FIELD_STATE)
+            .arg(FIELD_PRIORITY)
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        let Some(priority) = priority else {
+            return Ok(None);
+        };
+        let priority = Priority::parse(priority.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {priority}")))?;
+        Ok(Some((task_state_kind(state.as_str())?, priority)))
+    }
+
     async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
         let pattern = format!("{}*", self.task_key_prefix());
         let prefix = self.task_key_prefix();

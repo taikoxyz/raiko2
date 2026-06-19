@@ -484,11 +484,12 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn list_tasks(
+        fn get_task_state(
             &self,
-        ) -> BoxFuture<'_, Result<Vec<crate::server::state::EngineQueueTaskView>, TaskStoreError>>
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<crate::server::state::EngineQueueTaskView>, TaskStoreError>>
         {
-            Box::pin(async { Ok(Vec::new()) })
+            Box::pin(async { Ok(None) })
         }
 
         fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {

@@ -28,7 +28,10 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>>;
-    fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>>;
+    fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
 }
@@ -142,16 +145,16 @@ where
         })
     }
 
-    fn list_tasks(&self) -> BoxFuture<'_, Result<Vec<EngineQueueTaskView>, TaskStoreError>> {
+    fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
         Box::pin(async move {
-            self.list_tasks().await.map(|views| {
-                views
-                    .into_iter()
-                    .map(|view| EngineQueueTaskView {
-                        id: view.id,
-                        state: queue_task_state(view.state),
-                    })
-                    .collect()
+            Engine::get_task_state(self, id).await.map(|view| {
+                view.map(|view| EngineQueueTaskView {
+                    id: view.id,
+                    state: queue_task_state(view.state),
+                })
             })
         })
     }

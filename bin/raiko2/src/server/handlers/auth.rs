@@ -28,6 +28,18 @@ pub(crate) fn authorize_acl_feature(
     else {
         return Err(ApiError::unauthorized("missing API key"));
     };
+    let max_key_len = state
+        .config
+        .server
+        .acl
+        .keys
+        .iter()
+        .map(|key| key.key.len())
+        .max()
+        .unwrap_or_default();
+    if actual_key.len() > max_key_len {
+        return Err(ApiError::unauthorized("invalid API key"));
+    }
 
     let mut key_known = false;
     let mut authorized = false;

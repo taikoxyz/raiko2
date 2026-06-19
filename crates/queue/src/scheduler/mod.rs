@@ -362,6 +362,23 @@ where
     /// # Errors
     ///
     /// Returns `TaskStoreError` if underlying store fails.
+    pub async fn get_state(
+        &self,
+        id: TaskId<Id>,
+    ) -> Result<Option<TaskViewState<Id>>, TaskStoreError> {
+        let Some((state, priority)) = self.store.get_view_state(&id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(TaskViewState {
+            id,
+            state,
+            priority,
+        }))
+    }
+
+    /// # Errors
+    ///
+    /// Returns `TaskStoreError` if underlying store fails.
     pub async fn list(&self) -> Result<Vec<TaskViewState<Id>>, TaskStoreError> {
         self.store.list_view_states().await.map(|views| {
             views
@@ -631,6 +648,20 @@ mod tests {
             Ok(Some((record.state.clone(), record.priority)))
         }
 
+        async fn get_view_state(
+            &self,
+            id: &TestTaskId,
+        ) -> StoreResult<Option<(crate::TaskStateKind, Priority)>> {
+            let guard = self.inner.lock().await;
+            let Some(record) = guard.tasks.get(id) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                crate::TaskStateKind::from(&record.state),
+                record.priority,
+            )))
+        }
+
         async fn list_view_states(
             &self,
         ) -> StoreResult<Vec<(TestTaskId, crate::TaskStateKind, Priority)>> {
@@ -849,6 +880,13 @@ mod tests {
             id: &TestTaskId,
         ) -> crate::StoreResult<Option<(TaskState<O, TestId>, Priority)>> {
             self.inner.get_view(id).await
+        }
+
+        async fn get_view_state(
+            &self,
+            id: &TestTaskId,
+        ) -> crate::StoreResult<Option<(crate::TaskStateKind, Priority)>> {
+            self.inner.get_view_state(id).await
         }
 
         async fn list_view_states(

@@ -126,6 +126,10 @@ where
         Ok(updated)
     }
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>>;
     async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
     async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
@@ -579,6 +583,15 @@ where
         let g = self.inner.lock().await;
         let record = g.tasks.get(id);
         Ok(record.map(|r| (r.state.clone(), r.priority)))
+    }
+
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>> {
+        let g = self.inner.lock().await;
+        let record = g.tasks.get(id);
+        Ok(record.map(|r| (TaskStateKind::from(&r.state), r.priority)))
     }
 
     async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {

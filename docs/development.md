@@ -143,7 +143,12 @@ Direct `xtask` entrypoint:
 cargo run -r -p xtask -- build-guest all
 ```
 
-`build-guest` only rebuilds checked-in ELF artifacts under `crates/guests/elf`.
+`build-guest` only rebuilds checked-in ELF artifacts under `crates/guests/elf`. It is
+fingerprint-aware by default: rerunning the same backend skips the guest rebuild when source
+inputs, toolchain inputs, the selected binary set/profile, and generated ELF outputs are unchanged.
+Use `--force` when you intentionally need to refresh guest ELFs. SP1 defaults to the release Shasta
+binaries only; use `--all-binaries` when lab or example binaries are needed.
+
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
 differs from the source tree. `build-guest` does not register verifier trust-list entries or
@@ -164,6 +169,18 @@ To disable toolchain images and use local toolchains instead:
 ```bash
 RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
   cargo run -r -p xtask -- build-guest all
+```
+
+For local runtime-image iteration, use the same `release-image` entrypoint with `--no-push` so the
+image is built and loaded locally instead of published:
+
+```bash
+cargo run -r -p xtask -- release-image sp1 \
+  --tag local-sp1 \
+  --repository local/raiko2 \
+  --no-push \
+  --platform linux/amd64 \
+  --cargo-build-jobs 4
 ```
 
 If a guest ELF changes and the target environment relies on onchain verifier trust lists,

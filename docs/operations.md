@@ -424,6 +424,16 @@ cargo run -r -p xtask -- release-image risc0 \
   --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
+The backend selects the runtime feature set:
+
+- `host`: host-only runtime
+- `risc0`: RISC0 local prover runtime
+- `sp1`: SP1 local prover runtime
+- `all`: RISC0 and SP1 local prover runtime
+
+`all` does not include Boundless. If Boundless is required, add an explicit release path instead of
+hiding it inside `all`.
+
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
 process starts and does not rebuild guest sources by itself. The image sets
@@ -433,6 +443,9 @@ working directory.
 If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
 before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
 release command so the image provenance still matches committed repo state.
+
+Use `--no-push` only for local iteration. It skips registry publication and digest resolution, so
+official image publication must not use it.
 
 ## Register Guest Digests
 

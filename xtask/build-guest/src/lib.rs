@@ -30,6 +30,8 @@ const DEFAULT_SP1_AR_ENV: &str = "AR_riscv64im_succinct_zkvm_elf";
 const DEFAULT_SP1_CC: &str = "riscv64-unknown-elf-gcc -specs=picolibc.specs";
 const DEFAULT_SP1_CXX: &str = "riscv64-unknown-elf-g++ -specs=picolibcpp.specs";
 const DEFAULT_SP1_AR: &str = "riscv64-unknown-elf-ar";
+const SP1_RELEASE_BINARY_NAMES: &[&str] = &["sp1-shasta-proposal", "sp1-shasta-aggregation"];
+const SP1_RELEASE_ELF_STEMS: &[&str] = &["sp1_shasta_proposal", "sp1_shasta_aggregation"];
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -42,12 +44,45 @@ pub enum Backend {
 pub struct BuildGuestArgs {
     #[arg(value_enum)]
     pub backend: Backend,
-    /// Include benchmark binaries (requires bins in Cargo.toml).
+    /// Enable the guest bench feature. SP1 lab binaries also require --all-binaries.
     #[arg(long)]
     pub bench: bool,
+    /// Build every SP1 binary from guests/sp1/Cargo.toml instead of only release-required Shasta binaries.
+    #[arg(long, default_value_t = false)]
+    pub all_binaries: bool,
     /// Force rebuilding guests even if fingerprints match.
     #[arg(long, default_value_t = false)]
     pub force: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sp1BuildProfile {
+    Release,
+    Full,
+}
+
+impl Sp1BuildProfile {
+    const fn from_all_binaries(all_binaries: bool) -> Self {
+        if all_binaries {
+            Self::Full
+        } else {
+            Self::Release
+        }
+    }
+
+    const fn fingerprint_label(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Full => "full",
+        }
+    }
+
+    fn log_label(self) -> String {
+        match self {
+            Self::Release => format!("release binaries ({})", SP1_RELEASE_ELF_STEMS.join(", ")),
+            Self::Full => "full manifest".to_string(),
+        }
+    }
 }
 
 pub fn repo_root() -> PathBuf {
@@ -59,7 +94,14 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
-    ensure_release_guest_elves(root, args.backend, args.bench, None, args.force)?;
+    ensure_release_guest_elves_with_sp1_profile(
+        root,
+        args.backend,
+        args.bench,
+        None,
+        args.force,
+        Sp1BuildProfile::from_all_binaries(args.all_binaries),
+    )?;
     println!("[INFO] Build complete!");
     Ok(())
 }
@@ -70,16 +112,32 @@ pub fn build(
     bench: bool,
     sp1_docker_tag: Option<&str>,
 ) -> Result<()> {
+    build_with_sp1_profile(
+        root,
+        backend,
+        bench,
+        sp1_docker_tag,
+        Sp1BuildProfile::Release,
+    )
+}
+
+pub fn build_with_sp1_profile(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<()> {
     match backend {
         Backend::Risc0 => {
             build_risc0(root, bench)?;
         }
         Backend::Sp1 => {
-            build_sp1(root, bench, sp1_docker_tag)?;
+            build_sp1(root, bench, sp1_docker_tag, sp1_profile)?;
         }
         Backend::All => {
             build_risc0(root, bench)?;
-            build_sp1(root, bench, sp1_docker_tag)?;
+            build_sp1(root, bench, sp1_docker_tag, sp1_profile)?;
         }
     }
     Ok(())
@@ -150,16 +208,58 @@ pub fn ensure_release_guest_elves(
     sp1_docker_tag: Option<&str>,
     force_rebuild: bool,
 ) -> Result<()> {
+    ensure_release_guest_elves_with_sp1_profile(
+        root,
+        backend,
+        bench,
+        sp1_docker_tag,
+        force_rebuild,
+        Sp1BuildProfile::Release,
+    )
+}
+
+fn ensure_release_guest_elves_with_sp1_profile(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    force_rebuild: bool,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<()> {
     match backend {
-        Backend::Risc0 => {
-            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force_rebuild)
-        }
-        Backend::Sp1 => {
-            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force_rebuild)
-        }
+        Backend::Risc0 => ensure_release_backend(
+            root,
+            Backend::Risc0,
+            bench,
+            sp1_docker_tag,
+            force_rebuild,
+            sp1_profile,
+        ),
+        Backend::Sp1 => ensure_release_backend(
+            root,
+            Backend::Sp1,
+            bench,
+            sp1_docker_tag,
+            force_rebuild,
+            sp1_profile,
+        ),
         Backend::All => {
-            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force_rebuild)?;
-            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force_rebuild)
+            ensure_release_backend(
+                root,
+                Backend::Risc0,
+                bench,
+                sp1_docker_tag,
+                force_rebuild,
+                sp1_profile,
+            )?;
+            ensure_release_backend(
+                root,
+                Backend::Sp1,
+                bench,
+                sp1_docker_tag,
+                force_rebuild,
+                sp1_profile,
+            )
         }
     }
 }
@@ -210,15 +310,28 @@ fn ensure_release_backend(
     bench: bool,
     sp1_docker_tag: Option<&str>,
     force_rebuild: bool,
+    sp1_profile: Sp1BuildProfile,
 ) -> Result<()> {
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
-    let outputs_exist = guest_outputs_exist(root, backend)?;
-    let fingerprint =
-        compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
+    if matches!(backend, Backend::Sp1) {
+        println!(
+            "[INFO] SP1 guest build profile: {}",
+            sp1_profile.log_label()
+        );
+    }
+    let outputs_exist = guest_outputs_exist(root, backend, sp1_profile)?;
+    let fingerprint = compute_guest_fingerprint(
+        root,
+        backend,
+        bench,
+        sp1_docker_tag,
+        sp1_profile,
+        outputs_exist,
+    )?;
     let fingerprint_path = guest_fingerprint_path(root, backend_key);
 
     match guest_build_decision(
@@ -247,8 +360,9 @@ fn ensure_release_backend(
         }
     }
 
-    build(root, backend, bench, sp1_docker_tag)?;
-    let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?;
+    build_with_sp1_profile(root, backend, bench, sp1_docker_tag, sp1_profile)?;
+    let fingerprint =
+        compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, sp1_profile, true)?;
     write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
     Ok(())
 }
@@ -319,8 +433,12 @@ fn write_guest_fingerprint(
         .with_context(|| format!("write guest fingerprint {fingerprint_path:?}"))
 }
 
-fn guest_outputs_exist(root: &Path, backend: Backend) -> Result<bool> {
-    for output in expected_guest_outputs(root, backend)? {
+fn guest_outputs_exist(
+    root: &Path,
+    backend: Backend,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<bool> {
+    for output in expected_guest_outputs(root, backend, sp1_profile)? {
         if !output.exists() {
             return Ok(false);
         }
@@ -328,24 +446,40 @@ fn guest_outputs_exist(root: &Path, backend: Backend) -> Result<bool> {
     Ok(true)
 }
 
-fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>> {
+fn expected_guest_outputs(
+    root: &Path,
+    backend: Backend,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<Vec<PathBuf>> {
     let mut outputs = Vec::new();
     match backend {
-        Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0")?),
-        Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1")?),
+        Backend::Risc0 => outputs.extend(expected_backend_outputs(root, "risc0", sp1_profile)?),
+        Backend::Sp1 => outputs.extend(expected_backend_outputs(root, "sp1", sp1_profile)?),
         Backend::All => {
-            outputs.extend(expected_backend_outputs(root, "risc0")?);
-            outputs.extend(expected_backend_outputs(root, "sp1")?);
+            outputs.extend(expected_backend_outputs(root, "risc0", sp1_profile)?);
+            outputs.extend(expected_backend_outputs(root, "sp1", sp1_profile)?);
         }
     }
     Ok(outputs)
 }
 
-fn expected_backend_outputs(root: &Path, backend_key: &str) -> Result<Vec<PathBuf>> {
+fn expected_backend_outputs(
+    root: &Path,
+    backend_key: &str,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<Vec<PathBuf>> {
     let manifest = read_manifest(&root.join(format!("guests/{backend_key}/Cargo.toml")))?;
-    Ok(manifest
-        .bin
-        .iter()
+    expected_backend_outputs_for_manifest(root, backend_key, &manifest, sp1_profile)
+}
+
+fn expected_backend_outputs_for_manifest(
+    root: &Path,
+    backend_key: &str,
+    manifest: &CargoManifest,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<Vec<PathBuf>> {
+    Ok(select_backend_bins(manifest, backend_key, sp1_profile)?
+        .into_iter()
         .map(|bin| {
             root.join("crates/guests/elf")
                 .join(format!("{}.elf", bin.name.replace('-', "_")))
@@ -358,20 +492,27 @@ fn compute_guest_fingerprint(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
+    sp1_profile: Sp1BuildProfile,
     include_outputs: bool,
 ) -> Result<String> {
     let mut hasher = Sha256::new();
     hash_tagged_bytes(&mut hasher, "bench", if bench { b"1" } else { b"0" });
 
     match backend {
-        Backend::Risc0 => {
-            compute_backend_fingerprint(root, &mut hasher, "risc0", None, include_outputs)?
-        }
+        Backend::Risc0 => compute_backend_fingerprint(
+            root,
+            &mut hasher,
+            "risc0",
+            None,
+            sp1_profile,
+            include_outputs,
+        )?,
         Backend::Sp1 => compute_backend_fingerprint(
             root,
             &mut hasher,
             "sp1",
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
+            sp1_profile,
             include_outputs,
         )?,
         Backend::All => unreachable!("fingerprints are computed per concrete backend"),
@@ -385,6 +526,7 @@ fn compute_backend_fingerprint(
     hasher: &mut Sha256,
     backend_key: &str,
     sp1_tag: Option<String>,
+    sp1_profile: Sp1BuildProfile,
     include_outputs: bool,
 ) -> Result<()> {
     hash_tagged_bytes(hasher, "backend", backend_key.as_bytes());
@@ -393,6 +535,19 @@ fn compute_backend_fingerprint(
     }
     hash_backend_env(hasher, backend_key);
 
+    let manifest_path = root.join(format!("guests/{backend_key}/Cargo.toml"));
+    let manifest = read_manifest(&manifest_path)?;
+    if backend_key == "sp1" {
+        hash_tagged_bytes(
+            hasher,
+            "sp1_build_profile",
+            sp1_profile.fingerprint_label().as_bytes(),
+        );
+        for bin in select_sp1_bins(&manifest, sp1_profile)? {
+            hash_tagged_bytes(hasher, "sp1_binary", bin.name.as_bytes());
+        }
+    }
+
     let mut paths = vec![
         root.join("rust-toolchain.toml"),
         root.join("xtask/build-guest/Cargo.toml"),
@@ -400,7 +555,7 @@ fn compute_backend_fingerprint(
         root.join("xtask/build-guest/src/main.rs"),
         root.join("xtask/build-guest/src/util.rs"),
         root.join("crates/guest-common/Cargo.toml"),
-        root.join(format!("guests/{backend_key}/Cargo.toml")),
+        manifest_path,
         root.join(format!("guests/{backend_key}/Cargo.lock")),
         root.join(format!("docker/{backend_key}-toolchain/Dockerfile")),
     ];
@@ -413,7 +568,9 @@ fn compute_backend_fingerprint(
     }
 
     if include_outputs {
-        for output in expected_backend_outputs(root, backend_key)? {
+        for output in
+            expected_backend_outputs_for_manifest(root, backend_key, &manifest, sp1_profile)?
+        {
             hash_file_with_tags(root, hasher, &output, "output_path", "output_file")?;
         }
     }
@@ -839,7 +996,12 @@ fn export_risc0_binary(source: &Path, destination: &Path) -> Result<()> {
     fs::write(destination, output).with_context(|| format!("write {destination:?}"))
 }
 
-fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<()> {
+fn build_sp1(
+    root: &Path,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<()> {
     println!("[INFO] Building SP1 guest programs...");
     util::ensure_docker()?;
 
@@ -854,7 +1016,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
         && !toolchain_image.eq_ignore_ascii_case("local")
         && !toolchain_image.eq_ignore_ascii_case("none")
     {
-        return build_sp1_with_toolchain_image(root, bench, toolchain_image);
+        return build_sp1_with_toolchain_image(root, bench, toolchain_image, sp1_profile);
     }
 
     util::ensure_cargo_prove()?;
@@ -875,6 +1037,8 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     if manifest.bin.is_empty() {
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
+    let bins = select_sp1_bins(&manifest, sp1_profile)?;
+    println!("[INFO] SP1 build profile: {}", sp1_profile.log_label());
 
     println!("[INFO] Building SP1 guest binaries in a single cargo prove invocation...");
 
@@ -889,7 +1053,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     if bench {
         cmd.arg("--features").arg("bench");
     }
-    for bin in &manifest.bin {
+    for bin in &bins {
         cmd.arg("--binaries").arg(&bin.name);
     }
     cmd.arg("--output-directory")
@@ -926,13 +1090,18 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     }
 
     util::run(cmd)?;
-    export_sp1_elves(&manifest, &export_dir, &output_dir)?;
+    export_sp1_elves(&bins, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");
     Ok(())
 }
 
-fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Result<()> {
+fn build_sp1_with_toolchain_image(
+    root: &Path,
+    bench: bool,
+    image: &str,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<()> {
     println!("[INFO] Using SP1 toolchain image: {image}");
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
@@ -948,6 +1117,8 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     if manifest.bin.is_empty() {
         bail!("No [[bin]] targets found in guests/sp1/Cargo.toml");
     }
+    let bins = select_sp1_bins(&manifest, sp1_profile)?;
+    println!("[INFO] SP1 build profile: {}", sp1_profile.log_label());
 
     let target_root = util::target_root(root).join("sp1");
     let export_dir = target_root.join("sp1-export");
@@ -1020,7 +1191,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     if bench {
         script.push_str("--features bench ");
     }
-    for bin in &manifest.bin {
+    for bin in &bins {
         script.push_str("--binaries ");
         script.push_str(&bin.name);
         script.push(' ');
@@ -1039,14 +1210,14 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         extra_mount.as_deref(),
         &[target_root.as_path()],
     )?;
-    export_sp1_elves(&manifest, &export_dir, &output_dir)?;
+    export_sp1_elves(&bins, &export_dir, &output_dir)?;
 
     println!("[INFO] SP1 guest build complete");
     Ok(())
 }
 
-fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Path) -> Result<()> {
-    for bin in &manifest.bin {
+fn export_sp1_elves(bins: &[&BinSection], export_dir: &Path, output_dir: &Path) -> Result<()> {
+    for bin in bins {
         let source = export_dir.join(&bin.name);
         let destination = output_dir.join(format!("{}.elf", bin.name.replace('-', "_")));
         fs::copy(&source, &destination)
@@ -1058,6 +1229,42 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
     }
 
     Ok(())
+}
+
+fn select_backend_bins<'a>(
+    manifest: &'a CargoManifest,
+    backend_key: &str,
+    sp1_profile: Sp1BuildProfile,
+) -> Result<Vec<&'a BinSection>> {
+    match backend_key {
+        "sp1" => select_sp1_bins(manifest, sp1_profile),
+        "risc0" => Ok(manifest.bin.iter().collect()),
+        _ => unreachable!("unknown guest backend {backend_key}"),
+    }
+}
+
+fn select_sp1_bins(manifest: &CargoManifest, profile: Sp1BuildProfile) -> Result<Vec<&BinSection>> {
+    match profile {
+        Sp1BuildProfile::Full => Ok(manifest.bin.iter().collect()),
+        Sp1BuildProfile::Release => {
+            let mut bins = Vec::with_capacity(SP1_RELEASE_BINARY_NAMES.len());
+            let mut missing = Vec::new();
+            for name in SP1_RELEASE_BINARY_NAMES {
+                if let Some(bin) = manifest.bin.iter().find(|bin| bin.name == *name) {
+                    bins.push(bin);
+                } else {
+                    missing.push(*name);
+                }
+            }
+            if !missing.is_empty() {
+                bail!(
+                    "SP1 release binary target(s) missing from guests/sp1/Cargo.toml: {}",
+                    missing.join(", ")
+                );
+            }
+            Ok(bins)
+        }
+    }
 }
 
 fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {
@@ -1173,6 +1380,40 @@ mod tests {
     }
 
     #[test]
+    fn build_guest_args_parse_all_binaries_flag() {
+        let cli = TestCli::parse_from(["test", "sp1", "--all-binaries"]);
+
+        assert_eq!(cli.args.backend, Backend::Sp1);
+        assert!(cli.args.all_binaries);
+    }
+
+    #[test]
+    fn release_sp1_selection_includes_only_shasta_release_bins() {
+        let manifest = test_sp1_manifest();
+        let bins = select_sp1_bins(&manifest, Sp1BuildProfile::Release)
+            .unwrap()
+            .into_iter()
+            .map(|bin| bin.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(bins, vec!["sp1-shasta-proposal", "sp1-shasta-aggregation"]);
+    }
+
+    #[test]
+    fn full_sp1_selection_includes_lab_bins() {
+        let manifest = test_sp1_manifest();
+        let bins = select_sp1_bins(&manifest, Sp1BuildProfile::Full)
+            .unwrap()
+            .into_iter()
+            .map(|bin| bin.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(bins.contains(&"sp1-opcode-lab"));
+        assert!(bins.contains(&"sp1-precompile-lab"));
+        assert!(bins.contains(&"sp1-revm-opcode-lab"));
+    }
+
+    #[test]
     fn default_fingerprint_dir_uses_xtask_target_cache() {
         let temp_root = temp_test_dir();
 
@@ -1209,11 +1450,87 @@ mod tests {
     #[test]
     fn sp1_guest_fingerprint_changes_with_docker_tag() {
         let root = repo_root();
-        let v1 =
-            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4"), false).unwrap();
-        let v2 =
-            compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5"), false).unwrap();
+        let v1 = compute_guest_fingerprint(
+            &root,
+            Backend::Sp1,
+            false,
+            Some("v5.2.4"),
+            Sp1BuildProfile::Release,
+            false,
+        )
+        .unwrap();
+        let v2 = compute_guest_fingerprint(
+            &root,
+            Backend::Sp1,
+            false,
+            Some("v5.2.5"),
+            Sp1BuildProfile::Release,
+            false,
+        )
+        .unwrap();
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn sp1_guest_fingerprint_changes_with_build_profile() {
+        let root = repo_root();
+        let release = compute_guest_fingerprint(
+            &root,
+            Backend::Sp1,
+            false,
+            Some("v5.2.4"),
+            Sp1BuildProfile::Release,
+            false,
+        )
+        .unwrap();
+        let full = compute_guest_fingerprint(
+            &root,
+            Backend::Sp1,
+            false,
+            Some("v5.2.4"),
+            Sp1BuildProfile::Full,
+            false,
+        )
+        .unwrap();
+
+        assert_ne!(release, full);
+    }
+
+    #[test]
+    fn release_sp1_outputs_expect_only_shasta_elves() {
+        let temp_root = temp_test_dir();
+        write_sp1_manifest(&temp_root, &test_sp1_manifest());
+
+        let outputs = expected_guest_outputs(&temp_root, Backend::Sp1, Sp1BuildProfile::Release)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outputs,
+            vec!["sp1_shasta_proposal.elf", "sp1_shasta_aggregation.elf"]
+        );
+
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn full_sp1_outputs_expect_lab_elves() {
+        let temp_root = temp_test_dir();
+        write_sp1_manifest(&temp_root, &test_sp1_manifest());
+
+        let outputs = expected_guest_outputs(&temp_root, Backend::Sp1, Sp1BuildProfile::Full)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(outputs.contains(&"sp1_opcode_lab.elf".to_string()));
+        assert!(outputs.contains(&"sp1_precompile_lab.elf".to_string()));
+        assert!(outputs.contains(&"sp1_revm_opcode_lab.elf".to_string()));
+
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]
@@ -1264,5 +1581,43 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn test_sp1_manifest() -> CargoManifest {
+        CargoManifest {
+            package: PackageSection {
+                name: "raiko2-guest-sp1".to_string(),
+            },
+            bin: vec![
+                BinSection {
+                    name: "sp1-shasta-proposal".to_string(),
+                },
+                BinSection {
+                    name: "sp1-shasta-aggregation".to_string(),
+                },
+                BinSection {
+                    name: "sp1-opcode-lab".to_string(),
+                },
+                BinSection {
+                    name: "sp1-precompile-lab".to_string(),
+                },
+                BinSection {
+                    name: "sp1-revm-opcode-lab".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn write_sp1_manifest(root: &Path, manifest: &CargoManifest) {
+        let manifest_dir = root.join("guests/sp1");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let mut contents = format!(
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            manifest.package.name
+        );
+        for bin in &manifest.bin {
+            contents.push_str(&format!("\n[[bin]]\nname = \"{}\"\n", bin.name));
+        }
+        fs::write(manifest_dir.join("Cargo.toml"), contents).unwrap();
     }
 }

@@ -273,10 +273,12 @@ research. It generates synthetic opcode-lab and precompile-lab inputs, runs cach
 cases through `target/release/guest-launcher`, and fits marginal coefficients from JSONL reports.
 SP1 runs report software `proverGas`; RISC0 proposal replays report backend-native cycle metrics.
 
-Use the repository Python venv because it provides Python 3.11 `tomllib`:
+Use the repository Python venv because it provides Python 3.11 `tomllib`. SP1 lab ELFs are not
+part of the default release binary set; pass `--all-binaries` when refreshing opcode/precompile
+lab artifacts.
 
 ```bash
-cargo run -r -p xtask -- build-guest sp1 --bench
+cargo run -r -p xtask -- build-guest sp1 --bench --all-binaries
 cargo build -r -p guest-launcher --features sp1-sdk/profiling
 
 ~/.venv/bin/python experiments/opcode-gas/opcode_gas.py generate \

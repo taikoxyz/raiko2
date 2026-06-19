@@ -84,7 +84,7 @@ pub(crate) fn scheduler_config(config: &Config) -> SchedulerConfig {
 }
 
 #[allow(clippy::missing_const_for_fn)]
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-boundless")]
 pub(crate) fn boundless_scheduler_config(config: &Config) -> SchedulerConfig {
     scheduler_config(config)
 }
@@ -111,7 +111,7 @@ fn task_lease_duration(config: &Config) -> Duration {
     Duration::from_millis(lease_ms.max(60_000))
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-risc0")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc0Config {
     raiko2_prover::risc0::Risc0Config {
@@ -124,13 +124,13 @@ pub(crate) fn risc0_prover_config(config: &Config) -> raiko2_prover::risc0::Risc
     }
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-sp1")]
 #[allow(clippy::missing_const_for_fn)]
 pub(crate) fn sp1_prover_config(config: &Config) -> raiko2_prover::sp1::Sp1Config {
     config.prover.sp1.clone()
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-boundless")]
 pub(crate) fn boundless_prover_config(
     config: &Config,
     pair: &ResolvedNetworkPair,
@@ -176,10 +176,9 @@ pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: Pipel
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        boundless_prover_config, boundless_scheduler_config, build_context, risc0_prover_config,
-        scheduler_config,
-    };
+    #[cfg(feature = "local-prover-boundless")]
+    use super::{boundless_prover_config, boundless_scheduler_config};
+    use super::{build_context, scheduler_config};
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
     use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
@@ -213,6 +212,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "local-prover-boundless")]
     #[test]
     fn boundless_scheduler_uses_general_task_policy() {
         let mut config = Config::default();
@@ -262,6 +262,7 @@ mod tests {
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
     }
 
+    #[cfg(feature = "local-prover-boundless")]
     #[test]
     fn boundless_prover_inherits_risc0_execution_po2() {
         let mut config = Config::default();
@@ -273,13 +274,12 @@ mod tests {
             .pop()
             .expect("default pair");
 
-        let risc0 = risc0_prover_config(&config);
         let boundless = boundless_prover_config(&config, &pair);
 
-        assert_eq!(risc0.execution_po2, 24);
-        assert_eq!(boundless.execution_po2, risc0.execution_po2);
+        assert_eq!(boundless.execution_po2, 24);
     }
 
+    #[cfg(feature = "local-prover-boundless")]
     #[test]
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();

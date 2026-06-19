@@ -60,11 +60,17 @@ dotenvy = "0.15"
 
 [features]
 default = ["local-provers"]
-local-provers = [
-    "raiko2-engine/local-provers",
+local-prover-risc0 = ["raiko2-engine/local-prover-risc0", "raiko2-prover/risc0"]
+local-prover-sp1 = ["raiko2-engine/local-prover-sp1", "raiko2-prover/sp1"]
+local-prover-boundless = [
+    "raiko2-engine/local-prover-boundless",
     "raiko2-prover/risc0",
-    "raiko2-prover/sp1",
     "raiko2-prover/boundless",
+]
+local-provers = [
+    "local-prover-risc0",
+    "local-prover-sp1",
+    "local-prover-boundless",
 ]
 host = []
 fixture-server = ["local-provers"]

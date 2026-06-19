@@ -875,7 +875,7 @@ mod tests {
     use raiko2_primitives::ProofType;
     use raiko2_prover::{
         BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
-        Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
+        Sp1NetworkSubmissionProgress, sp1_config::ExecutionMode,
     };
     use raiko2_runtime::TaskRegistration;
 

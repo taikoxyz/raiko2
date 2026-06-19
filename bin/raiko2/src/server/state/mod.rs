@@ -35,24 +35,33 @@ use raiko2_engine::tasks::EngineTask;
 #[cfg(feature = "redis-queue")]
 type EngineOutput<I> = raiko2_engine::tasks::EngineOutput<I>;
 
+#[cfg(any(feature = "local-prover-risc0", feature = "local-prover-boundless"))]
+use raiko2_pipeline::Risc0ShastaBackend;
+#[cfg(feature = "local-prover-sp1")]
+use raiko2_pipeline::Sp1ShastaBackend;
+#[cfg(feature = "local-prover-boundless")]
+use raiko2_pipeline::forks::shasta::load_risc0_boundless_shasta_backend;
+#[cfg(feature = "local-prover-risc0")]
+use raiko2_pipeline::forks::shasta::load_risc0_shasta_backend;
+#[cfg(feature = "local-prover-sp1")]
+use raiko2_pipeline::forks::shasta::load_sp1_shasta_backend;
+#[cfg(feature = "local-prover-boundless")]
+use raiko2_prover::boundless::BoundlessProver;
 #[cfg(feature = "local-provers")]
-use raiko2_pipeline::{
-    Risc0ShastaBackend, Sp1ShastaBackend,
-    forks::shasta::{ShastaBackends, load_shasta_backends},
-};
-#[cfg(feature = "local-provers")]
-use raiko2_prover::{
-    boundless::BoundlessProver, native::NativeProver, risc0::Risc0Prover, sp1::Sp1Prover,
-};
+use raiko2_prover::native::NativeProver;
+#[cfg(feature = "local-prover-risc0")]
+use raiko2_prover::risc0::Risc0Prover;
+#[cfg(feature = "local-prover-sp1")]
+use raiko2_prover::sp1::Sp1Prover;
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-risc0")]
 type Risc0Spec = ShastaSpec<Risc0Prover, Risc0ShastaBackend, NetworkProvider>;
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-sp1")]
 type Sp1Spec = ShastaSpec<Sp1Prover, Sp1ShastaBackend, NetworkProvider>;
 #[cfg(feature = "local-provers")]
 type NativeSpec = ShastaSpec<NativeProver, NativeBackend, NetworkProvider>;
 type Gaiko2Spec = ShastaSpec<Gaiko2Prover, NativeBackend, NetworkProvider>;
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-boundless")]
 type BoundlessSpec = ShastaSpec<BoundlessProver, Risc0ShastaBackend, NetworkProvider>;
 
 use super::sampling::ZkAnySampler;
@@ -76,21 +85,27 @@ impl AppState {
     pub async fn new(mut config: Config) -> Result<Self> {
         config.normalize();
         config.validate()?;
+        ensure_configured_route_is_compiled(&config)?;
         let runtime = Arc::new(RuntimeManager::new(config.runtime.root.clone())?);
         restore_proof_artifacts_from_runtime_tasks(&runtime).await?;
         let scheduler_config = setup::scheduler_config(&config);
         let workers = config.queue.workers;
         let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
         let resolved_pairs = config.rpc.resolved_pairs()?;
-        #[cfg(feature = "local-provers")]
-        let shasta_backends = load_shasta_backends().map_err(anyhow::Error::msg)?;
-        #[cfg(feature = "local-provers")]
+        #[cfg(feature = "local-prover-risc0")]
+        let risc0_backend = load_risc0_shasta_backend().map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "local-prover-boundless")]
+        let boundless_backend =
+            load_risc0_boundless_shasta_backend().map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "local-prover-sp1")]
+        let sp1_backend = load_sp1_shasta_backend().map_err(anyhow::Error::msg)?;
+        #[cfg(feature = "local-prover-sp1")]
         let sp1_prover = if should_eagerly_initialize_sp1(&config) {
             let sp1_config = setup::sp1_prover_config(&config);
-            let sp1_backend = shasta_backends.sp1.clone();
+            let prover_backend = sp1_backend.clone();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
+                    Sp1Prover::new_with_backend(sp1_config, &prover_backend)
                 })
                 .await
                 .context("SP1 setup task panicked")??,
@@ -108,9 +123,13 @@ impl AppState {
                     config: &config,
                     pair,
                     runtime: Arc::clone(&runtime),
-                    #[cfg(feature = "local-provers")]
-                    shasta_backends: &shasta_backends,
-                    #[cfg(feature = "local-provers")]
+                    #[cfg(feature = "local-prover-risc0")]
+                    risc0_backend: &risc0_backend,
+                    #[cfg(feature = "local-prover-boundless")]
+                    boundless_backend: &boundless_backend,
+                    #[cfg(feature = "local-prover-sp1")]
+                    sp1_backend: &sp1_backend,
+                    #[cfg(feature = "local-prover-sp1")]
                     sp1_prover: sp1_prover.clone(),
                     scheduler_config: scheduler_config.clone(),
                     workers,
@@ -142,18 +161,63 @@ struct PairPipelineRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
-    #[cfg(feature = "local-provers")]
-    shasta_backends: &'a ShastaBackends,
-    #[cfg(feature = "local-provers")]
+    #[cfg(feature = "local-prover-risc0")]
+    risc0_backend: &'a Risc0ShastaBackend,
+    #[cfg(feature = "local-prover-boundless")]
+    boundless_backend: &'a Risc0ShastaBackend,
+    #[cfg(feature = "local-prover-sp1")]
+    sp1_backend: &'a Sp1ShastaBackend,
+    #[cfg(feature = "local-prover-sp1")]
     sp1_prover: Option<Sp1Prover>,
     scheduler_config: SchedulerConfig,
     workers: usize,
     maintenance_interval: Duration,
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-sp1")]
 const fn should_eagerly_initialize_sp1(config: &Config) -> bool {
     !config.prover.is_remote_sgx_route()
+}
+
+fn ensure_configured_route_is_compiled(config: &Config) -> Result<()> {
+    let route = config.prover.route();
+    let pipeline_key = route.pipeline_key().map_err(anyhow::Error::msg)?;
+    if compiled_pipeline_key(pipeline_key) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "configured prover route {}/{} requires building raiko2 with {}",
+        route.guest_system,
+        route.runner,
+        required_feature_for_pipeline_key(pipeline_key)
+    );
+}
+
+fn compiled_pipeline_key(pipeline_key: PipelineKey) -> bool {
+    match pipeline_key {
+        PipelineKey::ShastaRisc0 => cfg!(feature = "local-prover-risc0"),
+        PipelineKey::ShastaSp1 => cfg!(feature = "local-prover-sp1"),
+        PipelineKey::ShastaNative => cfg!(feature = "local-provers"),
+        PipelineKey::ShastaRisc0Network => cfg!(feature = "local-prover-boundless"),
+        PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth => true,
+    }
+}
+
+const fn required_feature_for_pipeline_key(pipeline_key: PipelineKey) -> &'static str {
+    match pipeline_key {
+        PipelineKey::ShastaRisc0 => {
+            "feature `local-prover-risc0` or aggregate feature `local-provers`"
+        }
+        PipelineKey::ShastaSp1 => "feature `local-prover-sp1` or aggregate feature `local-provers`",
+        PipelineKey::ShastaNative => "feature `local-provers`",
+        PipelineKey::ShastaRisc0Network => {
+            "feature `local-prover-boundless` or aggregate feature `local-provers`"
+        }
+        PipelineKey::ShastaSgx | PipelineKey::ShastaSgxGeth => {
+            "remote SGX support, which is always compiled"
+        }
+    }
 }
 
 async fn register_pair_pipelines(
@@ -169,21 +233,17 @@ async fn register_pair_pipelines(
         return Ok(());
     }
 
-    #[cfg(not(feature = "local-provers"))]
-    {
-        anyhow::bail!("local prover routes require building raiko2 with `local-provers`");
-    }
+    let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
+        Arc::clone(&registration.runtime),
+        registration.pair.key.clone(),
+    ));
 
-    #[cfg(feature = "local-provers")]
+    #[cfg(feature = "local-prover-risc0")]
     {
-        let runtime_observer: Arc<dyn EngineObserver> = Arc::new(RuntimeObserver::new(
-            Arc::clone(&registration.runtime),
-            registration.pair.key.clone(),
-        ));
         let risc0_engine = build_risc0_engine(
             registration.config,
             registration.pair,
-            registration.shasta_backends.risc0.clone(),
+            registration.risc0_backend.clone(),
             registration.scheduler_config.clone(),
             Arc::clone(&runtime_observer),
         )
@@ -197,11 +257,14 @@ async fn register_pair_pipelines(
             PipelineKey::ShastaRisc0,
             Arc::new(risc0_engine),
         );
+    }
 
+    #[cfg(feature = "local-prover-boundless")]
+    {
         let boundless_engine = build_boundless_engine(
             registration.config,
             registration.pair,
-            registration.shasta_backends.risc0_boundless.clone(),
+            registration.boundless_backend.clone(),
             setup::boundless_scheduler_config(registration.config),
             Arc::clone(&runtime_observer),
         )
@@ -215,7 +278,10 @@ async fn register_pair_pipelines(
             PipelineKey::ShastaRisc0Network,
             Arc::new(boundless_engine),
         );
+    }
 
+    #[cfg(feature = "local-prover-sp1")]
+    {
         let sp1_engine = build_sp1_engine(
             registration.config,
             registration.pair,
@@ -223,7 +289,7 @@ async fn register_pair_pipelines(
                 .sp1_prover
                 .clone()
                 .expect("sp1 prover must be initialized for local prover hosts"),
-            registration.shasta_backends.sp1.clone(),
+            registration.sp1_backend.clone(),
             registration.scheduler_config.clone(),
             Arc::clone(&runtime_observer),
         )
@@ -237,7 +303,10 @@ async fn register_pair_pipelines(
             PipelineKey::ShastaSp1,
             Arc::new(sp1_engine),
         );
+    }
 
+    #[cfg(feature = "local-provers")]
+    {
         let native_engine = build_native_engine(
             registration.config,
             registration.pair,
@@ -254,10 +323,10 @@ async fn register_pair_pipelines(
             PipelineKey::ShastaNative,
             Arc::new(native_engine),
         );
-
-        register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
-        Ok(())
     }
+
+    register_remote_sgx_pipelines(factory, &registration, runtime_observer).await?;
+    Ok(())
 }
 
 async fn register_remote_sgx_pipelines(
@@ -525,7 +594,7 @@ fn push_restored_ref(
     refs.push((proof_ref, kind));
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-risc0")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_risc0_engine(
     config: &Config,
@@ -598,7 +667,7 @@ async fn build_risc0_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-sp1")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_sp1_engine(
     config: &Config,
@@ -733,7 +802,7 @@ async fn build_native_engine(
     Ok(engine)
 }
 
-#[cfg(feature = "local-provers")]
+#[cfg(feature = "local-prover-boundless")]
 #[cfg_attr(not(feature = "redis-queue"), allow(clippy::unused_async))]
 async fn build_boundless_engine(
     config: &Config,
@@ -1076,6 +1145,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "local-prover-sp1")]
     #[test]
     fn remote_sgx_route_does_not_eagerly_initialize_sp1() {
         let mut config = Config::default();
@@ -1085,6 +1155,7 @@ mod tests {
         assert!(!should_eagerly_initialize_sp1(&config));
     }
 
+    #[cfg(feature = "local-prover-sp1")]
     #[test]
     fn sp1_route_still_eagerly_initializes_sp1() {
         let mut config = Config::default();

@@ -11,6 +11,10 @@ use crate::util;
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
+const RISC0_BIN_FEATURES: &str = "--no-default-features --features local-prover-risc0";
+const SP1_BIN_FEATURES: &str = "--no-default-features --features local-prover-sp1";
+const ALL_BIN_FEATURES: &str =
+    "--no-default-features --features local-prover-risc0,local-prover-sp1";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageBackend {
@@ -158,6 +162,15 @@ const fn guest_backend_name(backend: GuestBackend) -> &'static str {
     }
 }
 
+const fn runtime_bin_features(backend: ImageBackend) -> &'static str {
+    match backend {
+        ImageBackend::Host => HOST_BIN_FEATURES,
+        ImageBackend::Risc0 => RISC0_BIN_FEATURES,
+        ImageBackend::Sp1 => SP1_BIN_FEATURES,
+        ImageBackend::All => ALL_BIN_FEATURES,
+    }
+}
+
 fn resolve_guest_refresh_backend(
     image_backend: ImageBackend,
     force_rebuild_guests: bool,
@@ -235,12 +248,10 @@ fn build_metadata_flags(source_revision: &str) -> Vec<String> {
 
 fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<String> {
     let mut flags = build_metadata_flags(source_revision);
-    if matches!(image_backend, ImageBackend::Host) {
-        flags.extend([
-            "--build-arg".to_string(),
-            format!("BIN_FEATURES={HOST_BIN_FEATURES}"),
-        ]);
-    }
+    flags.extend([
+        "--build-arg".to_string(),
+        format!("BIN_FEATURES={}", runtime_bin_features(image_backend)),
+    ]);
     flags
 }
 
@@ -398,6 +409,62 @@ mod tests {
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features host".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn risc0_image_flags_select_local_risc0_features() {
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--build-arg".to_string(),
+                "BIN_FEATURES=--no-default-features --features local-prover-risc0".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn sp1_image_flags_select_local_sp1_features() {
+        let flags = build_image_flags(ImageBackend::Sp1, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--build-arg".to_string(),
+                "BIN_FEATURES=--no-default-features --features local-prover-sp1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_image_flags_select_local_risc0_and_sp1_features() {
+        let flags = build_image_flags(ImageBackend::All, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec![
+                "--build-arg".to_string(),
+                "VCS_REF=26eff23".to_string(),
+                "--build-arg".to_string(),
+                "BIN_FEATURES=--no-default-features --features local-prover-risc0,local-prover-sp1"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_image_flags_do_not_include_boundless_features() {
+        let flags = build_image_flags(ImageBackend::All, "26eff23");
+
+        assert!(
+            flags.iter().all(|flag| !flag.contains("boundless")),
+            "all local release image flags must not include boundless: {flags:?}"
         );
     }
 

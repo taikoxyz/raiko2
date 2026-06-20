@@ -1,6 +1,6 @@
 //! Aggregation request validation and proof execution.
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use raiko2_primitives_shasta::instance::{
     build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
 };
@@ -8,8 +8,13 @@ use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofC
 use raiko2_prover::remote_prover::protocol::{
     RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
 };
+use secp256k1::{
+    Message, Secp256k1,
+    ecdsa::{RecoverableSignature, RecoveryId},
+};
 
 use crate::{
+    bootstrap::public_key_to_address,
     protocol::{RequestFailure, load_signer_identity, proof_result_from_input_hash},
     tee::TeeProvider,
 };
@@ -21,9 +26,9 @@ pub(crate) fn aggregate_request<P: TeeProvider>(
     instance_id: u32,
     request: &Raiko2ShastaAggregateRequest,
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
-    let carries = validate_request(request)?;
     let identity = load_signer_identity(provider)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
+    let carries = validate_request(request, instance_id, identity.instance_address)?;
     let commitment = build_shasta_commitment_from_proof_carry_data_vec(&carries)
         .ok_or_else(|| RequestFailure::invalid_request("invalid shasta proof carry data"))?;
     let first = carries.first().ok_or_else(|| {
@@ -42,6 +47,8 @@ pub(crate) fn aggregate_request<P: TeeProvider>(
 
 fn validate_request(
     request: &Raiko2ShastaAggregateRequest,
+    expected_instance_id: u32,
+    expected_instance_address: Address,
 ) -> Result<Vec<ProofCarryData>, RequestFailure> {
     if request.schema != RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA {
         return Err(RequestFailure::invalid_request(format!(
@@ -87,6 +94,13 @@ fn validate_request(
                 "aggregate proof {index} input mismatch: got {input_hash:#x} expected {expected_input:#x}"
             )));
         }
+        validate_sgx_child_proof(
+            index,
+            &proof_bytes,
+            expected_input,
+            expected_instance_id,
+            expected_instance_address,
+        )?;
 
         carries.push(item.proof_carry_data.clone());
     }
@@ -98,6 +112,68 @@ fn validate_request(
     }
 
     Ok(carries)
+}
+
+fn validate_sgx_child_proof(
+    index: usize,
+    proof_bytes: &[u8],
+    input_hash: B256,
+    expected_instance_id: u32,
+    expected_instance_address: Address,
+) -> Result<(), RequestFailure> {
+    let instance_id = u32::from_be_bytes(
+        proof_bytes[0..4]
+            .try_into()
+            .expect("SGX proof length was already checked"),
+    );
+    if instance_id != expected_instance_id {
+        return Err(RequestFailure::invalid_request(format!(
+            "aggregate proof {index} SGX instance id mismatch: got {instance_id} expected {expected_instance_id}"
+        )));
+    }
+
+    let instance_address = Address::from_slice(&proof_bytes[4..24]);
+    if instance_address != expected_instance_address {
+        return Err(RequestFailure::invalid_request(format!(
+            "aggregate proof {index} SGX instance address mismatch: got {instance_address:#x} expected {expected_instance_address:#x}"
+        )));
+    }
+
+    let recovery_id = match proof_bytes[88] {
+        27 => RecoveryId::Zero,
+        28 => RecoveryId::One,
+        value => {
+            return Err(RequestFailure::invalid_request(format!(
+                "aggregate proof {index} has invalid SGX signature recovery id {value}"
+            )));
+        }
+    };
+    let signature =
+        RecoverableSignature::from_compact(&proof_bytes[24..88], recovery_id).map_err(|err| {
+            RequestFailure::invalid_request(format!(
+                "aggregate proof {index} has invalid SGX signature: {err}"
+            ))
+        })?;
+    let message = Message::from_digest_slice(input_hash.as_slice()).map_err(|err| {
+        RequestFailure::invalid_request(format!(
+            "aggregate proof {index} has invalid input hash: {err}"
+        ))
+    })?;
+    let recovered_key = Secp256k1::new()
+        .recover_ecdsa(&message, &signature)
+        .map_err(|err| {
+            RequestFailure::invalid_request(format!(
+                "aggregate proof {index} signature recovery failed: {err}"
+            ))
+        })?;
+    let recovered_address = public_key_to_address(&recovered_key);
+    if recovered_address != instance_address {
+        return Err(RequestFailure::invalid_request(format!(
+            "aggregate proof {index} SGX signature signer mismatch: recovered {recovered_address:#x} expected {instance_address:#x}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn parse_hash(value: &str) -> Result<B256, String> {
@@ -154,10 +230,11 @@ mod tests {
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2AggregateProof,
         Raiko2ProofStatus, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
     };
-    use secp256k1::SecretKey;
+    use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use std::str::FromStr;
 
     use super::aggregate_request;
+    use crate::bootstrap::public_key_to_address;
     use crate::tee::TeeProvider;
 
     #[derive(Clone)]
@@ -222,13 +299,20 @@ mod tests {
             B256::from([0xCC; 32]),
         );
         second.transition_input.parent_block_hash = first.transition_input.checkpoint.blockHash;
+        let signing_key = SecretKey::from_slice(&[13u8; 32]).expect("signing key");
+        let instance_address = instance_address_for_key(&signing_key);
 
         let proofs = [first, second]
             .into_iter()
             .map(|carry| {
                 let input = hash_shasta_subproof_input(&carry);
                 let proof = Proof {
-                    proof: Some(format!("0x{}", "11".repeat(89))),
+                    proof: Some(sgx_proof_for_input(
+                        7,
+                        input,
+                        &signing_key,
+                        instance_address,
+                    )),
                     input: Some(input),
                     extra_data: Some(encode_proof_carry_data(&carry).expect("carry data")),
                     ..Proof::default()
@@ -243,15 +327,38 @@ mod tests {
         }
     }
 
+    fn sgx_proof_for_input(
+        instance_id: u32,
+        input_hash: B256,
+        signing_key: &SecretKey,
+        embedded_instance_address: Address,
+    ) -> String {
+        let message = Message::from_digest_slice(input_hash.as_slice()).expect("input hash");
+        let signature = Secp256k1::new().sign_ecdsa_recoverable(&message, signing_key);
+        let (recovery_id, data) = signature.serialize_compact();
+
+        let mut proof = Vec::with_capacity(89);
+        proof.extend(instance_id.to_be_bytes());
+        proof.extend(embedded_instance_address);
+        proof.extend(data);
+        proof.push(u8::try_from(i32::from(recovery_id) + 27).expect("recovery id"));
+        format!("0x{}", hex::encode(proof))
+    }
+
+    fn instance_address_for_key(secret_key: &SecretKey) -> Address {
+        let public_key = PublicKey::from_secret_key(&Secp256k1::new(), secret_key);
+        public_key_to_address(&public_key)
+    }
+
     #[test]
     fn aggregate_request_returns_raiko2_envelope() {
         let provider = FakeProvider {
-            secret_key: SecretKey::from_slice(&[10u8; 32]).expect("secret key"),
+            secret_key: SecretKey::from_slice(&[13u8; 32]).expect("secret key"),
             quote: vec![0x12, 0x34],
         };
         let request = aggregate_request_fixture();
 
-        let response = aggregate_request(&provider, 19, &request).expect("aggregate request");
+        let response = aggregate_request(&provider, 7, &request).expect("aggregate request");
 
         assert_eq!(response.schema, RAIKO2_PROOF_RESPONSE_SCHEMA);
         assert_eq!(response.status, Raiko2ProofStatus::Ok);
@@ -274,5 +381,41 @@ mod tests {
 
         let err = aggregate_request(&provider, 19, &request).expect_err("empty proofs");
         assert!(err.to_string().contains("at least one aggregate proof"));
+    }
+
+    #[test]
+    fn aggregate_request_rejects_child_proof_signature_mismatch() {
+        let signing_key = SecretKey::from_slice(&[13u8; 32]).expect("signing key");
+        let different_key = SecretKey::from_slice(&[14u8; 32]).expect("different key");
+        let provider = FakeProvider {
+            secret_key: different_key,
+            quote: vec![],
+        };
+        let mut request = aggregate_request_fixture();
+        let first = request.payload.proofs.first_mut().expect("first proof");
+        let input_hash = hash_shasta_subproof_input(&first.proof_carry_data);
+        first.proof = sgx_proof_for_input(
+            19,
+            input_hash,
+            &signing_key,
+            instance_address_for_key(&different_key),
+        );
+
+        let err = aggregate_request(&provider, 19, &request).expect_err("signature mismatch");
+
+        assert!(err.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn aggregate_request_rejects_child_proof_from_other_instance() {
+        let provider = FakeProvider {
+            secret_key: SecretKey::from_slice(&[12u8; 32]).expect("secret key"),
+            quote: vec![],
+        };
+        let request = aggregate_request_fixture();
+
+        let err = aggregate_request(&provider, 7, &request).expect_err("instance mismatch");
+
+        assert!(err.to_string().contains("instance address"));
     }
 }

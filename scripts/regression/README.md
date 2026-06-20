@@ -177,7 +177,8 @@ curl -sS \
 ```
 
 Use `RAIKO2_REMOTE_TDX_BASE_URL` and the same `--include-guest-input` envelope when the target is
-`raiko2-tdx-prover`.
+`raiko2-tdx-prover`. For trusted TDX mode the prover also needs access to the in-VM `tdxs` socket;
+for local protocol checks, run it with `RAIKO2_TDX_MODE=native`.
 
 SGX/TDX checks still require the matching remote prover stack. `preflight` only builds and
 optionally validates the `GuestInput`; it does not launch a TEE prover by itself. For `sgxgeth`,

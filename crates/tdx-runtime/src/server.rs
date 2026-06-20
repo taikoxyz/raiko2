@@ -1,4 +1,4 @@
-//! Axum server for the dedicated TEE prover.
+//! Axum server for the dedicated TDX prover.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -16,21 +16,21 @@ use crate::{
 const MAX_REQUEST_BODY_BYTES: usize = 10_000 * 1024 * 1024;
 
 #[derive(Clone)]
-pub(crate) struct SgxProver<P> {
+pub(crate) struct TdxProver<P> {
     pub(crate) provider: P,
     pub(crate) service_config: ServiceConfig,
 }
 
-impl<P> FromRef<SgxProver<P>> for ServiceConfig
+impl<P> FromRef<TdxProver<P>> for ServiceConfig
 where
     P: Clone,
 {
-    fn from_ref(input: &SgxProver<P>) -> Self {
+    fn from_ref(input: &TdxProver<P>) -> Self {
         input.service_config.clone()
     }
 }
 
-pub(crate) fn router<P>(state: SgxProver<P>) -> Router
+pub(crate) fn router<P>(state: TdxProver<P>) -> Router
 where
     P: TeeProvider + Clone + Send + Sync + 'static,
 {
@@ -60,7 +60,7 @@ where
     );
     axum::serve(
         listener,
-        router(SgxProver {
+        router(TdxProver {
             provider,
             service_config,
         }),
@@ -115,7 +115,7 @@ fn aggregate_proposal_id_summary(
 }
 
 async fn prove_shasta<P>(
-    State(state): State<SgxProver<P>>,
+    State(state): State<TdxProver<P>>,
     request: Result<
         Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest>,
         JsonRejection,
@@ -138,7 +138,7 @@ where
                 Ok(response) => {
                     if response.result.is_some() {
                         info!(
-                            provider = "sgx",
+                            provider = "tdx",
                             schema = %request.schema,
                             proposal_id = proposal_id_from_request(&request),
                             chain_id = request.payload.chain_id,
@@ -152,7 +152,7 @@ where
                 }
                 Err(err) => {
                     warn!(
-                        provider = "sgx",
+                        provider = "tdx",
                         schema = %request.schema,
                         chain_id = request.payload.chain_id,
                         block_count = shasta_request_block_count(&request),
@@ -169,7 +169,7 @@ where
         Err(err) => {
             let failure = RequestFailure::invalid_json(err.body_text());
             warn!(
-                provider = "sgx",
+                provider = "tdx",
                 instance_id = state.service_config.instance_id,
                 code = failure.code,
                 message = %failure.message,
@@ -181,7 +181,7 @@ where
 }
 
 async fn prove_shasta_aggregate<P>(
-    State(state): State<SgxProver<P>>,
+    State(state): State<TdxProver<P>>,
     request: Result<
         Json<raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest>,
         JsonRejection,
@@ -198,7 +198,7 @@ where
             match aggregate_request(&state.provider, state.service_config.instance_id, &request) {
                 Ok(response) => {
                     info!(
-                        provider = "sgx",
+                        provider = "tdx",
                         schema = %request.schema,
                         proposal_ids = %aggregate_proposal_id_summary(&request),
                         proof_count = request.payload.proofs.len(),
@@ -209,7 +209,7 @@ where
                 }
                 Err(err) => {
                     warn!(
-                        provider = "sgx",
+                        provider = "tdx",
                         schema = %request.schema,
                         proof_count = request.payload.proofs.len(),
                         instance_id = state.service_config.instance_id,
@@ -224,7 +224,7 @@ where
         Err(err) => {
             let failure = RequestFailure::invalid_json(err.body_text());
             warn!(
-                provider = "sgx",
+                provider = "tdx",
                 instance_id = state.service_config.instance_id,
                 code = failure.code,
                 message = %failure.message,
@@ -237,7 +237,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, B256};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -252,7 +252,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::{
-        SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router,
+        TdxProver, aggregate_proposal_id_summary, proposal_id_from_request, router,
         shasta_request_block_count,
     };
     use crate::config::ServiceConfig;
@@ -270,7 +270,15 @@ mod tests {
             SecretKey::from_slice(&[12u8; 32]).map_err(Into::into)
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            Ok(vec![0xAA])
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             Ok(vec![0xAA])
         }
     }
@@ -317,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_route_responds_ok() {
-        let app = router(SgxProver {
+        let app = router(TdxProver {
             provider: FakeProvider,
             service_config: service_config(),
         });
@@ -337,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn prove_shasta_route_rejects_request_without_guest_input() {
-        let app = router(SgxProver {
+        let app = router(TdxProver {
             provider: FakeProvider,
             service_config: service_config(),
         });
@@ -360,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn prove_shasta_route_accepts_large_request_bodies_before_validation() {
-        let app = router(SgxProver {
+        let app = router(TdxProver {
             provider: FakeProvider,
             service_config: service_config(),
         });
@@ -384,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn prove_shasta_aggregate_rejects_empty_request() {
-        let app = router(SgxProver {
+        let app = router(TdxProver {
             provider: FakeProvider,
             service_config: service_config(),
         });

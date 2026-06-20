@@ -179,6 +179,23 @@ as `raiko2-sgx-prover`, but binds runtime identity to TDX:
 - default config dir: `~/.config/raiko2/tdx/config`
 - default secret dir: `~/.config/raiko2/tdx/secrets`
 - mode env var: `RAIKO2_TDX_MODE`
+- quote socket env var: `RAIKO2_TDXS_SOCKET` (default `/var/tdxs.sock`)
+
+TEE mode expects the in-VM `tdxs` daemon to listen on the configured Unix socket. `bootstrap`
+requests a quote bound to the prover instance address, while proposal and aggregate proofs request
+per-proof quotes bound to the signed input hash. This keeps the TDX quote tied to the proof payload
+instead of only to the long-lived instance identity.
+
+TEE-mode example:
+
+```bash
+cargo run -r -p raiko2-tdx-prover -- \
+  --mode tee \
+  --tdxs-socket /var/tdxs.sock \
+  --config-dir ~/.config/raiko2/tdx/config \
+  --secret-dir ~/.config/raiko2/tdx/secrets \
+  serve --listen-addr 0.0.0.0:8080
+```
 
 Local native-mode smoke:
 
@@ -189,8 +206,8 @@ cargo run -r -p raiko2-tdx-prover -- \
 ```
 
 Native mode is for protocol and GuestInput replay regression. Production TDX still needs a real TDX
-quote/key provider wired behind the shared runtime; do not use the SGX Gramine quote path as a TDX
-attestation substitute.
+VM image/release/deploy flow that pins `raiko2-tdx-prover`, `tdxs`, systemd units, and measured
+configuration; do not treat native mode as a trusted TDX proof.
 
 ### Docker Compose
 

@@ -98,9 +98,10 @@ flowchart LR
 - `tdx/remote` submits Shasta proving to the first-party remote TDX runtime. This repo ships
   `raiko2-tdx-prover` for `proof_type=tdx`.
 - `raiko2-tdx-prover` exposes the same GuestInput remote API as `raiko2-sgx-prover` but binds the
-  runtime flavor, native signer identity, and default directories to TDX. It is intended for the TDX
-  VM model where the measured service validates the full `GuestInput` before signing, rather than
-  the older gaiko2 replay-only packet.
+  runtime identity, quote provider, and default directories to TDX. In `tee` mode it reads quotes
+  from the in-VM `tdxs` socket and binds proof quotes to the signed input hash. It is intended for
+  the TDX VM model where the measured service validates the full `GuestInput` before signing,
+  rather than the older gaiko2 replay-only packet.
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
 

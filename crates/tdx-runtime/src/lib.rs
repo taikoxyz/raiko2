@@ -1,4 +1,4 @@
-//! Dedicated SGX runtime helpers for the `raiko2-sgx-prover` binary.
+//! Dedicated TDX runtime helpers for the `raiko2-tdx-prover` binary.
 
 #![allow(clippy::redundant_pub_crate)]
 
@@ -24,11 +24,11 @@ pub use bootstrap::{
 };
 pub use check::check;
 pub use config::{
-    DEFAULT_NATIVE_INSTANCE_ID, GlobalOpts, RuntimeMode, ServeOpts, ServiceConfig,
+    DEFAULT_NATIVE_TDX_INSTANCE_ID, GlobalOpts, RuntimeMode, ServeOpts, ServiceConfig,
     resolve_service_config,
 };
 
-/// Run the TEE proving server.
+/// Run the TDX proving server.
 ///
 /// # Errors
 ///
@@ -39,7 +39,7 @@ pub async fn serve(global_opts: GlobalOpts, serve_opts: ServeOpts) -> Result<()>
     startup::log_startup_summary(&global_opts, &service_config);
     match global_opts.mode {
         RuntimeMode::Tee => {
-            let provider = tee::GramineProvider::new(global_opts.secret_dir);
+            let provider = tee::TdxProvider::new(global_opts.secret_dir, global_opts.tdxs_socket);
             server::serve(provider, service_config).await
         }
         RuntimeMode::Native => server::serve(tee::NativeProvider::new(), service_config).await,

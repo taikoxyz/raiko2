@@ -1,4 +1,4 @@
-//! Startup summary logging helpers for the dedicated TEE provider.
+//! Startup summary logging helpers for the dedicated TDX provider.
 
 use serde::Serialize;
 use tracing::info;
@@ -14,6 +14,7 @@ pub(crate) struct StartupSummary {
     instance_id: u32,
     config_dir: String,
     secret_dir: String,
+    tdxs_socket: String,
 }
 
 pub(crate) fn build_startup_summary(
@@ -21,13 +22,14 @@ pub(crate) fn build_startup_summary(
     service_config: &ServiceConfig,
 ) -> StartupSummary {
     StartupSummary {
-        provider: "sgx",
+        provider: "tdx",
         mode: runtime_mode_name(global_opts.mode),
         listen: service_config.listen_addr.clone(),
         fork: service_config.fork.clone(),
         instance_id: service_config.instance_id,
         config_dir: global_opts.config_dir.display().to_string(),
         secret_dir: global_opts.secret_dir.display().to_string(),
+        tdxs_socket: global_opts.tdxs_socket.display().to_string(),
     }
 }
 
@@ -41,7 +43,8 @@ pub(crate) fn log_startup_summary(global_opts: &GlobalOpts, service_config: &Ser
         instance_id = summary.instance_id,
         config_dir = %summary.config_dir,
         secret_dir = %summary.secret_dir,
-        "starting raiko2 tee provider"
+        tdxs_socket = %summary.tdxs_socket,
+        "starting raiko2 tdx provider"
     );
 }
 
@@ -69,8 +72,9 @@ mod tests {
     fn sample_global_opts() -> GlobalOpts {
         GlobalOpts {
             mode: RuntimeMode::Tee,
-            config_dir: PathBuf::from("/var/lib/raiko2/sgx/config"),
-            secret_dir: PathBuf::from("/var/lib/raiko2/sgx/secrets"),
+            config_dir: PathBuf::from("/var/lib/raiko2/tdx/config"),
+            secret_dir: PathBuf::from("/var/lib/raiko2/tdx/secrets"),
+            tdxs_socket: PathBuf::from("/var/tdxs.sock"),
         }
     }
 
@@ -87,12 +91,13 @@ mod tests {
         let summary = summary_json(&sample_global_opts(), &sample_service_config());
 
         assert_eq!(summary["mode"], "tee");
-        assert_eq!(summary["provider"], "sgx");
+        assert_eq!(summary["provider"], "tdx");
         assert_eq!(summary["listen"], "0.0.0.0:8080");
         assert_eq!(summary["fork"], "shasta");
         assert_eq!(summary["instance_id"], 14);
-        assert_eq!(summary["config_dir"], "/var/lib/raiko2/sgx/config");
-        assert_eq!(summary["secret_dir"], "/var/lib/raiko2/sgx/secrets");
+        assert_eq!(summary["config_dir"], "/var/lib/raiko2/tdx/config");
+        assert_eq!(summary["secret_dir"], "/var/lib/raiko2/tdx/secrets");
+        assert_eq!(summary["tdxs_socket"], "/var/tdxs.sock");
     }
 
     #[test]

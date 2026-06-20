@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use raiko2_sgx_runtime::{GlobalOpts, RuntimeFlavor, RuntimeMode, ServeOpts};
+use raiko2_tdx_runtime::{GlobalOpts, RuntimeMode, ServeOpts};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Debug, Parser)]
@@ -28,7 +28,7 @@ impl From<TdxGlobalOpts> for GlobalOpts {
     fn from(opts: TdxGlobalOpts) -> Self {
         let mut inner = opts.inner;
         inner.mode = opts.mode;
-        inner.for_flavor(RuntimeFlavor::Tdx)
+        inner
     }
 }
 
@@ -49,12 +49,12 @@ async fn main() -> Result<()> {
     init_logging();
     match app.command {
         Command::Bootstrap => {
-            let data = raiko2_sgx_runtime::bootstrap(&global_opts)?;
+            let data = raiko2_tdx_runtime::bootstrap(&global_opts)?;
             println!("{}", serde_json::to_string_pretty(&data)?);
             Ok(())
         }
-        Command::Check => raiko2_sgx_runtime::check(&global_opts),
-        Command::Serve(serve_opts) => raiko2_sgx_runtime::serve(global_opts, serve_opts).await,
+        Command::Check => raiko2_tdx_runtime::check(&global_opts),
+        Command::Serve(serve_opts) => raiko2_tdx_runtime::serve(global_opts, serve_opts).await,
     }
 }
 

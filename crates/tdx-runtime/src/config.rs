@@ -1,4 +1,4 @@
-//! Configuration types for the dedicated SGX runtime.
+//! Configuration types for the dedicated TDX runtime.
 
 use std::path::PathBuf;
 
@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{Args, ValueEnum};
 use raiko2_primitives::ProofType;
 
-use crate::bootstrap::load_registered_instance_ids;
+use crate::{bootstrap::load_registered_instance_ids, tee::DEFAULT_TDXS_SOCKET};
 
 /// Bootstrap metadata filename.
 pub const BOOTSTRAP_INFO_FILENAME: &str = "bootstrap.json";
@@ -15,34 +15,34 @@ pub const REGISTERED_INFO_FILENAME: &str = "registered.json";
 /// TEE private key filename.
 pub const PRIV_KEY_FILENAME: &str = "priv.key";
 
-const DEFAULT_RAIKO2_SGX_CONFIG_SUBDIR: &str = ".config/raiko2/sgx/config";
-const DEFAULT_RAIKO2_SGX_SECRET_SUBDIR: &str = ".config/raiko2/sgx/secrets";
+const DEFAULT_RAIKO2_TDX_CONFIG_SUBDIR: &str = ".config/raiko2/tdx/config";
+const DEFAULT_RAIKO2_TDX_SECRET_SUBDIR: &str = ".config/raiko2/tdx/secrets";
 const DEFAULT_FORK: &str = "shasta";
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8080";
-/// Native-mode fallback instance id used when no explicit id is provided.
-pub const DEFAULT_NATIVE_INSTANCE_ID: u32 = 0xDEAD_C0DE;
+/// Native-mode fallback instance id used by the dedicated TDX prover.
+pub const DEFAULT_NATIVE_TDX_INSTANCE_ID: u32 = 0x7D00_C0DE;
 
 impl ServiceConfig {
     #[must_use]
     pub(crate) const fn proof_type(&self) -> ProofType {
-        ProofType::Sgx
+        ProofType::Tdx
     }
 }
 
-/// Runtime execution mode for the dedicated SGX prover.
+/// Runtime execution mode for the dedicated TDX prover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum RuntimeMode {
-    /// Run inside Gramine and load SGX quote material.
+    /// Run inside a TDX VM and load quote material from tdxs.
     #[default]
     Tee,
     /// Skip TEE attestation and use the fixed native signer identity.
     Native,
 }
 
-/// Global SGX runtime directories.
+/// Global TDX runtime directories.
 #[derive(Clone, Debug, Args)]
 pub struct GlobalOpts {
-    /// Runtime mode used by the dedicated SGX prover.
+    /// Runtime mode used by the dedicated TDX prover.
     #[arg(skip = RuntimeMode::Tee)]
     pub mode: RuntimeMode,
     /// Directory containing bootstrap metadata.
@@ -51,6 +51,9 @@ pub struct GlobalOpts {
     /// Directory containing sealed private key material.
     #[arg(long, default_value_os_t = default_secret_dir())]
     pub secret_dir: PathBuf,
+    /// Unix socket exposed by the in-VM tdxs daemon.
+    #[arg(long, env = "RAIKO2_TDXS_SOCKET", default_value = DEFAULT_TDXS_SOCKET)]
+    pub tdxs_socket: PathBuf,
 }
 
 impl Default for GlobalOpts {
@@ -59,6 +62,7 @@ impl Default for GlobalOpts {
             mode: RuntimeMode::Tee,
             config_dir: default_config_dir(),
             secret_dir: default_secret_dir(),
+            tdxs_socket: PathBuf::from(DEFAULT_TDXS_SOCKET),
         }
     }
 }
@@ -98,16 +102,16 @@ pub struct ServiceConfig {
     pub instance_id: u32,
 }
 
-/// Default config directory for SGX bootstrap artifacts.
+/// Default config directory for TDX bootstrap artifacts.
 #[must_use]
 pub fn default_config_dir() -> PathBuf {
-    default_dir(DEFAULT_RAIKO2_SGX_CONFIG_SUBDIR)
+    default_dir(DEFAULT_RAIKO2_TDX_CONFIG_SUBDIR)
 }
 
-/// Default secrets directory for the TEE private key.
+/// Default secrets directory for the TDX private key.
 #[must_use]
 pub fn default_secret_dir() -> PathBuf {
-    default_dir(DEFAULT_RAIKO2_SGX_SECRET_SUBDIR)
+    default_dir(DEFAULT_RAIKO2_TDX_SECRET_SUBDIR)
 }
 
 /// Resolve the serving configuration, preferring an explicit instance id and
@@ -124,7 +128,7 @@ pub fn resolve_service_config(
     let instance_id = if let Some(instance_id) = serve_opts.instance_id {
         instance_id
     } else if global_opts.mode == RuntimeMode::Native {
-        DEFAULT_NATIVE_INSTANCE_ID
+        DEFAULT_NATIVE_TDX_INSTANCE_ID
     } else {
         let registered =
             load_registered_instance_ids(&global_opts.config_dir).with_context(|| {
@@ -163,14 +167,14 @@ fn default_dir(subdir: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_NATIVE_INSTANCE_ID, GlobalOpts, RuntimeMode, ServeOpts, ServiceConfig,
-        default_config_dir, default_secret_dir, resolve_service_config,
+        DEFAULT_NATIVE_TDX_INSTANCE_ID, DEFAULT_TDXS_SOCKET, GlobalOpts, RuntimeMode, ServeOpts,
+        ServiceConfig, default_config_dir, default_secret_dir, resolve_service_config,
     };
     use crate::bootstrap::save_registered_instance_ids;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "raiko2-sgx-runtime-config-{name}-{}",
+            "raiko2-tdx-runtime-config-{name}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -181,24 +185,32 @@ mod tests {
     }
 
     #[test]
-    fn default_config_dir_uses_raiko2_sgx_namespace() {
+    fn default_config_dir_uses_raiko2_tdx_namespace() {
         let dir = default_config_dir();
         let raw = dir.to_string_lossy();
-        assert!(raw.contains(".config/raiko2/sgx/config"), "{raw}");
+        assert!(raw.contains(".config/raiko2/tdx/config"), "{raw}");
     }
 
     #[test]
-    fn default_secret_dir_uses_raiko2_sgx_namespace() {
+    fn default_secret_dir_uses_raiko2_tdx_namespace() {
         let dir = default_secret_dir();
         let raw = dir.to_string_lossy();
-        assert!(raw.contains(".config/raiko2/sgx/secrets"), "{raw}");
+        assert!(raw.contains(".config/raiko2/tdx/secrets"), "{raw}");
     }
 
     #[test]
-    fn service_config_maps_to_sgx_proof_type() {
+    fn service_config_maps_to_tdx_proof_type() {
         assert_eq!(
             ServiceConfig::default().proof_type(),
-            raiko2_primitives::ProofType::Sgx
+            raiko2_primitives::ProofType::Tdx
+        );
+    }
+
+    #[test]
+    fn default_global_opts_use_tdxs_socket() {
+        assert_eq!(
+            GlobalOpts::default().tdxs_socket,
+            std::path::PathBuf::from(DEFAULT_TDXS_SOCKET)
         );
     }
 
@@ -226,6 +238,7 @@ mod tests {
             mode: RuntimeMode::Tee,
             config_dir,
             secret_dir: default_secret_dir(),
+            tdxs_socket: std::path::PathBuf::from(DEFAULT_TDXS_SOCKET),
         };
         let serve_opts = ServeOpts::default();
 
@@ -234,15 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_service_config_uses_native_default_instance_id_without_registration() {
+    fn resolve_service_config_uses_tdx_native_default_instance_id_without_registration() {
         let global_opts = GlobalOpts {
             mode: RuntimeMode::Native,
-            config_dir: temp_dir("native-default"),
+            config_dir: temp_dir("tdx-native-default"),
             secret_dir: default_secret_dir(),
+            tdxs_socket: std::path::PathBuf::from(DEFAULT_TDXS_SOCKET),
         };
         let serve_opts = ServeOpts::default();
 
         let config = resolve_service_config(&global_opts, &serve_opts).expect("service config");
-        assert_eq!(config.instance_id, DEFAULT_NATIVE_INSTANCE_ID);
+        assert_eq!(config.instance_id, DEFAULT_NATIVE_TDX_INSTANCE_ID);
     }
 }

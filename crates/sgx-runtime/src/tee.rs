@@ -11,7 +11,7 @@ use alloy_primitives::{Address, keccak256};
 use anyhow::{Context, Result};
 use secp256k1::SecretKey;
 
-use crate::config::{PRIV_KEY_FILENAME, RuntimeFlavor};
+use crate::config::PRIV_KEY_FILENAME;
 
 const ATTESTATION_QUOTE_DEVICE_FILE: &str = "/dev/attestation/quote";
 const ATTESTATION_USER_REPORT_DATA_DEVICE_FILE: &str = "/dev/attestation/user_report_data";
@@ -89,18 +89,16 @@ impl TeeProvider for GramineProvider {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct NativeProvider {
-    flavor: RuntimeFlavor,
-}
+pub(crate) struct NativeProvider;
 
 impl NativeProvider {
-    pub(crate) const fn new(flavor: RuntimeFlavor) -> Self {
-        Self { flavor }
+    pub(crate) const fn new() -> Self {
+        Self
     }
 
     fn private_key(self) -> Result<SecretKey> {
         let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(native_key_seed(self.flavor).as_slice());
+        bytes.copy_from_slice(native_key_seed().as_slice());
         SecretKey::from_byte_array(&bytes).context("decode native proof private key")
     }
 }
@@ -119,9 +117,6 @@ impl TeeProvider for NativeProvider {
     }
 }
 
-fn native_key_seed(flavor: RuntimeFlavor) -> alloy_primitives::B256 {
-    match flavor {
-        RuntimeFlavor::Sgx => keccak256(b"raiko2:native-sgx-provider"),
-        RuntimeFlavor::Tdx => keccak256(b"raiko2:native-tdx-provider"),
-    }
+fn native_key_seed() -> alloy_primitives::B256 {
+    keccak256(b"raiko2:native-sgx-provider")
 }

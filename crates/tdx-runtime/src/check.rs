@@ -1,23 +1,23 @@
-//! Validation helpers for SGX lifecycle state.
+//! Validation helpers for TDX lifecycle state.
 
 use anyhow::Result;
 
 use crate::{
     bootstrap::load_bootstrap_data,
     config::{GlobalOpts, RuntimeMode},
-    tee::{GramineProvider, TeeProvider},
+    tee::{TdxProvider, TeeProvider},
 };
 
 /// Validate that lifecycle state is usable for the selected runtime mode.
 ///
 /// # Errors
 ///
-/// Returns an error when `tee` mode bootstrap metadata or the SGX private key cannot be loaded.
-/// `native` mode succeeds without SGX lifecycle files.
+/// Returns an error when `tee` mode bootstrap metadata or the TDX private key cannot be loaded.
+/// `native` mode succeeds without TDX lifecycle files.
 pub fn check(opts: &GlobalOpts) -> Result<()> {
     match opts.mode {
         RuntimeMode::Tee => {
-            let provider = GramineProvider::new(opts.secret_dir.clone());
+            let provider = TdxProvider::new(opts.secret_dir.clone(), opts.tdxs_socket.clone());
             let _ = load_bootstrap_data(&opts.config_dir)?;
             check_with_provider(&provider)
         }
@@ -25,7 +25,7 @@ pub fn check(opts: &GlobalOpts) -> Result<()> {
     }
 }
 
-/// Validate that the SGX private key has been bootstrapped and can be read.
+/// Validate that the TDX private key has been bootstrapped and can be read.
 ///
 /// # Errors
 ///
@@ -39,7 +39,7 @@ pub fn check_with_provider<P: TeeProvider>(provider: &P) -> Result<()> {
 mod tests {
     use std::path::PathBuf;
 
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, B256};
     use secp256k1::SecretKey;
 
     use super::{check, check_with_provider};
@@ -59,7 +59,15 @@ mod tests {
             anyhow::bail!("missing bootstrap key")
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            unreachable!("unused in test")
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             unreachable!("unused in test")
         }
     }
@@ -75,7 +83,15 @@ mod tests {
             SecretKey::from_slice(&[7u8; 32]).map_err(Into::into)
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            unreachable!("unused in test")
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             unreachable!("unused in test")
         }
     }
@@ -93,7 +109,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "raiko2-sgx-runtime-check-{name}-{}",
+            "raiko2-tdx-runtime-check-{name}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -109,6 +125,7 @@ mod tests {
             mode: RuntimeMode::Native,
             config_dir: temp_dir("native-config"),
             secret_dir: temp_dir("native-secret"),
+            tdxs_socket: crate::tee::DEFAULT_TDXS_SOCKET.into(),
         };
 
         check(&opts).expect("native check");

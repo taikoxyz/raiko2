@@ -1,4 +1,4 @@
-//! Bootstrap artifact generation and persistence.
+//! TDX bootstrap artifact generation and persistence.
 
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -10,24 +10,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{BOOTSTRAP_INFO_FILENAME, GlobalOpts, REGISTERED_INFO_FILENAME, RuntimeMode},
-    tee::{GramineProvider, NativeProvider, TeeProvider},
+    tee::{NativeProvider, TdxProvider, TeeProvider},
 };
 
 /// Registered instance ids keyed by fork name.
 pub type RegisteredInstanceIds = BTreeMap<String, u64>;
 
-/// Persisted SGX bootstrap metadata used for registration and prove responses.
+/// Persisted TDX bootstrap metadata used for registration and prove responses.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootstrapData {
     /// Uncompressed secp256k1 public key.
     pub public_key: String,
-    /// Derived SGX instance address.
+    /// Derived TDX instance address.
     pub new_instance: Address,
     /// Hex-encoded attestation quote.
     pub quote: String,
 }
 
-/// Bootstrap the SGX runtime and return operator-facing bootstrap metadata.
+/// Bootstrap the TDX runtime and return operator-facing bootstrap metadata.
 ///
 /// # Errors
 ///
@@ -37,14 +37,14 @@ pub struct BootstrapData {
 pub fn bootstrap(opts: &GlobalOpts) -> Result<BootstrapData> {
     match opts.mode {
         RuntimeMode::Tee => {
-            let provider = GramineProvider::new(opts.secret_dir.clone());
+            let provider = TdxProvider::new(opts.secret_dir.clone(), opts.tdxs_socket.clone());
             bootstrap_with_provider(&provider, &opts.config_dir)
         }
         RuntimeMode::Native => bootstrap_native(),
     }
 }
 
-/// Bootstrap the SGX runtime using an injected TEE provider.
+/// Bootstrap the TDX runtime using an injected TEE provider.
 ///
 /// # Errors
 ///
@@ -59,7 +59,7 @@ pub fn bootstrap_with_provider<P: TeeProvider>(
 
     let public_key = public_key(&secret_key);
     let instance_address = public_key_to_address(&public_key);
-    let quote = provider.load_quote(instance_address)?;
+    let quote = provider.load_bootstrap_quote(instance_address)?;
     let data = bootstrap_data_from_parts(public_key, instance_address, quote);
     save_bootstrap_data(config_dir, &data)?;
     Ok(data)
@@ -74,7 +74,7 @@ fn bootstrap_native_with_provider(provider: &NativeProvider) -> Result<Bootstrap
     let secret_key = provider.load_private_key()?;
     let public_key = public_key(&secret_key);
     let instance_address = public_key_to_address(&public_key);
-    let quote = provider.load_quote(instance_address)?;
+    let quote = provider.load_bootstrap_quote(instance_address)?;
     Ok(bootstrap_data_from_parts(
         public_key,
         instance_address,
@@ -149,7 +149,7 @@ pub fn public_key(secret_key: &SecretKey) -> PublicKey {
     PublicKey::from_secret_key(&Secp256k1::new(), secret_key)
 }
 
-/// Convert a secp256k1 public key into the onchain SGX instance address.
+/// Convert a secp256k1 public key into the onchain TDX instance address.
 #[must_use]
 pub fn public_key_to_address(public_key: &PublicKey) -> Address {
     let hash = keccak256(&public_key.serialize_uncompressed()[1..]);
@@ -211,14 +211,22 @@ mod tests {
                 .context("missing private key")
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            Ok(self.quote.clone())
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: alloy_primitives::B256,
+        ) -> anyhow::Result<Vec<u8>> {
             Ok(self.quote.clone())
         }
     }
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "raiko2-sgx-runtime-{name}-{}",
+            "raiko2-tdx-runtime-{name}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
@@ -287,6 +295,7 @@ mod tests {
             mode: RuntimeMode::Native,
             config_dir: config_dir.clone(),
             secret_dir: secret_dir.clone(),
+            tdxs_socket: crate::tee::DEFAULT_TDXS_SOCKET.into(),
         };
 
         let data = bootstrap(&opts).expect("native bootstrap");
@@ -301,5 +310,19 @@ mod tests {
             !secret_dir.join(PRIV_KEY_FILENAME).exists(),
             "native bootstrap should not persist a private key"
         );
+    }
+
+    #[test]
+    fn native_bootstrap_uses_tdx_signer_identity() {
+        let tdx = bootstrap(&GlobalOpts {
+            mode: RuntimeMode::Native,
+            config_dir: temp_dir("native-tdx-config"),
+            secret_dir: temp_dir("native-tdx-secret"),
+            tdxs_socket: crate::tee::DEFAULT_TDXS_SOCKET.into(),
+        })
+        .expect("tdx native bootstrap");
+
+        assert!(tdx.public_key.starts_with("0x04"));
+        assert_eq!(tdx.quote, "");
     }
 }

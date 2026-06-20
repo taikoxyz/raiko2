@@ -9,7 +9,9 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{BOOTSTRAP_INFO_FILENAME, GlobalOpts, REGISTERED_INFO_FILENAME, RuntimeMode},
+    config::{
+        BOOTSTRAP_INFO_FILENAME, GlobalOpts, REGISTERED_INFO_FILENAME, RuntimeFlavor, RuntimeMode,
+    },
     tee::{GramineProvider, NativeProvider, TeeProvider},
 };
 
@@ -35,12 +37,15 @@ pub struct BootstrapData {
 /// `tee` mode persists bootstrap artifacts to disk, while `native` mode is a no-op that only
 /// returns the fixed signer identity.
 pub fn bootstrap(opts: &GlobalOpts) -> Result<BootstrapData> {
-    match opts.mode {
-        RuntimeMode::Tee => {
+    match (opts.flavor, opts.mode) {
+        (RuntimeFlavor::Sgx, RuntimeMode::Tee) => {
             let provider = GramineProvider::new(opts.secret_dir.clone());
             bootstrap_with_provider(&provider, &opts.config_dir)
         }
-        RuntimeMode::Native => bootstrap_native(),
+        (RuntimeFlavor::Tdx, RuntimeMode::Tee) => {
+            anyhow::bail!("TDX tee mode is not implemented")
+        }
+        (_, RuntimeMode::Native) => bootstrap_native_for_flavor(opts.flavor),
     }
 }
 
@@ -65,8 +70,12 @@ pub fn bootstrap_with_provider<P: TeeProvider>(
     Ok(data)
 }
 
-fn bootstrap_native() -> Result<BootstrapData> {
-    let provider = NativeProvider;
+fn bootstrap_native_for_flavor(flavor: RuntimeFlavor) -> Result<BootstrapData> {
+    let provider = NativeProvider::new(flavor);
+    bootstrap_native_with_provider(&provider)
+}
+
+fn bootstrap_native_with_provider(provider: &NativeProvider) -> Result<BootstrapData> {
     let secret_key = provider.load_private_key()?;
     let public_key = public_key(&secret_key);
     let instance_address = public_key_to_address(&public_key);
@@ -182,7 +191,9 @@ mod tests {
         save_registered_instance_ids,
     };
     use crate::{
-        config::{BOOTSTRAP_INFO_FILENAME, GlobalOpts, PRIV_KEY_FILENAME, RuntimeMode},
+        config::{
+            BOOTSTRAP_INFO_FILENAME, GlobalOpts, PRIV_KEY_FILENAME, RuntimeFlavor, RuntimeMode,
+        },
         tee::TeeProvider,
     };
 
@@ -280,6 +291,7 @@ mod tests {
         let config_dir = temp_dir("native-bootstrap-config");
         let secret_dir = temp_dir("native-bootstrap-secret");
         let opts = GlobalOpts {
+            flavor: RuntimeFlavor::Sgx,
             mode: RuntimeMode::Native,
             config_dir: config_dir.clone(),
             secret_dir: secret_dir.clone(),
@@ -297,5 +309,39 @@ mod tests {
             !secret_dir.join(PRIV_KEY_FILENAME).exists(),
             "native bootstrap should not persist a private key"
         );
+    }
+
+    #[test]
+    fn native_bootstrap_uses_distinct_sgx_and_tdx_signer_identities() {
+        let sgx = bootstrap(&GlobalOpts {
+            flavor: RuntimeFlavor::Sgx,
+            mode: RuntimeMode::Native,
+            config_dir: temp_dir("native-sgx-config"),
+            secret_dir: temp_dir("native-sgx-secret"),
+        })
+        .expect("sgx native bootstrap");
+        let tdx = bootstrap(&GlobalOpts {
+            flavor: RuntimeFlavor::Tdx,
+            mode: RuntimeMode::Native,
+            config_dir: temp_dir("native-tdx-config"),
+            secret_dir: temp_dir("native-tdx-secret"),
+        })
+        .expect("tdx native bootstrap");
+
+        assert_ne!(sgx.new_instance, tdx.new_instance);
+        assert_ne!(sgx.public_key, tdx.public_key);
+    }
+
+    #[test]
+    fn tdx_tee_bootstrap_fails_until_tdx_quote_provider_is_available() {
+        let err = bootstrap(&GlobalOpts {
+            flavor: RuntimeFlavor::Tdx,
+            mode: RuntimeMode::Tee,
+            config_dir: temp_dir("tdx-tee-config"),
+            secret_dir: temp_dir("tdx-tee-secret"),
+        })
+        .expect_err("tdx tee unsupported");
+
+        assert!(err.to_string().contains("TDX tee mode is not implemented"));
     }
 }

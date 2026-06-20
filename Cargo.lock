@@ -8642,6 +8642,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "raiko2-tdx-prover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "raiko2-sgx-runtime",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

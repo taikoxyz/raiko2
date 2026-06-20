@@ -170,6 +170,28 @@ smoke endpoint: `raiko2-sgx-prover` requires a complete `GuestInput` request env
 same Shasta guest validation path as the zk guests before signing the resulting public input.
 Use the main `raiko2` service or the regression scripts to build that request.
 
+## TDX GuestInput Runtime
+
+The `raiko2-tdx-prover` binary exposes the same remote HTTP surface and GuestInput validation path
+as `raiko2-sgx-prover`, but binds runtime identity to TDX:
+
+- binary: `raiko2-tdx-prover`
+- default config dir: `~/.config/raiko2/tdx/config`
+- default secret dir: `~/.config/raiko2/tdx/secrets`
+- mode env var: `RAIKO2_TDX_MODE`
+
+Local native-mode smoke:
+
+```bash
+cargo run -r -p raiko2-tdx-prover -- \
+  --mode native \
+  serve --listen-addr 0.0.0.0:8080
+```
+
+Native mode is for protocol and GuestInput replay regression. Production TDX still needs a real TDX
+quote/key provider wired behind the shared runtime; do not use the SGX Gramine quote path as a TDX
+attestation substitute.
+
 ### Docker Compose
 
 Quickstart:
@@ -251,6 +273,10 @@ The optional dockerized `raiko2` service is prewired with both remote SGX URLs:
 - `proof_type=sgx` uses `RAIKO2_REMOTE_SGX_BASE_URL`
 - `proof_type=sgxgeth` uses `RAIKO2_REMOTE_SGX_SGXGETH_BASE_URL`
 
+TDX is a separate first-party remote route. A local or deployed `raiko2` host uses
+`RAIKO2_PROVER=tdx/remote` plus `RAIKO2_REMOTE_TDX_BASE_URL` when targeting
+`raiko2-tdx-prover`.
+
 The regression env sample pins fixed `RAIKO2_SGX_INSTANCE_ID` and `GAIKO2_INSTANCE_ID` values so
 both SGX lanes can boot and prove without an onchain registration step. Replace them with the real
 registered instance ids, or mount the corresponding registration metadata, when you need
@@ -275,9 +301,9 @@ Then choose the lane per request:
 
 ### Main-Service Wiring
 
-`raiko2` keeps the SGX path as a remote route. The dedicated `raiko2-sgx-prover` binary is the
-runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from an external
-`gaiko2` SGX service.
+`raiko2` keeps the TEE paths as remote routes. The dedicated `raiko2-sgx-prover` binary is the
+runtime for `sgx`, and `raiko2-tdx-prover` is the first-party runtime for `tdx`. Historical
+`sgxgeth` compatibility is expected to come from an external `gaiko2` SGX service.
 
 ## Source Releases
 

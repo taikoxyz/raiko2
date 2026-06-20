@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::{
     bootstrap::load_bootstrap_data,
-    config::{GlobalOpts, RuntimeMode},
+    config::{GlobalOpts, RuntimeFlavor, RuntimeMode},
     tee::{GramineProvider, TeeProvider},
 };
 
@@ -15,13 +15,16 @@ use crate::{
 /// Returns an error when `tee` mode bootstrap metadata or the SGX private key cannot be loaded.
 /// `native` mode succeeds without SGX lifecycle files.
 pub fn check(opts: &GlobalOpts) -> Result<()> {
-    match opts.mode {
-        RuntimeMode::Tee => {
+    match (opts.flavor, opts.mode) {
+        (RuntimeFlavor::Sgx, RuntimeMode::Tee) => {
             let provider = GramineProvider::new(opts.secret_dir.clone());
             let _ = load_bootstrap_data(&opts.config_dir)?;
             check_with_provider(&provider)
         }
-        RuntimeMode::Native => Ok(()),
+        (RuntimeFlavor::Tdx, RuntimeMode::Tee) => {
+            anyhow::bail!("TDX tee mode is not implemented")
+        }
+        (_, RuntimeMode::Native) => Ok(()),
     }
 }
 
@@ -44,7 +47,7 @@ mod tests {
 
     use super::{check, check_with_provider};
     use crate::{
-        config::{GlobalOpts, RuntimeMode},
+        config::{GlobalOpts, RuntimeFlavor, RuntimeMode},
         tee::TeeProvider,
     };
 
@@ -106,11 +109,26 @@ mod tests {
     #[test]
     fn native_mode_check_is_noop_without_bootstrap_files() {
         let opts = GlobalOpts {
+            flavor: RuntimeFlavor::Sgx,
             mode: RuntimeMode::Native,
             config_dir: temp_dir("native-config"),
             secret_dir: temp_dir("native-secret"),
         };
 
         check(&opts).expect("native check");
+    }
+
+    #[test]
+    fn tdx_tee_check_fails_until_tdx_quote_provider_is_available() {
+        let opts = GlobalOpts {
+            flavor: RuntimeFlavor::Tdx,
+            mode: RuntimeMode::Tee,
+            config_dir: temp_dir("tdx-tee-config"),
+            secret_dir: temp_dir("tdx-tee-secret"),
+        };
+
+        let err = check(&opts).expect_err("tdx tee unsupported");
+
+        assert!(err.to_string().contains("TDX tee mode is not implemented"));
     }
 }

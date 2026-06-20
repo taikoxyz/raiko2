@@ -440,6 +440,11 @@ fn validate_public_prover_args(
             "sgxgeth prover args are not supported in this API",
         ));
     }
+    if args.tdx.is_some() {
+        return Err(ApiError::bad_request(
+            "tdx prover args are not supported in this API",
+        ));
+    }
     if args.sp1.is_some() && !matches!(proof_type, BatchProofType::Sp1 | BatchProofType::ZkAny) {
         return Err(ApiError::bad_request(
             "sp1 prover args require proof_type=sp1",
@@ -494,7 +499,10 @@ fn prover_type_for_proof_type(
         }
         BatchProofType::Risc0 => Ok(Some(risc0_prover_type(state, route))),
         BatchProofType::Boundless => Err(unsupported_proof_type(proof_type)),
-        BatchProofType::Native | BatchProofType::Sgx | BatchProofType::SgxGeth => Ok(None),
+        BatchProofType::Native
+        | BatchProofType::Sgx
+        | BatchProofType::SgxGeth
+        | BatchProofType::Tdx => Ok(None),
         BatchProofType::ZkAny => Err(ApiError::bad_request(
             "proof_type=zk_any must be resolved before prover type selection",
         )),
@@ -2392,6 +2400,7 @@ const fn hoodi_response_proof_type(submission: &CanonicalBatchSubmission) -> Bat
         ProofType::Sp1 => BatchProofType::Sp1,
         ProofType::Sgx => BatchProofType::Sgx,
         ProofType::SgxGeth => BatchProofType::SgxGeth,
+        ProofType::Tdx => BatchProofType::Tdx,
         ProofType::Risc0 => BatchProofType::Risc0,
     }
 }

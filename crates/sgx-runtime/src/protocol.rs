@@ -72,7 +72,7 @@ pub(crate) struct SignerIdentity {
 pub(crate) fn load_signer_identity<P: TeeProvider>(provider: &P) -> Result<SignerIdentity> {
     let secret_key = provider
         .load_private_key()
-        .context("load SGX private key")?;
+        .context("load TEE private key")?;
     let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     Ok(SignerIdentity {
         instance_address: public_key_to_address(&public_key),
@@ -86,12 +86,12 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
 ) -> Result<Raiko2ProofResult> {
     let secret_key = provider
         .load_private_key()
-        .context("load SGX private key")?;
+        .context("load TEE private key")?;
     let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     let instance_address = public_key_to_address(&public_key);
     let quote = provider
         .load_quote(instance_address)
-        .context("load SGX quote")?;
+        .context("load TEE quote")?;
     let signature = sign_hash(&secret_key, input_hash)?;
     let proof = build_shasta_proof_bytes(instance_id, instance_address, signature);
 

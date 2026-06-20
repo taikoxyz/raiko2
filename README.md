@@ -73,7 +73,7 @@ flowchart LR
 - Single-proof aggregation is allowed for compatibility with existing `raiko` clients.
 - Shasta manifests support `blob_proof_type = "proof_of_equivalence"` only; legacy
   `kzg_versioned_hash` manifests are rejected.
-- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, and
+- Public batch request proof types are `native`, `risc0`, `sp1`, `sgx`, `sgxgeth`, `tdx`, and
   admission-time `zk_any` for proposal sampling. `native` is accepted only for internal native
   regression when the server route is `native/local`.
 - Hosted SP1 proposal proving emits Compressed proofs and SP1 aggregation emits Plonk proofs.
@@ -95,6 +95,12 @@ flowchart LR
   `raiko2-sgx-prover` for `proof_type=sgx`; that runtime can run in `tee` or `native` mode
   without changing the remote API. `proof_type=sgxgeth` is served by an external remote prover
   implementation such as `gaiko2` over the same remote protocol.
+- `tdx/remote` submits Shasta proving to the first-party remote TDX runtime. This repo ships
+  `raiko2-tdx-prover` for `proof_type=tdx`.
+- `raiko2-tdx-prover` exposes the same GuestInput remote API as `raiko2-sgx-prover` but binds the
+  runtime flavor, native signer identity, and default directories to TDX. It is intended for the TDX
+  VM model where the measured service validates the full `GuestInput` before signing, rather than
+  the older gaiko2 replay-only packet.
 - `docker/docker-compose.sgx.regression.yml` starts both SGX remote services and can optionally
   add a dockerized `raiko2` for regression work.
 
@@ -124,9 +130,9 @@ The harness posts the vendored proposal and aggregate fixtures to:
 
 This harness targets providers whose `/prove/shasta` input is the replay packet used by
 `gaiko2`/`sgxgeth`. That packet is valid provider input for gaiko2 because gaiko2 executes it
-internally, but it is not a `raiko2-sgx-prover` smoke test. `raiko2-sgx-prover` requires a complete
-`raiko2_primitives_shasta::GuestInput` envelope and runs the Shasta guest validation path before
-signing.
+internally, but it is not a smoke test for `raiko2-sgx-prover` or `raiko2-tdx-prover`. Those
+runtimes require a complete `raiko2_primitives_shasta::GuestInput` envelope and run the Shasta guest
+validation path before signing.
 
 It then builds a live aggregate request from the returned proposal proof and posts that derived
 request to:

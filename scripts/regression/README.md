@@ -160,8 +160,9 @@ cargo run -r -p guest-launcher -- \
   --output /tmp/proposal-17771.native-proof.json
 ```
 
-For a direct `raiko2-sgx-prover` check without a `raiko2` server, convert the guest input into a
-Shasta request envelope that includes the full `GuestInput` and post it to the SGX prover:
+For a direct `raiko2-sgx-prover` or `raiko2-tdx-prover` check without a `raiko2` server, convert the
+guest input into a Shasta request envelope that includes the full `GuestInput` and post it to the
+TEE prover:
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
@@ -175,10 +176,13 @@ curl -sS \
   "${RAIKO2_REMOTE_SGX_BASE_URL:-http://127.0.0.1:9090}/prove/shasta"
 ```
 
-SGX checks still require the SGX prover stack or a remote SGX prover. `preflight` only builds and
-optionally validates the `GuestInput`; it does not launch SGX by itself. For `sgxgeth`, omit
-`--include-guest-input` and point the replay request at the geth-backed remote SGX service instead
-of `raiko2-sgx-prover`.
+Use `RAIKO2_REMOTE_TDX_BASE_URL` and the same `--include-guest-input` envelope when the target is
+`raiko2-tdx-prover`.
+
+SGX/TDX checks still require the matching remote prover stack. `preflight` only builds and
+optionally validates the `GuestInput`; it does not launch a TEE prover by itself. For `sgxgeth`,
+omit `--include-guest-input` and point the replay request at the geth-backed remote SGX service
+instead of `raiko2-sgx-prover` or `raiko2-tdx-prover`.
 
 For a fixed Masaya fork-boundary replay case, use the checked-in
 `taiko_masaya/shasta_unzen_transition` fixture suite. It captures proposals `25125`, `25126`,
@@ -214,6 +218,9 @@ The dockerized or local `raiko2` process can then target both remote lanes in th
 
 - `proof_type=sgx` -> `raiko2-sgx-prover`
 - `proof_type=sgxgeth` -> `gaiko2-sgxgeth`
+
+TDX is not started by this SGX compose stack. Use `proof_type=tdx`, `RAIKO2_PROVER=tdx/remote`,
+and `RAIKO2_REMOTE_TDX_BASE_URL` against a running `raiko2-tdx-prover`.
 
 The file-based regression harness in this directory still only supports `native` and `sp1`.
 Use the SGX stack for API-driven regression and remote-server smoke testing.

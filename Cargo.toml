@@ -19,6 +19,7 @@ members = [
     "crates/sgx-runtime",
     "bin/raiko2",
     "bin/raiko2-sgx-prover",
+    "bin/raiko2-tdx-prover",
     "bin/rpc-proxy",
     "bin/witness-check",
     "bin/guest-launcher",

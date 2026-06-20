@@ -15,16 +15,17 @@ use crate::{
 pub(crate) fn prove_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
+    proof_type: ProofType,
     request: &Raiko2ShastaRequest,
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
     validate_schema(request)?;
     let guest_input = request.payload.guest_input.as_ref().ok_or_else(|| {
-        RequestFailure::invalid_request("raiko2-sgx request must include GuestInput")
+        RequestFailure::invalid_request("raiko2 TEE request must include GuestInput")
     })?;
     validate_request(request, guest_input)?;
     let input_hash =
-        prove_shasta_proposal_for_proof_type(guest_input, ProofType::Sgx).map_err(|err| {
-            RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err:#}"))
+        prove_shasta_proposal_for_proof_type(guest_input, proof_type).map_err(|err| {
+            RequestFailure::invalid_request(format!("invalid raiko2 TEE GuestInput: {err:#}"))
         })?;
     let expected_input = hash_shasta_subproof_input(&request.payload.proof_carry_data);
     if input_hash != expected_input {
@@ -78,6 +79,7 @@ fn validate_request(
 #[cfg(test)]
 mod tests {
     use alloy_primitives::Address;
+    use raiko2_primitives::ProofType;
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
@@ -134,7 +136,8 @@ mod tests {
         };
         let request = request_fixture();
 
-        let err = prove_request(&provider, 9, &request).expect_err("missing guest input");
+        let err =
+            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("missing guest input");
 
         assert!(err.to_string().contains("GuestInput"));
     }
@@ -152,7 +155,8 @@ mod tests {
         });
         request.payload.chain_id = 1;
 
-        let err = prove_request(&provider, 9, &request).expect_err("chain id mismatch");
+        let err =
+            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("chain id mismatch");
         assert!(err.to_string().contains("chain_id mismatch"));
     }
 
@@ -164,7 +168,8 @@ mod tests {
         };
         let request = request_fixture();
 
-        let err = prove_request(&provider, 9, &request).expect_err("unverified replay packet");
+        let err = prove_request(&provider, 9, ProofType::Sgx, &request)
+            .expect_err("unverified replay packet");
 
         assert!(
             err.to_string().contains("GuestInput")
@@ -185,7 +190,8 @@ mod tests {
             ..GuestInput::default()
         });
 
-        let err = prove_request(&provider, 9, &request).expect_err("invalid guest input");
+        let err =
+            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("invalid guest input");
 
         assert!(err.to_string().contains("GuestInput"));
     }

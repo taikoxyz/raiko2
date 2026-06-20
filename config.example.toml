@@ -54,10 +54,10 @@ inactive_ttl_secs = 7200
 [prover]
 # Server default route.
 # Supported routes:
-# Public proof requests use proof_type = "risc0" or "sp1"; "zk_any" is sampling only.
+# Public proof requests use proof_type = "risc0", "sp1", "sgx", "sgxgeth", or "tdx"; "zk_any" is sampling only.
 # Internal regression environments may use proof_type = "native" with route native/local.
 # Routes supported by server config:
-#   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
+#   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote | tdx/remote
 guest_system = "risc0"
 runner = "local"
 
@@ -113,6 +113,11 @@ timeout_ms = 3600000
 base_url = "http://127.0.0.1:8081"
 # For `proof_type=sgxgeth`, point this at the external geth-backed remote SGX server.
 sgxgeth_base_url = "http://127.0.0.1:8090"
+timeout_ms = 300000
+
+[prover.remote_tdx]
+# For `proof_type=tdx`, point this at the first-party TDX runtime (`raiko2-tdx-prover`).
+base_url = "http://127.0.0.1:8082"
 timeout_ms = 300000
 
 [prover.boundless.deployment]

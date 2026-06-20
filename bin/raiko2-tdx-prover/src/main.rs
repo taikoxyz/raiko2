@@ -1,52 +1,52 @@
-//! CLI entrypoint for the dedicated SGX proving runtime.
+//! CLI entrypoint for the dedicated TDX proving runtime.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use raiko2_sgx_runtime::{GlobalOpts, RuntimeMode, ServeOpts};
+use raiko2_sgx_runtime::{GlobalOpts, RuntimeFlavor, RuntimeMode, ServeOpts};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Debug, Parser)]
-#[command(name = "raiko2-sgx-prover")]
-#[command(about = "Dedicated SGX runtime service for Raiko2")]
+#[command(name = "raiko2-tdx-prover")]
+#[command(about = "Dedicated TDX runtime service for Raiko2")]
 struct App {
     #[command(flatten)]
-    global_opts: SgxGlobalOpts,
+    global_opts: TdxGlobalOpts,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Clone, Debug, clap::Args)]
-struct SgxGlobalOpts {
+struct TdxGlobalOpts {
     #[command(flatten)]
     inner: GlobalOpts,
-    /// Runtime mode used by the dedicated SGX prover.
-    #[arg(long, env = "RAIKO2_SGX_MODE", value_enum, default_value_t = RuntimeMode::Tee)]
+    /// Runtime mode used by the dedicated TDX prover.
+    #[arg(long, env = "RAIKO2_TDX_MODE", value_enum, default_value_t = RuntimeMode::Tee)]
     mode: RuntimeMode,
 }
 
-impl From<SgxGlobalOpts> for GlobalOpts {
-    fn from(opts: SgxGlobalOpts) -> Self {
+impl From<TdxGlobalOpts> for GlobalOpts {
+    fn from(opts: TdxGlobalOpts) -> Self {
         let mut inner = opts.inner;
         inner.mode = opts.mode;
-        inner
+        inner.for_flavor(RuntimeFlavor::Tdx)
     }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Bootstrap the SGX runtime and emit operator metadata.
+    /// Bootstrap the TDX runtime and emit operator metadata.
     Bootstrap,
-    /// Check the SGX runtime lifecycle state.
+    /// Check the TDX runtime lifecycle state.
     Check,
-    /// Run the SGX Shasta proving server.
+    /// Run the TDX Shasta proving server.
     Serve(ServeOpts),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let app = App::parse();
-    init_logging();
     let global_opts = GlobalOpts::from(app.global_opts);
+    init_logging();
     match app.command {
         Command::Bootstrap => {
             let data = raiko2_sgx_runtime::bootstrap(&global_opts)?;

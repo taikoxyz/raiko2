@@ -19,7 +19,7 @@ use crate::{
     tee::TeeProvider,
 };
 
-const SHASTA_SGX_PROOF_LEN: usize = 89;
+const SHASTA_TEE_PROOF_LEN: usize = 89;
 
 pub(crate) fn aggregate_request<P: TeeProvider>(
     provider: &P,
@@ -78,9 +78,9 @@ fn validate_request(
         let proof_bytes = hex::decode(item.proof.trim_start_matches("0x")).map_err(|err| {
             RequestFailure::invalid_request(format!("decode aggregate proof {index}: {err}"))
         })?;
-        if proof_bytes.len() != SHASTA_SGX_PROOF_LEN {
+        if proof_bytes.len() != SHASTA_TEE_PROOF_LEN {
             return Err(RequestFailure::invalid_request(format!(
-                "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+                "aggregate proof {index} length mismatch: got {} expected {SHASTA_TEE_PROOF_LEN}",
                 proof_bytes.len()
             )));
         }

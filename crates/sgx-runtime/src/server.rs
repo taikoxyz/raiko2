@@ -1,4 +1,4 @@
-//! Axum server for the dedicated SGX prover.
+//! Axum server for the dedicated TEE prover.
 
 use anyhow::{Context, Result};
 use axum::{
@@ -51,12 +51,12 @@ where
         .with_context(|| format!("bind {}", service_config.listen_addr))?;
     let local_addr = listener
         .local_addr()
-        .context("read local SGX listener address")?;
+        .context("read local TEE listener address")?;
     info!(
         listen = %local_addr,
         fork = %service_config.fork,
         instance_id = service_config.instance_id,
-        "raiko2 sgx provider listening"
+        "raiko2 tee provider listening"
     );
     axum::serve(
         listener,
@@ -66,7 +66,7 @@ where
         }),
     )
     .await
-    .context("run SGX server")
+    .context("run TEE server")
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -129,23 +129,30 @@ where
 {
     match request {
         Ok(Json(request)) => {
-            match prove_request(&state.provider, state.service_config.instance_id, &request) {
+            match prove_request(
+                &state.provider,
+                state.service_config.instance_id,
+                state.service_config.proof_type(),
+                &request,
+            ) {
                 Ok(response) => {
                     if response.result.is_some() {
                         info!(
+                            provider = state.service_config.flavor.as_str(),
                             schema = %request.schema,
                             proposal_id = proposal_id_from_request(&request),
                             chain_id = request.payload.chain_id,
                             block_count = shasta_request_block_count(&request),
                             replay_block_count = request.payload.blocks.len(),
                             instance_id = state.service_config.instance_id,
-                            "completed sgx shasta prove request"
+                            "completed tee shasta prove request"
                         );
                     }
                     (axum::http::StatusCode::OK, Json(response))
                 }
                 Err(err) => {
                     warn!(
+                        provider = state.service_config.flavor.as_str(),
                         schema = %request.schema,
                         chain_id = request.payload.chain_id,
                         block_count = shasta_request_block_count(&request),
@@ -153,7 +160,7 @@ where
                         instance_id = state.service_config.instance_id,
                         code = err.code,
                         message = %err.message,
-                        "sgx shasta prove request failed"
+                        "tee shasta prove request failed"
                     );
                     err.into_response()
                 }
@@ -162,10 +169,11 @@ where
         Err(err) => {
             let failure = RequestFailure::invalid_json(err.body_text());
             warn!(
+                provider = state.service_config.flavor.as_str(),
                 instance_id = state.service_config.instance_id,
                 code = failure.code,
                 message = %failure.message,
-                "sgx shasta prove request failed"
+                "tee shasta prove request failed"
             );
             failure.into_response()
         }
@@ -190,22 +198,24 @@ where
             match aggregate_request(&state.provider, state.service_config.instance_id, &request) {
                 Ok(response) => {
                     info!(
+                        provider = state.service_config.flavor.as_str(),
                         schema = %request.schema,
                         proposal_ids = %aggregate_proposal_id_summary(&request),
                         proof_count = request.payload.proofs.len(),
                         instance_id = state.service_config.instance_id,
-                        "completed sgx shasta aggregate request"
+                        "completed tee shasta aggregate request"
                     );
                     (axum::http::StatusCode::OK, Json(response))
                 }
                 Err(err) => {
                     warn!(
+                        provider = state.service_config.flavor.as_str(),
                         schema = %request.schema,
                         proof_count = request.payload.proofs.len(),
                         instance_id = state.service_config.instance_id,
                         code = err.code,
                         message = %err.message,
-                        "sgx shasta aggregate request failed"
+                        "tee shasta aggregate request failed"
                     );
                     err.into_response()
                 }
@@ -214,10 +224,11 @@ where
         Err(err) => {
             let failure = RequestFailure::invalid_json(err.body_text());
             warn!(
+                provider = state.service_config.flavor.as_str(),
                 instance_id = state.service_config.instance_id,
                 code = failure.code,
                 message = %failure.message,
-                "sgx shasta aggregate request failed"
+                "tee shasta aggregate request failed"
             );
             failure.into_response()
         }
@@ -244,7 +255,7 @@ mod tests {
         SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router,
         shasta_request_block_count,
     };
-    use crate::config::ServiceConfig;
+    use crate::config::{RuntimeFlavor, ServiceConfig};
     use crate::tee::TeeProvider;
 
     #[derive(Clone)]
@@ -261,6 +272,15 @@ mod tests {
 
         fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
             Ok(vec![0xAA])
+        }
+    }
+
+    fn service_config() -> ServiceConfig {
+        ServiceConfig {
+            flavor: RuntimeFlavor::Sgx,
+            listen_addr: "127.0.0.1:0".to_string(),
+            fork: "shasta".to_string(),
+            instance_id: 99,
         }
     }
 
@@ -300,11 +320,7 @@ mod tests {
     async fn health_route_responds_ok() {
         let app = router(SgxProver {
             provider: FakeProvider,
-            service_config: ServiceConfig {
-                listen_addr: "127.0.0.1:0".to_string(),
-                fork: "shasta".to_string(),
-                instance_id: 99,
-            },
+            service_config: service_config(),
         });
 
         let response = app
@@ -324,11 +340,7 @@ mod tests {
     async fn prove_shasta_route_rejects_request_without_guest_input() {
         let app = router(SgxProver {
             provider: FakeProvider,
-            service_config: ServiceConfig {
-                listen_addr: "127.0.0.1:0".to_string(),
-                fork: "shasta".to_string(),
-                instance_id: 99,
-            },
+            service_config: service_config(),
         });
         let body = serde_json::to_vec(&request_fixture()).expect("request body");
 
@@ -351,11 +363,7 @@ mod tests {
     async fn prove_shasta_route_accepts_large_request_bodies_before_validation() {
         let app = router(SgxProver {
             provider: FakeProvider,
-            service_config: ServiceConfig {
-                listen_addr: "127.0.0.1:0".to_string(),
-                fork: "shasta".to_string(),
-                instance_id: 99,
-            },
+            service_config: service_config(),
         });
         let mut body = vec![b' '; 3 * 1024 * 1024];
         body.extend(serde_json::to_vec(&request_fixture()).expect("request body"));
@@ -379,11 +387,7 @@ mod tests {
     async fn prove_shasta_aggregate_rejects_empty_request() {
         let app = router(SgxProver {
             provider: FakeProvider,
-            service_config: ServiceConfig {
-                listen_addr: "127.0.0.1:0".to_string(),
-                fork: "shasta".to_string(),
-                instance_id: 99,
-            },
+            service_config: service_config(),
         });
         let body = serde_json::to_vec(&Raiko2ShastaAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),

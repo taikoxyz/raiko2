@@ -1,4 +1,4 @@
-//! Startup summary logging helpers for the dedicated SGX provider.
+//! Startup summary logging helpers for the dedicated TEE provider.
 
 use serde::Serialize;
 use tracing::info;
@@ -7,6 +7,7 @@ use crate::config::{GlobalOpts, RuntimeMode, ServiceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StartupSummary {
+    provider: &'static str,
     mode: &'static str,
     listen: String,
     fork: String,
@@ -20,6 +21,7 @@ pub(crate) fn build_startup_summary(
     service_config: &ServiceConfig,
 ) -> StartupSummary {
     StartupSummary {
+        provider: service_config.flavor.as_str(),
         mode: runtime_mode_name(global_opts.mode),
         listen: service_config.listen_addr.clone(),
         fork: service_config.fork.clone(),
@@ -32,13 +34,14 @@ pub(crate) fn build_startup_summary(
 pub(crate) fn log_startup_summary(global_opts: &GlobalOpts, service_config: &ServiceConfig) {
     let summary = build_startup_summary(global_opts, service_config);
     info!(
+        provider = summary.provider,
         mode = summary.mode,
         listen = %summary.listen,
         fork = %summary.fork,
         instance_id = summary.instance_id,
         config_dir = %summary.config_dir,
         secret_dir = %summary.secret_dir,
-        "starting raiko2 sgx provider"
+        "starting raiko2 tee provider"
     );
 }
 
@@ -56,7 +59,7 @@ mod tests {
     use serde_json::Value;
 
     use super::build_startup_summary;
-    use crate::config::{GlobalOpts, RuntimeMode, ServiceConfig};
+    use crate::config::{GlobalOpts, RuntimeFlavor, RuntimeMode, ServiceConfig};
 
     fn summary_json(global_opts: &GlobalOpts, service_config: &ServiceConfig) -> Value {
         serde_json::to_value(build_startup_summary(global_opts, service_config))
@@ -65,6 +68,7 @@ mod tests {
 
     fn sample_global_opts() -> GlobalOpts {
         GlobalOpts {
+            flavor: RuntimeFlavor::Sgx,
             mode: RuntimeMode::Tee,
             config_dir: PathBuf::from("/var/lib/raiko2/sgx/config"),
             secret_dir: PathBuf::from("/var/lib/raiko2/sgx/secrets"),
@@ -73,6 +77,7 @@ mod tests {
 
     fn sample_service_config() -> ServiceConfig {
         ServiceConfig {
+            flavor: RuntimeFlavor::Sgx,
             listen_addr: "0.0.0.0:8080".to_string(),
             fork: "shasta".to_string(),
             instance_id: 14,
@@ -84,6 +89,7 @@ mod tests {
         let summary = summary_json(&sample_global_opts(), &sample_service_config());
 
         assert_eq!(summary["mode"], "tee");
+        assert_eq!(summary["provider"], "sgx");
         assert_eq!(summary["listen"], "0.0.0.0:8080");
         assert_eq!(summary["fork"], "shasta");
         assert_eq!(summary["instance_id"], 14);
@@ -99,6 +105,22 @@ mod tests {
         let summary = summary_json(&global_opts, &sample_service_config());
 
         assert_eq!(summary["mode"], "native");
+    }
+
+    #[test]
+    fn startup_summary_tracks_tdx_provider() {
+        let mut global_opts = sample_global_opts();
+        global_opts.flavor = RuntimeFlavor::Tdx;
+        global_opts.config_dir = PathBuf::from("/var/lib/raiko2/tdx/config");
+        global_opts.secret_dir = PathBuf::from("/var/lib/raiko2/tdx/secrets");
+        let mut service_config = sample_service_config();
+        service_config.flavor = RuntimeFlavor::Tdx;
+
+        let summary = summary_json(&global_opts, &service_config);
+
+        assert_eq!(summary["provider"], "tdx");
+        assert_eq!(summary["config_dir"], "/var/lib/raiko2/tdx/config");
+        assert_eq!(summary["secret_dir"], "/var/lib/raiko2/tdx/secrets");
     }
 
     #[test]

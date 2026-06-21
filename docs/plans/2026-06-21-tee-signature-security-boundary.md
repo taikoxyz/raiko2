@@ -59,6 +59,26 @@ The SGX path is not secure because "anyone can sign". It is secure only under
 the opposite assumption: only the measured enclave can use the registered
 signer key.
 
+## Comparison With Gaiko
+
+`raiko2-sgx` and `gaiko2-sgxgeth` use different SGX runtimes, but they rely on
+the same signer-key security property.
+
+For `raiko2-sgx`, Gramine protects the signer key through an encrypted mount:
+`/var/lib/raiko2/sgx/secrets` is mounted as an encrypted filesystem keyed by
+`_sgx_mrenclave`. A different binary or enclave measurement cannot decode the
+persisted private-key file.
+
+For current `gaiko2-sgxgeth`, the EGo provider writes `priv.gaiko2.key` using
+`ecrypto.SealWithUniqueKey` and reads it with `ecrypto.Unseal`. That sealed blob
+is bound to the enclave-derived sealing key rather than being a plaintext
+operator-shared key.
+
+The older `gaiko` codebase has the same EGo sealing model for its EGo provider.
+It also contains a Gramine provider path that reads and writes the key through
+the configured secret directory, so that path must rely on the surrounding
+Gramine manifest and deployment mount policy for equivalent protection.
+
 ## TDX Applicability
 
 The same high-level signature assumption can apply to TDX, but only if the TDX

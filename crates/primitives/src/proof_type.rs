@@ -31,6 +31,11 @@ pub enum ProofType {
     /// Uses the external gaiko2 SGX service lane for Shasta proving.
     #[serde(alias = "SGXGETH")]
     SgxGeth = 4u8,
+    /// # Tdx
+    ///
+    /// Uses the first-party remote TDX GuestInput proving service.
+    #[serde(alias = "TDX")]
+    Tdx = 5u8,
 }
 
 impl std::fmt::Display for ProofType {
@@ -40,6 +45,7 @@ impl std::fmt::Display for ProofType {
             ProofType::Sp1 => "sp1",
             ProofType::Sgx => "sgx",
             ProofType::SgxGeth => "sgxgeth",
+            ProofType::Tdx => "tdx",
             ProofType::Risc0 => "risc0",
         })
     }
@@ -54,6 +60,7 @@ impl std::str::FromStr for ProofType {
             "sp1" => Ok(ProofType::Sp1),
             "sgx" => Ok(ProofType::Sgx),
             "sgxgeth" => Ok(ProofType::SgxGeth),
+            "tdx" => Ok(ProofType::Tdx),
             "risc0" => Ok(ProofType::Risc0),
             _ => Err(format!("Unknown proof type {s}")),
         }
@@ -70,6 +77,7 @@ impl TryFrom<u8> for ProofType {
             2 => Ok(Self::Sgx),
             3 => Ok(Self::Risc0),
             4 => Ok(Self::SgxGeth),
+            5 => Ok(Self::Tdx),
             _ => Err(format!("Unknown proof type {value}")),
         }
     }
@@ -113,9 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn accepts_tdx_by_string() {
+        assert_eq!("tdx".parse::<ProofType>().unwrap(), ProofType::Tdx);
+        assert_eq!("TDX".parse::<ProofType>().unwrap(), ProofType::Tdx);
+    }
+
+    #[test]
     fn accepts_sgx_variants_by_u8() {
         assert_eq!(ProofType::try_from(2u8).unwrap(), ProofType::Sgx);
         assert_eq!(ProofType::try_from(4u8).unwrap(), ProofType::SgxGeth);
-        assert!(ProofType::try_from(5u8).is_err());
+        assert_eq!(ProofType::try_from(5u8).unwrap(), ProofType::Tdx);
+        assert!(ProofType::try_from(6u8).is_err());
     }
 }

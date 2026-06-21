@@ -94,7 +94,7 @@ fn validate_request(
                 "aggregate proof {index} input mismatch: got {input_hash:#x} expected {expected_input:#x}"
             )));
         }
-        validate_sgx_child_proof(
+        validate_tdx_child_proof(
             index,
             &proof_bytes,
             expected_input,
@@ -114,7 +114,7 @@ fn validate_request(
     Ok(carries)
 }
 
-fn validate_sgx_child_proof(
+fn validate_tdx_child_proof(
     index: usize,
     proof_bytes: &[u8],
     input_hash: B256,
@@ -124,18 +124,18 @@ fn validate_sgx_child_proof(
     let instance_id = u32::from_be_bytes(
         proof_bytes[0..4]
             .try_into()
-            .expect("SGX proof length was already checked"),
+            .expect("TDX proof length was already checked"),
     );
     if instance_id != expected_instance_id {
         return Err(RequestFailure::invalid_request(format!(
-            "aggregate proof {index} SGX instance id mismatch: got {instance_id} expected {expected_instance_id}"
+            "aggregate proof {index} TDX instance id mismatch: got {instance_id} expected {expected_instance_id}"
         )));
     }
 
     let instance_address = Address::from_slice(&proof_bytes[4..24]);
     if instance_address != expected_instance_address {
         return Err(RequestFailure::invalid_request(format!(
-            "aggregate proof {index} SGX instance address mismatch: got {instance_address:#x} expected {expected_instance_address:#x}"
+            "aggregate proof {index} TDX instance address mismatch: got {instance_address:#x} expected {expected_instance_address:#x}"
         )));
     }
 
@@ -144,14 +144,14 @@ fn validate_sgx_child_proof(
         28 => RecoveryId::One,
         value => {
             return Err(RequestFailure::invalid_request(format!(
-                "aggregate proof {index} has invalid SGX signature recovery id {value}"
+                "aggregate proof {index} has invalid TDX signature recovery id {value}"
             )));
         }
     };
     let signature =
         RecoverableSignature::from_compact(&proof_bytes[24..88], recovery_id).map_err(|err| {
             RequestFailure::invalid_request(format!(
-                "aggregate proof {index} has invalid SGX signature: {err}"
+                "aggregate proof {index} has invalid TDX signature: {err}"
             ))
         })?;
     let message = Message::from_digest_slice(input_hash.as_slice()).map_err(|err| {
@@ -169,7 +169,7 @@ fn validate_sgx_child_proof(
     let recovered_address = public_key_to_address(&recovered_key);
     if recovered_address != instance_address {
         return Err(RequestFailure::invalid_request(format!(
-            "aggregate proof {index} SGX signature signer mismatch: recovered {recovered_address:#x} expected {instance_address:#x}"
+            "aggregate proof {index} TDX signature signer mismatch: recovered {recovered_address:#x} expected {instance_address:#x}"
         )));
     }
 
@@ -252,7 +252,15 @@ mod tests {
             Ok(self.secret_key)
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            Ok(self.quote.clone())
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             Ok(self.quote.clone())
         }
     }
@@ -307,7 +315,7 @@ mod tests {
             .map(|carry| {
                 let input = hash_shasta_subproof_input(&carry);
                 let proof = Proof {
-                    proof: Some(sgx_proof_for_input(
+                    proof: Some(tdx_proof_for_input(
                         7,
                         input,
                         &signing_key,
@@ -327,7 +335,7 @@ mod tests {
         }
     }
 
-    fn sgx_proof_for_input(
+    fn tdx_proof_for_input(
         instance_id: u32,
         input_hash: B256,
         signing_key: &SecretKey,
@@ -394,7 +402,7 @@ mod tests {
         let mut request = aggregate_request_fixture();
         let first = request.payload.proofs.first_mut().expect("first proof");
         let input_hash = hash_shasta_subproof_input(&first.proof_carry_data);
-        first.proof = sgx_proof_for_input(
+        first.proof = tdx_proof_for_input(
             19,
             input_hash,
             &signing_key,

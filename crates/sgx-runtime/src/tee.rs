@@ -88,13 +88,17 @@ impl TeeProvider for GramineProvider {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NativeProvider;
 
 impl NativeProvider {
-    fn private_key() -> Result<SecretKey> {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+
+    fn private_key(self) -> Result<SecretKey> {
         let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(keccak256(b"raiko2:native-sgx-provider").as_slice());
+        bytes.copy_from_slice(native_key_seed().as_slice());
         SecretKey::from_byte_array(&bytes).context("decode native proof private key")
     }
 }
@@ -105,10 +109,14 @@ impl TeeProvider for NativeProvider {
     }
 
     fn load_private_key(&self) -> Result<SecretKey> {
-        Self::private_key()
+        self.private_key()
     }
 
     fn load_quote(&self, _instance_address: Address) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }
+}
+
+fn native_key_seed() -> alloy_primitives::B256 {
+    keccak256(b"raiko2:native-sgx-provider")
 }

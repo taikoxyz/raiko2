@@ -1,4 +1,4 @@
-//! Shared SGX proof protocol helpers.
+//! Shared TDX proof protocol helpers.
 
 use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result};
@@ -10,7 +10,7 @@ use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
 use crate::{bootstrap::public_key_to_address, tee::TeeProvider};
 
-const SHASTA_SGX_PROOF_LEN: usize = 89;
+const SHASTA_TDX_PROOF_LEN: usize = 89;
 
 /// Structured request failure mapped to the remote prover response envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,8 +90,8 @@ pub(crate) fn proof_result_from_input_hash<P: TeeProvider>(
     let public_key = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     let instance_address = public_key_to_address(&public_key);
     let quote = provider
-        .load_quote(instance_address)
-        .context("load TEE quote")?;
+        .load_proof_quote(instance_address, input_hash)
+        .context("load TDX quote")?;
     let signature = sign_hash(&secret_key, input_hash)?;
     let proof = build_shasta_proof_bytes(instance_id, instance_address, signature);
 
@@ -120,7 +120,7 @@ fn build_shasta_proof_bytes(
     instance_address: Address,
     signature: [u8; 65],
 ) -> Vec<u8> {
-    let mut proof = Vec::with_capacity(SHASTA_SGX_PROOF_LEN);
+    let mut proof = Vec::with_capacity(SHASTA_TDX_PROOF_LEN);
     proof.extend(instance_id.to_be_bytes());
     proof.extend(instance_address);
     proof.extend(signature);
@@ -154,13 +154,21 @@ mod tests {
             Ok(self.secret_key)
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            Ok(self.quote.clone())
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             Ok(self.quote.clone())
         }
     }
 
     #[test]
-    fn proof_result_contains_sgx_signature_quote_and_identity() {
+    fn proof_result_contains_tdx_signature_quote_and_identity() {
         let provider = FakeProvider {
             secret_key: SecretKey::from_slice(&[7u8; 32]).expect("secret key"),
             quote: vec![0x12, 0x34, 0x56],

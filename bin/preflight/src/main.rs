@@ -85,7 +85,7 @@ struct Args {
     #[arg(long)]
     l2_end: u64,
 
-    /// Proof type to record in the context (native, risc0, sp1, sgx, or sgxgeth).
+    /// Proof type to record in the context (native, risc0, sp1, sgx, sgxgeth, or tdx).
     #[arg(long, default_value = "sp1")]
     proof_type: String,
 

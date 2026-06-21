@@ -35,6 +35,9 @@ pub struct ProverConfig {
     /// Remote SGX prover configuration.
     #[serde(default)]
     pub remote_sgx: RemoteSgxConfig,
+    /// Remote TDX prover configuration.
+    #[serde(default)]
+    pub remote_tdx: RemoteTdxConfig,
 }
 
 impl ProverConfig {
@@ -52,6 +55,22 @@ impl ProverConfig {
                 runner: RunnerKind::Remote
             }
         )
+    }
+
+    #[must_use]
+    pub const fn is_remote_tdx_route(&self) -> bool {
+        matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Tdx,
+                runner: RunnerKind::Remote
+            }
+        )
+    }
+
+    #[must_use]
+    pub const fn is_remote_tee_route(&self) -> bool {
+        self.is_remote_sgx_route() || self.is_remote_tdx_route()
     }
 
     /// Applies the canonical server route to backend-specific prover defaults.
@@ -113,6 +132,20 @@ impl ProverConfig {
             }
             if self.remote_sgx.timeout_ms == 0 {
                 bail!("prover.remote_sgx.timeout_ms must be greater than zero");
+            }
+        }
+        if matches!(
+            self.route(),
+            PipelineRoute {
+                guest_system: GuestSystem::Tdx,
+                runner: RunnerKind::Remote
+            }
+        ) {
+            if self.remote_tdx.base_url.trim().is_empty() {
+                bail!("prover.remote_tdx.base_url must not be empty");
+            }
+            if self.remote_tdx.timeout_ms == 0 {
+                bail!("prover.remote_tdx.timeout_ms must be greater than zero");
             }
         }
         self.sp1.validate().map_err(anyhow::Error::msg)?;
@@ -210,6 +243,28 @@ impl Default for RemoteSgxConfig {
         Self {
             base_url: defaults.base_url,
             sgxgeth_base_url: String::new(),
+            timeout_ms: if defaults.timeout_ms == 0 {
+                300_000
+            } else {
+                defaults.timeout_ms
+            },
+        }
+    }
+}
+
+/// Remote TDX prover configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteTdxConfig {
+    pub base_url: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for RemoteTdxConfig {
+    fn default() -> Self {
+        let defaults = Gaiko2ProverConfig::default();
+        Self {
+            base_url: String::new(),
             timeout_ms: if defaults.timeout_ms == 0 {
                 300_000
             } else {

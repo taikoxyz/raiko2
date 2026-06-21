@@ -17,6 +17,8 @@ pub(crate) struct StartupSummary {
     remote_sgx_base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_sgx_sgxgeth_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_tdx_base_url: Option<String>,
 }
 
 pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> StartupSummary {
@@ -30,6 +32,13 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
         )
     } else {
         (None, None)
+    };
+    let remote_tdx_base_url = if config.prover.is_remote_tdx_route()
+        && !config.prover.remote_tdx.base_url.trim().is_empty()
+    {
+        Some(sanitize_url_for_log(&config.prover.remote_tdx.base_url))
+    } else {
+        None
     };
 
     StartupSummary {
@@ -47,6 +56,7 @@ pub(crate) fn build_startup_summary(config: &Config, json_logs: bool) -> Startup
         json_logs,
         remote_sgx_base_url,
         remote_sgx_sgxgeth_base_url,
+        remote_tdx_base_url,
     }
 }
 
@@ -65,6 +75,22 @@ pub(crate) fn log_startup_readiness_passed(config: &Config, json_logs: bool) {
 }
 
 fn log_summary(message: &'static str, summary: &StartupSummary) {
+    if let Some(remote_tdx_base_url) = summary.remote_tdx_base_url.as_deref() {
+        info!(
+            listen = %summary.listen,
+            route = %summary.route,
+            pairs = ?summary.pairs,
+            runtime_root = %summary.runtime_root,
+            queue_backend = %summary.queue_backend,
+            queue_workers = summary.queue_workers,
+            json_logs = summary.json_logs,
+            remote_tdx_base_url = %remote_tdx_base_url,
+            "{}",
+            message
+        );
+        return;
+    }
+
     match (
         summary.remote_sgx_base_url.as_deref(),
         summary.remote_sgx_sgxgeth_base_url.as_deref(),
@@ -185,6 +211,7 @@ mod tests {
         assert_eq!(summary["json_logs"], false);
         assert!(summary.get("remote_sgx_base_url").is_none());
         assert!(summary.get("remote_sgx_sgxgeth_base_url").is_none());
+        assert!(summary.get("remote_tdx_base_url").is_none());
     }
 
     #[test]
@@ -203,6 +230,22 @@ mod tests {
             summary["remote_sgx_sgxgeth_base_url"],
             "http://example.com:8090"
         );
+        assert_eq!(summary["json_logs"], true);
+    }
+
+    #[test]
+    fn startup_summary_includes_remote_tdx_url_for_remote_tdx_route() {
+        let mut config = sample_config();
+        config.prover.guest_system = GuestSystem::Tdx;
+        config.prover.runner = RunnerKind::Remote;
+        config.prover.remote_tdx.base_url = "http://example.com:8080".to_string();
+
+        let summary = summary_json(&config, true);
+
+        assert_eq!(summary["route"], "tdx/remote");
+        assert_eq!(summary["remote_tdx_base_url"], "http://example.com:8080");
+        assert!(summary.get("remote_sgx_base_url").is_none());
+        assert!(summary.get("remote_sgx_sgxgeth_base_url").is_none());
         assert_eq!(summary["json_logs"], true);
     }
 

@@ -78,7 +78,7 @@ fn validate_request(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::Address;
+    use alloy_primitives::{Address, B256};
     use raiko2_primitives::ProofType;
     use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -105,7 +105,15 @@ mod tests {
             Ok(self.secret_key)
         }
 
-        fn load_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+        fn load_bootstrap_quote(&self, _instance_address: Address) -> anyhow::Result<Vec<u8>> {
+            Ok(self.quote.clone())
+        }
+
+        fn load_proof_quote(
+            &self,
+            _instance_address: Address,
+            _input_hash: B256,
+        ) -> anyhow::Result<Vec<u8>> {
             Ok(self.quote.clone())
         }
     }
@@ -137,7 +145,7 @@ mod tests {
         let request = request_fixture();
 
         let err =
-            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("missing guest input");
+            prove_request(&provider, 9, ProofType::Tdx, &request).expect_err("missing guest input");
 
         assert!(err.to_string().contains("GuestInput"));
     }
@@ -156,7 +164,7 @@ mod tests {
         request.payload.chain_id = 1;
 
         let err =
-            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("chain id mismatch");
+            prove_request(&provider, 9, ProofType::Tdx, &request).expect_err("chain id mismatch");
         assert!(err.to_string().contains("chain_id mismatch"));
     }
 
@@ -168,7 +176,7 @@ mod tests {
         };
         let request = request_fixture();
 
-        let err = prove_request(&provider, 9, ProofType::Sgx, &request)
+        let err = prove_request(&provider, 9, ProofType::Tdx, &request)
             .expect_err("unverified replay packet");
 
         assert!(
@@ -191,7 +199,7 @@ mod tests {
         });
 
         let err =
-            prove_request(&provider, 9, ProofType::Sgx, &request).expect_err("invalid guest input");
+            prove_request(&provider, 9, ProofType::Tdx, &request).expect_err("invalid guest input");
 
         assert!(err.to_string().contains("GuestInput"));
     }

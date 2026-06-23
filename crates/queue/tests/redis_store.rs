@@ -571,3 +571,57 @@ async fn redis_store_list_uses_task_index_and_removes_deleted_tasks()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn redis_store_list_falls_back_to_task_scan_when_index_missing()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !docker_available() {
+        eprintln!("skipping redis store test: docker unavailable");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("redis", "7-alpine")
+        .with_exposed_port(6379.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+        .start()
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
+    let url = format!("redis://127.0.0.1:{port}/");
+    let namespace = format!(
+        "test-list-index-fallback-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await?;
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
+    let id = TaskId::new(1);
+    sched
+        .submit(
+            id.clone(),
+            NewTask {
+                priority: Priority::Medium,
+                payload: "first".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+
+    let mut conn = redis::Client::open(url.as_str())?
+        .get_multiplexed_async_connection()
+        .await?;
+    let _: () = conn.del(format!("{namespace}:tasks")).await?;
+
+    let listed = sched
+        .list()
+        .await?
+        .into_iter()
+        .map(|view| view.id)
+        .collect::<Vec<_>>();
+    assert_eq!(listed, vec![id]);
+
+    Ok(())
+}

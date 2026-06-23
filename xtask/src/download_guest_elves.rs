@@ -79,8 +79,12 @@ fn ensure_gh_available() -> Result<()> {
 fn asset_patterns(backend: GuestElfBackend) -> &'static [&'static str] {
     match backend {
         GuestElfBackend::Risc0 => &["risc0_shasta_*.elf"],
-        GuestElfBackend::Sp1 => &["sp1_shasta_*.elf"],
-        GuestElfBackend::All => &["risc0_shasta_*.elf", "sp1_shasta_*.elf"],
+        GuestElfBackend::Sp1 => &["sp1_shasta_*.elf", "sp1_shasta_*.vk.bin"],
+        GuestElfBackend::All => &[
+            "risc0_shasta_*.elf",
+            "sp1_shasta_*.elf",
+            "sp1_shasta_*.vk.bin",
+        ],
     }
 }
 
@@ -101,10 +105,17 @@ mod tests {
             asset_patterns(GuestElfBackend::Risc0),
             ["risc0_shasta_*.elf"]
         );
-        assert_eq!(asset_patterns(GuestElfBackend::Sp1), ["sp1_shasta_*.elf"]);
+        assert_eq!(
+            asset_patterns(GuestElfBackend::Sp1),
+            ["sp1_shasta_*.elf", "sp1_shasta_*.vk.bin"]
+        );
         assert_eq!(
             asset_patterns(GuestElfBackend::All),
-            ["risc0_shasta_*.elf", "sp1_shasta_*.elf"]
+            [
+                "risc0_shasta_*.elf",
+                "sp1_shasta_*.elf",
+                "sp1_shasta_*.vk.bin"
+            ]
         );
     }
 }

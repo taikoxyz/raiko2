@@ -171,6 +171,36 @@ where
         format!("{}:task:", self.namespace)
     }
 
+    async fn scan_task_index_ids_locked(
+        conn: &mut redis::aio::MultiplexedConnection,
+        prefix: &str,
+    ) -> StoreResult<Vec<String>> {
+        let pattern = format!("{prefix}*");
+        let mut cursor = 0u64;
+        let mut encoded_ids = Vec::new();
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(128)
+                .query_async(conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+            for key in keys {
+                if let Some(encoded) = key.strip_prefix(prefix) {
+                    encoded_ids.push(encoded.to_string());
+                }
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+        Ok(encoded_ids)
+    }
+
     fn encode_id(id: &TaskId<Id>) -> StoreResult<String> {
         encode_task_id(id).map_err(TaskStoreError::corrupt_data)
     }
@@ -1098,14 +1128,17 @@ return 1
         let prefix = self.task_key_prefix();
         let index_key = self.task_index_key();
         let mut conn = self.conn.lock().await;
-        let encoded_ids: Vec<String> = conn
+        let mut encoded_ids: Vec<String> = conn
             .smembers(&index_key)
             .await
             .map_err(TaskStoreError::backend)?;
         let mut views = Vec::new();
 
         if encoded_ids.is_empty() {
-            return Ok(views);
+            encoded_ids = Self::scan_task_index_ids_locked(&mut conn, &prefix).await?;
+            if encoded_ids.is_empty() {
+                return Ok(views);
+            }
         }
 
         let mut batch = Vec::with_capacity(encoded_ids.len());

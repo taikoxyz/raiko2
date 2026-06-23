@@ -364,7 +364,7 @@ Recommended sequence:
    ## Runtime Images
 
    - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
-   - includes both `risc0` and `sp1` guest ELFs
+   - includes `risc0` guest ELFs and `sp1` guest ELF/VK artifacts
 
    ## ZK Guest Digests
 
@@ -438,7 +438,7 @@ process starts and does not rebuild guest sources by itself. The image sets
 working directory.
 
 For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
-released artifacts, download ELF assets from GitHub Releases with
+released artifacts, download guest ELF/VK assets from GitHub Releases with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
 When running v0.1.0 release guest ELFs with a newer host, set
 `prover.guest_input_abi = "v0_1_0"`; leave the default `current` for locally built or current

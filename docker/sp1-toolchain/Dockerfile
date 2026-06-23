@@ -34,8 +34,8 @@ ARG CARGO_PROVE_VERSION
 #
 # Security note: verify the downloaded release artifact checksum to mitigate supply-chain attacks.
 # Keep these checksums in sync with the cargo-prove release assets for the default SP1 docker tag.
-ARG CARGO_PROVE_SHA256_AMD64=99f0087f581798ec510573baedcd51b97a32c6f6a1f5942612ed252e5285954b
-ARG CARGO_PROVE_SHA256_ARM64=8262b0ab26004795c162e8c5bd013265f7cc145aed8d109cd935a3f6b9cd789b
+ARG CARGO_PROVE_SHA256_AMD64=9d25d5ab786a508d8f3e216caa2b51ec46127b3b5b57119ec588f8e3d06401a6
+ARG CARGO_PROVE_SHA256_ARM64=5f5b4db7f76ff168c171118dd08c241a7f1bdff28812b2d2b7cd121b0bcbaa49
 ARG TARGETARCH
 RUN set -eux; \
     version="${CARGO_PROVE_VERSION:-${SP1_DOCKER_TAG}}"; \

@@ -175,6 +175,24 @@ fn resolve_guest_refresh_backend(
         return Ok(None);
     }
 
+    if let Some(refresh_backend) = refresh_guest_elves {
+        let refresh_matches_image = match image_backend {
+            ImageBackend::Host => true,
+            ImageBackend::Risc0 => {
+                matches!(refresh_backend, GuestBackend::Risc0 | GuestBackend::All)
+            }
+            ImageBackend::Sp1 => matches!(refresh_backend, GuestBackend::Sp1 | GuestBackend::All),
+            ImageBackend::All => matches!(refresh_backend, GuestBackend::All),
+        };
+        if !refresh_matches_image {
+            bail!(
+                "--refresh-guest-elves {} cannot be used with --backend {}",
+                guest_backend_name(refresh_backend),
+                image_backend_name(image_backend)
+            );
+        }
+    }
+
     let default_refresh = match image_backend {
         ImageBackend::Host => None,
         ImageBackend::Risc0 => Some(GuestBackend::Risc0),
@@ -448,6 +466,22 @@ mod tests {
                 .expect("runtime image can opt in to explicit guest refresh");
 
         assert_eq!(refresh, Some(GuestBackend::All));
+    }
+
+    #[test]
+    fn non_host_image_rejects_conflicting_guest_refresh_backend() {
+        let err = resolve_guest_refresh_backend(
+            ImageBackend::Risc0,
+            false,
+            false,
+            Some(GuestBackend::Sp1),
+        )
+        .expect_err("runtime image should reject mismatched guest refresh");
+
+        assert!(
+            err.to_string()
+                .contains("--refresh-guest-elves sp1 cannot be used with --backend risc0")
+        );
     }
 
     #[test]

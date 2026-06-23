@@ -45,8 +45,9 @@ pub(crate) fn authorize_acl_feature(
     let mut authorized = false;
     for key in &state.config.server.acl.keys {
         let matches = constant_time_eq(actual_key, &key.key);
+        let allows_feature = key.allow.contains(&feature);
         key_known |= matches;
-        authorized |= matches && key.allow.contains(&feature);
+        authorized |= matches && allows_feature;
     }
     if authorized {
         return Ok(());

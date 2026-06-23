@@ -508,6 +508,15 @@ async fn fetch_preflight_chunk<P: Provider>(
         tx_list_witness = tx_lists.is_some(),
         "starting shasta preflight chunk"
     );
+    if let Some(tx_lists) = tx_lists
+        && tx_lists.len() != blocks.len()
+    {
+        return Err(RaikoError::Preflight(format!(
+            "tx-list witness count ({}) does not match block count ({})",
+            tx_lists.len(),
+            blocks.len()
+        )));
+    }
     let use_canonical_witness =
         tx_lists.is_some() && preflight_uses_canonical_witness_for_tx_lists(&chain_spec);
     let witnesses = async {
@@ -2006,6 +2015,34 @@ mod tests {
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_tx_list_count_mismatch() {
+        let provider = sample_provider();
+        let tx_lists = Vec::new();
+        let chain_spec = ChainSpec {
+            name: "taiko_hoodi".to_string(),
+            chain_id: 167_013,
+            ..Default::default()
+        };
+
+        let err = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect_err("mismatched tx-list count should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("tx-list witness count (0) does not match block count (1)")
+        );
     }
 
     #[tokio::test]

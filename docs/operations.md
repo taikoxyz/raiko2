@@ -336,7 +336,7 @@ Recommended sequence:
 3. Export guest digests:
 
    ```bash
-   cargo run -p xtask-build-guest --bin guest-digests -- \
+   cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
      --output "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
@@ -390,7 +390,10 @@ Recommended sequence:
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
-     "${RELEASE_DIR}/guest-digests-summary.json"
+     "${RELEASE_DIR}/guest-digests-summary.json" \
+     crates/guests/elf/risc0_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.vk.bin
    ```
 
 Expected release outputs:
@@ -400,6 +403,10 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
+- Shasta guest artifact assets:
+  - `risc0_shasta_*.elf`
+  - `sp1_shasta_*.elf`
+  - `sp1_shasta_*.vk.bin`
 
 Do not:
 

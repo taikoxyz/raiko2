@@ -99,7 +99,20 @@ impl AppState {
         #[cfg(feature = "host")]
         let sp1_prover = if should_create_sp1_prover(&config) {
             let sp1_config = setup::sp1_prover_config(&config);
-            Some(Sp1Prover::new(sp1_config))
+            #[cfg(feature = "local-provers")]
+            {
+                Some(
+                    Sp1Prover::new_with_backend(sp1_config, &shasta_backends.sp1)
+                        .map_err(anyhow::Error::msg)?,
+                )
+            }
+            #[cfg(all(feature = "host", not(feature = "local-provers")))]
+            {
+                Some(
+                    Sp1Prover::new_with_backend(sp1_config, &sp1_backend)
+                        .map_err(anyhow::Error::msg)?,
+                )
+            }
         } else {
             None
         };

@@ -14232,6 +14232,7 @@ dependencies = [
  "alloy-rpc-types-eth 2.0.1",
  "alloy-sol-types",
  "anyhow",
+ "bincode",
  "clap",
  "raiko2-guests",
  "raiko2-pipeline",
@@ -14258,6 +14259,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "anyhow",
+ "bincode",
  "clap",
  "raiko2-guests",
  "risc0-binfmt",

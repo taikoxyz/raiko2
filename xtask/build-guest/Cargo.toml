@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 alloy-primitives = { workspace = true, optional = true }
 anyhow = { workspace = true }
+bincode = { workspace = true }
 clap = { workspace = true }
 raiko2-guests = { workspace = true, optional = true }
 risc0-binfmt = "=3.0.4"
@@ -16,11 +17,11 @@ risc0-zkos-v1compat = "=2.2.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-sp1-sdk = { workspace = true, optional = true }
+sp1-sdk = { workspace = true }
 toml = "0.9.8"
 
 [features]
-digests = ["dep:alloy-primitives", "dep:raiko2-guests", "dep:risc0-zkvm", "dep:sp1-sdk"]
+digests = ["dep:alloy-primitives", "dep:raiko2-guests", "dep:risc0-zkvm"]
 
 [[bin]]
 name = "guest-digests"

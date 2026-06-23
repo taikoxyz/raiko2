@@ -19,8 +19,8 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use serde::Deserialize;
 use sp1_sdk::{
-    HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
+    HashableKey, NetworkProver, ProveRequest as _, Prover as _, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
     blocking::{
         CpuProver as BlockingCpuProver, MockProver as BlockingMockProver, ProveRequest as _,
         Prover as BlockingProver, ProverClient as BlockingProverClient,
@@ -229,14 +229,13 @@ impl Sp1Prover {
         }
 
         let elf = backend.elf(stage)?;
-        let client = BlockingProverClient::builder().cpu().build();
-        let pk = client.setup(elf.into()).map_err(|err| {
+        let vk: SP1VerifyingKey = bincode::deserialize(backend.sp1_vk(stage)?).map_err(|err| {
             RaikoError::Guest(format!(
-                "Failed to initialize SP1 {} setup: {err}",
+                "Failed to load SP1 {} verifying key: {err}",
                 sp1_stage_name(stage)
             ))
         })?;
-        let vk = pk.verifying_key().clone();
+        let pk = SP1ProvingKey::new(vk.clone(), elf.into());
         let setup = Arc::new(Sp1ProgramSetup { pk, vk });
 
         match cell.set(Arc::clone(&setup)) {
@@ -244,7 +243,7 @@ impl Sp1Prover {
                 tracing::info!(
                     stage = sp1_stage_name(stage),
                     vkey_hash = %sp1_vk_digest(&setup.vk),
-                    "Initialized SP1 program setup"
+                    "Loaded SP1 program setup"
                 );
                 Ok(setup)
             }
@@ -1382,12 +1381,6 @@ mod tests {
 
     #[test]
     fn sp1_new_with_backend_preloads_setup_cache() {
-        // This eager path is retained for callers with SP1 ELFs compatible with the linked SDK.
-        // Current mainnet v0.1.0 SP1 ELFs are intentionally not compatible with SP1 SDK 6.1 setup.
-        // Run manually when refreshing SP1 ELFs.
-        if std::env::var_os("RAIKO2_RUN_SP1_SETUP_TEST").is_none() {
-            return;
-        }
         let backend = sp1_shasta_backend_from_elves(sp1_test_elves());
         let prover = super::Sp1Prover::new_with_backend(super::Sp1Config::default(), &backend)
             .expect("preload SP1 setup");

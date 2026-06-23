@@ -11,10 +11,7 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{
-    HashableKey, ProvingKey as _,
-    blocking::{Prover as _, ProverClient},
-};
+use sp1_sdk::{HashableKey, SP1VerifyingKey};
 
 use crate::util;
 
@@ -147,15 +144,10 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
 }
 
 fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
-    let client = ProverClient::builder().cpu().build();
-    let proposal_pk = client
-        .setup(elves.proposal.as_ref().into())
-        .context("failed to setup SP1 proposal ELF")?;
-    let aggregation_pk = client
-        .setup(elves.aggregation.as_ref().into())
-        .context("failed to setup SP1 aggregation ELF")?;
-    let proposal_vk = proposal_pk.verifying_key();
-    let aggregation_vk = aggregation_pk.verifying_key();
+    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
+        .context("failed to load SP1 proposal VK")?;
+    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
+        .context("failed to load SP1 aggregation VK")?;
 
     Ok(vec![
         sp1_digest_entry(

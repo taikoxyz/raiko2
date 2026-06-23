@@ -9,6 +9,10 @@ use risc0_binfmt::ProgramBinary;
 use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sp1_sdk::{
+    ProvingKey as _,
+    blocking::{Prover as _, ProverClient},
+};
 
 #[cfg(feature = "digests")]
 pub mod guest_digests;
@@ -990,16 +994,45 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
 fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Path) -> Result<()> {
     for bin in &manifest.bin {
         let source = export_dir.join(&bin.name);
-        let destination = output_dir.join(format!("{}.elf", bin.name.replace('-', "_")));
+        let artifact_name = bin.name.replace('-', "_");
+        let destination = output_dir.join(format!("{artifact_name}.elf"));
         fs::copy(&source, &destination)
             .with_context(|| format!("export {source:?} -> {destination:?}"))?;
         println!(
             "[INFO] Exported {}",
             destination.file_name().unwrap().to_string_lossy()
         );
+
+        let elf = fs::read(&destination).with_context(|| format!("read {destination:?}"))?;
+        let vk_destination = output_dir.join(format!("{artifact_name}.vk.bin"));
+        let vk = sp1_vk_bin(elf, artifact_name.clone())?;
+        fs::write(&vk_destination, vk).with_context(|| format!("write {vk_destination:?}"))?;
+        println!(
+            "[INFO] Exported {}",
+            vk_destination.file_name().unwrap().to_string_lossy()
+        );
     }
 
     Ok(())
+}
+
+fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
+    let panic_artifact = artifact_name.clone();
+    let handle = std::thread::Builder::new()
+        .name(format!("sp1-vk-{artifact_name}"))
+        .spawn(move || {
+            let client = ProverClient::builder().cpu().build();
+            let pk = client
+                .setup(elf.as_slice().into())
+                .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;
+            bincode::serialize(pk.verifying_key())
+                .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+        })
+        .with_context(|| format!("spawn SP1 verifying key setup for {panic_artifact}"))?;
+
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("SP1 verifying key setup panicked for {panic_artifact}"))?
 }
 
 fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {

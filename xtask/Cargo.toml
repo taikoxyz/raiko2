@@ -9,6 +9,7 @@ alloy = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-sol-types = { workspace = true }
 anyhow = { workspace = true }
+bincode = { workspace = true }
 clap = { workspace = true }
 raiko2-guests = { workspace = true, optional = true }
 raiko2-pipeline = { workspace = true }

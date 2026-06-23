@@ -384,7 +384,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        _backend: &B,
+        backend: &B,
     ) -> RaikoResult<Proof> {
         let effective_config =
             self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
@@ -397,8 +397,8 @@ where
 
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
-        let proposal_setup = self.setup_for_stage(_backend, ProofStage::Proposal)?;
-        let aggregation_setup = self.setup_for_stage(_backend, ProofStage::Aggregation)?;
+        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
+        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
@@ -437,7 +437,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        _backend: &B,
+        backend: &B,
         observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let effective_config =
@@ -448,8 +448,8 @@ where
         );
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
-        let proposal_setup = self.setup_for_stage(_backend, ProofStage::Proposal)?;
-        let aggregation_setup = self.setup_for_stage(_backend, ProofStage::Aggregation)?;
+        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
+        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {

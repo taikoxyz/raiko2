@@ -167,6 +167,10 @@ where
         format!("{}:tasks", self.namespace)
     }
 
+    fn task_index_backfilled_key(&self) -> String {
+        format!("{}:tasks:backfilled", self.namespace)
+    }
+
     fn task_key_prefix(&self) -> String {
         format!("{}:task:", self.namespace)
     }
@@ -1127,6 +1131,7 @@ return 1
     async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
         let prefix = self.task_key_prefix();
         let index_key = self.task_index_key();
+        let backfilled_key = self.task_index_backfilled_key();
         let mut conn = self.conn.lock().await;
         let mut encoded_ids: Vec<String> = conn
             .smembers(&index_key)
@@ -1134,11 +1139,33 @@ return 1
             .map_err(TaskStoreError::backend)?;
         let mut views = Vec::new();
 
-        if encoded_ids.is_empty() {
-            encoded_ids = Self::scan_task_index_ids_locked(&mut conn, &prefix).await?;
-            if encoded_ids.is_empty() {
-                return Ok(views);
+        let index_backfilled: bool = conn
+            .exists(&backfilled_key)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        if !index_backfilled {
+            let scanned_ids = Self::scan_task_index_ids_locked(&mut conn, &prefix).await?;
+            if !scanned_ids.is_empty() {
+                let _: () = redis::cmd("SADD")
+                    .arg(&index_key)
+                    .arg(&scanned_ids)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                encoded_ids.extend(scanned_ids);
+                encoded_ids.sort();
+                encoded_ids.dedup();
             }
+            let _: () = redis::cmd("SET")
+                .arg(&backfilled_key)
+                .arg("1")
+                .query_async(&mut *conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+        }
+
+        if encoded_ids.is_empty() {
+            return Ok(views);
         }
 
         let mut batch = Vec::with_capacity(encoded_ids.len());

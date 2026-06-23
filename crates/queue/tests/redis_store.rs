@@ -625,3 +625,74 @@ async fn redis_store_list_falls_back_to_task_scan_when_index_missing()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn redis_store_list_backfills_partial_task_index() -> Result<(), Box<dyn std::error::Error>> {
+    if !docker_available() {
+        eprintln!("skipping redis store test: docker unavailable");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("redis", "7-alpine")
+        .with_exposed_port(6379.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+        .start()
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
+    let url = format!("redis://127.0.0.1:{port}/");
+    let namespace = format!(
+        "test-list-index-partial-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await?;
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
+    let missing_from_index = TaskId::new(1);
+    let present_in_index = TaskId::new(2);
+    sched
+        .submit(
+            missing_from_index.clone(),
+            NewTask {
+                priority: Priority::Medium,
+                payload: "first".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+    sched
+        .submit(
+            present_in_index.clone(),
+            NewTask {
+                priority: Priority::Low,
+                payload: "second".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+
+    let mut conn = redis::Client::open(url.as_str())?
+        .get_multiplexed_async_connection()
+        .await?;
+    let missing_encoded = encode_task_id(&missing_from_index)?;
+    let _: () = conn
+        .srem(format!("{namespace}:tasks"), &missing_encoded)
+        .await?;
+
+    let mut listed = sched
+        .list()
+        .await?
+        .into_iter()
+        .map(|view| view.id)
+        .collect::<Vec<_>>();
+    listed.sort_by_key(|id| id.0);
+    assert_eq!(listed, vec![missing_from_index, present_in_index]);
+
+    let indexed: Vec<String> = conn.smembers(format!("{namespace}:tasks")).await?;
+    assert!(indexed.contains(&missing_encoded));
+
+    Ok(())
+}

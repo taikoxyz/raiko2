@@ -2,7 +2,7 @@ use raiko2_engine::{
     AggregateProofInput, AggregationTaskRequest, Engine, EngineTaskId, EngineTaskKey,
     ProposalTaskRequest,
 };
-use raiko2_queue::{TaskState, TaskStoreError, TaskView};
+use raiko2_queue::{TaskState, TaskStateKind, TaskStoreError, TaskView};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -28,8 +28,41 @@ pub trait EngineHandle: Send + Sync {
         &self,
         id: EngineTaskId,
     ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>>;
+    fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>>;
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
     fn remove(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EngineQueueTaskState {
+    Pending,
+    Ready,
+    Retrying,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EngineQueueTaskView {
+    pub(crate) id: EngineTaskId,
+    pub(crate) state: EngineQueueTaskState,
+}
+
+const fn queue_task_state(state: TaskStateKind) -> EngineQueueTaskState {
+    match state {
+        TaskStateKind::Pending => EngineQueueTaskState::Pending,
+        TaskStateKind::Ready => EngineQueueTaskState::Ready,
+        TaskStateKind::Retrying => EngineQueueTaskState::Retrying,
+        TaskStateKind::Running => EngineQueueTaskState::Running,
+        TaskStateKind::Succeeded => EngineQueueTaskState::Succeeded,
+        TaskStateKind::Failed => EngineQueueTaskState::Failed,
+        TaskStateKind::Cancelled => EngineQueueTaskState::Cancelled,
+    }
 }
 
 fn summarize_task<I>(view: TaskView<EngineOutput<I>, EngineTaskKey>) -> EngineStatusView {
@@ -112,6 +145,20 @@ where
         })
     }
 
+    fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+        Box::pin(async move {
+            Engine::get_task_state(self, id).await.map(|view| {
+                view.map(|view| EngineQueueTaskView {
+                    id: view.id,
+                    state: queue_task_state(view.state),
+                })
+            })
+        })
+    }
+
     fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
         Box::pin(async move { self.cancel(id).await })
     }
@@ -126,7 +173,7 @@ mod tests {
     use super::summarize_task;
     use crate::server::state::types::ProofStatus;
     use raiko2_engine::tasks::EngineOutput;
-    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
+    use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest, ProverTaskConfig};
     use raiko2_pipeline::{PipelineKey, PipelineStage, PipelineStageResult};
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::GuestInput;
@@ -159,7 +206,7 @@ mod tests {
                     blob_proof_type: None,
                     prover: None,
                     graffiti: None,
-                    prover_config: Default::default(),
+                    prover_config: ProverTaskConfig::default(),
                 },
             }),
             state: TaskState::Succeeded { output },

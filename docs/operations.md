@@ -336,7 +336,7 @@ Recommended sequence:
 3. Export guest digests:
 
    ```bash
-   cargo run -p xtask-build-guest --bin guest-digests -- \
+   cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
      --output "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
@@ -364,7 +364,7 @@ Recommended sequence:
    ## Runtime Images
 
    - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
-   - includes both `risc0` and `sp1` guest ELFs
+   - includes `risc0` guest ELFs and `sp1` guest ELF/VK artifacts
 
    ## ZK Guest Digests
 
@@ -390,7 +390,10 @@ Recommended sequence:
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
-     "${RELEASE_DIR}/guest-digests-summary.json"
+     "${RELEASE_DIR}/guest-digests-summary.json" \
+     crates/guests/elf/risc0_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.vk.bin
    ```
 
 Expected release outputs:
@@ -400,6 +403,10 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
+- Shasta guest artifact assets:
+  - `risc0_shasta_*.elf`
+  - `sp1_shasta_*.elf`
+  - `sp1_shasta_*.vk.bin`
 
 Do not:
 
@@ -409,8 +416,8 @@ Do not:
 
 ## Release Images
 
-Use the `xtask` release entrypoint for runtime images. It ensures the checked-in guest ELFs are
-current, then builds and pushes the runtime image.
+Use the `xtask` release entrypoint for runtime images. It refreshes selected guest ELFs before
+building non-host runtime images unless `--skip-guest-refresh` is explicitly set.
 
 ```bash
 just release-image risc0 release-20260507-1013
@@ -430,9 +437,16 @@ process starts and does not rebuild guest sources by itself. The image sets
 `RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf` so ELF lookup does not depend on the container
 working directory.
 
-If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
-before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
-release command so the image provenance still matches committed repo state.
+For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
+released artifacts, download guest ELF/VK assets from GitHub Releases with
+`cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
+When running v0.1.0 release guest ELFs with a newer host, set
+`prover.guest_input_abi = "v0_1_0"`; leave the default `current` for locally built or current
+release ELFs.
+`release-image` refreshes guest ELFs for the selected non-host backend by default.
+If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
+and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
+provenance still matches the committed repo state.
 
 ## Register Guest Digests
 
@@ -456,6 +470,31 @@ Current behavior:
   `setProgramTrusted(bytes32,bool)`.
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
+
+## Boundless Storage Upload
+
+Boundless storage uploader selection is environment-driven. Use your private GCS
+bucket:
+
+```bash
+BOUNDLESS_STORAGE_UPLOADER=gcs
+GCS_BUCKET=<your-gcs-bucket>
+GCS_PUBLIC_URL=false
+```
+
+The GCP project is selected by the current gcloud/ADC context, for example
+`<your-gcp-project>`; raiko2 does not carry a separate project id setting. The
+bucket should enforce public access prevention, so `GCS_PUBLIC_URL=false` returns
+private `gs://` URLs and Boundless downloaders must have GCS credentials. Set
+`GCS_PUBLIC_URL=true` only for a publicly readable bucket that should return HTTPS
+URLs.
+
+Authentication uses Google ADC from the active environment
+(`GOOGLE_APPLICATION_CREDENTIALS`, workload identity, metadata server, or local
+application-default credentials). Inline service account JSON through
+`GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
+supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
+alias, and existing S3/Pinata/File settings continue to work.
 
 ## Release TEE Provider Metadata
 
@@ -539,6 +578,10 @@ Operator notes:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
+  each resubmission doubles the offer's max price, capped at `4x` the configured
+  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
+  the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
@@ -564,12 +607,12 @@ at admission time and either routes the request to `sp1` / `risc0` or returns
 `zk_any` is only accepted when `aggregate = false`; aggregate requests must specify a concrete
 proof type such as `sp1` or `risc0`.
 
-Operators can adjust the in-memory `zk_any` ballot without restarting the server when
-`server.admin_api_key` is configured:
+Operators can adjust the in-memory `zk_any` ballot without restarting the server when an ACL key
+grants `admin.ballot.read` and `admin.ballot.write`:
 
 ```bash
-curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/ballot
-curl -X POST -H "x-api-key: $RAIKO2_ADMIN_API_KEY" -H "content-type: application/json" \
+curl -H "x-api-key: $RAIKO2_ACL_API_KEY" http://localhost:8080/admin/ballot
+curl -X POST -H "x-api-key: $RAIKO2_ACL_API_KEY" -H "content-type: application/json" \
   --data '{"Risc0":[0.1,10],"Sp1":[0.0,0]}' \
   http://localhost:8080/admin/ballot
 ```

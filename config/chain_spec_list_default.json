@@ -1,28 +1,6 @@
 [
     {
         "name": "ethereum",
-        "chain_id": 1,
-        "max_spec_id": "CANCUN",
-        "hard_forks": {
-            "FRONTIER": {
-                "Block": 0
-            },
-            "MERGE": {
-                "Block": 15537394
-            },
-            "SHANGHAI": {
-                "Block": 17034870
-            },
-            "CANCUN": {
-                "Timestamp": 1710338135
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {},
         "l2_contract": null,
         "rpc": "https://ethereum-rpc.publicnode.com",
@@ -35,30 +13,10 @@
             }
         },
         "genesis_time": 1606824023,
-        "seconds_per_slot": 12,
-        "is_taiko": false
+        "seconds_per_slot": 12
     },
     {
         "name": "hoodi",
-        "chain_id": 560048,
-        "max_spec_id": "CANCUN",
-        "hard_forks": {
-            "FRONTIER": {
-                "Block": 0
-            },
-            "SHANGHAI": {
-                "Timestamp": 1696000704
-            },
-            "CANCUN": {
-                "Timestamp": 1707305664
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {},
         "l2_contract": null,
         "rpc": "https://ethereum-hoodi-rpc.publicnode.com",
@@ -71,8 +29,7 @@
             }
         },
         "genesis_time": 1742213400,
-        "seconds_per_slot": 12,
-        "is_taiko": false
+        "seconds_per_slot": 12
     },
     {
         "name": "taiko_dev_l1",
@@ -97,8 +54,8 @@
         },
         "l1_contract": {},
         "l2_contract": null,
-        "rpc": "https://l1rpc.internal.taiko.xyz",
-        "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
+        "rpc": "https://example.com",
+        "beacon_rpc": "https://beacon.example.com",
         "verifier_address_forks": {
             "FRONTIER": {
                 "SGX": "0x532efbf6d62720d0b2a2bb9d11066e8588cae6d9",
@@ -112,19 +69,6 @@
     },
     {
         "name": "taiko_mainnet",
-        "chain_id": 167000,
-        "max_spec_id": "SHASTA",
-        "hard_forks": {
-            "SHASTA": {
-                "Timestamp": 1775135700
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {
             "SHASTA": "0x6f21C543a4aF5189eBdb0723827577e1EF57ef1f"
         },
@@ -140,38 +84,18 @@
             }
         },
         "genesis_time": 0,
-        "seconds_per_slot": 1,
-        "is_taiko": true
+        "seconds_per_slot": 1
     },
     {
         "name": "taiko_dev",
-        "chain_id": 167001,
-        "max_spec_id": "UNZEN",
-        "hard_forks": {
-            "SHASTA": {
-                "Timestamp": 0
-            },
-            "UNZEN": {
-                "Timestamp": 0
-            },
-            "CANCUN": {
-                "Timestamp": 0
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {
-            "CANCUN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
+            "UNZEN": "0xb432bbe475e569b2adef4830ae43d587932f139c"
         },
         "l2_contract": "0x1670010000000000000000000000000000010001",
-        "rpc": "https://rpc.internal.taiko.xyz",
+        "rpc": "https://example.com",
         "beacon_rpc": null,
         "verifier_address_forks": {
-            "CANCUN": {
+            "UNZEN": {
                 "SGX": "0x2184bace3e668bf0eecb22c5ccf02cfca87c8a67",
                 "SP1": "0x9d351f6e72e3095f24dd854c9b8ca69f99a2c538",
                 "RISC0": "0xfe3edf3e778a647c0955f2a5f79565e272e6afdb",
@@ -179,37 +103,10 @@
             }
         },
         "genesis_time": 0,
-        "seconds_per_slot": 1,
-        "is_taiko": true
+        "seconds_per_slot": 1
     },
     {
         "name": "taiko_masaya",
-        "chain_id": 167011,
-        "max_spec_id": "UNZEN",
-        "hard_forks": {
-            "HEKLA": {
-                "Block": 0
-            },
-            "ONTAKE": {
-                "Block": 0
-            },
-            "PACAYA": {
-                "Block": 0
-            },
-            "SHASTA": {
-                "Timestamp": 0
-            },
-            "UNZEN": {
-                "Timestamp": 1778158800
-            },
-            "CANCUN": "TBD"
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {
             "SHASTA": "0x3477f9e8a890c2286c5e62150ad6593eef4590b9"
         },
@@ -225,37 +122,10 @@
             }
         },
         "genesis_time": 0,
-        "seconds_per_slot": 1,
-        "is_taiko": true
+        "seconds_per_slot": 1
     },
     {
         "name": "taiko_hoodi",
-        "chain_id": 167013,
-        "max_spec_id": "UNZEN",
-        "hard_forks": {
-            "HEKLA": {
-                "Block": 0
-            },
-            "ONTAKE": {
-                "Block": 0
-            },
-            "PACAYA": {
-                "Block": 0
-            },
-            "SHASTA": {
-                "Timestamp": 1770296400
-            },
-            "UNZEN": {
-                "Timestamp": 1781787600
-            },
-            "CANCUN": "TBD"
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {
             "PACAYA": "0xf6eA848c7d7aC83de84db45Ae28EAbf377fe0eF9",
             "SHASTA": "0xeF4bB7A442Bd68150A3aa61A6a097B86b91700BF"
@@ -278,7 +148,6 @@
             }
         },
         "genesis_time": 0,
-        "seconds_per_slot": 1,
-        "is_taiko": true
+        "seconds_per_slot": 1
     }
 ]

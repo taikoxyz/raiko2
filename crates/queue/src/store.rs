@@ -1,5 +1,5 @@
 use crate::ready_sort::insert_ready_sorted;
-use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState};
+use crate::{Priority, ReadyQueueSort, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::error::Error;
@@ -126,6 +126,11 @@ where
         Ok(updated)
     }
     async fn get_view(&self, id: &TaskId<Id>) -> StoreResult<Option<(TaskState<O, Id>, Priority)>>;
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>>;
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>>;
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>>;
     async fn dec_remaining_deps(&self, id: &TaskId<Id>) -> StoreResult<usize>;
     async fn try_mark_ready(&self, id: &TaskId<Id>) -> StoreResult<Option<Priority>>;
@@ -135,31 +140,22 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-        task_timeout: Duration,
-    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>>;
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>>;
     async fn renew_lease(&self, id: &TaskId<Id>, worker: &str, attempt: u32) -> StoreResult<bool>;
 
     async fn pop_ready_and_take(
         &self,
         prio: Priority,
         worker: &str,
-        task_timeout: Duration,
-    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy, u64)>> {
+    ) -> StoreResult<Option<(TaskId<Id>, P, Priority, u32, TaskExecutionPolicy)>> {
         loop {
             let Some(id) = self.pop_ready(prio).await? else {
                 return Ok(None);
             };
-            if let Some((payload, priority, attempt, execution_policy, deadline_at_ms)) =
-                self.take_ready(&id, worker, task_timeout).await?
+            if let Some((payload, priority, attempt, execution_policy)) =
+                self.take_ready(&id, worker).await?
             {
-                return Ok(Some((
-                    id,
-                    payload,
-                    priority,
-                    attempt,
-                    execution_policy,
-                    deadline_at_ms,
-                )));
+                return Ok(Some((id, payload, priority, attempt, execution_policy)));
             }
         }
     }
@@ -193,11 +189,10 @@ struct TaskRecord<P, O, Id> {
     attempt: u32,
     lease_until_ms: Option<u64>,
     lease_sequence: u64,
-    deadline_at_ms: Option<u64>,
     execution_policy: TaskExecutionPolicy,
 }
 
-type TakenReadyTask<P> = (P, Priority, u32, TaskExecutionPolicy, u64);
+type TakenReadyTask<P> = (P, Priority, u32, TaskExecutionPolicy);
 
 enum DependencyInsertState<Id> {
     Pending {
@@ -310,13 +305,12 @@ fn take_ready_locked<P, O, Id>(
     lease: Duration,
     id: &TaskId<Id>,
     worker: &str,
-    task_timeout: Duration,
 ) -> StoreResult<Option<TakenReadyTask<P>>>
 where
     P: Clone,
     Id: Clone + Eq + Hash,
 {
-    let (payload, deadline_at_ms, now_ms) = {
+    let (payload, now_ms) = {
         let Some(record) = inner.tasks.get_mut(id) else {
             return Ok(None);
         };
@@ -328,11 +322,7 @@ where
         };
         let payload = payload.clone();
         let now_ms = now_millis();
-        let task_timeout_ms = duration_millis_saturating(task_timeout);
-        let deadline_at_ms = *record
-            .deadline_at_ms
-            .get_or_insert_with(|| now_ms.saturating_add(task_timeout_ms));
-        (payload, deadline_at_ms, now_ms)
+        (payload, now_ms)
     };
 
     let lease_sequence = next_sequence(inner);
@@ -356,7 +346,6 @@ where
         record.priority,
         attempt,
         record.execution_policy.clone(),
-        deadline_at_ms,
     )))
 }
 
@@ -424,7 +413,6 @@ where
                 existing.attempt = 0;
                 existing.lease_until_ms = None;
                 existing.lease_sequence = 0;
-                existing.deadline_at_ms = None;
                 existing.state = next_state;
                 existing.execution_policy = execution_policy;
             }
@@ -462,7 +450,6 @@ where
                 attempt: 0,
                 lease_until_ms: None,
                 lease_sequence: 0,
-                deadline_at_ms: None,
                 execution_policy,
             },
         );
@@ -598,6 +585,29 @@ where
         Ok(record.map(|r| (r.state.clone(), r.priority)))
     }
 
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>> {
+        let g = self.inner.lock().await;
+        let record = g.tasks.get(id);
+        Ok(record.map(|r| (TaskStateKind::from(&r.state), r.priority)))
+    }
+
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
+        let g = self.inner.lock().await;
+        Ok(g.tasks
+            .iter()
+            .map(|(id, record)| {
+                (
+                    id.clone(),
+                    TaskStateKind::from(&record.state),
+                    record.priority,
+                )
+            })
+            .collect())
+    }
+
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>> {
         let g = self.inner.lock().await;
         Ok(g.dependents.get(dep).cloned().unwrap_or_default())
@@ -661,10 +671,9 @@ where
         &self,
         id: &TaskId<Id>,
         worker: &str,
-        task_timeout: Duration,
-    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>> {
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
         let mut g = self.inner.lock().await;
-        take_ready_locked(&mut g, self.lease, id, worker, task_timeout)
+        take_ready_locked(&mut g, self.lease, id, worker)
     }
 
     async fn put_payload(&self, id: &TaskId<Id>, payload: P) -> StoreResult<()> {
@@ -817,10 +826,6 @@ fn now_millis() -> u64 {
             .as_millis(),
     )
     .unwrap_or_default()
-}
-
-fn duration_millis_saturating(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis().min(u128::from(u64::MAX))).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

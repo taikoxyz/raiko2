@@ -10,9 +10,11 @@
 [server]
 host = "0.0.0.0"
 port = 8080
-# Optional: enables `GET /admin/ballot` and `POST /admin/ballot`.
-# Keep unset to disable the admin API.
-# admin_api_key = "change-me"
+# Optional: enables ACL-protected endpoints.
+# [server.acl]
+# keys = [
+#   { id = "ops", key = "change-me", allow = ["admin.ballot.read", "admin.ballot.write", "prover.clear"] },
+# ]
 
 [rpc]
 # Explicitly allowed (network, l1_network) combinations for the hoodi-compatible API.
@@ -29,8 +31,9 @@ pairs = [
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x3B6041173B80E77f038f3F2C0f9744f04837185e" },
   # Optional: override Boundless quote and offer params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
-  # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200 } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { batch_quoted_mcycles = 6000, aggregation_quoted_mcycles = 200, offer_params = { batch = { pricing_mode = "market", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 200, timeout_ms_per_mcycle = 410, lock_collateral = "20" } } } },
+  # Leave fixed quote overrides unset unless the target network has stable proof sizes.
+# { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote_strategy = "evaluated" } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
@@ -60,6 +63,9 @@ inactive_ttl_secs = 7200
 #   risc0/local | risc0/network | sp1/local | sp1/network | native/local | sgx/remote
 guest_system = "risc0"
 runner = "local"
+# Guest input ABI emitted by host preflight.
+# Use "v0_1_0" only when intentionally running already released v0.1.0 guest ELFs.
+guest_input_abi = "current"
 
 [prover.risc0]
 bonsai = true
@@ -84,14 +90,20 @@ timeout_secs = 7200
 
 [prover.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
-# can replace `batch_quoted_mcycles`, `aggregation_quoted_mcycles`, and either offer param block
+# can replace fixed quote overrides, `aggregation_quote_strategy`, and either offer param block
 # for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
-batch_quoted_mcycles = 6000
+# Leave `batch_quoted_mcycles` unset so proposal quotes use evaluated cycles
+# (`raiko_agent` rounds up to the next 1000 mcycles with a 2000 mcycle floor).
+# Fixed quote underprices large proposals and overprices small ones.
+# batch_quoted_mcycles = 6000
 batch_quote_strategy = "raiko_agent"
-aggregation_quoted_mcycles = 200
+# Leave `aggregation_quoted_mcycles` unset so aggregation quotes follow the selected strategy.
+# `raiko_agent` rounds aggregation quotes to 100 mcycles with a 200 mcycle floor.
+# aggregation_quoted_mcycles = 200
+aggregation_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 
@@ -125,11 +137,26 @@ order_stream_url = "https://base-mainnet.boundless.network"
 
 [prover.boundless.offer_params.batch]
 pricing_mode = "market"
+# Optional in market mode: multiply lockTimeout and timeout after dynamic pricing.
+# 2.0 doubles both values, giving provers more time to accept larger proofs.
+dynamic_pricing_timeout_modifier = 2.0
+# Optional in market mode: reject SDK autoprice offers above this per-mcycle safety cap.
+max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 200
-timeout_ms_per_mcycle = 410
+lock_timeout_ms_per_mcycle = 300
+timeout_ms_per_mcycle = 900
 lock_collateral = "20"
+# Optional: pin the request timeouts to fixed values in seconds instead of deriving
+# them from the quoted mcycles (prices still follow the quote strategy). A fixed
+# value is final: it is not scaled by dynamic_pricing_timeout_modifier.
+# lock_timeout_secs = 600
+# timeout_secs = 3600
+# pricing_mode = "manual", set both price fields. max price is a cap, not
+# paid price; provers lock the ramping auction price. Caps below ~0.0000001 ETH/mcycle
+# historically expired un-locked on Taiko market.
+# max_price_per_mcycle = "0.0000006"
+# min_price_per_mcycle = "0.000000010"
 
 [prover.boundless.offer_params.aggregation]
 pricing_mode = "market"
@@ -138,11 +165,16 @@ ramp_up_period_blocks = 60
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
 lock_collateral = "20"
+# Aggregation uses the selected quote strategy unless `aggregation_quoted_mcycles`
+# fixes the quote, so per-mcycle cap must also amortize prover overhead (~0.0000087 ETH).
+# Manual caps below ~0.0000002 ETH/mcycle (= 0.00004 ETH total at 200 mcycles)
+# rarely lock.
+# max_price_per_mcycle = "0.0000008"
+# min_price_per_mcycle = "0.000000006"
 
 [queue]
 backend = "memory"
 namespace = "raiko2:queue"
 workers = 6
 maintenance_interval_ms = 200
-task_timeout_secs = 14400
 # redis_url = "redis://localhost:6379/"

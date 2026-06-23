@@ -17,6 +17,8 @@ pub const RISC0_SHASTA_PROPOSAL_ELF: &str = "risc0_shasta_proposal.elf";
 pub const RISC0_SHASTA_AGGREGATION_ELF: &str = "risc0_shasta_aggregation.elf";
 pub const SP1_SHASTA_PROPOSAL_ELF: &str = "sp1_shasta_proposal.elf";
 pub const SP1_SHASTA_AGGREGATION_ELF: &str = "sp1_shasta_aggregation.elf";
+pub const SP1_SHASTA_PROPOSAL_VK_BIN: &str = "sp1_shasta_proposal.vk.bin";
+pub const SP1_SHASTA_AGGREGATION_VK_BIN: &str = "sp1_shasta_aggregation.vk.bin";
 
 #[derive(Clone, Debug)]
 pub struct ShastaGuestElves {
@@ -34,6 +36,8 @@ pub struct Risc0ShastaGuestElves {
 pub struct Sp1ShastaGuestElves {
     pub proposal: Arc<[u8]>,
     pub aggregation: Arc<[u8]>,
+    pub proposal_vk: Arc<[u8]>,
+    pub aggregation_vk: Arc<[u8]>,
 }
 
 /// Load all Shasta guest ELFs from the default fixed repository/runtime path.
@@ -107,8 +111,10 @@ pub fn load_sp1_shasta_guest_elves_from_dir(
 ) -> io::Result<Sp1ShastaGuestElves> {
     let dir = dir.as_ref();
     Ok(Sp1ShastaGuestElves {
-        proposal: read_elf(dir, SP1_SHASTA_PROPOSAL_ELF)?,
-        aggregation: read_elf(dir, SP1_SHASTA_AGGREGATION_ELF)?,
+        proposal: read_guest_file(dir, SP1_SHASTA_PROPOSAL_ELF)?,
+        aggregation: read_guest_file(dir, SP1_SHASTA_AGGREGATION_ELF)?,
+        proposal_vk: read_guest_file(dir, SP1_SHASTA_PROPOSAL_VK_BIN)?,
+        aggregation_vk: read_guest_file(dir, SP1_SHASTA_AGGREGATION_VK_BIN)?,
     })
 }
 
@@ -131,11 +137,15 @@ pub fn default_guest_elf_dir() -> io::Result<PathBuf> {
 }
 
 fn read_elf(dir: &Path, filename: &str) -> io::Result<Arc<[u8]>> {
+    read_guest_file(dir, filename)
+}
+
+fn read_guest_file(dir: &Path, filename: &str) -> io::Result<Arc<[u8]>> {
     let path = dir.join(filename);
     fs::read(&path).map(Vec::into).map_err(|err| {
         io::Error::new(
             err.kind(),
-            format!("failed to read guest ELF {}: {err}", path.display()),
+            format!("failed to read guest file {}: {err}", path.display()),
         )
     })
 }

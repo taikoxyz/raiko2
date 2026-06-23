@@ -1,5 +1,6 @@
 #[cfg(feature = "guest-tools")]
 mod bench_guest;
+mod download_guest_elves;
 #[cfg(feature = "guest-tools")]
 mod latest_proposal_request;
 #[cfg(feature = "guest-tools")]
@@ -46,6 +47,9 @@ enum Cmd {
     /// Build guest ELFs, build and push the runtime image.
     ReleaseImage(release_image::ReleaseImageArgs),
 
+    /// Download guest ELF binaries from a GitHub Release.
+    DownloadGuestElves(download_guest_elves::DownloadGuestElvesArgs),
+
     /// Export the current Shasta guest registration digests.
     #[cfg(feature = "guest-tools")]
     GuestDigests(xtask_build_guest::guest_digests::GuestDigestsArgs),
@@ -80,6 +84,7 @@ async fn main() -> Result<()> {
         #[cfg(feature = "guest-tools")]
         Cmd::LatestProposalRequest(args) => latest_proposal_request::run(&root, args).await,
         Cmd::ReleaseImage(args) => release_image::run(&root, args),
+        Cmd::DownloadGuestElves(args) => download_guest_elves::run(&root, args),
         #[cfg(feature = "guest-tools")]
         Cmd::GuestDigests(args) => xtask_build_guest::guest_digests::run(&root, args),
         #[cfg(feature = "guest-tools")]

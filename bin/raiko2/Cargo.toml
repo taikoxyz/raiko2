@@ -60,13 +60,12 @@ dotenvy = "0.15"
 
 [features]
 default = ["local-provers"]
+host = ["raiko2-prover/boundless", "raiko2-prover/sp1"]
 local-provers = [
+    "host",
     "raiko2-engine/local-provers",
     "raiko2-prover/risc0",
-    "raiko2-prover/sp1",
-    "raiko2-prover/boundless",
 ]
-host = []
 fixture-server = ["local-provers"]
 redis-queue = ["raiko2-queue/redis"]
 

@@ -149,7 +149,9 @@ fn sanitize_url_for_log(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::build_startup_summary;
-    use crate::config::{Config, GuestSystem, QueueBackend, RunnerKind};
+    use crate::config::{
+        Config, GuestSystem, QueueBackend, RunnerKind, ServerAclFeature, ServerAclKey,
+    };
     use serde_json::Value;
     use std::path::PathBuf;
 
@@ -161,7 +163,14 @@ mod tests {
         let mut config = Config::default();
         config.server.host = "127.0.0.1".to_string();
         config.server.port = 8088;
-        config.server.admin_api_key = Some("secret-admin-key".to_string());
+        config.server.acl.keys = vec![ServerAclKey {
+            id: "ops-admin".to_string(),
+            key: "secret-admin-key".to_string(),
+            allow: vec![
+                ServerAclFeature::AdminBallotRead,
+                ServerAclFeature::AdminBallotWrite,
+            ],
+        }];
         config.prover.guest_system = GuestSystem::Native;
         config.prover.runner = RunnerKind::Local;
         config.runtime.root = PathBuf::from("/tmp/raiko2-runtime");
@@ -212,7 +221,7 @@ mod tests {
 
         assert!(!summary.contains("secret-admin-key"));
         assert!(!summary.contains("signer_key"));
-        assert!(!summary.contains("admin_api_key"));
+        assert!(!summary.contains("acl"));
     }
 
     #[test]

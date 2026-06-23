@@ -32,7 +32,7 @@ use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverPro
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
-    TaskState, TaskStoreError, TaskView,
+    TaskState, TaskStoreError, TaskView, TaskViewState,
 };
 
 use crate::tasks::{EngineOutput, EngineTask};
@@ -197,7 +197,6 @@ where
     const fn default_scheduler_config() -> SchedulerConfig {
         SchedulerConfig {
             lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_secs(7_200),
             retry: RetryPolicy::None,
         }
     }
@@ -320,7 +319,7 @@ where
         let config = self.inner.scheduler.config();
         TaskExecutionPolicy {
             lease_duration: config.lease_duration,
-            retry: RetryPolicy::None,
+            retry: config.retry.clone(),
         }
     }
 
@@ -431,6 +430,23 @@ where
 
     /// # Errors
     ///
+    /// error if task store cannot fetch task state.
+    pub async fn get_task_state(
+        &self,
+        id: EngineTaskId,
+    ) -> Result<Option<TaskViewState<EngineTaskKey>>, TaskStoreError> {
+        self.inner.scheduler.get_state(id).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if task store cannot list tasks.
+    pub async fn list_tasks(&self) -> Result<Vec<TaskViewState<EngineTaskKey>>, TaskStoreError> {
+        self.inner.scheduler.list().await
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the task store cannot cancel the task.
     pub async fn cancel(&self, id: EngineTaskId) -> Result<(), TaskStoreError> {
         self.inner.scheduler.cancel(id.clone()).await?;
@@ -456,7 +472,6 @@ where
         };
 
         let payload = lease.payload.clone();
-        let task_timeout = self.inner.scheduler.config().task_timeout;
         let renew_scheduler = self.inner.scheduler.clone();
         let renew_lease = lease.clone();
         let renew_period = lease
@@ -492,13 +507,9 @@ where
             observer.on_task_started(&lease.id, &payload, worker).await;
         }
 
-        let remaining_timeout = remaining_task_timeout(lease.deadline_at_ms);
-        let result = if remaining_timeout.is_zero() {
-            Err(task_timeout_error(task_timeout))
-        } else {
-            self.execute_with_task_controls(&lease.id, &lease, payload.clone(), remaining_timeout)
-                .await
-        };
+        let result = self
+            .execute_with_task_controls(&lease.id, &lease, payload.clone())
+            .await;
         renew_task.abort();
         if let Err(err) = &result {
             tracing::warn!(worker = %worker, task = ?payload, error = %err, "engine task failed");
@@ -507,8 +518,7 @@ where
         let error = result.as_ref().err().cloned();
         let should_notify_queue_task = !matches!(payload, EngineTask::Proposal { .. })
             || error.as_deref() == Some(task_cancelled_error().as_str())
-            || error.as_deref() == Some(task_lease_lost_error().as_str())
-            || error.as_deref() == Some(task_timeout_error(task_timeout).as_str());
+            || error.as_deref() == Some(task_lease_lost_error().as_str());
         let completed_id = lease.id.clone();
         let completed = self.inner.scheduler.complete(lease, result).await?;
         if completed
@@ -601,7 +611,6 @@ where
         task_id: &EngineTaskId,
         lease: &raiko2_queue::TaskLease<EngineTask, EngineTaskKey>,
         payload: EngineTask,
-        remaining_timeout: Duration,
     ) -> Result<EngineOutput<S::GuestInput>, String> {
         let execute = self.execute(task_id, payload, &lease.worker);
         let interrupted = self.wait_lease_interruption(&lease.id, &lease.worker, lease.attempt);
@@ -610,9 +619,6 @@ where
 
         tokio::select! {
             result = &mut execute => result,
-            () = tokio::time::sleep(remaining_timeout) => {
-                Err(task_timeout_error(self.inner.scheduler.config().task_timeout))
-            }
             interruption = &mut interrupted => {
                 match interruption {
                     Ok(LeaseInterruption::Cancelled) => Err(task_cancelled_error()),
@@ -1035,37 +1041,12 @@ fn task_success_from_output<I>(output: &EngineOutput<I>) -> EngineTaskSuccess {
     }
 }
 
-fn task_timeout_error(task_timeout: Duration) -> String {
-    format!("task timed out after {}ms", task_timeout.as_millis())
-}
-
 fn task_cancelled_error() -> String {
     "task cancelled".to_string()
 }
 
 fn task_lease_lost_error() -> String {
     "task lease lost before completion".to_string()
-}
-
-fn remaining_task_timeout(deadline_at_ms: u64) -> Duration {
-    let now_ms = now_millis();
-    if deadline_at_ms <= now_ms {
-        Duration::ZERO
-    } else {
-        Duration::from_millis(deadline_at_ms - now_ms)
-    }
-}
-
-fn now_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or_default()
 }
 
 #[async_trait::async_trait]
@@ -1453,7 +1434,6 @@ mod tests {
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
         assert!(Box::pin(engine.run_one("w1")).await?);
-        assert!(!Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
@@ -1633,7 +1613,6 @@ mod tests {
     async fn retry_policy_none_fails_task_immediately() -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::None,
         };
         let engine = Engine::with_store_and_scheduler_config(
@@ -1656,11 +1635,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submitted_proposal_and_aggregate_tasks_disable_queue_retry()
+    async fn submitted_proposal_and_aggregate_tasks_use_scheduler_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(45),
-            task_timeout: Duration::from_secs(300),
             retry: RetryPolicy::Fixed {
                 max_attempts: 4,
                 delay: Duration::from_millis(25),
@@ -1669,7 +1647,7 @@ mod tests {
         let engine = boundless_test_engine(scheduler_config.clone());
         let task_policy = raiko2_queue::TaskExecutionPolicy {
             lease_duration: scheduler_config.lease_duration,
-            retry: RetryPolicy::None,
+            retry: scheduler_config.retry.clone(),
         };
         let request = proposal_request(9);
         let proposal_id = engine.submit_proposal_proof(request.clone()).await?;
@@ -1703,11 +1681,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_prove_stage_ignores_scheduler_retry_policy()
+    async fn failed_prove_stage_uses_scheduler_retry_policy()
     -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::Fixed {
                 max_attempts: 4,
                 delay: Duration::from_millis(1),
@@ -1723,47 +1700,12 @@ mod tests {
         let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
 
         assert!(Box::pin(engine.run_one("w1")).await?);
-        assert!(!Box::pin(engine.run_one("w1")).await?);
 
         let view = engine
             .get(job_id)
             .await?
             .ok_or_else(|| std::io::Error::other("expected task view"))?;
-        assert!(matches!(view.state, TaskState::Failed { .. }));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_one_applies_scheduler_task_timeout() -> Result<(), Box<dyn std::error::Error>> {
-        let scheduler_config = SchedulerConfig {
-            lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_millis(100),
-            retry: RetryPolicy::None,
-        };
-        let engine = Engine::with_store_and_scheduler_config(
-            TestSpec::new(SlowProver),
-            test_context(),
-            raiko2_queue::MemoryStore::new(),
-            scheduler_config,
-        );
-        let job_id = engine.submit_proposal_proof(proposal_request(1)).await?;
-
-        assert!(Box::pin(engine.run_one("w1")).await?);
-
-        let view = engine
-            .get(job_id)
-            .await?
-            .ok_or_else(|| std::io::Error::other("expected task view"))?;
-        match view.state {
-            TaskState::Failed { error, .. } => {
-                assert!(error.contains("task timed out after 100ms"));
-            }
-            other => {
-                return Err(
-                    std::io::Error::other(format!("unexpected task state: {other:?}")).into(),
-                );
-            }
-        }
+        assert!(matches!(view.state, TaskState::Retrying { attempt: 1, .. }));
         Ok(())
     }
 
@@ -1771,7 +1713,6 @@ mod tests {
     async fn run_one_stops_running_task_after_cancel() -> Result<(), Box<dyn std::error::Error>> {
         let scheduler_config = SchedulerConfig {
             lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_secs(30),
             retry: RetryPolicy::None,
         };
         let engine = Engine::with_store_and_scheduler_config(

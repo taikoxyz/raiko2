@@ -213,8 +213,8 @@ jobs:
           shopt -s nullglob
           case "${BACKEND}" in
             risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
-            sp1)   entries=(crates/guests/elf/sp1_*.elf) ;;
-            all)   entries=(crates/guests/elf/*.elf) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin) ;;
+            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin) ;;
           esac
           if [ "${#entries[@]}" -gt 0 ]; then
             rm -rf -- "${entries[@]}"
@@ -241,8 +241,8 @@ jobs:
           shopt -s nullglob
           case "${BACKEND}" in
             risc0) produced=(crates/guests/elf/risc0_*.elf) ;;
-            sp1)   produced=(crates/guests/elf/sp1_*.elf) ;;
-            all)   produced=(crates/guests/elf/*.elf) ;;
+            sp1)   produced=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin) ;;
+            all)   produced=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin) ;;
           esac
           if [ "${#produced[@]}" -eq 0 ]; then
             echo "::error title=Empty build::no ELFs produced for backend=${BACKEND}"
@@ -254,7 +254,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: guest-elf-sync-${{ steps.backend.outputs.value }}
-          path: crates/guests/elf/*.elf
+          path: |
+            crates/guests/elf/*.elf
+            crates/guests/elf/*.vk.bin
           if-no-files-found: error
           retention-days: 7
 
@@ -333,8 +335,8 @@ jobs:
           shopt -s nullglob
           case "${BACKEND}" in
             risc0) entries=(crates/guests/elf/risc0_*.elf) ;;
-            sp1)   entries=(crates/guests/elf/sp1_*.elf) ;;
-            all)   entries=(crates/guests/elf/*.elf) ;;
+            sp1)   entries=(crates/guests/elf/sp1_*.elf crates/guests/elf/sp1_*.vk.bin) ;;
+            all)   entries=(crates/guests/elf/*.elf crates/guests/elf/*.vk.bin) ;;
           esac
           if [ "${#entries[@]}" -gt 0 ]; then
             rm -rf -- "${entries[@]}"

@@ -521,7 +521,6 @@ pub(crate) fn base_config() -> Config {
 const fn memory_scheduler_config() -> SchedulerConfig {
     SchedulerConfig {
         lease_duration: Duration::from_secs(60),
-        task_timeout: Duration::from_secs(60),
         retry: RetryPolicy::None,
     }
 }
@@ -556,13 +555,16 @@ where
 fn native_fixture_engine_with_observer(
     observer: Option<Arc<dyn EngineObserver>>,
 ) -> NativeFixtureEngine {
+    native_fixture_engine_for_pipeline(PipelineKey::ShastaNative, observer)
+}
+
+#[cfg(test)]
+pub(crate) fn native_fixture_engine_for_pipeline(
+    pipeline_key: PipelineKey,
+    observer: Option<Arc<dyn EngineObserver>>,
+) -> NativeFixtureEngine {
     let provider = FixtureProvider::from_repo_shared_fixture();
-    let spec = FixtureSpec::new(
-        PipelineKey::ShastaNative,
-        NativeProver,
-        NativeBackend,
-        provider,
-    );
+    let spec = FixtureSpec::new(pipeline_key, NativeProver, NativeBackend, provider);
     let ctx = ProofContext::new(
         ProofRequest {
             l1_chain_id: 1,
@@ -578,11 +580,6 @@ fn native_fixture_engine_with_observer(
         raiko2_primitives::ProverConfig::default(),
     );
     build_engine_with_observer(spec, ctx, observer)
-}
-
-#[cfg(test)]
-pub(crate) fn native_fixture_engine() -> NativeFixtureEngine {
-    native_fixture_engine_with_observer(None)
 }
 
 #[cfg(test)]

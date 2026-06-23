@@ -16,11 +16,11 @@ const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
 pub(crate) enum ImageBackend {
     /// Host-only runtime image. Guest ELF refresh is opt-in.
     Host,
-    /// Runtime image with RISC0 guest ELF release refresh.
+    /// Runtime image backend label. Guest ELF refresh defaults to RISC0.
     Risc0,
-    /// Runtime image with SP1 guest ELF release refresh.
+    /// Runtime image backend label. Guest ELF refresh defaults to SP1.
     Sp1,
-    /// Runtime image with all guest ELF release refreshes.
+    /// Runtime image backend label. Guest ELF refresh defaults to all guests.
     All,
 }
 
@@ -48,7 +48,7 @@ pub(crate) struct ReleaseImageArgs {
     #[arg(long, default_value_t = false)]
     pub(crate) skip_guest_refresh: bool,
 
-    /// For backend=host, optionally refresh checked-in guest ELFs before building the host image.
+    /// Optionally refresh checked-in guest ELFs before building the image.
     #[arg(long, value_enum)]
     pub(crate) refresh_guest_elves: Option<GuestBackend>,
 }
@@ -97,7 +97,7 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
     } else if args.skip_guest_refresh {
         println!("[INFO] Guest ELF refresh skipped by --skip-guest-refresh");
     } else {
-        println!("[INFO] Guest ELF refresh skipped for backend=host");
+        println!("[INFO] Guest ELF refresh skipped; use --refresh-guest-elves to opt in");
     }
 
     println!(
@@ -171,29 +171,39 @@ fn resolve_guest_refresh_backend(
         bail!("--skip-guest-refresh cannot be combined with --refresh-guest-elves");
     }
 
-    match image_backend {
-        ImageBackend::Host => {
-            if force_rebuild_guests && refresh_guest_elves.is_none() {
-                bail!("--force-rebuild-guests requires --refresh-guest-elves for backend=host");
+    if skip_guest_refresh {
+        return Ok(None);
+    }
+
+    if let Some(refresh_backend) = refresh_guest_elves {
+        let refresh_matches_image = match image_backend {
+            ImageBackend::Host => true,
+            ImageBackend::Risc0 => {
+                matches!(refresh_backend, GuestBackend::Risc0 | GuestBackend::All)
             }
-            Ok(refresh_guest_elves)
-        }
-        ImageBackend::Risc0 | ImageBackend::Sp1 | ImageBackend::All => {
-            if refresh_guest_elves.is_some() {
-                bail!("--refresh-guest-elves is only supported for backend=host");
-            }
-            if skip_guest_refresh {
-                Ok(None)
-            } else {
-                Ok(Some(match image_backend {
-                    ImageBackend::Risc0 => GuestBackend::Risc0,
-                    ImageBackend::Sp1 => GuestBackend::Sp1,
-                    ImageBackend::All => GuestBackend::All,
-                    ImageBackend::Host => unreachable!("host handled above"),
-                }))
-            }
+            ImageBackend::Sp1 => matches!(refresh_backend, GuestBackend::Sp1 | GuestBackend::All),
+            ImageBackend::All => matches!(refresh_backend, GuestBackend::All),
+        };
+        if !refresh_matches_image {
+            bail!(
+                "--refresh-guest-elves {} cannot be used with --backend {}",
+                guest_backend_name(refresh_backend),
+                image_backend_name(image_backend)
+            );
         }
     }
+
+    let default_refresh = match image_backend {
+        ImageBackend::Host => None,
+        ImageBackend::Risc0 => Some(GuestBackend::Risc0),
+        ImageBackend::Sp1 => Some(GuestBackend::Sp1),
+        ImageBackend::All => Some(GuestBackend::All),
+    };
+    let selected = refresh_guest_elves.or(default_refresh);
+    if force_rebuild_guests && selected.is_none() {
+        bail!("--force-rebuild-guests requires --refresh-guest-elves");
+    }
+    Ok(selected)
 }
 
 #[cfg(feature = "guest-tools")]
@@ -423,25 +433,54 @@ mod tests {
     }
 
     #[test]
-    fn host_image_rejects_force_rebuild_without_refresh_backend() {
+    fn image_release_rejects_force_rebuild_without_refresh_backend() {
         let err = resolve_guest_refresh_backend(ImageBackend::Host, true, false, None)
             .expect_err("force rebuild needs a selected guest backend");
 
         assert!(
             err.to_string()
-                .contains("--force-rebuild-guests requires --refresh-guest-elves for backend=host")
+                .contains("--force-rebuild-guests requires --refresh-guest-elves")
         );
     }
 
     #[test]
-    fn non_host_image_rejects_explicit_refresh_backend() {
-        let err =
+    fn non_host_image_refreshes_matching_guest_elves_by_default() {
+        let refresh = resolve_guest_refresh_backend(ImageBackend::All, false, false, None)
+            .expect("runtime image should refresh guests by default");
+
+        assert_eq!(refresh, Some(GuestBackend::All));
+    }
+
+    #[test]
+    fn non_host_image_can_explicitly_skip_guest_refresh() {
+        let refresh = resolve_guest_refresh_backend(ImageBackend::All, false, true, None)
+            .expect("runtime image should allow explicit guest refresh skip");
+
+        assert_eq!(refresh, None);
+    }
+
+    #[test]
+    fn non_host_image_can_refresh_selected_guest_elves() {
+        let refresh =
             resolve_guest_refresh_backend(ImageBackend::All, false, false, Some(GuestBackend::All))
-                .expect_err("non-host backend owns its guest refresh backend already");
+                .expect("runtime image can opt in to explicit guest refresh");
+
+        assert_eq!(refresh, Some(GuestBackend::All));
+    }
+
+    #[test]
+    fn non_host_image_rejects_conflicting_guest_refresh_backend() {
+        let err = resolve_guest_refresh_backend(
+            ImageBackend::Risc0,
+            false,
+            false,
+            Some(GuestBackend::Sp1),
+        )
+        .expect_err("runtime image should reject mismatched guest refresh");
 
         assert!(
             err.to_string()
-                .contains("--refresh-guest-elves is only supported for backend=host")
+                .contains("--refresh-guest-elves sp1 cannot be used with --backend risc0")
         );
     }
 

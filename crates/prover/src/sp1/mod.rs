@@ -19,8 +19,8 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
 use serde::Deserialize;
 use sp1_sdk::{
-    HashableKey, NetworkProver, ProveRequest as _, Prover as _, ProvingKey as _, SP1Proof,
-    SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
+    HashableKey, NetworkProver, ProveRequest as _, Prover as _, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1VerifyingKey,
     blocking::{
         CpuProver as BlockingCpuProver, MockProver as BlockingMockProver, ProveRequest as _,
         Prover as BlockingProver, ProverClient as BlockingProverClient,
@@ -229,14 +229,13 @@ impl Sp1Prover {
         }
 
         let elf = backend.elf(stage)?;
-        let client = BlockingProverClient::builder().cpu().build();
-        let pk = client.setup(elf.into()).map_err(|err| {
+        let vk: SP1VerifyingKey = bincode::deserialize(backend.sp1_vk(stage)?).map_err(|err| {
             RaikoError::Guest(format!(
-                "Failed to initialize SP1 {} setup: {err}",
+                "Failed to load SP1 {} verifying key: {err}",
                 sp1_stage_name(stage)
             ))
         })?;
-        let vk = pk.verifying_key().clone();
+        let pk = SP1ProvingKey::new(vk.clone(), elf.into());
         let setup = Arc::new(Sp1ProgramSetup { pk, vk });
 
         match cell.set(Arc::clone(&setup)) {
@@ -244,7 +243,7 @@ impl Sp1Prover {
                 tracing::info!(
                     stage = sp1_stage_name(stage),
                     vkey_hash = %sp1_vk_digest(&setup.vk),
-                    "Initialized SP1 program setup"
+                    "Loaded SP1 program setup"
                 );
                 Ok(setup)
             }
@@ -252,13 +251,15 @@ impl Sp1Prover {
         }
     }
 
-    fn cached_setup_for_stage(&self, stage: ProofStage) -> RaikoResult<Arc<Sp1ProgramSetup>> {
-        self.setup_cache.cell(stage).get().cloned().ok_or_else(|| {
-            RaikoError::InvalidRequestConfig(format!(
-                "SP1 {} setup is not initialized; call Sp1Prover::preload_setup before proving",
-                sp1_stage_name(stage)
-            ))
-        })
+    fn setup_for_stage<B>(
+        &self,
+        backend: &B,
+        stage: ProofStage,
+    ) -> RaikoResult<Arc<Sp1ProgramSetup>>
+    where
+        B: ProverBackend,
+    {
+        self.preload_setup_for_stage(backend, stage)
     }
 }
 
@@ -347,7 +348,7 @@ where
             }
             ExecutionMode::Prove => {
                 let proof_mode: SP1ProofMode = effective_config.recursion.into();
-                let setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
+                let setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
                 match effective_config.prover {
                     ProverMode::Mock | ProverMode::Local => {
                         prove_proposal_with_local_client(
@@ -383,7 +384,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        _backend: &B,
+        backend: &B,
     ) -> RaikoResult<Proof> {
         let effective_config =
             self.resolve_config_for_request(config, Sp1RequestContext::Aggregation)?;
@@ -396,8 +397,8 @@ where
 
         // Get the proposal prover's verifying key for proof verification.
         // The proposal proofs were generated with the proposal ELF.
-        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
-        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
+        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
+        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
@@ -436,7 +437,7 @@ where
         &self,
         input: AggregationGuestInput,
         config: &ProverConfig,
-        _backend: &B,
+        backend: &B,
         observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let effective_config =
@@ -447,8 +448,8 @@ where
         );
 
         let aggregation_input = build_shasta_aggregation_input(&input.proofs)?;
-        let proposal_setup = self.cached_setup_for_stage(ProofStage::Proposal)?;
-        let aggregation_setup = self.cached_setup_for_stage(ProofStage::Aggregation)?;
+        let proposal_setup = self.setup_for_stage(backend, ProofStage::Proposal)?;
+        let aggregation_setup = self.setup_for_stage(backend, ProofStage::Aggregation)?;
         let proof_mode: SP1ProofMode = effective_config.recursion.into();
 
         match effective_config.prover {
@@ -1359,14 +1360,23 @@ mod tests {
     }
 
     #[test]
-    fn sp1_setup_cache_requires_preload_before_use() {
+    fn sp1_new_does_not_preload_setup_cache() {
         let prover = super::Sp1Prover::new(super::Sp1Config::default());
 
-        let Err(err) = prover.cached_setup_for_stage(ProofStage::Proposal) else {
-            panic!("setup should not be initialized");
-        };
-
-        assert!(err.to_string().contains("setup is not initialized"));
+        assert!(
+            prover
+                .setup_cache
+                .cell(ProofStage::Proposal)
+                .get()
+                .is_none()
+        );
+        assert!(
+            prover
+                .setup_cache
+                .cell(ProofStage::Aggregation)
+                .get()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1375,11 +1385,19 @@ mod tests {
         let prover = super::Sp1Prover::new_with_backend(super::Sp1Config::default(), &backend)
             .expect("preload SP1 setup");
 
-        assert!(prover.cached_setup_for_stage(ProofStage::Proposal).is_ok());
         assert!(
             prover
-                .cached_setup_for_stage(ProofStage::Aggregation)
-                .is_ok()
+                .setup_cache
+                .cell(ProofStage::Proposal)
+                .get()
+                .is_some()
+        );
+        assert!(
+            prover
+                .setup_cache
+                .cell(ProofStage::Aggregation)
+                .get()
+                .is_some()
         );
     }
 

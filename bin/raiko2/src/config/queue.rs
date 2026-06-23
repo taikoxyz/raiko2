@@ -9,10 +9,6 @@ const fn default_queue_maintenance_interval_ms() -> u64 {
     200
 }
 
-const fn default_queue_task_timeout_secs() -> u64 {
-    14_400
-}
-
 /// Queue backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -48,8 +44,6 @@ pub struct QueueConfig {
     pub workers: usize,
     #[serde(default = "default_queue_maintenance_interval_ms")]
     pub maintenance_interval_ms: u64,
-    #[serde(default = "default_queue_task_timeout_secs")]
-    pub task_timeout_secs: u64,
 }
 
 const fn default_queue_workers() -> usize {
@@ -64,7 +58,6 @@ impl Default for QueueConfig {
             redis_url: None,
             workers: default_queue_workers(),
             maintenance_interval_ms: default_queue_maintenance_interval_ms(),
-            task_timeout_secs: default_queue_task_timeout_secs(),
         }
     }
 }
@@ -79,10 +72,6 @@ impl QueueConfig {
             bail!("Queue maintenance_interval_ms must be > 0");
         }
 
-        if self.task_timeout_secs == 0 {
-            bail!("Queue task_timeout_secs must be > 0");
-        }
-
         match self.backend {
             QueueBackend::Memory => Ok(()),
             QueueBackend::Redis => {
@@ -95,22 +84,5 @@ impl QueueConfig {
                 Ok(())
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::QueueConfig;
-
-    #[test]
-    fn queue_rejects_zero_task_timeout() {
-        let mut config = QueueConfig::default();
-        config.task_timeout_secs = 0;
-
-        let err = config.validate().expect_err("zero task timeout must fail");
-        assert!(
-            err.to_string().contains("task_timeout_secs"),
-            "unexpected error: {err}"
-        );
     }
 }

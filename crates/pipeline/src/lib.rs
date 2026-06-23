@@ -456,6 +456,15 @@ pub trait ProverBackend: Send + Sync {
     ///
     /// Returns an error if the backend cannot provide an ELF for the requested stage.
     fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]>;
+
+    /// # Errors
+    ///
+    /// Returns an error if the backend cannot provide SP1 verifying key bytes.
+    fn sp1_vk(&self, _stage: ProofStage) -> RaikoResult<&[u8]> {
+        Err(RaikoError::InvalidRequestConfig(
+            "backend does not provide SP1 verifying key".to_string(),
+        ))
+    }
 }
 
 /// Native backend placeholder (no ELF).
@@ -525,23 +534,35 @@ impl ProverBackend for Risc0ShastaBackend {
 #[derive(Debug, Clone)]
 pub struct Sp1ShastaBackend {
     elf_backend: ShastaElfBackend,
+    proposal_vk: Arc<[u8]>,
+    aggregation_vk: Arc<[u8]>,
 }
 
 impl Sp1ShastaBackend {
     #[must_use]
-    pub const fn new(proposal_elf: Arc<[u8]>, aggregation_elf: Arc<[u8]>) -> Self {
+    pub const fn new(
+        proposal_elf: Arc<[u8]>,
+        aggregation_elf: Arc<[u8]>,
+        proposal_vk: Arc<[u8]>,
+        aggregation_vk: Arc<[u8]>,
+    ) -> Self {
         Self {
             elf_backend: ShastaElfBackend::new(proposal_elf, aggregation_elf),
+            proposal_vk,
+            aggregation_vk,
         }
-    }
-
-    pub(crate) const fn from_elf_backend(elf_backend: ShastaElfBackend) -> Self {
-        Self { elf_backend }
     }
 }
 
 impl ProverBackend for Sp1ShastaBackend {
     fn elf(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
         self.elf_backend.elf(stage)
+    }
+
+    fn sp1_vk(&self, stage: ProofStage) -> RaikoResult<&[u8]> {
+        Ok(match stage {
+            ProofStage::Proposal => self.proposal_vk.as_ref(),
+            ProofStage::Aggregation => self.aggregation_vk.as_ref(),
+        })
     }
 }

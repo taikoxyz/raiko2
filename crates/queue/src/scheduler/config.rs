@@ -12,7 +12,6 @@ pub struct TaskExecutionPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SchedulerConfig {
     pub lease_duration: Duration,
-    pub task_timeout: Duration,
     pub retry: RetryPolicy,
 }
 
@@ -30,7 +29,6 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             lease_duration: Duration::from_secs(60),
-            task_timeout: Duration::from_secs(60),
             retry: RetryPolicy::None,
         }
     }

@@ -80,22 +80,22 @@ raiko2-guests = { path = "./crates/guests" }
 raiko2-sgx-runtime = { path = "./crates/sgx-runtime" }
 
 # Taiko client protocol
-taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "ffce7c8aea3867d3dbd52a7da50d776daa5774e2", default-features = false }
+taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", package = "protocol", rev = "ff002a4516b489c7146675f7036d699b07a7f785", default-features = false }
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
-sp1-sdk = { version = "=6.1.0", features = ["blocking", "network"] }
+sp1-sdk = { version = "=6.3.0", features = ["blocking", "network"] }
 
 # Alethia reth
-alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "1ed7c19d1f9652c5fed96185f4ab8f930e812dd3", default-features = false, features = [
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false, features = [
     "prover",
     "serde",
 ] }
-alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "1ed7c19d1f9652c5fed96185f4ab8f930e812dd3", default-features = false }
-alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "1ed7c19d1f9652c5fed96185f4ab8f930e812dd3", default-features = false, features = [
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false }
+alethia-reth-consensus = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false, features = [
     "full",
 ] }
-alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "1ed7c19d1f9652c5fed96185f4ab8f930e812dd3", default-features = false }
+alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false }
 
 # Reth (aligned with the current taiko-mono and alethia-reth compatibility surface)
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f", default-features = false, features = [
@@ -213,7 +213,7 @@ itertools = "0.14"
 revm = { version = "38.0.0", default-features = false }
 risc0-ethereum-trie = { git = "https://github.com/risc0/risc0-ethereum.git", tag = "v3.0.1" }
 risc0-ethereum-contracts-boundless = { package = "risc0-ethereum-contracts", version = "=3.0.1" }
-boundless-market = { version = "=2.0.0" }
+boundless-market = { version = "=2.0.0", features = ["gcs"] }
 
 # kzg
 c-kzg = { version = "2.1.7", default-features = false, features = [

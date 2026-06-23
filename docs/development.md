@@ -149,6 +149,17 @@ the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary f
 differs from the source tree. `build-guest` does not register verifier trust-list entries or
 update any external program registry.
 
+For unreleased testing, use `build-guest` so ELFs match the current checkout. Download guest ELFs from
+a GitHub Release when you need released artifacts without rebuilding:
+
+```bash
+cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf
+```
+
+When testing v0.1.0 release guest ELFs with a newer host, set
+`prover.guest_input_abi = "v0_1_0"` in the host config. Leave it as `current`
+for locally built or current release ELFs.
+
 Prerequisites:
 
 - `docker`

@@ -126,6 +126,12 @@ pub(crate) struct ApiOk<T> {
 }
 
 #[derive(Serialize)]
+pub(crate) struct ApiData<T> {
+    pub(crate) status: &'static str,
+    pub(crate) data: T,
+}
+
+#[derive(Serialize)]
 pub(crate) struct LegacyProofEnvelope {
     pub(crate) status: &'static str,
     pub(crate) proof_type: String,
@@ -255,9 +261,13 @@ pub(crate) struct TaskRuntime {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) submitted_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_multiplier: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,6 +283,65 @@ pub(crate) struct TaskRuntime {
 #[derive(Serialize)]
 pub(crate) struct PruneStatus {
     pub(crate) status: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ClearProverStatus {
+    pub(crate) status: &'static str,
+    pub(crate) cancelled: usize,
+    pub(crate) skipped: ProverSkippedStatusCounts,
+    pub(crate) failed: usize,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ProverStatus {
+    pub(crate) clean: bool,
+    pub(crate) tasks: ProverTaskStatusCounts,
+    pub(crate) network: ProverNetworkStatus,
+    pub(crate) skipped: ProverSkippedStatusCounts,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ProverSkippedStatusCounts {
+    pub(crate) invalid_metadata: usize,
+    pub(crate) unavailable_pipeline: usize,
+}
+
+impl ProverSkippedStatusCounts {
+    pub(crate) const fn is_clean(&self) -> bool {
+        self.invalid_metadata == 0 && self.unavailable_pipeline == 0
+    }
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ProverTaskStatusCounts {
+    pub(crate) pending: usize,
+    pub(crate) ready: usize,
+    pub(crate) retrying: usize,
+    pub(crate) running: usize,
+}
+
+impl ProverTaskStatusCounts {
+    pub(crate) const fn is_clean(&self) -> bool {
+        self.pending == 0 && self.ready == 0 && self.retrying == 0 && self.running == 0
+    }
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ProverNetworkStatus {
+    pub(crate) sp1: ProverNetworkBackendStatus,
+    pub(crate) risc0: ProverNetworkBackendStatus,
+}
+
+impl ProverNetworkStatus {
+    pub(crate) const fn is_clean(&self) -> bool {
+        self.sp1.inflight_orders == 0 && self.risc0.inflight_orders == 0
+    }
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct ProverNetworkBackendStatus {
+    pub(crate) inflight_orders: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,7 +364,11 @@ pub(super) struct RootTaskState {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchProofType, BatchShastaRequest};
+    use super::{
+        ApiData, BatchProofType, BatchShastaRequest, ClearProverStatus, ProverNetworkBackendStatus,
+        ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus, ProverTaskStatusCounts,
+        PruneStatus,
+    };
 
     #[test]
     fn shasta_batch_request_accepts_sgxgeth_json_variant() {
@@ -319,5 +392,56 @@ mod tests {
     #[test]
     fn native_is_accepted_for_internal_batch_requests() {
         assert!(BatchProofType::Native.is_public_batch_request_type());
+    }
+
+    #[test]
+    fn prover_api_shapes_match_issue_93() {
+        let status = serde_json::to_value(ApiData {
+            status: "ok",
+            data: ProverStatus {
+                clean: false,
+                tasks: ProverTaskStatusCounts {
+                    pending: 0,
+                    ready: 2,
+                    retrying: 1,
+                    running: 6,
+                },
+                network: ProverNetworkStatus {
+                    sp1: ProverNetworkBackendStatus { inflight_orders: 3 },
+                    risc0: ProverNetworkBackendStatus { inflight_orders: 0 },
+                },
+                skipped: ProverSkippedStatusCounts::default(),
+            },
+        })
+        .expect("serialize status");
+        assert_eq!(status["status"], "ok");
+        assert_eq!(status["data"]["tasks"]["ready"], 2);
+        assert_eq!(status["data"]["network"]["sp1"]["inflight_orders"], 3);
+
+        let clear = serde_json::to_value(ClearProverStatus {
+            status: "ok",
+            cancelled: 2,
+            skipped: ProverSkippedStatusCounts {
+                invalid_metadata: 1,
+                unavailable_pipeline: 3,
+            },
+            failed: 4,
+        })
+        .expect("serialize clear");
+        assert_eq!(
+            clear,
+            serde_json::json!({
+                "status": "ok",
+                "cancelled": 2,
+                "skipped": {
+                    "invalid_metadata": 1,
+                    "unavailable_pipeline": 3
+                },
+                "failed": 4
+            })
+        );
+
+        let prune = serde_json::to_value(PruneStatus { status: "ok" }).expect("serialize prune");
+        assert_eq!(prune, serde_json::json!({ "status": "ok" }));
     }
 }

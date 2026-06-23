@@ -6,6 +6,6 @@ mod proof_route;
 mod proof_types;
 
 pub use proof_api::{
-    cancel_task, get_task, list_proofs, prune_proofs, report_proofs, request_aggregation_proof,
-    request_batch_shasta_proof,
+    cancel_task, clear_prover, get_prover_status, get_task, list_proofs, prune_proofs,
+    report_proofs, request_aggregation_proof, request_batch_shasta_proof,
 };

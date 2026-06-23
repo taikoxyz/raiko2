@@ -83,5 +83,10 @@ pub fn risc0_boundless_shasta_backend_from_elves(
 
 #[must_use]
 pub fn sp1_shasta_backend_from_elves(elves: Sp1ShastaGuestElves) -> Sp1ShastaBackend {
-    Sp1ShastaBackend::from_elf_backend(ShastaElfBackend::new(elves.proposal, elves.aggregation))
+    Sp1ShastaBackend::new(
+        elves.proposal,
+        elves.aggregation,
+        elves.proposal_vk,
+        elves.aggregation_vk,
+    )
 }

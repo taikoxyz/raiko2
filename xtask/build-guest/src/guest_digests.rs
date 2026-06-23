@@ -11,15 +11,16 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{
-    HashableKey, ProvingKey as _,
-    blocking::{Prover as _, ProverClient},
-};
+use sp1_sdk::{HashableKey, SP1VerifyingKey};
 
 use crate::util;
 
 #[derive(Args)]
 pub struct GuestDigestsArgs {
+    /// Guest ELF directory to inspect. Defaults to crates/guests/elf under the repository root.
+    #[arg(long)]
+    pub guest_elf_dir: Option<PathBuf>,
+
     /// Output path for the JSON summary.
     #[arg(long)]
     pub output: Option<PathBuf>,
@@ -64,7 +65,7 @@ pub struct GuestDigestSummary {
 }
 
 pub fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
-    let summary = collect_guest_digests(root)?;
+    let summary = collect_guest_digests_with_dir(root, args.guest_elf_dir.as_deref())?;
     let output_path = resolve_output_path(root, args.output.as_deref())?;
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)
@@ -76,7 +77,16 @@ pub fn run(root: &Path, args: GuestDigestsArgs) -> Result<()> {
 }
 
 pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
-    let elf_dir = root.join(DEFAULT_GUEST_ELF_DIR);
+    collect_guest_digests_with_dir(root, None)
+}
+
+pub fn collect_guest_digests_with_dir(
+    root: &Path,
+    guest_elf_dir: Option<&Path>,
+) -> Result<GuestDigestSummary> {
+    let elf_dir = guest_elf_dir
+        .map(|path| resolve_input_path(root, path))
+        .unwrap_or_else(|| root.join(DEFAULT_GUEST_ELF_DIR));
     let risc0_elves = load_risc0_shasta_guest_elves_from_dir(&elf_dir)
         .with_context(|| format!("failed to load RISC0 guest ELFs from {}", elf_dir.display()))?;
     let sp1_elves = load_sp1_shasta_guest_elves_from_dir(&elf_dir)
@@ -89,9 +99,19 @@ pub fn collect_guest_digests(root: &Path) -> Result<GuestDigestSummary> {
 
     Ok(GuestDigestSummary {
         created_at_unix: unix_timestamp(),
-        guest_elf_dir: DEFAULT_GUEST_ELF_DIR.to_string(),
+        guest_elf_dir: guest_elf_dir
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| DEFAULT_GUEST_ELF_DIR.to_string()),
         digests,
     })
+}
+
+fn resolve_input_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
 }
 
 fn resolve_output_path(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
@@ -124,15 +144,10 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
 }
 
 fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
-    let client = ProverClient::builder().cpu().build();
-    let proposal_pk = client
-        .setup(elves.proposal.as_ref().into())
-        .context("failed to setup SP1 proposal ELF")?;
-    let aggregation_pk = client
-        .setup(elves.aggregation.as_ref().into())
-        .context("failed to setup SP1 aggregation ELF")?;
-    let proposal_vk = proposal_pk.verifying_key();
-    let aggregation_vk = aggregation_pk.verifying_key();
+    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
+        .context("failed to load SP1 proposal VK")?;
+    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
+        .context("failed to load SP1 aggregation VK")?;
 
     Ok(vec![
         sp1_digest_entry(
@@ -209,6 +224,7 @@ fn b256_hex(value: B256) -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use raiko2_guests::DEFAULT_GUEST_ELF_DIR;
 
@@ -260,6 +276,19 @@ mod tests {
     }
 
     #[test]
+    fn relative_guest_elf_dir_resolves_from_repo_root() {
+        let root = PathBuf::from("/repo/root");
+        assert_eq!(
+            super::resolve_input_path(&root, Path::new("crates/guests/elf")),
+            root.join("crates/guests/elf")
+        );
+        assert_eq!(
+            super::resolve_input_path(&root, Path::new("/tmp/guest-elf")),
+            PathBuf::from("/tmp/guest-elf")
+        );
+    }
+
+    #[test]
     fn guest_digests_run_writes_json_summary() {
         let root = crate::repo_root();
         let output = crate::util::target_root(&root)
@@ -275,6 +304,7 @@ mod tests {
         super::run(
             &root,
             super::GuestDigestsArgs {
+                guest_elf_dir: None,
                 output: Some(output.clone()),
             },
         )

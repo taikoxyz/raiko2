@@ -14,4 +14,3 @@ regression.log
 test/regression/**/*.log
 scripts/regression/*.log
 docker/var/
-.codex-fable5

@@ -500,3 +500,74 @@ async fn redis_store_resubmitting_cancelled_task_clears_stale_running_member()
     assert_eq!(running_count, 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn redis_store_list_uses_task_index_and_removes_deleted_tasks()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !docker_available() {
+        eprintln!("skipping redis store test: docker unavailable");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("redis", "7-alpine")
+        .with_exposed_port(6379.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+        .start()
+        .await?;
+    let port = container.get_host_port_ipv4(6379).await?;
+    let url = format!("redis://127.0.0.1:{port}/");
+    let namespace = format!(
+        "test-list-index-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+
+    let store =
+        RedisStore::<String, String, u64>::connect(&url, &namespace, Duration::from_secs(30))
+            .await?;
+    let sched: Scheduler<String, String, u64> = Scheduler::new(store);
+    let first = TaskId::new(1);
+    let second = TaskId::new(2);
+
+    sched
+        .submit(
+            first.clone(),
+            NewTask {
+                priority: Priority::Medium,
+                payload: "first".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+    sched
+        .submit(
+            second.clone(),
+            NewTask {
+                priority: Priority::Low,
+                payload: "second".to_string(),
+            },
+            vec![],
+        )
+        .await?;
+
+    let mut listed = sched
+        .list()
+        .await?
+        .into_iter()
+        .map(|view| view.id)
+        .collect::<Vec<_>>();
+    listed.sort_by_key(|id| id.0);
+    assert_eq!(listed, vec![first.clone(), second.clone()]);
+
+    sched.remove(first.clone()).await?;
+    let listed_after_remove = sched
+        .list()
+        .await?
+        .into_iter()
+        .map(|view| view.id)
+        .collect::<Vec<_>>();
+    assert_eq!(listed_after_remove, vec![second]);
+
+    Ok(())
+}

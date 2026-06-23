@@ -410,7 +410,7 @@ jobs:
           if [ -n "${status_output}" ]; then
             printf '%s\n' "${status_output}"
             git diff --stat -- crates/guests/elf
-            echo "::error title=Guest ELF drift detected::Checked-in guest ELFs differ from a clean rebuild. Run the sync-guest-elf workflow for this branch and commit the resulting ELF update."
+            echo "::error title=Guest ELF drift detected::Checked-in guest artifacts differ from a clean rebuild. Run \`just build-guest all\` locally and commit the updated crates/guests/elf artifacts."
             exit 1
           fi
 

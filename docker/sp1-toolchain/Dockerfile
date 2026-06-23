@@ -2,8 +2,8 @@
 ARG RUST_VERSION=1.94.0
 
 # Keep in sync with the sp1-zkvm version in guests/sp1/Cargo.lock.
-# For example, sp1-zkvm 6.1.0 in Cargo.lock corresponds to Docker tag v6.1.0 here.
-ARG SP1_DOCKER_TAG=v6.1.0
+# For example, sp1-zkvm 6.3.0 in Cargo.lock corresponds to Docker tag v6.3.0 here.
+ARG SP1_DOCKER_TAG=v6.3.0
 FROM ghcr.io/succinctlabs/sp1:${SP1_DOCKER_TAG}
 
 ENV DEBIAN_FRONTEND=noninteractive

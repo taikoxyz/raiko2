@@ -84,7 +84,7 @@ taiko-client-protocol = { git = "https://github.com/taikoxyz/taiko-mono", packag
 
 # zkVM
 risc0-zkvm = { version = "=3.0.5", features = ["prove"] }
-sp1-sdk = { version = "=6.1.0", features = ["blocking", "network"] }
+sp1-sdk = { version = "=6.3.0", features = ["blocking", "network"] }
 
 # Alethia reth
 alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false, features = [

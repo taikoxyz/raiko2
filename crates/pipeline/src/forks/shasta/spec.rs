@@ -1359,8 +1359,13 @@ mod tests {
     use super::{
         AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call,
     };
+    use alethia_reth_chainspec::{
+        TAIKO_MAINNET,
+        hardfork::{TaikoHardfork as AlethiaTaikoHardfork, TaikoHardforks as _},
+    };
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
     use alloy_eips::eip4844::BYTES_PER_BLOB;
+    use alloy_hardforks::ForkCondition as AlethiaForkCondition;
     use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
@@ -1602,6 +1607,13 @@ mod tests {
         ProofContext::new(request, ProverConfig::default())
     }
 
+    fn alethia_mainnet_shasta_timestamp() -> u64 {
+        match TAIKO_MAINNET.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
+            AlethiaForkCondition::Timestamp(timestamp) => timestamp,
+            condition => panic!("expected mainnet Shasta timestamp fork, got {condition:?}"),
+        }
+    }
+
     #[test]
     fn chain_spec_from_context_defaults_to_current_guest_input_abi() {
         let mut ctx = sample_context(42, 11, 9);
@@ -1610,7 +1622,7 @@ mod tests {
 
         assert_ne!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(1_775_393_399))
+            Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
         );
         assert!(
             spec.verifier_address_forks
@@ -1629,7 +1641,7 @@ mod tests {
 
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(1_775_393_399))
+            Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
         );
         assert!(
             spec.verifier_address_forks

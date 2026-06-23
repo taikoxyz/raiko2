@@ -36,6 +36,8 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+alethia-reth-chainspec.workspace = true
 alloy-eips.workspace = true
+alloy-hardforks.workspace = true
 alloy-trie.workspace = true
 alloy-primitives.workspace = true

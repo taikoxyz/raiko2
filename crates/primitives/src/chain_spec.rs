@@ -504,6 +504,13 @@ fn canonical_chain_spec(name: &str) -> Option<CanonicalChainSpec> {
     }
 }
 
+fn canonical_taiko_fork_condition(name: &str, fork: TaikoFork) -> Option<ForkCondition> {
+    canonical_chain_spec(name)?
+        .hard_forks
+        .get(&ForkId::Taiko(fork))
+        .cloned()
+}
+
 fn canonical_l1_chain_spec(spec: &RethChainSpec) -> CanonicalChainSpec {
     let hard_forks = ETHEREUM_EXECUTION_FORKS
         .iter()
@@ -654,7 +661,7 @@ fn v0_1_0_guest_input_hard_forks(name: &str) -> Option<(SpecId, BTreeMap<ForkId,
         ]),
         "taiko_mainnet" => BTreeMap::from([(
             ForkId::Taiko(TaikoFork::Shasta),
-            ForkCondition::Timestamp(1_775_135_700),
+            canonical_taiko_fork_condition("taiko_mainnet", TaikoFork::Shasta)?,
         )]),
         "taiko_dev" => BTreeMap::from([
             (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Timestamp(0)),
@@ -1184,8 +1191,16 @@ mod tests {
     };
     use alloy_primitives::address;
 
-    const MAINNET_SHASTA_TIMESTAMP: u64 = 1_775_135_700;
     const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
+
+    fn mainnet_shasta_timestamp() -> u64 {
+        match canonical_taiko_fork_condition("taiko_mainnet", TaikoFork::Shasta)
+            .expect("taiko mainnet Shasta fork")
+        {
+            ForkCondition::Timestamp(timestamp) => timestamp,
+            condition => panic!("expected mainnet Shasta timestamp fork, got {condition:?}"),
+        }
+    }
 
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
@@ -1298,7 +1313,7 @@ mod tests {
         );
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
+            Some(&ForkCondition::Timestamp(mainnet_shasta_timestamp()))
         );
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
@@ -1306,19 +1321,23 @@ mod tests {
         );
         assert_eq!(spec.l1_contract.len(), 1);
         let err = spec
-            .get_fork_l1_contract_address_at(5_412_478, MAINNET_SHASTA_TIMESTAMP - 1)
+            .get_fork_l1_contract_address_at(5_412_478, mainnet_shasta_timestamp() - 1)
             .expect_err("mainnet config should only activate at Shasta");
         assert!(err.to_string().contains("fork l1 contract is not active"));
         assert_eq!(
-            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sgx)?,
+            spec.get_fork_verifier_address(5_412_478, mainnet_shasta_timestamp(), ProofType::Sgx)?,
             address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
         );
         assert_eq!(
-            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Risc0)?,
+            spec.get_fork_verifier_address(
+                5_412_478,
+                mainnet_shasta_timestamp(),
+                ProofType::Risc0
+            )?,
             address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
         );
         assert_eq!(
-            spec.get_fork_verifier_address(5_412_478, MAINNET_SHASTA_TIMESTAMP, ProofType::Sp1)?,
+            spec.get_fork_verifier_address(5_412_478, mainnet_shasta_timestamp(), ProofType::Sp1)?,
             address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
         );
         Ok(())
@@ -1354,7 +1373,7 @@ mod tests {
         );
         assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
+            Some(&ForkCondition::Timestamp(mainnet_shasta_timestamp()))
         );
 
         let projected = spec.project_for_guest_input_abi(GuestInputAbi::V0_1_0);
@@ -1369,7 +1388,7 @@ mod tests {
         assert_eq!(projected.hard_forks.len(), 1);
         assert_eq!(
             projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(MAINNET_SHASTA_TIMESTAMP))
+            Some(&ForkCondition::Timestamp(mainnet_shasta_timestamp()))
         );
         assert_eq!(projected.l1_contract.len(), 1);
         assert_eq!(
@@ -1379,7 +1398,7 @@ mod tests {
         assert_eq!(
             projected.get_fork_verifier_address(
                 5_412_478,
-                MAINNET_SHASTA_TIMESTAMP,
+                mainnet_shasta_timestamp(),
                 ProofType::Sgx,
             )?,
             address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
@@ -1387,7 +1406,7 @@ mod tests {
         assert_eq!(
             projected.get_fork_verifier_address(
                 5_412_478,
-                MAINNET_SHASTA_TIMESTAMP,
+                mainnet_shasta_timestamp(),
                 ProofType::Risc0,
             )?,
             address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
@@ -1395,7 +1414,7 @@ mod tests {
         assert_eq!(
             projected.get_fork_verifier_address(
                 5_412_478,
-                MAINNET_SHASTA_TIMESTAMP,
+                mainnet_shasta_timestamp(),
                 ProofType::Sp1,
             )?,
             address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
@@ -1502,7 +1521,7 @@ mod tests {
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
         assert_eq!(
-            spec.spec_id(5_412_478, MAINNET_SHASTA_TIMESTAMP),
+            spec.spec_id(5_412_478, mainnet_shasta_timestamp()),
             Some(SpecId::SHANGHAI)
         );
         Ok(())

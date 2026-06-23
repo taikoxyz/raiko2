@@ -277,6 +277,16 @@ jobs:
             docker builder prune -af || true
           fi
 
+          threshold_kb=$((20 * 1024 * 1024)) # 20 GiB
+          avail_kb="$(df -Pk "${GITHUB_WORKSPACE:-$PWD}" | tail -1 | awk '{print $4}')"
+          if command -v docker >/dev/null 2>&1 \
+            && [ -n "${avail_kb:-}" ] \
+            && [ "${avail_kb}" -lt "${threshold_kb}" ]; then
+            echo "Low disk: ${avail_kb} KiB available (< ${threshold_kb} KiB); pruning unused Docker images"
+            docker image prune -af || true
+            docker builder prune -af || true
+          fi
+
           if [ -n "${RUNNER_TEMP:-}" ]; then
             runner_root="$(dirname "$(dirname "${RUNNER_TEMP}")")"
             if [ -d "${runner_root}/_diag" ]; then

@@ -1620,7 +1620,7 @@ mod tests {
         ctx.request.l2_chain_id = 167_000;
         let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
 
-        assert_ne!(
+        assert_eq!(
             spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
         );

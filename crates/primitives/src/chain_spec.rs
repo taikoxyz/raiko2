@@ -1470,7 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_internal_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let l1_spec = list
             .iter()
@@ -1483,16 +1483,16 @@ mod tests {
         let unzen_timestamp = 0;
 
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
+        assert_eq!(l1_spec.rpc, "https://example.com");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://l1beacon.internal.taiko.xyz")
+            Some("https://beacon.example.com")
         );
         assert_eq!(l1_spec.genesis_time, 1_780_630_944);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
-        assert_eq!(l2_spec.rpc, "https://rpc.internal.taiko.xyz");
+        assert_eq!(l2_spec.rpc, "https://example.com");
         assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))

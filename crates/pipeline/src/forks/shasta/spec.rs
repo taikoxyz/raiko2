@@ -13,8 +13,8 @@ use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
-    ChainSpec, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError, RaikoResult,
-    StatelessInput, SupportedChainSpecs,
+    ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
+    RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
     chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
 };
 use raiko2_primitives_shasta::{
@@ -28,7 +28,7 @@ use raiko2_protocol_shasta::shasta::{
     manifest::BlockManifest,
     prepare_source_manifest_with_max_blocks,
 };
-use raiko2_provider::{Provider, RpcClientConfig};
+use raiko2_provider::{AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig};
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
     future::Future,
@@ -484,6 +484,44 @@ fn collect_preflight_account_targets(tx_list: Option<&Bytes>) -> RaikoResult<Vec
     Ok(targets)
 }
 
+async fn fetch_preflight_accounts<P: Provider>(
+    provider: &P,
+    block_numbers: &[u64],
+    account_targets: &[Vec<Address>],
+    use_canonical_witness: bool,
+) -> RaikoResult<(AccountStateMaps, AccountProofWitnessNodes, u128)> {
+    let started_at = Instant::now();
+    let (accounts, account_witness_nodes) = if use_canonical_witness {
+        provider
+            .batch_accounts_with_proof_witnesses(block_numbers, account_targets)
+            .await?
+    } else {
+        let accounts = provider
+            .batch_accounts(block_numbers, account_targets)
+            .await?;
+        (accounts, vec![Vec::new(); block_numbers.len()])
+    };
+    Ok((
+        accounts,
+        account_witness_nodes,
+        started_at.elapsed().as_millis(),
+    ))
+}
+
+fn merge_account_witness_nodes(
+    witnesses: &mut [ExecutionWitness],
+    account_witness_nodes: Vec<Vec<WitnessStateNode>>,
+) {
+    for (witness, nodes) in witnesses.iter_mut().zip(account_witness_nodes) {
+        if nodes.is_empty() {
+            continue;
+        }
+        witness.state.extend(nodes);
+        witness.state =
+            ExecutionWitness::canonicalize_state_nodes(std::mem::take(&mut witness.state));
+    }
+}
+
 async fn fetch_preflight_chunk<P: Provider>(
     provider: &P,
     proposal_id: u64,
@@ -539,20 +577,28 @@ async fn fetch_preflight_chunk<P: Provider>(
             collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
         })
         .collect::<RaikoResult<Vec<_>>>()?;
-    let accounts = async {
-        let started_at = Instant::now();
-        let accounts = provider
-            .batch_accounts(&block_numbers, &account_targets)
-            .await?;
-        Ok::<_, RaikoError>((accounts, started_at.elapsed().as_millis()))
-    };
-    let ((witnesses, witnesses_elapsed_ms), (accounts, accounts_elapsed_ms)) =
-        try_join(witnesses, accounts).await?;
+    let accounts = fetch_preflight_accounts(
+        provider,
+        &block_numbers,
+        &account_targets,
+        use_canonical_witness,
+    );
+    let (
+        (mut witnesses, witnesses_elapsed_ms),
+        (accounts, account_witness_nodes, accounts_elapsed_ms),
+    ) = try_join(witnesses, accounts).await?;
 
-    if blocks.len() != witnesses.len() || blocks.len() != accounts.len() {
+    if blocks.len() != witnesses.len()
+        || blocks.len() != accounts.len()
+        || blocks.len() != account_witness_nodes.len()
+    {
         return Err(RaikoError::InvalidRequestConfig(
             "Provider returned mismatched input lengths".to_string(),
         ));
+    }
+
+    if use_canonical_witness {
+        merge_account_witness_nodes(&mut witnesses, account_witness_nodes);
     }
 
     let witnesses = blocks
@@ -1381,6 +1427,7 @@ mod tests {
     use raiko2_primitives::{
         ChainSpec, ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType,
         ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
+        WitnessStateNode,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -1408,6 +1455,7 @@ mod tests {
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
+        account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
     }
 
     #[async_trait::async_trait]
@@ -1435,6 +1483,20 @@ mod tests {
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
             Ok(vec![AddressMap::default()])
+        }
+
+        async fn batch_accounts_with_proof_witnesses(
+            &self,
+            _blocks: &[u64],
+            accounts: &[Vec<Address>],
+        ) -> RaikoResult<(Vec<AddressMap<TrieAccount>>, Vec<Vec<WitnessStateNode>>)> {
+            *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
+            let nodes = self
+                .account_witness_nodes
+                .lock()
+                .expect("account witness nodes lock")
+                .clone();
+            Ok((vec![AddressMap::default()], nodes))
         }
 
         async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
@@ -1727,6 +1789,9 @@ mod tests {
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
+            account_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
+                Bytes::from_static(&[0xc1, 0x80]),
+            )]])),
         }
     }
 
@@ -2015,6 +2080,7 @@ mod tests {
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(witnesses[0].witness.state.len(), 1);
     }
 
     #[tokio::test]

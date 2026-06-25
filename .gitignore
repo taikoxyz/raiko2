@@ -14,3 +14,4 @@ regression.log
 test/regression/**/*.log
 scripts/regression/*.log
 docker/var/
+docker/enclave-key*.pem

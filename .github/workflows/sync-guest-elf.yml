@@ -355,8 +355,7 @@ jobs:
           # actions/upload-artifact normalizes file permissions, so the
           # downloaded ELFs come back as 0644. The repository tracks them
           # as 0755, so without this step the push job would commit a
-          # permission-only regression that `guest-elf-consistency` would
-          # immediately flag on the next CI run.
+          # permission-only regression.
           shopt -s nullglob
           for elf in crates/guests/elf/*.elf; do
             chmod 0755 "${elf}"

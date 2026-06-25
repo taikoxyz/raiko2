@@ -187,9 +187,8 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
-- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
-  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
-  only when you intentionally need a different signer.
+- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
+  signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -284,7 +283,8 @@ runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from a
 
 ## Source Releases
 
-Use this flow when cutting a versioned source release such as `v0.1.0`.
+Use this flow when cutting a versioned ZK/runtime source release such as
+`vX.Y.Z`. Keep TEE provider metadata in its separate release flow below.
 
 Release prerequisites:
 
@@ -353,31 +353,42 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes:
+5. Write release notes from the ZK source release template:
 
    ```bash
    cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
-   ## Summary
+## Summary
 
-   - release summary here
+- ZK/runtime source release summary.
 
-   ## Runtime Images
+## Runtime Image
 
-   - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
-   - includes `risc0` guest ELFs and `sp1` guest ELF/VK artifacts
+- runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
+- commit: <release commit SHA>
+- includes `risc0` guest ELFs and `sp1` guest ELF/VK artifacts
 
-   ## ZK Guest Digests
+## ZK Guest Digests
 
    - risc0 proposal image_id: 0x...
    - risc0 aggregation image_id: 0x...
    - sp1 proposal vk_bn254: 0x...
    - sp1 proposal vk_hash_bytes: 0x...
-   - sp1 aggregation vk_bn254: 0x...
-   - sp1 aggregation vk_hash_bytes: 0x...
+- sp1 aggregation vk_bn254: 0x...
+- sp1 aggregation vk_hash_bytes: 0x...
 
-   See attached `release-manifest-vX.Y.Z.json` and `guest-digests-summary.json`.
-   EOF
-   ```
+## Reproduce
+
+See `docs/operations.md#reproduce-zk-guest-digests`.
+
+## Release Assets
+
+- `release-manifest-vX.Y.Z.json`
+- `guest-digests-summary.json`
+- `risc0_shasta_*.elf`
+- `sp1_shasta_*.elf`
+- `sp1_shasta_*.vk.bin`
+EOF
+```
 
 6. Create the tag and GitHub Release:
 
@@ -412,7 +423,45 @@ Do not:
 
 - apply `register-image` automatically as part of the release cut
 - mix rollout or deployment steps into the release flow
+- mix TEE provider metadata into a ZK/runtime-only release
 - write release-only metadata back into the source tree
+
+### Reproduce ZK Guest Digests
+
+Use this when GitHub release notes need a stable reference for how ZK digest
+values were regenerated. This compares the published release digest asset with
+digests recomputed from the tag checkout.
+
+```bash
+export TAG=vX.Y.Z
+export REPRO_DIR=target/releases/${TAG}/zk-digest-repro
+
+git fetch --tags origin "${TAG}"
+git checkout "${TAG}"
+mkdir -p "${REPRO_DIR}"
+
+cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
+  --output "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern guest-digests-summary.json \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '.digests | sort_by(.proof_system, .object_name, .stage, .digest_source)' \
+  "${REPRO_DIR}/guest-digests-summary.json" > "${REPRO_DIR}/release-digests.sorted.json"
+jq -S '.digests | sort_by(.proof_system, .object_name, .stage, .digest_source)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-digests.sorted.json"
+diff -u "${REPRO_DIR}/release-digests.sorted.json" "${REPRO_DIR}/source-digests.sorted.json"
+```
+
+Print the values for the release notes:
+
+```bash
+jq -r '.digests[]
+  | [.proof_system, .object_name, .stage, .digest_source, .digest]
+  | @tsv' "${REPRO_DIR}/from-source.json"
+```
 
 ## Release Images
 
@@ -503,12 +552,18 @@ TEE-backed remote prover images have a separate pre-release metadata flow.
 Use:
 
 ```bash
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
 
 for local smoke verification, and:
 
 ```bash
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
 ```
 
@@ -517,7 +572,10 @@ for a formal pre-release export.
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`
-- builds the local `raiko2-sgx` provider image
+- fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
+  `GCP_ENCLAVE_KEY_SECRET` is set
+- builds the local `raiko2-sgx` provider image with the signing key passed as a Docker BuildKit
+  secret
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
 - records immutable image digests
@@ -533,6 +591,80 @@ Use this manifest to hand off:
 - pushed image digest
 
 to whoever configures the on-chain verifier allowlists.
+
+`GCP_ENCLAVE_KEY_VERSION` defaults to `latest`. Omit `GCP_ENCLAVE_KEY_PROJECT` to use the active
+`gcloud` project. Release builds must set `GCP_ENCLAVE_KEY_SECRET`. For local non-release builds
+only, `RAIKO2_SGX_ENCLAVE_KEY_HOST` can point to a local key file.
+
+### TEE Provider Release Notes Template
+
+Use this only for TEE provider metadata releases. Do not include this section in
+ZK/runtime-only release notes.
+
+```markdown
+## Summary
+
+- TEE provider metadata release summary.
+
+## TEE Provider Images
+
+- `raiko2-sgx`: us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `<provider>`: <provider image digest ref>
+
+## TEE Attestation Metadata
+
+- `raiko2-sgx` `mr_enclave`: ...
+- `raiko2-sgx` `mr_signer`: ...
+- `<provider>` `mr_enclave`: ...
+- `<provider>` `mr_signer`: ...
+
+## Reproduce
+
+See `docs/operations.md#reproduce-tee-provider-metadata`.
+
+## Release Assets
+
+- `tee-attestation-manifest-vX.Y.Z.json`
+```
+
+### Reproduce TEE Provider Metadata
+
+Use this to regenerate TEE provider attestation metadata from the tag checkout.
+Official rebuilds need the release enclave signing key from GCP Secret Manager
+to reproduce `mr_signer`; a disposable local key can reproduce `mr_enclave` but
+will produce a different signer.
+
+```bash
+export TAG=vX.Y.Z
+export REPRO_DIR=target/releases/${TAG}/tee-provider-repro
+
+git fetch --tags origin "${TAG}"
+git checkout "${TAG}"
+
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
+cargo run -r -p xtask -- release-tee-providers --tag "${TAG}" --no-push
+
+mkdir -p "${REPRO_DIR}"
+cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+  "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern "tee-attestation-manifest-${TAG}.json" \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '[.providers[]
+  | {lane, provider, source, attestation}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.sorted.json"
+jq -S '[.providers[]
+  | {lane, provider, source, attestation}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.sorted.json"
+diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
+```
 
 This command does not:
 

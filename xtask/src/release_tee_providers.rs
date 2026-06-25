@@ -1,3 +1,5 @@
+use std::env;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,8 +19,34 @@ const DEFAULT_LOCAL_LANE: &str = "sgx";
 const DEFAULT_LOCAL_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2-sgx";
 const DEFAULT_LOCAL_DOCKERFILE: &str = "Dockerfile.sgx";
 const DEFAULT_LOCAL_ATTESTATION_PATH: &str = "/opt/raiko2-sgx/etc/attestation.raiko2.json";
-const DEFAULT_GRAMINE_ENCLAVE_KEY_PATH: &str = "docker/enclave-key.pem";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
+const ENV_GCP_ENCLAVE_KEY_SECRET: &str = "GCP_ENCLAVE_KEY_SECRET";
+const ENV_GCP_ENCLAVE_KEY_VERSION: &str = "GCP_ENCLAVE_KEY_VERSION";
+const ENV_GCP_ENCLAVE_KEY_PROJECT: &str = "GCP_ENCLAVE_KEY_PROJECT";
+const ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST: &str = "RAIKO2_SGX_ENCLAVE_KEY_HOST";
+
+#[derive(Debug)]
+struct GramineSigningKey {
+    path: PathBuf,
+    _temp: Option<tempfile::NamedTempFile>,
+}
+
+impl GramineSigningKey {
+    fn local(path: PathBuf) -> Self {
+        Self { path, _temp: None }
+    }
+
+    fn temp(temp: tempfile::NamedTempFile) -> Self {
+        Self {
+            path: temp.path().to_path_buf(),
+            _temp: Some(temp),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseTeeProvidersArgs {
@@ -263,8 +291,8 @@ fn docker_build(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()
 }
 
 fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
-    let secret_src = default_gramine_enclave_key_path(context)?;
-    let key_sha256 = file_sha256_hex(&secret_src)?;
+    let secret_src = resolve_gramine_enclave_key(context)?;
+    let key_sha256 = file_sha256_hex(secret_src.path())?;
     let mut cmd = Command::new("docker");
     cmd.env("DOCKER_BUILDKIT", "1");
     cmd.arg("build")
@@ -273,7 +301,7 @@ fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) ->
         .arg("--secret")
         .arg(format!(
             "id=gramine_enclave_key,src={}",
-            secret_src.display()
+            secret_src.path().display()
         ))
         .arg("-f")
         .arg(dockerfile)
@@ -330,12 +358,118 @@ fn read_attestation_json(
     parse_attestation_json(std::str::from_utf8(&output.stdout).context("attestation is not utf-8")?)
 }
 
-fn default_gramine_enclave_key_path(root: &Path) -> Result<PathBuf> {
-    let path = root.join(DEFAULT_GRAMINE_ENCLAVE_KEY_PATH);
+fn resolve_gramine_enclave_key(root: &Path) -> Result<GramineSigningKey> {
+    resolve_gramine_enclave_key_from_values(
+        root,
+        env_var(ENV_GCP_ENCLAVE_KEY_SECRET),
+        env_var(ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST),
+    )
+}
+
+fn resolve_gramine_enclave_key_from_values(
+    root: &Path,
+    gcp_secret: Option<String>,
+    local_path: Option<String>,
+) -> Result<GramineSigningKey> {
+    if let Some(secret) = gcp_secret {
+        return fetch_gcp_enclave_key(&secret);
+    }
+
+    if let Some(path) = local_path {
+        return local_gramine_enclave_key_path(PathBuf::from(path));
+    }
+
+    bail!(
+        "missing Gramine enclave signing key; set {ENV_GCP_ENCLAVE_KEY_SECRET} for release builds \
+         or {ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST} for local builds from {}",
+        root.display()
+    )
+}
+
+fn fetch_gcp_enclave_key(secret: &str) -> Result<GramineSigningKey> {
+    let version = env_var(ENV_GCP_ENCLAVE_KEY_VERSION).unwrap_or_else(|| "latest".to_string());
+
+    ensure_gcloud()?;
+    let project = env_var(ENV_GCP_ENCLAVE_KEY_PROJECT);
+    let output = gcp_secret_access_command(secret, &version, project.as_deref())
+        .output()
+        .with_context(|| format!("failed to run gcloud for GCP Secret Manager secret {secret}"))?;
+    if !output.status.success() {
+        bail!("gcloud failed to fetch enclave signing key from secret {secret}");
+    }
+
+    let mut temp =
+        tempfile::NamedTempFile::new().context("create temporary enclave signing key file")?;
+    let path = temp.path().to_path_buf();
+    restrict_file_permissions(&path)?;
+    temp.write_all(&output.stdout)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    temp.flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    ensure_non_empty_file(&path)?;
+
+    Ok(GramineSigningKey::temp(temp))
+}
+
+fn gcp_secret_access_command(secret: &str, version: &str, project: Option<&str>) -> Command {
+    let mut cmd = Command::new("gcloud");
+    cmd.arg("secrets")
+        .arg("versions")
+        .arg("access")
+        .arg(version)
+        .arg("--secret")
+        .arg(secret);
+    if let Some(project) = project.filter(|value| !value.trim().is_empty()) {
+        cmd.arg("--project").arg(project);
+    }
+    cmd
+}
+
+fn ensure_gcloud() -> Result<()> {
+    let mut cmd = Command::new("gcloud");
+    cmd.arg("--version");
+    util::ensure_command(
+        cmd,
+        "gcloud",
+        "Install the Google Cloud SDK or unset GCP_ENCLAVE_KEY_SECRET.",
+    )
+}
+
+fn local_gramine_enclave_key_path(path: PathBuf) -> Result<GramineSigningKey> {
     if !path.exists() {
         bail!("missing Gramine enclave signing key at {}", path.display());
     }
-    Ok(path)
+    ensure_non_empty_file(&path)?;
+    Ok(GramineSigningKey::local(path))
+}
+
+fn env_var(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn ensure_non_empty_file(path: &Path) -> Result<()> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!("Gramine enclave signing key is empty: {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to chmod 0600 {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn restrict_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn file_sha256_hex(path: &Path) -> Result<String> {
@@ -387,8 +521,10 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_gramine_enclave_key_path, external_source_checkout_dir, file_sha256_hex,
-        local_provider_image_ref, parse_attestation_json, validate_attestation_path,
+        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, external_source_checkout_dir,
+        file_sha256_hex, gcp_secret_access_command, local_gramine_enclave_key_path,
+        local_provider_image_ref, parse_attestation_json, resolve_gramine_enclave_key_from_values,
+        validate_attestation_path,
     };
 
     #[test]
@@ -415,13 +551,48 @@ mod tests {
     }
 
     #[test]
-    fn release_tee_providers_defaults_to_repo_signing_key() {
+    fn release_tee_providers_rejects_missing_signing_key_env() {
         let root = std::path::Path::new("/tmp/raiko2");
+        let err = resolve_gramine_enclave_key_from_values(root, None, None)
+            .expect_err("missing signing key env fails");
+
+        assert!(err.to_string().contains(ENV_GCP_ENCLAVE_KEY_SECRET));
+        assert!(err.to_string().contains(ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST));
+    }
+
+    #[test]
+    fn release_tee_providers_builds_gcp_secret_access_command() {
+        let command = gcp_secret_access_command("raiko2-sgx-key", "42", Some("taiko-project"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program().to_string_lossy(), "gcloud");
         assert_eq!(
-            default_gramine_enclave_key_path(root)
-                .unwrap_err()
-                .to_string(),
-            "missing Gramine enclave signing key at /tmp/raiko2/docker/enclave-key.pem"
+            args,
+            vec![
+                "secrets",
+                "versions",
+                "access",
+                "42",
+                "--secret",
+                "raiko2-sgx-key",
+                "--project",
+                "taiko-project",
+            ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_rejects_empty_local_signing_key() {
+        let temp = tempfile::NamedTempFile::new().expect("temp signing key");
+        let err = local_gramine_enclave_key_path(temp.path().to_path_buf())
+            .expect_err("empty signing key fails");
+
+        assert!(
+            err.to_string()
+                .contains("Gramine enclave signing key is empty")
         );
     }
 

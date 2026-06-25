@@ -70,6 +70,7 @@ RUN chmod +x /opt/raiko2-sgx/bin/raiko2-sgx-prover /opt/raiko2-sgx/bin/entrypoin
 RUN --mount=type=secret,id=gramine_enclave_key \
     test -s /run/secrets/gramine_enclave_key && \
     test -n "${GRAMINE_ENCLAVE_KEY_SHA256}" && \
+    test "$(sha256sum /run/secrets/gramine_enclave_key | awk '{print $1}')" = "${GRAMINE_ENCLAVE_KEY_SHA256}" && \
     cd /opt/raiko2-sgx/bin && \
     gramine-manifest \
         -Dlog_level="${GRAMINE_LOG_LEVEL}" \

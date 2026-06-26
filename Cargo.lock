@@ -8518,6 +8518,7 @@ dependencies = [
  "raiko2-protocol-shasta",
  "raiko2-stateless",
  "reth-ethereum-primitives",
+ "risc0-ethereum-trie",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
 use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
-use alloy_primitives::{B256, map::AddressMap};
+use alloy_primitives::{Address, B256, U256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -125,6 +125,25 @@ pub(crate) fn determine_pre_state_root(
             .ok_or(StatelessValidationError::HeaderDeserializationFailed),
         None => Err(StatelessValidationError::MissingAncestorHeader),
     }
+}
+
+/// Read a parent-state storage slot from witness material.
+///
+/// # Errors
+///
+/// Returns an error if the ancestor header or witness cannot prove the requested storage.
+pub fn read_parent_storage_with_witness_resources(
+    address: Address,
+    slot: U256,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+) -> Result<U256, StatelessValidationError> {
+    let pre_state_root = determine_pre_state_root(ancestor_headers)?;
+    let (mut trie, _) =
+        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    trie.storage_from_witness(address, slot)
+        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))
 }
 
 fn ensure_full_ancestor_headers(

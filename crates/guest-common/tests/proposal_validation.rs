@@ -1,12 +1,14 @@
 #![allow(missing_docs)]
 
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
-use alloy_consensus::{SignableTransaction, TrieAccount, TxEip1559};
+use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
+use alloy_primitives::{keccak256, Signature, TxKind, U256};
 use alloy_primitives::{Address, B256};
-use alloy_primitives::{Signature, TxKind, U256};
 use alloy_sol_types::{sol, SolCall, SolValue};
 use raiko2_guest_common::{prove_shasta_proposal, prove_shasta_proposal_with_validator};
-use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs};
+use raiko2_primitives::{
+    ChainSpec, ExecutionWitness, ProofType, StatelessInput, SupportedChainSpecs, WitnessStateNode,
+};
 use raiko2_primitives_shasta::{
     build_proof_carry_data, instance::SHASTA_PROPOSAL_ID_MAX, GuestInput,
 };
@@ -17,6 +19,10 @@ use raiko2_protocol_shasta::shasta::{
     BlobSlice, DerivationSource,
 };
 use raiko2_protocol_shasta::TaikoManifest;
+use risc0_ethereum_trie::Trie;
+
+const ANCHOR_BLOCK_STATE_SLOT: u64 = 256;
+const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
 
 sol! {
     #[derive(Debug)]
@@ -69,14 +75,53 @@ fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::Trans
     .into()
 }
 
+fn parent_anchor_state_witness(
+    chain_spec: &ChainSpec,
+    anchor_block_number: u64,
+) -> (B256, Vec<WitnessStateNode>) {
+    let anchor_address = chain_spec
+        .l2_contract
+        .expect("test chain spec must define Anchor address");
+    let mut storage_trie = Trie::default();
+    storage_trie.insert(
+        keccak256(B256::from(U256::from(ANCHOR_BLOCK_STATE_SLOT))),
+        alloy_rlp::encode(U256::from(anchor_block_number)),
+    );
+
+    let mut state_trie = Trie::default();
+    state_trie.insert(
+        keccak256(anchor_address),
+        alloy_rlp::encode(TrieAccount {
+            nonce: 0,
+            balance: U256::ZERO,
+            storage_root: storage_trie.hash_slow(),
+            code_hash: KECCAK_EMPTY,
+        }),
+    );
+
+    let state_root = state_trie.hash_slow();
+    let state_nodes = state_trie
+        .rlp_nodes()
+        .into_iter()
+        .chain(storage_trie.rlp_nodes())
+        .map(WitnessStateNode::from_bytes)
+        .collect();
+    (
+        state_root,
+        ExecutionWitness::canonicalize_state_nodes(state_nodes),
+    )
+}
+
 fn guest_input_with_single_block() -> GuestInput {
     let chain_spec = taiko_mainnet_chain_spec();
+    let (parent_state_root, parent_state_nodes) =
+        parent_anchor_state_witness(&chain_spec, TEST_PARENT_ANCHOR_BLOCK_NUMBER);
     let parent_header = alloy_consensus::Header {
         number: 0,
         timestamp: u64::MAX / 2 - 1,
         gas_limit: 30_000_000,
         base_fee_per_gas: Some(1),
-        state_root: B256::from([0x10; 32]),
+        state_root: parent_state_root,
         ..Default::default()
     };
     let parent_witness_header =
@@ -90,7 +135,8 @@ fn guest_input_with_single_block() -> GuestInput {
     input.block.header.parent_hash = parent_header.hash_slow();
     input.block.header.state_root = B256::from([1u8; 32]);
     input.witness.headers = vec![parent_witness_header.clone()];
-    let l1_header = sample_l1_header(7, B256::from([0x66; 32]));
+    input.witness.state = parent_state_nodes;
+    let l1_header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
     let checkpoint = AnchorV4Checkpoint {
         blockNumber: l1_header.number.try_into().expect("fits in uint48"),
         blockHash: l1_header.hash_slow(),
@@ -136,11 +182,14 @@ fn canonical_inline_source_guest_input() -> GuestInput {
     let parent_timestamp = 1_775_135_700u64;
     let block_timestamp = parent_timestamp + 1;
     let proposal_timestamp = parent_timestamp + 100;
+    let (parent_state_root, parent_state_nodes) =
+        parent_anchor_state_witness(&chain_spec, TEST_PARENT_ANCHOR_BLOCK_NUMBER);
     let parent_header = alloy_consensus::Header {
         number: 0,
         timestamp: parent_timestamp,
         gas_limit: 30_000_000,
         base_fee_per_gas: Some(1),
+        state_root: parent_state_root,
         ..Default::default()
     };
     let l1_header = sample_l1_header(7, B256::from([0x66; 32]));
@@ -171,9 +220,11 @@ fn canonical_inline_source_guest_input() -> GuestInput {
     .into();
     let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
 
-    guest_input.proposal_ancestor_headers = vec![raiko2_primitives::WitnessHeader::from_header(
-        parent_header.clone(),
-    )];
+    let parent_witness_header =
+        raiko2_primitives::WitnessHeader::from_header(parent_header.clone());
+    guest_input.proposal_ancestor_headers = vec![parent_witness_header.clone()];
+    guest_input.witnesses[0].witness.headers = vec![parent_witness_header];
+    guest_input.witnesses[0].witness.state = parent_state_nodes;
     guest_input.witnesses[0].accounts.insert(
         anchor_signer,
         TrieAccount {

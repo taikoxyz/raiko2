@@ -26,6 +26,9 @@ reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = 
     "serde",
 ] }
 
+[dev-dependencies]
+risc0-ethereum-trie.workspace = true
+
 [features]
 default = []
 bench = []

@@ -13,15 +13,10 @@ use raiko2_primitives_shasta::{
     ShastaRisc0AggregationGuestInput, ShastaZkAggregationGuestInput,
     instance::words_to_bytes_le,
 };
-use risc0_zkvm::{Digest, InnerReceipt, Receipt, VerifierContext, guest::env};
+use risc0_zkvm::{Digest, Receipt, guest::env};
 
 fn verify_receipt(receipt: &Receipt, image_id: Digest) {
-    let result = if matches!(&receipt.inner, InnerReceipt::Fake(_)) {
-        receipt.verify_with_context(&VerifierContext::default().with_dev_mode(true), image_id)
-    } else {
-        receipt.verify(image_id)
-    };
-    result.expect("receipt verification failed");
+    receipt.verify(image_id).expect("receipt verification failed");
 }
 
 pub fn main() {

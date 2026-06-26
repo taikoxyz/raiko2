@@ -20,6 +20,7 @@ raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 risc0-zkvm = { version = "=3.0.5", default-features = false, features = [
     "std",
     "getrandom",
+    "disable-dev-mode",
 ] }
 risc0-zkvm-platform = { version = "=2.2.2", default-features = false, features = ["sys-getenv"] }
 alloy-primitives = { version = "=1.5.7", default-features = false, features = ["tiny-keccak"] }

@@ -1620,6 +1620,11 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     let mut config = base_config();
     config.server.acl.keys = vec![
         acl_key(
+            "root-admin",
+            "secret-root-key",
+            vec![ServerAclFeature::Admin],
+        ),
+        acl_key(
             "ops-admin",
             "secret-admin-key",
             vec![
@@ -1661,6 +1666,10 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
     assert_eq!(res["Sp1"][1], 0);
     assert_eq!(res["Risc0"][0], 0.0);
     assert_eq!(res["Risc0"][1], 0);
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-root-key").await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["Sp1"][0], 1.0);
 
     let (status, res) = post_json(
         &app,
@@ -1728,6 +1737,11 @@ async fn e2e_prover_clear_requires_clear_api_key() {
     let mut config = base_config();
     config.server.acl.keys = vec![
         acl_key(
+            "root-admin",
+            "secret-root-key",
+            vec![ServerAclFeature::Admin],
+        ),
+        acl_key(
             "ops-admin",
             "secret-admin-key",
             vec![ServerAclFeature::AdminBallotRead],
@@ -1750,6 +1764,11 @@ async fn e2e_prover_clear_requires_clear_api_key() {
     let (status, res) =
         post_json_with_api_key(&app, "/v3/prover/clear", "secret-admin-key", json!({})).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-root-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["status"], "ok");
 
     let (status, res) =
         post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
@@ -2525,6 +2544,25 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
+    let (status, res) = post_json(&app, "/proof/prune", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{res}");
+
+    let mut config = base_config();
+    config.server.acl.keys = vec![
+        acl_key(
+            "ops-clear",
+            "secret-clear-key",
+            vec![ServerAclFeature::ProverClear],
+        ),
+        acl_key(
+            "root-admin",
+            "secret-admin-key",
+            vec![ServerAclFeature::Admin],
+        ),
+    ];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
     let (status, res) = post_json(
         &app,
         "/v3/proof/batch/shasta",
@@ -2547,8 +2585,19 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
-    let (status, prune) = post_json(&app, "/proof/prune", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
+    let (status, res) = post_json(&app, "/v3/proof/prune", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) = post_json_with_api_key(&app, "/proof/prune", "wrong", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/proof/prune", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
+
+    let (status, prune) =
+        post_json_with_api_key(&app, "/proof/prune", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{prune}");
     assert_eq!(prune["status"], "ok");
 
     let (status, report) = get_json(&app, "/v3/proof/report").await;
@@ -2824,6 +2873,30 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
     let engine = risc0_fixture_engine(json!({}));
     let app = app_with_risc0_fixture_engine(config, engine);
 
+    let (status, res) = post_json(&app, "/v3/tasks/missing/cancel", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{res}");
+
+    let mut config = base_config();
+    config.server.acl.keys = vec![
+        acl_key(
+            "ops-clear",
+            "secret-clear-key",
+            vec![ServerAclFeature::ProverClear],
+        ),
+        acl_key(
+            "ballot-admin",
+            "secret-ballot-key",
+            vec![ServerAclFeature::AdminBallotWrite],
+        ),
+        acl_key(
+            "root-admin",
+            "secret-admin-key",
+            vec![ServerAclFeature::Admin],
+        ),
+    ];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
     let (status, res) = post_json(
         &app,
         "/v3/proof/batch/shasta",
@@ -2846,8 +2919,25 @@ async fn e2e_cancel_marks_task_cancelled_without_workers() {
     assert!(res["data"].get("task_id").is_none(), "{res}");
     let id = single_report_task_id(&app).await;
 
-    let (status, res) = post_json(&app, &format!("/v3/tasks/{id}/cancel"), json!({})).await;
-    assert_eq!(status, StatusCode::OK);
+    let cancel_uri = format!("/v3/tasks/{id}/cancel");
+
+    let (status, res) = post_json(&app, &cancel_uri, json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) = post_json_with_api_key(&app, &cancel_uri, "wrong", json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, &cancel_uri, "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, &cancel_uri, "secret-ballot-key", json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, &cancel_uri, "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["data"]["status"], "cancelled");
 }
 

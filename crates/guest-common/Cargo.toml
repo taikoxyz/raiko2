@@ -15,6 +15,7 @@ alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "
     "prover",
     "serde",
 ] }
+alethia-reth-consensus.workspace = true
 alethia-reth-primitives = { git = "https://github.com/taikoxyz/alethia-reth", rev = "2c791d83843e81828411ca7a4aaadb7f6149983f", default-features = false }
 alloy-primitives = { version = "=1.5.7", default-features = false }
 alloy-consensus = { version = "=2.0.4", default-features = false, features = ["serde"] }
@@ -25,6 +26,11 @@ anyhow = "=1.0.102"
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "27bfddeada3953edc22759080a3659ccea62ca1f", default-features = false, features = [
     "serde",
 ] }
+
+[dev-dependencies]
+alloy-signer = { version = "2.0", default-features = false }
+alloy-signer-local = { version = "2.0", default-features = false }
+risc0-ethereum-trie.workspace = true
 
 [features]
 default = []

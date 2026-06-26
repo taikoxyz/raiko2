@@ -8505,11 +8505,14 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
+ "alethia-reth-consensus",
  "alethia-reth-primitives",
  "alloy-consensus 2.0.4",
  "alloy-hardforks 0.4.7",
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-signer 2.0.1",
+ "alloy-signer-local 2.0.1",
  "alloy-sol-types",
  "anyhow",
  "raiko2-primitives",
@@ -8518,6 +8521,7 @@ dependencies = [
  "raiko2-protocol-shasta",
  "raiko2-stateless",
  "reth-ethereum-primitives",
+ "risc0-ethereum-trie",
 ]
 
 [[package]]

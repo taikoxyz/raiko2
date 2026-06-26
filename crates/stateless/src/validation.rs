@@ -7,12 +7,12 @@ use alethia_reth_block::{
     config::{TaikoEvmConfig, TaikoNextBlockEnvAttributes},
     derived_block::{assemble_filtered_block, execute_derived_block},
 };
-use alethia_reth_chainspec::spec::TaikoChainSpec;
+use alethia_reth_chainspec::{hardfork::TaikoHardforks, spec::TaikoChainSpec};
 use alethia_reth_consensus::validation::{
     TaikoBeaconConsensus, TaikoBlockReader, validate_anchor_transaction_in_block,
 };
 use alloy_consensus::{BlockHeader, Header, TrieAccount, proofs, transaction::Recovered};
-use alloy_primitives::{B256, map::AddressMap};
+use alloy_primitives::{Address, B256, U256, map::AddressMap};
 use raiko2_primitives::{
     ExecutionWitness, StatelessValidationError, WitnessHeader, WitnessStateNode,
 };
@@ -125,6 +125,25 @@ pub(crate) fn determine_pre_state_root(
             .ok_or(StatelessValidationError::HeaderDeserializationFailed),
         None => Err(StatelessValidationError::MissingAncestorHeader),
     }
+}
+
+/// Read a parent-state storage slot from witness material.
+///
+/// # Errors
+///
+/// Returns an error if the ancestor header or witness cannot prove the requested storage.
+pub fn read_parent_storage_with_witness_resources(
+    address: Address,
+    slot: U256,
+    witness: &ExecutionWitness,
+    ancestor_headers: &[WitnessHeader],
+    shared_state_nodes: &[WitnessStateNode],
+) -> Result<U256, StatelessValidationError> {
+    let pre_state_root = determine_pre_state_root(ancestor_headers)?;
+    let (mut trie, _) =
+        SparseState::new_with_state_pool(witness, shared_state_nodes, pre_state_root)?;
+    trie.storage_from_witness(address, slot)
+        .map_err(|err| StatelessValidationError::StatelessExecutionFailed(err.to_string()))
 }
 
 fn ensure_full_ancestor_headers(
@@ -272,6 +291,8 @@ pub fn reconstruct_block_from_transactions_with_witness_resources(
         None,
     )
     .map_err(StatelessValidationError::ConsensusValidationFailed)?;
+    validate_anchor_transaction_in_block(&outcome.filtered_block, chain_spec.as_ref())
+        .map_err(StatelessValidationError::ConsensusValidationFailed)?;
 
     Ok(outcome)
 }
@@ -411,6 +432,12 @@ pub(crate) fn validate_block_consensus(
                 .map(|full| SealedHeader::new(full, header.hash))
         })
         .ok_or(StatelessValidationError::MissingAncestorHeader)?;
+    if chain_spec.is_shasta_active(block.header().timestamp())
+        && parent_header.number() != 0
+        && ancestor_headers.len() < 2
+    {
+        return Err(StatelessValidationError::MissingAncestorHeader);
+    }
 
     let block_reader = Arc::new(WitnessTaikoBlockReader::from_headers(ancestor_headers));
     let consensus = TaikoBeaconConsensus::new(chain_spec.clone(), block_reader);
@@ -492,6 +519,7 @@ mod tests {
     use alethia_reth_block::config::TaikoEvmConfig;
     use alethia_reth_block::config::TaikoNextBlockEnvAttributes;
     use alethia_reth_chainspec::TAIKO_DEVNET;
+    use alethia_reth_consensus::validation::{ANCHOR_V3_V4_GAS_LIMIT, ANCHOR_V4_SELECTOR};
     use alloy_consensus::{
         Header, SignableTransaction, TrieAccount, TxEip1559, constants::KECCAK_EMPTY, proofs,
         transaction::Recovered,
@@ -564,6 +592,38 @@ mod tests {
         }
         .into_signed(signature)
         .into()
+    }
+
+    fn golden_touch_address() -> Address {
+        alloy_primitives::address!("0000777735367b36bc9b61c50022d9d0700db4ec")
+    }
+
+    fn test_anchor_tx(chain_id: u64, nonce: u64) -> TransactionSigned {
+        let tx = unsigned_anchor_template(chain_id, nonce);
+        let signature = Signature::new(
+            U256::from_be_slice(&alloy_primitives::hex!(
+                "0b239248ff190a19e937981fb33a2ce56c9c36f8c93850f3c8f4f2bbdce4840f"
+            )),
+            U256::from_be_slice(&alloy_primitives::hex!(
+                "44121bf189bb91092d784e6966e06e347849a28b76b84cce76fe5bbb08532a46"
+            )),
+            true,
+        );
+        tx.into_signed(signature).into()
+    }
+
+    fn unsigned_anchor_template(chain_id: u64, nonce: u64) -> TxEip1559 {
+        TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit: ANCHOR_V3_V4_GAS_LIMIT,
+            max_fee_per_gas: 25_000_000,
+            max_priority_fee_per_gas: 0,
+            to: TxKind::Call(Address::with_last_byte(0x22)),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::copy_from_slice(ANCHOR_V4_SELECTOR),
+        }
     }
 
     #[test]
@@ -717,31 +777,24 @@ mod tests {
         let signer = candidate_tx
             .recover_signer()
             .expect("test signature should recover");
-        let anchor_tx: TransactionSigned = TxEip1559 {
-            chain_id: chain_spec.inner.chain().id(),
-            nonce: 0,
-            gas_limit: 21_000,
-            max_fee_per_gas: 25_000_000,
-            max_priority_fee_per_gas: 0,
-            to: TxKind::Call(Address::with_last_byte(0x22)),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            input: Bytes::new(),
-        }
-        .into_signed(Signature::test_signature())
-        .into();
-        let anchor_tx = Recovered::new_unchecked(anchor_tx, signer);
+        let anchor_signer = golden_touch_address();
+        let anchor_tx = Recovered::new_unchecked(
+            test_anchor_tx(chain_spec.inner.chain().id(), 0),
+            anchor_signer,
+        );
 
         let mut trie = Trie::default();
-        trie.insert(
-            keccak256(signer),
-            alloy_rlp::encode(TrieAccount {
-                nonce: 0,
-                balance: U256::from(1_000_000_000_000_000u64),
-                storage_root: EMPTY_ROOT_HASH,
-                code_hash: KECCAK_EMPTY,
-            }),
-        );
+        for signer in [anchor_signer, signer] {
+            trie.insert(
+                keccak256(signer),
+                alloy_rlp::encode(TrieAccount {
+                    nonce: 0,
+                    balance: U256::from(1_000_000_000_000_000u64),
+                    storage_root: EMPTY_ROOT_HASH,
+                    code_hash: KECCAK_EMPTY,
+                }),
+            );
+        }
 
         let parent_header = Header {
             number: 0,
@@ -781,10 +834,8 @@ mod tests {
         let chain_spec = TAIKO_DEVNET.clone();
         let evm_config = TaikoEvmConfig::new(chain_spec.clone());
         let chain_id = chain_spec.inner.chain().id();
-        let anchor_inner = test_signed_tx(chain_id, 0, Signature::test_signature());
-        let anchor_signer = anchor_inner
-            .recover_signer()
-            .expect("anchor signer should recover");
+        let anchor_inner = test_anchor_tx(chain_id, 0);
+        let anchor_signer = golden_touch_address();
         let anchor_tx = Recovered::new_unchecked(anchor_inner, anchor_signer);
         let invalid_signature_tx =
             test_signed_tx(chain_id, 0, Signature::new(U256::ZERO, U256::ZERO, false));
@@ -846,5 +897,94 @@ mod tests {
         .expect("reconstruction should succeed while skipping unrecoverable tx");
 
         assert_eq!(outcome.filtered_block.body().transactions().count(), 1);
+    }
+
+    #[test]
+    fn reconstruct_block_rejects_non_golden_touch_anchor_signer() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let chain_id = chain_spec.inner.chain().id();
+        let anchor_inner: TransactionSigned = unsigned_anchor_template(chain_id, 0)
+            .into_signed(Signature::test_signature())
+            .into();
+        let anchor_signer = anchor_inner
+            .recover_signer()
+            .expect("bad anchor signer should recover");
+        assert_ne!(anchor_signer, golden_touch_address());
+        let anchor_tx = Recovered::new_unchecked(anchor_inner, anchor_signer);
+
+        let mut trie = Trie::default();
+        trie.insert(
+            keccak256(anchor_signer),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::from(1_000_000_000_000_000u64),
+                storage_root: EMPTY_ROOT_HASH,
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+        let parent_header = Header {
+            number: 0,
+            timestamp: 100,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(25_000_000),
+            state_root: trie.hash_slow(),
+            ..Default::default()
+        };
+        let witness = witness_from_state_nodes(trie.rlp_nodes(), parent_header.state_root);
+
+        let result = reconstruct_block_from_transactions_with_witness_resources(
+            anchor_tx,
+            Vec::new(),
+            TaikoNextBlockEnvAttributes {
+                timestamp: 101,
+                suggested_fee_recipient: Address::ZERO,
+                prev_randao: alloy_primitives::B256::ZERO,
+                gas_limit: 30_000_000,
+                extra_data: Bytes::new(),
+                base_fee_per_gas: 25_000_000,
+            },
+            &witness,
+            &witness.headers,
+            &[],
+            Default::default(),
+            &chain_spec,
+            &evm_config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::ConsensusValidationFailed(_))
+        ));
+    }
+
+    #[test]
+    fn shasta_non_genesis_parent_requires_grandparent_header() {
+        let chain_spec = TAIKO_DEVNET.clone();
+        let evm_config = TaikoEvmConfig::new(chain_spec.clone());
+        let grandparent_header = shanghai_header(0, 88, alloy_primitives::B256::ZERO);
+        let parent_header = shanghai_header(1, 100, grandparent_header.hash_slow());
+        let header = shanghai_header(2, 112, parent_header.hash_slow());
+        let block = Block {
+            header,
+            body: empty_shanghai_body(),
+        };
+        let witness = ExecutionWitness {
+            headers: vec![WitnessHeader::from_header(parent_header)],
+            ..Default::default()
+        };
+
+        let result = validate_block(
+            block,
+            &witness,
+            Default::default(),
+            &chain_spec,
+            &evm_config,
+        );
+
+        assert!(matches!(
+            result,
+            Err(StatelessValidationError::MissingAncestorHeader)
+        ));
     }
 }

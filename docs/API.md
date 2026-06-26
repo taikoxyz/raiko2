@@ -20,16 +20,18 @@ The public API surface is:
 - `POST /v3/proof/aggregate`
 - `GET /v3/proof/report`
 - `GET /v3/proof/list`
-- `POST /v3/proof/prune`
 - `GET /v3/prover/status`
 - `GET /v3/tasks/{id}` (`raiko2` extension)
-- `POST /v3/tasks/{id}/cancel` (`raiko2` extension)
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
 
 ACL-protected API surface requires an `x-api-key` whose ACL allows the listed feature:
 
+- A key with `admin` is accepted for any ACL-protected endpoint.
+- `POST /v3/proof/prune` requires `admin`
+- `POST /proof/prune` requires `admin`
+- `POST /v3/tasks/{id}/cancel` requires `admin`
 - `POST /v3/prover/clear` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
@@ -360,7 +362,10 @@ present.
 ```http
 POST /v3/proof/prune
 POST /proof/prune
+x-api-key: <server.acl.keys[].key with allow=["admin"]>
 ```
+
+Requires an ACL key that allows `admin`.
 
 Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
 directories. Reusable proof artifacts under `cache/proofs/...` are retained.
@@ -420,10 +425,10 @@ no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
 ```http
 POST /v3/prover/clear
-x-api-key: <server.acl.keys[].key with allow=["prover.clear"]>
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
 ```
 
-Requires an ACL key that allows `prover.clear`. Cancels every non-terminal root originally submitted
+Requires an ACL key that allows `prover.clear` or `admin`. Cancels every non-terminal root originally submitted
 with `proof_type=zk_any`, cascades cancellation to owned proposal and aggregation queue tasks, and
 marks the root runtime state `cancelled`.
 
@@ -536,7 +541,10 @@ Returns the root-task view derived from the original batch request.
 
 ```http
 POST /v3/tasks/{id}/cancel
+x-api-key: <server.acl.keys[].key with allow=["admin"]>
 ```
+
+Requires an ACL key that allows `admin`.
 
 Cancelling a root task cascades to its proposal stage tasks and optional aggregate task. The root
 runtime is only marked `cancelled` after child-task cancellation succeeds; shared child tasks are

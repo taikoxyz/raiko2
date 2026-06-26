@@ -174,6 +174,27 @@ impl SparseState {
         );
         ExecutionWitness::canonicalize_state_nodes(nodes)
     }
+
+    pub(super) fn storage_from_witness(
+        &mut self,
+        address: Address,
+        slot: U256,
+    ) -> Result<U256, ProviderError> {
+        self.account(address)?;
+        let hashed_address = keccak256(address);
+        let hashed_slot = keccak256(B256::from(slot));
+        let storage_trie = self.storage_trie_mut(hashed_address).map_err(|err| {
+            ProviderError::TrieWitnessError(format!("storage trie missing for {address}: {err}"))
+        })?;
+        let value = catch_unwind(AssertUnwindSafe(|| storage_trie.get(hashed_slot))).map_err(
+            |_| {
+                ProviderError::TrieWitnessError(format!(
+                    "storage trie unresolved while address {address} slot {slot} (hashed {hashed_slot})"
+                ))
+            },
+        )??;
+        Ok(value.unwrap_or(U256::ZERO))
+    }
 }
 
 impl StatelessTrie for SparseState {

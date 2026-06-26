@@ -269,8 +269,11 @@ pub async fn get_task(
 
 pub async fn cancel_task(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ApiOk<TaskData>>, ApiError> {
+    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
+
     let TaskLookup {
         record,
         metadata,
@@ -418,7 +421,12 @@ pub async fn list_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskD
     Ok(Json(tasks))
 }
 
-pub async fn prune_proofs(State(state): State<AppState>) -> Result<Json<PruneStatus>, ApiError> {
+pub async fn prune_proofs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PruneStatus>, ApiError> {
+    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
+
     let records = state
         .runtime
         .list_tasks()

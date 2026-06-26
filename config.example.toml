@@ -13,7 +13,7 @@ port = 8080
 # Optional: enables ACL-protected endpoints.
 # [server.acl]
 # keys = [
-#   { id = "ops", key = "change-me", allow = ["admin.ballot.read", "admin.ballot.write", "prover.clear"] },
+#   { id = "admin", key = "change-me", allow = ["admin"] },
 # ]
 
 [rpc]

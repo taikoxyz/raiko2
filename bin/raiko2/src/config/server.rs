@@ -31,6 +31,8 @@ pub struct ServerAclKey {
 
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ServerAclFeature {
+    #[serde(rename = "admin")]
+    Admin,
     #[serde(rename = "admin.ballot.read")]
     AdminBallotRead,
     #[serde(rename = "admin.ballot.write")]

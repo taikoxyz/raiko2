@@ -17,7 +17,7 @@ pub(crate) fn authorize_acl_feature(
         .acl
         .keys
         .iter()
-        .any(|key| key.allow.contains(&feature));
+        .any(|key| acl_allows_feature(&key.allow, feature));
     if !feature_enabled {
         return Err(ApiError::not_found("ACL feature is not enabled"));
     }
@@ -45,7 +45,7 @@ pub(crate) fn authorize_acl_feature(
     let mut authorized = false;
     for key in &state.config.server.acl.keys {
         let matches = constant_time_eq(actual_key, &key.key);
-        let allows_feature = key.allow.contains(&feature);
+        let allows_feature = acl_allows_feature(&key.allow, feature);
         key_known |= matches;
         authorized |= matches && allows_feature;
     }
@@ -60,6 +60,10 @@ pub(crate) fn authorize_acl_feature(
     }
 
     Err(ApiError::unauthorized("invalid API key"))
+}
+
+fn acl_allows_feature(allow: &[ServerAclFeature], feature: ServerAclFeature) -> bool {
+    allow.contains(&ServerAclFeature::Admin) || allow.contains(&feature)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {

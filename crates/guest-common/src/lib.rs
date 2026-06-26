@@ -5,6 +5,7 @@ use alethia_reth_chainspec::{
     hardfork::{TaikoHardfork, TaikoHardforks},
     spec::TaikoChainSpec,
 };
+use alethia_reth_consensus::validation::{validate_anchor_transaction, AnchorValidationContext};
 use alethia_reth_primitives::addresses::TAIKO_GOLDEN_TOUCH_ADDRESS;
 use alloy_consensus::{
     transaction::{SignerRecoverable, Transaction as _},
@@ -444,6 +445,39 @@ fn validate_anchor_transaction_binding(
         .transactions()
         .next()
         .context("missing anchor transaction")?;
+    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
+    let pre_state_account = stateless_input
+        .accounts
+        .get(&anchor_signer)
+        .context("missing anchor signer account in pre-state callers")?;
+    ensure!(
+        anchor_tx.nonce() == pre_state_account.nonce,
+        "anchor transaction nonce mismatch: expected {}, got {}",
+        pre_state_account.nonce,
+        anchor_tx.nonce()
+    );
+
+    let checkpoint = decode_anchor_checkpoint(block)?;
+    ensure!(
+        checkpoint.block_number == expected_block.anchor_block_number,
+        "anchor checkpoint block number mismatch: expected {}, got {}",
+        expected_block.anchor_block_number,
+        checkpoint.block_number
+    );
+
+    Ok(())
+}
+
+fn validate_anchor_transaction_common(
+    stateless_input: &StatelessInput,
+    chain_spec: &TaikoChainSpec,
+) -> Result<()> {
+    let block = &stateless_input.block;
+    let anchor_tx = block
+        .body
+        .transactions()
+        .next()
+        .context("missing anchor transaction")?;
     let expected_anchor_recipient = stateless_input
         .chain_spec
         .l2_contract
@@ -459,23 +493,21 @@ fn validate_anchor_transaction_binding(
         stateless_input.chain_spec.chain_id,
         anchor_tx.chain_id()
     );
-
-    let anchor_signer = Address::from(TAIKO_GOLDEN_TOUCH_ADDRESS);
-    let pre_state_account = stateless_input
-        .accounts
-        .get(&anchor_signer)
-        .context("missing anchor signer account in pre-state callers")?;
-    ensure!(
-        anchor_tx.nonce() == pre_state_account.nonce,
-        "anchor transaction nonce mismatch: expected {}, got {}",
-        pre_state_account.nonce,
-        anchor_tx.nonce()
-    );
-
     let base_fee = block
         .header
         .base_fee_per_gas()
         .context("missing base fee per gas in Shasta block header")?;
+
+    validate_anchor_transaction(
+        anchor_tx,
+        chain_spec,
+        AnchorValidationContext {
+            timestamp: block.header.timestamp,
+            block_number: block.header.number,
+            base_fee_per_gas: base_fee,
+        },
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
     ensure!(
         anchor_tx.max_fee_per_gas() == u128::from(base_fee),
         "anchor transaction max_fee_per_gas mismatch: expected {base_fee}, got {}",
@@ -491,14 +523,6 @@ fn validate_anchor_transaction_binding(
             "anchor transaction access list must be empty"
         );
     }
-
-    let checkpoint = decode_anchor_checkpoint(block)?;
-    ensure!(
-        checkpoint.block_number == expected_block.anchor_block_number,
-        "anchor checkpoint block number mismatch: expected {}, got {}",
-        expected_block.anchor_block_number,
-        checkpoint.block_number
-    );
 
     Ok(())
 }
@@ -807,6 +831,8 @@ where
     bench_report_start("proposal_stateless_validation");
     for (index, stateless_input) in guest_input.witnesses.iter().enumerate() {
         let block = &stateless_input.block;
+        validate_anchor_transaction_common(stateless_input, runtime.chain_spec.as_ref())
+            .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
         let expected_block = expected_blocks
             .as_ref()
             .and_then(|blocks| blocks.get(index));
@@ -1030,6 +1056,8 @@ mod tests {
     use super::*;
     use alloy_consensus::{constants::KECCAK_EMPTY, SignableTransaction, TrieAccount, TxEip1559};
     use alloy_primitives::{keccak256, Address, Signature, TxKind, U256};
+    use alloy_signer::SignerSync;
+    use alloy_signer_local::PrivateKeySigner;
     use raiko2_primitives::ProofType;
     use raiko2_primitives::{
         ChainSpec, ExecutionWitness, StatelessInput, SupportedChainSpecs, WitnessStateNode,
@@ -1041,6 +1069,7 @@ mod tests {
     use risc0_ethereum_trie::Trie;
 
     const TEST_PARENT_ANCHOR_BLOCK_NUMBER: u64 = 7;
+    const TEST_SHASTA_BLOCK_NUMBER: u64 = 1_166_000;
 
     fn taiko_mainnet_chain_spec() -> ChainSpec {
         SupportedChainSpecs::default()
@@ -1057,14 +1086,20 @@ mod tests {
         }
     }
 
-    fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
+    fn test_anchor_address() -> Address {
+        taiko_mainnet_chain_spec()
+            .l2_contract
+            .expect("test chain spec must define Anchor address")
+    }
+
+    fn unsigned_anchor_tx(checkpoint: &AnchorV4Checkpoint, to: Address) -> TxEip1559 {
         TxEip1559 {
             chain_id: 167_000,
             nonce: 0,
             gas_limit: 1_000_000,
             max_fee_per_gas: 1,
             max_priority_fee_per_gas: 0,
-            to: TxKind::Call(Address::ZERO),
+            to: TxKind::Call(to),
             value: U256::ZERO,
             access_list: Default::default(),
             input: anchorV4Call {
@@ -1073,8 +1108,33 @@ mod tests {
             .abi_encode()
             .into(),
         }
-        .into_signed(Signature::test_signature())
-        .into()
+    }
+
+    fn anchor_tx_with_signature(
+        checkpoint: &AnchorV4Checkpoint,
+        signature: Signature,
+    ) -> reth_ethereum_primitives::TransactionSigned {
+        unsigned_anchor_tx(checkpoint, test_anchor_address())
+            .into_signed(signature)
+            .into()
+    }
+
+    fn golden_touch_signer() -> PrivateKeySigner {
+        [
+            "92954368afd3caa1f3ce3ead0069c1af",
+            "414054aefe1ef9aeacc1bf426222ce38",
+        ]
+        .concat()
+        .parse()
+        .expect("golden touch signer")
+    }
+
+    fn anchor_tx(checkpoint: &AnchorV4Checkpoint) -> reth_ethereum_primitives::TransactionSigned {
+        let tx = unsigned_anchor_tx(checkpoint, test_anchor_address());
+        let signature = golden_touch_signer()
+            .sign_hash_sync(&tx.signature_hash())
+            .expect("golden touch anchor signature");
+        tx.into_signed(signature).into()
     }
 
     fn parent_anchor_state_witness(
@@ -1119,7 +1179,7 @@ mod tests {
         let (parent_state_root, parent_state_nodes) =
             parent_anchor_state_witness(anchor_address, TEST_PARENT_ANCHOR_BLOCK_NUMBER);
         let parent_header = alloy_consensus::Header {
-            number: 0,
+            number: TEST_SHASTA_BLOCK_NUMBER - 1,
             timestamp: u64::MAX / 2 - 1,
             gas_limit: 30_000_000,
             base_fee_per_gas: Some(1),
@@ -1131,9 +1191,10 @@ mod tests {
             chain_spec,
             ..Default::default()
         };
-        input.block.header.number = 1;
+        input.block.header.number = TEST_SHASTA_BLOCK_NUMBER;
         input.block.header.timestamp = u64::MAX / 2;
         input.block.header.parent_hash = parent_header.hash_slow();
+        input.block.header.base_fee_per_gas = Some(1);
         input.block.header.state_root = B256::from([1u8; 32]);
         input.witness.headers = vec![parent_witness_header.clone()];
         input.witness.state = parent_state_nodes;
@@ -1283,6 +1344,7 @@ mod tests {
         second.block.header.number = first.block.header.number + 1;
         second.block.header.timestamp = first.block.header.timestamp;
         second.block.header.parent_hash = B256::from([2u8; 32]);
+        second.block.header.base_fee_per_gas = first.block.header.base_fee_per_gas;
         second.block.body.transactions = first.block.body.transactions.clone();
         guest_input.witnesses = vec![first, second];
         guest_input.proof_carry_data =
@@ -1471,6 +1533,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_anchor_not_signed_by_golden_touch() {
+        let mut guest_input = guest_input_with_single_block();
+        let checkpoint = decode_anchor_checkpoint(&guest_input.witnesses[0].block)
+            .expect("fixture anchor checkpoint");
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx_with_signature(
+            &AnchorV4Checkpoint {
+                blockNumber: checkpoint.block_number.try_into().expect("fits in uint48"),
+                blockHash: checkpoint.block_hash,
+                stateRoot: checkpoint.state_root,
+            },
+            Signature::test_signature(),
+        )];
+
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect_err("non-golden-touch anchor signer should fail");
+
+        let messages = err.chain().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Anchor transaction sender must")),
+            "unexpected error chain: {messages:?}"
+        );
+    }
+
+    #[test]
     fn rejects_anchor_regression_within_batch() {
         let mut guest_input = guest_input_with_single_block();
         let header_seven = sample_l1_header(7, B256::from([0x66; 32]));
@@ -1489,7 +1582,7 @@ mod tests {
         let first_block_hash = guest_input.witnesses[0].block.header.hash_slow();
 
         let mut second = guest_input.witnesses[0].clone();
-        second.block.header.number = 2;
+        second.block.header.number = guest_input.witnesses[0].block.header.number + 1;
         second.block.header.parent_hash = first_block_hash;
         second.block.header.state_root = B256::from([0x22; 32]);
         second.block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
@@ -1529,7 +1622,7 @@ mod tests {
         };
 
         let mut second = guest_input.witnesses[0].clone();
-        second.block.header.number = 2;
+        second.block.header.number = guest_input.witnesses[0].block.header.number + 1;
         second.block.header.parent_hash = first_block_hash;
         second.block.header.state_root = B256::from([0x22; 32]);
         second.block.body.transactions = vec![anchor_tx(&checkpoint)];

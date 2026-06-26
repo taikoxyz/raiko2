@@ -3737,6 +3737,7 @@ version = "0.1.0"
 dependencies = [
  "alethia-reth-block",
  "alethia-reth-chainspec",
+ "alethia-reth-consensus",
  "alethia-reth-primitives",
  "alloy-consensus 2.0.4",
  "alloy-hardforks",

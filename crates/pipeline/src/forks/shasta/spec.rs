@@ -1007,46 +1007,21 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         .prover_data
         .last_anchor_block_number
         .unwrap_or_default();
-    if should_bypass_stalled_anchor_linkage(
+    let bypass_stalled_anchor_linkage = should_bypass_stalled_anchor_linkage(
         &anchor_block_numbers,
         last_anchor_block_number,
         origin_block_number,
         chain_id,
-    ) {
-        let l1_headers =
-            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
-                provider.batch_l1_headers(&[origin_block_number]).await
-            })
-            .await?;
-        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
-            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
-        })?;
-        if origin_header.number != origin_block_number {
-            return Err(RaikoError::Preflight(format!(
-                "proposal origin block number mismatch: expected {origin_block_number}, got {}",
-                origin_header.number
-            )));
-        }
-        if origin_header.hash_slow() != proposal.originBlockHash {
-            return Err(RaikoError::Preflight(format!(
-                "proposal origin block hash mismatch: expected {:?}, got {:?}",
-                proposal.originBlockHash,
-                origin_header.hash_slow()
-            )));
-        }
-
-        manifest.l1_header = origin_header;
-        manifest.l1_ancestor_headers.clear();
-        return Ok(());
+    );
+    if !bypass_stalled_anchor_linkage {
+        validate_anchor_progression(
+            &anchor_block_numbers,
+            last_anchor_block_number,
+            origin_block_number,
+            chain_id,
+        )
+        .map_err(RaikoError::Preflight)?;
     }
-
-    validate_anchor_progression(
-        &anchor_block_numbers,
-        last_anchor_block_number,
-        origin_block_number,
-        chain_id,
-    )
-    .map_err(RaikoError::Preflight)?;
     let min_anchor_block_number = anchor_block_numbers.iter().copied().min().ok_or_else(|| {
         RaikoError::Preflight("cannot derive Shasta anchor checkpoints".to_string())
     })?;
@@ -1637,6 +1612,20 @@ mod tests {
             timestamp: 777,
             ..Default::default()
         }
+    }
+
+    fn sample_l1_header_chain(start: u64, end: u64) -> Vec<Header> {
+        let mut parent_hash = None;
+        (start..=end)
+            .map(|number| {
+                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                if let Some(hash) = parent_hash {
+                    header.parent_hash = hash;
+                }
+                parent_hash = Some(header.hash_slow());
+                header
+            })
+            .collect()
     }
 
     fn sample_block(
@@ -2385,12 +2374,19 @@ mod tests {
     #[tokio::test]
     async fn preflight_bypasses_stalled_anchor_linkage() {
         let mut provider = sample_provider();
-        let origin_header = sample_l1_header(200, B256::from([0x77; 32]));
-        provider.block = sample_block(42, 10, B256::from([0x88; 32]), B256::from([0x99; 32]));
+        let l1_headers = sample_l1_header_chain(10, 200);
+        let anchor_header = l1_headers.first().expect("anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        provider.block = sample_block(
+            42,
+            anchor_header.number,
+            anchor_header.hash_slow(),
+            anchor_header.state_root,
+        );
         provider.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
         provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
-        provider.l1_headers = vec![origin_header.clone()];
+        provider.l1_headers = l1_headers;
         let ctx = sample_context(42, 201, 10);
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
@@ -2401,7 +2397,9 @@ mod tests {
 
         let input = spec.preflight(&ctx, &provider).await.expect("preflight");
 
-        assert!(input.taiko.l1_ancestor_headers.is_empty());
+        assert_eq!(input.taiko.l1_ancestor_headers.len(), 191);
+        assert_eq!(input.taiko.l1_ancestor_headers[0].number, 10);
+        assert_eq!(input.taiko.l1_ancestor_headers.last().unwrap().number, 200);
         assert_eq!(input.taiko.l1_header.number, origin_header.number);
     }
 

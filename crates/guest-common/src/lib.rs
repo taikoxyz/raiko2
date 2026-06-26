@@ -13,7 +13,7 @@ use alloy_consensus::{
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs, WitnessHeader};
 use raiko2_primitives_shasta::{
     instance::{
@@ -172,13 +172,12 @@ fn validate_l1_anchor_linkage(
         .iter()
         .map(|checkpoint| checkpoint.block_number)
         .collect::<Vec<_>>();
-    let bypass_stalled_anchor_linkage = guest_input.taiko.l1_ancestor_headers.is_empty()
-        && should_bypass_stalled_anchor_linkage(
-            &anchor_block_numbers,
-            parent_anchor_block_number,
-            origin_block_number,
-            guest_input.taiko.chain_spec.chain_id,
-        );
+    let bypass_stalled_anchor_linkage = should_bypass_stalled_anchor_linkage(
+        &anchor_block_numbers,
+        parent_anchor_block_number,
+        origin_block_number,
+        guest_input.taiko.chain_spec.chain_id,
+    );
 
     if !bypass_stalled_anchor_linkage {
         validate_anchor_progression(
@@ -201,17 +200,7 @@ fn validate_l1_anchor_linkage(
         "taiko.l1_header hash mismatch"
     );
     if guest_input.taiko.l1_ancestor_headers.is_empty() {
-        ensure!(
-            anchor_block_numbers
-                .iter()
-                .all(|&anchor_block_number| anchor_block_number == parent_anchor_block_number),
-            "empty L1 ancestor headers cannot verify advancing anchor checkpoint"
-        );
-        ensure!(
-            bypass_stalled_anchor_linkage,
-            "taiko.l1_ancestor_headers must not be empty unless anchor linkage is stalled"
-        );
-        return Ok(());
+        bail!("taiko.l1_ancestor_headers must not be empty");
     }
 
     let mut checkpoint_index = 0usize;
@@ -1086,6 +1075,20 @@ mod tests {
         }
     }
 
+    fn sample_l1_header_chain(start: u64, end: u64) -> Vec<alloy_consensus::Header> {
+        let mut parent_hash = None;
+        (start..=end)
+            .map(|number| {
+                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                if let Some(hash) = parent_hash {
+                    header.parent_hash = hash;
+                }
+                parent_hash = Some(header.hash_slow());
+                header
+            })
+            .collect()
+    }
+
     fn test_anchor_address() -> Address {
         taiko_mainnet_chain_spec()
             .l2_contract
@@ -1456,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn bypasses_stalled_anchor_linkage_with_empty_l1_ancestor_headers() {
+    fn rejects_stalled_anchor_linkage_with_empty_l1_ancestor_headers() {
         let mut guest_input = guest_input_with_single_block();
         let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
         guest_input.taiko.l1_header = origin_header.clone();
@@ -1468,18 +1471,86 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect_err("stalled anchor without headers should fail");
+
+        assert!(error_chain_contains(
+            &err,
+            "taiko.l1_ancestor_headers must not be empty"
+        ));
+    }
+
+    #[test]
+    fn accepts_stalled_anchor_linkage_with_matching_l1_header_chain() {
+        let mut guest_input = guest_input_with_single_block();
+        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
+        let anchor_header = headers.first().expect("anchor header").clone();
+        let origin_header = headers.last().expect("origin header").clone();
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers = headers;
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(anchor_header.number);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
+            blockHash: anchor_header.hash_slow(),
+            stateRoot: anchor_header.state_root,
+        })];
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+
         let subproof_input_hash = prove_shasta_proposal_with_validator(
             &guest_input,
             |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
             },
         )
-        .expect("stalled anchor should bypass linkage");
+        .expect("stalled anchor should validate against L1 headers");
 
         assert_eq!(
             subproof_input_hash,
             hash_shasta_subproof_input(&guest_input.proof_carry_data)
         );
+    }
+
+    #[test]
+    fn rejects_stalled_anchor_checkpoint_state_root_mismatch() {
+        let mut guest_input = guest_input_with_single_block();
+        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
+        let anchor_header = headers.first().expect("anchor header").clone();
+        let origin_header = headers.last().expect("origin header").clone();
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers = headers;
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(anchor_header.number);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
+            blockHash: anchor_header.hash_slow(),
+            stateRoot: B256::from([0xFE; 32]),
+        })];
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect_err("forged stalled anchor state root should fail");
+
+        assert!(error_chain_contains(
+            &err,
+            "not found in taiko.l1_ancestor_headers"
+        ));
     }
 
     #[test]
@@ -1497,7 +1568,7 @@ mod tests {
 
         assert!(error_chain_contains(
             &err,
-            "unless anchor linkage is stalled"
+            "taiko.l1_ancestor_headers must not be empty"
         ));
     }
 
@@ -1528,7 +1599,7 @@ mod tests {
 
         assert!(error_chain_contains(
             &err,
-            "empty L1 ancestor headers cannot verify advancing anchor checkpoint"
+            "taiko.l1_ancestor_headers must not be empty"
         ));
     }
 

@@ -295,6 +295,9 @@ fn last_full_header(headers: &[WitnessHeader]) -> Result<Header> {
         .context("missing parent header in proposal ancestor headers")
 }
 
+// Anchor._blockState is read as a raw 256-bit storage word. In the current
+// contract layout, anchorBlockNumber is a uint48 packed into the least
+// significant 48 bits of slot 256.
 fn anchor_block_number_from_storage_word(word: U256) -> u64 {
     let bytes = word.to_be_bytes::<32>();
     let mut value = [0u8; 8];
@@ -1178,6 +1181,17 @@ mod tests {
         err.chain()
             .map(ToString::to_string)
             .any(|message| message.contains(expected))
+    }
+
+    #[test]
+    fn anchor_block_number_from_storage_word_reads_low_uint48() {
+        let anchor_block_number = 0x0102_0304_0506u128;
+        let word = U256::from((0xDEAD_BEEFu128 << 64) | (0xABCDu128 << 48) | anchor_block_number);
+
+        assert_eq!(
+            anchor_block_number_from_storage_word(word),
+            anchor_block_number as u64
+        );
     }
 
     #[test]

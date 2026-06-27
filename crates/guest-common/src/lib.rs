@@ -2293,11 +2293,14 @@ mod tests {
 
     #[test]
     fn derivation_guest_empty_sources_skips_derivation() {
-        // DIVERGENCE(parity) P-2: the client rejects empty proposal.sources (EmptyDerivationSources);
-        // raiko2 derive_expected_shasta_blocks returns Ok(None) and still proves. Asserting current
-        // behavior — the guest accepts an empty-sources proposal and completes the proof, whereas the
-        // client would reject it. This divergence means raiko2 will prove blocks the client would never
-        // propose, creating a one-sided soundness gap if a proposer bypasses client-side checks.
+        // P-2 (defensive no-op, NOT a soundness gap): empty proposal.sources makes
+        // derive_expected_shasta_blocks return Ok(None), so the per-block manifest/derivation checks are
+        // skipped. This is unreachable for any finalizable proof: the proof binds to hash_proposal(proposal)
+        // (== the on-chain LibHashOptimized.hashProposal = keccak256(abi.encode(Proposal))), which commits to
+        // the full `sources` array; and the inbox always builds `new DerivationSource[](toProcess + 1)`, i.e.
+        // >= 1 source (the proposer cannot force it empty). So an empty-sources proposal can never match a
+        // finalized on-chain proposal hash. This test pins the harmless current behavior; the client's
+        // EmptyDerivationSources rejection is a client-side convenience, not a soundness requirement here.
         let guest_input = guest_input_with_single_block(); // sources are empty by construction
         assert!(guest_input.taiko.proposal_event.proposal.sources.is_empty());
         let mut gi = guest_input;

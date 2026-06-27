@@ -7,11 +7,14 @@ use risc0_ethereum_trie::Trie;
 use std::time::Instant;
 use tracing::info;
 
+use crate::StorageProofTargets;
+
 use super::RpcL2Provider;
 
 const DEFAULT_ACCOUNT_PROOF_BATCH_SIZE: usize = 250;
 
 type AccountProofRequest = (usize, u64, Address);
+type StorageProofRequest = (usize, u64, u64, Address, Vec<B256>);
 
 /// Decode account from EIP-1186 proof response
 fn decode_account_from_proof(
@@ -70,6 +73,43 @@ fn build_account_proof_requests(
                 .into_iter()
                 .map(|address| (block_idx, parent_block_number, address)),
         );
+    }
+
+    Ok(requests)
+}
+
+fn build_storage_proof_requests(
+    block_numbers: &[u64],
+    targets: &StorageProofTargets,
+) -> RaikoResult<Vec<StorageProofRequest>> {
+    if block_numbers.len() != targets.len() {
+        return Err(RaikoError::Provider(format!(
+            "storage proof target count ({}) does not match block count ({})",
+            targets.len(),
+            block_numbers.len()
+        )));
+    }
+
+    let mut requests = Vec::new();
+    for (block_idx, (block_number, block_targets)) in block_numbers.iter().zip(targets).enumerate()
+    {
+        let parent_block_number = block_number.checked_sub(1).ok_or_else(|| {
+            RaikoError::Provider(format!(
+                "cannot fetch parent storage proof for genesis block {block_number}"
+            ))
+        })?;
+        for (address, storage_keys) in block_targets {
+            if storage_keys.is_empty() {
+                continue;
+            }
+            requests.push((
+                block_idx,
+                *block_number,
+                parent_block_number,
+                *address,
+                storage_keys.clone(),
+            ));
+        }
     }
 
     Ok(requests)
@@ -195,6 +235,94 @@ impl RpcL2Provider {
         }
 
         Ok((accounts, witness_nodes))
+    }
+
+    pub(super) async fn fetch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        let requests = build_storage_proof_requests(block_numbers, targets)?;
+        let mut result = vec![Vec::new(); block_numbers.len()];
+        if requests.is_empty() {
+            return Ok(result);
+        }
+
+        let started_at = Instant::now();
+        let batch_size = account_proof_batch_size();
+        for chunk in requests.chunks(batch_size) {
+            let mut batch = self.witness_client.new_batch();
+            let mut pending = Vec::with_capacity(chunk.len());
+            for (block_idx, block_number, parent_block_number, address, storage_keys) in chunk {
+                pending.push((
+                    *block_idx,
+                    *block_number,
+                    *parent_block_number,
+                    *address,
+                    Box::pin(
+                        batch
+                            .add_call::<_, EIP1186AccountProofResponse>(
+                                "eth_getProof",
+                                &(
+                                    *address,
+                                    storage_keys.clone(),
+                                    BlockNumberOrTag::from(*parent_block_number),
+                                ),
+                            )
+                            .map_err(|_| {
+                                RaikoError::RPC(
+                                    "failed adding storage eth_getProof call to batch".to_owned(),
+                                )
+                            })?,
+                    ),
+                ));
+            }
+
+            batch.send().await.map_err(|e| {
+                let blocks = chunk
+                    .iter()
+                    .map(|(_, block_number, _, _, _)| *block_number)
+                    .collect::<Vec<_>>();
+                RaikoError::RPC(format!(
+                    "error sending storage eth_getProof batch for blocks {blocks:?}: {e}"
+                ))
+            })?;
+
+            for (block_idx, block_number, parent_block_number, address, request) in pending {
+                let proof = request.await.map_err(|e| {
+                    RaikoError::RPC(format!(
+                        "error collecting storage eth_getProof for address {address} at parent block {parent_block_number} (block {block_number}): {e}"
+                    ))
+                })?;
+                result[block_idx].extend(
+                    proof
+                        .account_proof
+                        .iter()
+                        .cloned()
+                        .map(WitnessStateNode::from_bytes),
+                );
+                for storage_proof in proof.storage_proof {
+                    result[block_idx].extend(
+                        storage_proof
+                            .proof
+                            .into_iter()
+                            .map(WitnessStateNode::from_bytes),
+                    );
+                }
+            }
+        }
+
+        for nodes in &mut result {
+            *nodes = ExecutionWitness::canonicalize_state_nodes(std::mem::take(nodes));
+        }
+        info!(
+            block_count = block_numbers.len(),
+            proof_requests = requests.len(),
+            batch_size,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "fetched proposal-window storage proofs"
+        );
+        Ok(result)
     }
 }
 

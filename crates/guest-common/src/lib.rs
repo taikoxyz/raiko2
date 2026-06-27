@@ -14,7 +14,10 @@ use alloy_consensus::{
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use anyhow::{bail, ensure, Context, Result};
-use raiko2_primitives::{ChainSpec, ProofType, StatelessInput, SupportedChainSpecs, WitnessHeader};
+use raiko2_primitives::{
+    shasta_checkpoint_storage_slots, ChainSpec, ProofType, StatelessInput, SupportedChainSpecs,
+    WitnessHeader,
+};
 use raiko2_primitives_shasta::{
     instance::{
         build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
@@ -120,6 +123,10 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
         "unexpected l2_contract"
     );
     ensure!(
+        chain_spec.checkpoint_store_contract == verified_chain_spec.checkpoint_store_contract,
+        "unexpected checkpoint_store_contract"
+    );
+    ensure!(
         chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
         "unexpected verifier_address_forks"
     );
@@ -178,17 +185,6 @@ fn validate_l1_anchor_linkage(
         origin_block_number,
         guest_input.taiko.chain_spec.chain_id,
     );
-
-    if !bypass_stalled_anchor_linkage {
-        validate_anchor_progression(
-            &anchor_block_numbers,
-            parent_anchor_block_number,
-            origin_block_number,
-            guest_input.taiko.chain_spec.chain_id,
-        )
-        .map_err(anyhow::Error::msg)?;
-    }
-
     ensure!(
         guest_input.taiko.l1_header.number == origin_block_number,
         "taiko.l1_header.number mismatch: expected {}, got {}",
@@ -199,6 +195,33 @@ fn validate_l1_anchor_linkage(
         guest_input.taiko.l1_header.hash_slow() == origin_block_hash,
         "taiko.l1_header hash mismatch"
     );
+
+    if bypass_stalled_anchor_linkage {
+        let parent_checkpoint =
+            verified_parent_shasta_checkpoint(guest_input, parent_anchor_block_number)?;
+        for checkpoint in anchor_checkpoints {
+            ensure!(
+                checkpoint == &parent_checkpoint,
+                "anchor checkpoint ({}, {:?}, {:?}) does not match parent checkpoint ({}, {:?}, {:?})",
+                checkpoint.block_number,
+                checkpoint.block_hash,
+                checkpoint.state_root,
+                parent_checkpoint.block_number,
+                parent_checkpoint.block_hash,
+                parent_checkpoint.state_root
+            );
+        }
+        return Ok(());
+    }
+
+    validate_anchor_progression(
+        &anchor_block_numbers,
+        parent_anchor_block_number,
+        origin_block_number,
+        guest_input.taiko.chain_spec.chain_id,
+    )
+    .map_err(anyhow::Error::msg)?;
+
     if guest_input.taiko.l1_ancestor_headers.is_empty() {
         bail!("taiko.l1_ancestor_headers must not be empty");
     }
@@ -293,6 +316,60 @@ fn anchor_block_number_from_storage_word(word: U256) -> u64 {
     let mut value = [0u8; 8];
     value[2..].copy_from_slice(&bytes[26..]);
     u64::from_be_bytes(value)
+}
+
+fn storage_word_as_b256(word: U256) -> B256 {
+    B256::from(word.to_be_bytes::<32>())
+}
+
+fn verified_parent_shasta_checkpoint(
+    guest_input: &GuestInput,
+    block_number: u64,
+) -> Result<DecodedAnchorCheckpoint> {
+    let first_witness = guest_input
+        .witnesses
+        .first()
+        .context("GuestInput must contain least one witness")?;
+    let checkpoint_store = first_witness
+        .chain_spec
+        .checkpoint_store_contract
+        .context("missing chain_spec.checkpoint_store_contract parent checkpoint validation")?;
+    let ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
+    let (block_hash_slot, state_root_slot) = shasta_checkpoint_storage_slots(block_number);
+    let block_hash = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            block_hash_slot,
+            &first_witness.witness,
+            &ancestor_headers,
+            guest_input.proposal_state_nodes(),
+        )
+        .context("failed to read parent CheckpointStore blockHash")?,
+    );
+    let state_root = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            state_root_slot,
+            &first_witness.witness,
+            &ancestor_headers,
+            guest_input.proposal_state_nodes(),
+        )
+        .context("failed to read parent CheckpointStore stateRoot")?,
+    );
+    ensure!(
+        block_hash != B256::ZERO,
+        "parent CheckpointStore blockHash is zero"
+    );
+    ensure!(
+        state_root != B256::ZERO,
+        "parent CheckpointStore stateRoot is zero"
+    );
+
+    Ok(DecodedAnchorCheckpoint {
+        block_number,
+        block_hash,
+        state_root,
+    })
 }
 
 fn verified_parent_anchor_block_number(guest_input: &GuestInput) -> Result<u64> {
@@ -1075,20 +1152,6 @@ mod tests {
         }
     }
 
-    fn sample_l1_header_chain(start: u64, end: u64) -> Vec<alloy_consensus::Header> {
-        let mut parent_hash = None;
-        (start..=end)
-            .map(|number| {
-                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
-                if let Some(hash) = parent_hash {
-                    header.parent_hash = hash;
-                }
-                parent_hash = Some(header.hash_slow());
-                header
-            })
-            .collect()
-    }
-
     fn test_anchor_address() -> Address {
         taiko_mainnet_chain_spec()
             .l2_contract
@@ -1143,11 +1206,25 @@ mod tests {
     fn parent_anchor_state_witness(
         anchor_address: Address,
         anchor_block_number: u64,
+        checkpoint_store: Address,
+        checkpoint: DecodedAnchorCheckpoint,
     ) -> (B256, Vec<WitnessStateNode>) {
         let mut storage_trie = Trie::default();
         storage_trie.insert(
             keccak256(B256::from(U256::from(ANCHOR_BLOCK_STATE_SLOT))),
             alloy_rlp::encode(U256::from(anchor_block_number)),
+        );
+
+        let (block_hash_slot, state_root_slot) =
+            shasta_checkpoint_storage_slots(checkpoint.block_number);
+        let mut checkpoint_storage_trie = Trie::default();
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(block_hash_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.block_hash.as_slice())),
+        );
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(state_root_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.state_root.as_slice())),
         );
 
         let mut state_trie = Trie::default();
@@ -1160,12 +1237,22 @@ mod tests {
                 code_hash: KECCAK_EMPTY,
             }),
         );
+        state_trie.insert(
+            keccak256(checkpoint_store),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: checkpoint_storage_trie.hash_slow(),
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
 
         let state_root = state_trie.hash_slow();
         let state_nodes = state_trie
             .rlp_nodes()
             .into_iter()
             .chain(storage_trie.rlp_nodes())
+            .chain(checkpoint_storage_trie.rlp_nodes())
             .map(WitnessStateNode::from_bytes)
             .collect();
         (
@@ -1174,13 +1261,56 @@ mod tests {
         )
     }
 
+    fn replace_parent_checkpoint(
+        guest_input: &mut GuestInput,
+        checkpoint: DecodedAnchorCheckpoint,
+    ) {
+        let chain_spec = &guest_input.witnesses[0].chain_spec;
+        let anchor_address = chain_spec
+            .l2_contract
+            .expect("test chain spec must define Anchor address");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("test chain spec must define checkpoint store address");
+        let (parent_state_root, parent_state_nodes) = parent_anchor_state_witness(
+            anchor_address,
+            TEST_PARENT_ANCHOR_BLOCK_NUMBER,
+            checkpoint_store,
+            checkpoint,
+        );
+        let mut parent_header = guest_input.witnesses[0].witness.headers[0]
+            .header
+            .as_ref()
+            .expect("parent header")
+            .clone();
+        parent_header.state_root = parent_state_root;
+        let parent_witness_header = WitnessHeader::from_header(parent_header.clone());
+        guest_input.proposal_ancestor_headers = vec![parent_witness_header.clone()];
+        guest_input.witnesses[0].witness.headers = vec![parent_witness_header];
+        guest_input.witnesses[0].witness.state = parent_state_nodes;
+        guest_input.witnesses[0].block.header.parent_hash = parent_header.hash_slow();
+    }
+
     fn guest_input_with_single_block() -> GuestInput {
         let chain_spec = taiko_mainnet_chain_spec();
         let anchor_address = chain_spec
             .l2_contract
             .expect("test chain spec must define Anchor address");
-        let (parent_state_root, parent_state_nodes) =
-            parent_anchor_state_witness(anchor_address, TEST_PARENT_ANCHOR_BLOCK_NUMBER);
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("test chain spec must define checkpoint store address");
+        let l1_header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
+        let parent_checkpoint = DecodedAnchorCheckpoint {
+            block_number: l1_header.number,
+            block_hash: l1_header.hash_slow(),
+            state_root: l1_header.state_root,
+        };
+        let (parent_state_root, parent_state_nodes) = parent_anchor_state_witness(
+            anchor_address,
+            TEST_PARENT_ANCHOR_BLOCK_NUMBER,
+            checkpoint_store,
+            parent_checkpoint,
+        );
         let parent_header = alloy_consensus::Header {
             number: TEST_SHASTA_BLOCK_NUMBER - 1,
             timestamp: u64::MAX / 2 - 1,
@@ -1201,7 +1331,6 @@ mod tests {
         input.block.header.state_root = B256::from([1u8; 32]);
         input.witness.headers = vec![parent_witness_header.clone()];
         input.witness.state = parent_state_nodes;
-        let l1_header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
         let checkpoint = AnchorV4Checkpoint {
             blockNumber: l1_header.number.try_into().expect("fits in uint48"),
             blockHash: l1_header.hash_slow(),
@@ -1459,10 +1588,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stalled_anchor_linkage_with_empty_l1_ancestor_headers() {
+    fn accepts_stalled_anchor_linkage_with_empty_l1_ancestor_headers() {
         let mut guest_input = guest_input_with_single_block();
         let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
         guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+
+        let subproof_input_hash = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect("stalled anchor should validate against parent checkpoint");
+
+        assert_eq!(
+            subproof_input_hash,
+            hash_shasta_subproof_input(&guest_input.proof_carry_data)
+        );
+    }
+
+    #[test]
+    fn rejects_stalled_anchor_with_mismatched_origin_header() {
+        let mut guest_input = guest_input_with_single_block();
+        let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        guest_input.taiko.l1_header = sample_l1_header(600, B256::from([0x88; 32]));
         guest_input.taiko.l1_ancestor_headers.clear();
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
         guest_input.taiko.proposal_event.proposal.originBlockNumber =
@@ -1477,63 +1633,65 @@ mod tests {
                 Ok(stateless_input.block.header.hash_slow())
             },
         )
-        .expect_err("stalled anchor without headers should fail");
+        .expect_err("stalled anchor with mismatched origin header should fail");
 
-        assert!(error_chain_contains(
-            &err,
-            "taiko.l1_ancestor_headers must not be empty"
-        ));
+        assert!(error_chain_contains(&err, "taiko.l1_header hash mismatch"));
     }
 
     #[test]
-    fn accepts_stalled_anchor_linkage_with_matching_l1_header_chain() {
+    fn rejects_stalled_anchor_missing_parent_checkpoint() {
         let mut guest_input = guest_input_with_single_block();
-        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
-        let anchor_header = headers.first().expect("anchor header").clone();
-        let origin_header = headers.last().expect("origin header").clone();
+        let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
         guest_input.taiko.l1_header = origin_header.clone();
-        guest_input.taiko.l1_ancestor_headers = headers;
-        guest_input.taiko.prover_data.last_anchor_block_number = Some(anchor_header.number);
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
         guest_input.taiko.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
-        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
-            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
-            blockHash: anchor_header.hash_slow(),
-            stateRoot: anchor_header.state_root,
-        })];
+        replace_parent_checkpoint(
+            &mut guest_input,
+            DecodedAnchorCheckpoint {
+                block_number: TEST_PARENT_ANCHOR_BLOCK_NUMBER,
+                block_hash: B256::ZERO,
+                state_root: B256::ZERO,
+            },
+        );
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-        let subproof_input_hash = prove_shasta_proposal_with_validator(
+        let err = prove_shasta_proposal_with_validator(
             &guest_input,
             |stateless_input, _ancestor_headers, _runtime| {
                 Ok(stateless_input.block.header.hash_slow())
             },
         )
-        .expect("stalled anchor should validate against L1 headers");
+        .expect_err("stalled anchor without parent checkpoint should fail");
 
-        assert_eq!(
-            subproof_input_hash,
-            hash_shasta_subproof_input(&guest_input.proof_carry_data)
-        );
+        assert!(error_chain_contains(
+            &err,
+            "parent CheckpointStore blockHash is zero"
+        ));
     }
 
     #[test]
     fn rejects_stalled_anchor_checkpoint_state_root_mismatch() {
         let mut guest_input = guest_input_with_single_block();
-        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
-        let anchor_header = headers.first().expect("anchor header").clone();
-        let origin_header = headers.last().expect("origin header").clone();
+        let parent_checkpoint =
+            decode_anchor_checkpoint(&guest_input.witnesses[0].block).expect("fixture anchor");
+        let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
         guest_input.taiko.l1_header = origin_header.clone();
-        guest_input.taiko.l1_ancestor_headers = headers;
-        guest_input.taiko.prover_data.last_anchor_block_number = Some(anchor_header.number);
+        guest_input.taiko.l1_ancestor_headers.clear();
+        guest_input.taiko.prover_data.last_anchor_block_number =
+            Some(parent_checkpoint.block_number);
         guest_input.taiko.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
         guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
-            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
-            blockHash: anchor_header.hash_slow(),
+            blockNumber: parent_checkpoint
+                .block_number
+                .try_into()
+                .expect("fits in uint48"),
+            blockHash: parent_checkpoint.block_hash,
             stateRoot: B256::from([0xFE; 32]),
         })];
         guest_input.proof_carry_data =
@@ -1549,7 +1707,7 @@ mod tests {
 
         assert!(error_chain_contains(
             &err,
-            "not found in taiko.l1_ancestor_headers"
+            "does not match parent checkpoint"
         ));
     }
 

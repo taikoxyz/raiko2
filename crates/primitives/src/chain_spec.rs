@@ -5,7 +5,9 @@ use alethia_reth_chainspec::{
     hardfork::TaikoHardfork as AlethiaTaikoHardfork, spec::TaikoDevnetConfigExt,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
-use alloy_primitives::{Address, BlockNumber, ChainId, U256, address, map::HashMap, uint};
+use alloy_primitives::{
+    Address, B256, BlockNumber, ChainId, U256, address, keccak256, map::HashMap, uint,
+};
 use anyhow::{Result, anyhow, bail};
 use reth_chainspec::{ChainSpec as RethChainSpec, HOODI as RETH_HOODI, MAINNET as RETH_MAINNET};
 use reth_revm::primitives::hardfork::SpecId;
@@ -14,6 +16,24 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
+pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
+
+#[must_use]
+pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&U256::from(block_number).to_be_bytes::<32>());
+    encoded[32..]
+        .copy_from_slice(&U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT).to_be_bytes::<32>());
+
+    let block_hash_slot = U256::from_be_slice(keccak256(encoded).as_slice());
+    let state_root_slot = block_hash_slot + U256::from(1);
+    (block_hash_slot, state_root_slot)
+}
+
+#[must_use]
+pub fn storage_slot_key(slot: U256) -> B256 {
+    B256::from(slot.to_be_bytes::<32>())
+}
 
 #[derive(Clone, Debug)]
 pub struct SupportedChainSpecs(HashMap<String, ChainSpec>);
@@ -361,17 +381,14 @@ where
 pub struct ChainSpec {
     pub name: String,
     pub chain_id: ChainId,
-    #[serde(deserialize_with = "deserialize_spec_id")]
     pub max_spec_id: SpecId,
-    #[serde(deserialize_with = "deserialize_fork_id_map")]
     pub hard_forks: BTreeMap<ForkId, ForkCondition>,
     pub eip_1559_constants: Eip1559Constants,
-    #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     pub l1_contract: BTreeMap<ForkId, Address>,
     pub l2_contract: Option<Address>,
+    pub checkpoint_store_contract: Option<Address>,
     pub rpc: String,
     pub beacon_rpc: Option<String>,
-    #[serde(deserialize_with = "deserialize_verifier_address_forks")]
     pub verifier_address_forks: VerifierAddressForks,
     pub genesis_time: u64,
     pub seconds_per_slot: u64,
@@ -400,6 +417,8 @@ struct BinaryChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    checkpoint_store_contract: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -419,6 +438,7 @@ impl From<BinaryChainSpecHelper> for ChainSpec {
             eip_1559_constants: helper.eip_1559_constants,
             l1_contract: helper.l1_contract,
             l2_contract: helper.l2_contract,
+            checkpoint_store_contract: helper.checkpoint_store_contract,
             rpc: helper.rpc,
             beacon_rpc: helper.beacon_rpc,
             verifier_address_forks: helper.verifier_address_forks,
@@ -443,6 +463,8 @@ struct JsonChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    checkpoint_store_contract: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -615,6 +637,7 @@ where
         eip_1559_constants,
         l1_contract: helper.l1_contract,
         l2_contract: helper.l2_contract,
+        checkpoint_store_contract: helper.checkpoint_store_contract,
         rpc: helper.rpc,
         beacon_rpc: helper.beacon_rpc,
         verifier_address_forks: helper.verifier_address_forks,
@@ -939,6 +962,7 @@ impl ChainSpec {
             eip_1559_constants,
             l1_contract: BTreeMap::new(),
             l2_contract: None,
+            checkpoint_store_contract: None,
             rpc: String::new(),
             beacon_rpc: None,
             verifier_address_forks: BTreeMap::new(),

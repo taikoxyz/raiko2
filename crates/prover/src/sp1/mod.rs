@@ -599,6 +599,23 @@ async fn verify_network_proposal_proof(
     .await
 }
 
+/// Rejects a network-returned proof whose committed input hash does not match the
+/// hash raiko2 derived locally from the inputs it submitted. Runs unconditionally,
+/// independent of `config.verify`, mirroring the Boundless/RISC0 backend.
+fn ensure_sp1_network_input_hash_matches(
+    stage: &str,
+    expected: B256,
+    actual: B256,
+) -> RaikoResult<()> {
+    if expected != actual {
+        return Err(RaikoError::Guest(format!(
+            "SP1 network {stage} public values do not match locally-computed expected hash \
+             (expected {expected}, got {actual})"
+        )));
+    }
+    Ok(())
+}
+
 async fn verify_network_aggregation_proof(
     config: &Sp1Config,
     proof: &SP1ProofWithPublicValues,
@@ -1639,5 +1656,26 @@ mod tests {
 
         let loaded = load_sp1_subproof_for_aggregation(&proof).expect("load legacy subproof");
         assert!(matches!(loaded, sp1_sdk::SP1Proof::Compressed(_)));
+    }
+
+    #[test]
+    fn sp1_network_input_hash_match_passes() {
+        let h = B256::repeat_byte(0xAB);
+        assert!(super::ensure_sp1_network_input_hash_matches("aggregation", h, h).is_ok());
+    }
+
+    #[test]
+    fn sp1_network_input_hash_mismatch_is_rejected() {
+        let expected = B256::repeat_byte(0x11);
+        let actual = B256::repeat_byte(0x22);
+        let err = super::ensure_sp1_network_input_hash_matches("aggregation", expected, actual)
+            .expect_err("a mismatch must error");
+        match err {
+            raiko2_primitives::RaikoError::Guest(message) => {
+                assert!(message.contains("aggregation"), "stage missing: {message}");
+                assert!(message.contains("do not match"), "reason missing: {message}");
+            }
+            other => panic!("expected RaikoError::Guest, got {other:?}"),
+        }
     }
 }

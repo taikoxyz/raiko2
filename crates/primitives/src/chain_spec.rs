@@ -1159,7 +1159,7 @@ impl ChainSpec {
                 disable_unzen_eth_forks(&mut spec);
                 Ok(spec)
             }
-            other => bail!(
+            other @ ForkCondition::Block(_) => bail!(
                 "unsupported devnet Unzen fork condition for chain {}: {other:?}",
                 self.name
             ),

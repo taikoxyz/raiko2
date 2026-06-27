@@ -8,7 +8,7 @@ use alloy_consensus::{
     Header,
     transaction::{SignerRecoverable, Transaction as _},
 };
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, future::try_join, stream};
@@ -28,7 +28,10 @@ use raiko2_protocol_shasta::shasta::{
     manifest::BlockManifest,
     prepare_source_manifest_with_max_blocks,
 };
-use raiko2_provider::{AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig};
+use raiko2_provider::{
+    AccountProofWitnessNodes, AccountStateMaps, ParentStorageProofRequest, Provider,
+    RpcClientConfig,
+};
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
     future::Future,
@@ -51,6 +54,7 @@ sol! {
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
 const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
 const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
+const SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
 #[cfg(not(test))]
 const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
@@ -118,6 +122,8 @@ where
         let blocks = fetch_preflight_blocks(provider, &block_numbers).await?;
         let manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
+        let parent_storage_proofs =
+            stalled_anchor_parent_storage_requests_for_blocks(&chain_spec, &manifest, &blocks)?;
         let parent_block =
             fetch_preflight_parent_block_for_tx_lists(provider, &manifest, &blocks).await?;
         let tx_lists =
@@ -134,6 +140,7 @@ where
             ctx.request.proposal_id,
             &blocks,
             tx_lists.as_deref(),
+            &parent_storage_proofs,
         )
         .await?;
         info!(
@@ -217,6 +224,7 @@ async fn fetch_preflight_witnesses<P: Provider>(
     proposal_id: u64,
     blocks: &[reth_ethereum_primitives::Block],
     tx_lists: Option<&[Bytes]>,
+    parent_storage_proofs: &[ParentStorageProofRequest],
 ) -> RaikoResult<Vec<StatelessInput>> {
     let block_numbers = blocks
         .iter()
@@ -252,6 +260,11 @@ async fn fetch_preflight_witnesses<P: Provider>(
                 let chain_spec = chain_spec.clone();
                 let chunk_blocks = &blocks[start..end];
                 let chunk_tx_lists = tx_lists.map(|tx_lists| &tx_lists[start..end]);
+                let chunk_parent_storage_proofs = if start == 0 {
+                    parent_storage_proofs
+                } else {
+                    &[]
+                };
                 async move {
                     let chunk_block_numbers = chunk_blocks
                         .iter()
@@ -274,6 +287,7 @@ async fn fetch_preflight_witnesses<P: Provider>(
                                 chunk_count,
                                 chunk_blocks,
                                 chunk_tx_lists,
+                                chunk_parent_storage_proofs,
                                 chain_spec,
                             )
                             .await
@@ -529,6 +543,7 @@ async fn fetch_preflight_chunk<P: Provider>(
     chunk_count: usize,
     blocks: &[reth_ethereum_primitives::Block],
     tx_lists: Option<&[Bytes]>,
+    parent_storage_proofs: &[ParentStorageProofRequest],
     chain_spec: ChainSpec,
 ) -> RaikoResult<(usize, Vec<StatelessInput>)> {
     let block_numbers = blocks
@@ -544,6 +559,7 @@ async fn fetch_preflight_chunk<P: Provider>(
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
         tx_list_witness = tx_lists.is_some(),
+        parent_storage_proof_count = parent_storage_proofs.len(),
         "starting shasta preflight chunk"
     );
     if let Some(tx_lists) = tx_lists
@@ -562,11 +578,25 @@ async fn fetch_preflight_chunk<P: Provider>(
         let witnesses = if let Some(tx_lists) = tx_lists
             && !use_canonical_witness
         {
-            provider
-                .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
-                .await
-        } else {
+            if parent_storage_proofs.is_empty() {
+                provider
+                    .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
+                    .await
+            } else {
+                provider
+                    .batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+                        &block_numbers,
+                        tx_lists,
+                        parent_storage_proofs,
+                    )
+                    .await
+            }
+        } else if parent_storage_proofs.is_empty() {
             provider.batch_witnesses(&block_numbers).await
+        } else {
+            provider
+                .batch_witnesses_with_parent_storage_proofs(&block_numbers, parent_storage_proofs)
+                .await
         }?;
         Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
     };
@@ -979,6 +1009,72 @@ fn decode_anchor_checkpoint(
         block_hash: decoded._checkpoint.blockHash,
         state_root: decoded._checkpoint.stateRoot,
     })
+}
+
+fn signal_service_checkpoint_entry_slot(block_number: u64) -> B256 {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&U256::from(block_number).to_be_bytes::<32>());
+    encoded[32..].copy_from_slice(&U256::from(SIGNAL_SERVICE_CHECKPOINTS_SLOT).to_be_bytes::<32>());
+    keccak256(encoded)
+}
+
+fn signal_service_checkpoint_storage_keys(block_number: u64) -> Vec<B256> {
+    let entry_slot = signal_service_checkpoint_entry_slot(block_number);
+    let state_root_slot = U256::from_be_slice(entry_slot.as_slice()).wrapping_add(U256::from(1));
+    vec![entry_slot, B256::from(state_root_slot.to_be_bytes::<32>())]
+}
+
+fn stalled_anchor_parent_storage_requests(
+    chain_spec: &ChainSpec,
+    parent_anchor_block_number: u64,
+) -> RaikoResult<Vec<ParentStorageProofRequest>> {
+    let signal_service = chain_spec.l2_signal_service.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.l2_signal_service is required for stalled anchor checkpoint proof"
+                .to_string(),
+        )
+    })?;
+
+    Ok(vec![ParentStorageProofRequest {
+        block_index: 0,
+        address: signal_service,
+        storage_keys: signal_service_checkpoint_storage_keys(parent_anchor_block_number),
+    }])
+}
+
+fn stalled_anchor_parent_storage_requests_for_blocks(
+    chain_spec: &ChainSpec,
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<Vec<ParentStorageProofRequest>> {
+    let anchor_checkpoints = blocks
+        .iter()
+        .map(decode_anchor_checkpoint)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let anchor_block_numbers = anchor_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .collect::<Vec<_>>();
+    let last_anchor_block_number = manifest
+        .prover_data
+        .last_anchor_block_number
+        .unwrap_or_default();
+    let origin_block_number = manifest
+        .proposal_event
+        .proposal
+        .originBlockNumber
+        .to::<u64>();
+
+    if should_bypass_stalled_anchor_linkage(
+        &anchor_block_numbers,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_spec.chain_id,
+    ) {
+        return stalled_anchor_parent_storage_requests(chain_spec, last_anchor_block_number);
+    }
+
+    Ok(Vec::new())
 }
 
 async fn hydrate_shasta_l1_headers<P: Provider>(
@@ -1435,7 +1531,7 @@ mod tests {
         BlobSlice, DerivationSource, ShastaEventData,
         manifest::{BlockManifest, DerivationSourceManifest},
     };
-    use raiko2_provider::Provider;
+    use raiko2_provider::{ParentStorageProofRequest, Provider};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1454,6 +1550,7 @@ mod tests {
         witness_calls: Arc<AtomicUsize>,
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
+        parent_storage_inputs: Arc<Mutex<Vec<ParentStorageProofRequest>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
         account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
     }
@@ -1482,7 +1579,7 @@ mod tests {
             accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            Ok(vec![AddressMap::default()])
+            Ok(vec![AddressMap::default(); accounts.len()])
         }
 
         async fn batch_accounts_with_proof_witnesses(
@@ -1496,10 +1593,13 @@ mod tests {
                 .lock()
                 .expect("account witness nodes lock")
                 .clone();
-            Ok((vec![AddressMap::default()], nodes))
+            let mut nodes = nodes;
+            nodes.resize_with(accounts.len(), Vec::new);
+            nodes.truncate(accounts.len());
+            Ok((vec![AddressMap::default(); accounts.len()], nodes))
         }
 
-        async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
+        async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
             self.witness_calls.fetch_add(1, Ordering::SeqCst);
             if self
                 .witness_failures
@@ -1510,7 +1610,19 @@ mod tests {
             {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
-            Ok(vec![ExecutionWitness::default()])
+            Ok(blocks.iter().map(|_| ExecutionWitness::default()).collect())
+        }
+
+        async fn batch_witnesses_with_parent_storage_proofs(
+            &self,
+            blocks: &[u64],
+            parent_storage_proofs: &[ParentStorageProofRequest],
+        ) -> RaikoResult<Vec<ExecutionWitness>> {
+            self.parent_storage_inputs
+                .lock()
+                .expect("parent storage inputs lock")
+                .extend_from_slice(parent_storage_proofs);
+            self.batch_witnesses(blocks).await
         }
 
         async fn batch_witnesses_with_tx_lists(
@@ -1523,6 +1635,27 @@ mod tests {
                 .tx_list_witness_inputs
                 .lock()
                 .expect("tx list witness inputs lock") = tx_lists.to_vec();
+            Ok(tx_lists
+                .iter()
+                .map(|_| ExecutionWitness::default())
+                .collect())
+        }
+
+        async fn batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+            &self,
+            _blocks: &[u64],
+            tx_lists: &[Bytes],
+            parent_storage_proofs: &[ParentStorageProofRequest],
+        ) -> RaikoResult<Vec<ExecutionWitness>> {
+            self.tx_list_witness_calls.fetch_add(1, Ordering::SeqCst);
+            *self
+                .tx_list_witness_inputs
+                .lock()
+                .expect("tx list witness inputs lock") = tx_lists.to_vec();
+            self.parent_storage_inputs
+                .lock()
+                .expect("parent storage inputs lock")
+                .extend_from_slice(parent_storage_proofs);
             Ok(tx_lists
                 .iter()
                 .map(|_| ExecutionWitness::default())
@@ -1788,6 +1921,7 @@ mod tests {
             witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
+            parent_storage_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
             account_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
                 Bytes::from_static(&[0xc1, 0x80]),
@@ -2005,6 +2139,7 @@ mod tests {
             1,
             std::slice::from_ref(&provider.block),
             Some(&tx_lists),
+            &[],
             chain_spec,
         )
         .await
@@ -2072,6 +2207,7 @@ mod tests {
             1,
             std::slice::from_ref(&provider.block),
             Some(&tx_lists),
+            &[],
             chain_spec,
         )
         .await
@@ -2100,6 +2236,7 @@ mod tests {
             1,
             std::slice::from_ref(&provider.block),
             Some(&tx_lists),
+            &[],
             chain_spec,
         )
         .await
@@ -2382,6 +2519,28 @@ mod tests {
         assert_eq!(input.taiko.l1_header.number, 10);
     }
 
+    #[test]
+    fn stalled_anchor_parent_storage_request_targets_signal_service_checkpoint() {
+        let signal_service = Address::from([0x5a; 20]);
+        let chain_spec = ChainSpec {
+            l2_signal_service: Some(signal_service),
+            ..Default::default()
+        };
+        let parent_anchor = 123_456u64;
+
+        let requests = super::stalled_anchor_parent_storage_requests(&chain_spec, parent_anchor)
+            .expect("stalled anchor parent storage request");
+
+        assert_eq!(
+            requests,
+            vec![ParentStorageProofRequest {
+                block_index: 0,
+                address: signal_service,
+                storage_keys: super::signal_service_checkpoint_storage_keys(parent_anchor),
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn preflight_bypasses_stalled_anchor_linkage() {
         let mut provider = sample_provider();
@@ -2403,6 +2562,45 @@ mod tests {
 
         assert!(input.taiko.l1_ancestor_headers.is_empty());
         assert_eq!(input.taiko.l1_header.number, origin_header.number);
+    }
+
+    #[tokio::test]
+    async fn preflight_stalled_anchor_requests_parent_checkpoint_storage_proof() {
+        let mut provider = sample_provider();
+        let origin_header = sample_l1_header(200, B256::from([0x77; 32]));
+        provider.block = sample_block(42, 10, B256::from([0x88; 32]), B256::from([0x99; 32]));
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        provider.l1_headers = vec![origin_header];
+        let ctx = sample_context(42, 201, 10);
+        let chain_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+            .expect("supported chain");
+        let signal_service = chain_spec
+            .l2_signal_service
+            .expect("supported chain defines SignalService");
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let _input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        let parent_storage_inputs = provider
+            .parent_storage_inputs
+            .lock()
+            .expect("parent storage inputs lock");
+        assert_eq!(
+            &*parent_storage_inputs,
+            &[ParentStorageProofRequest {
+                block_index: 0,
+                address: signal_service,
+                storage_keys: super::signal_service_checkpoint_storage_keys(10),
+            }]
+        );
     }
 
     #[tokio::test]

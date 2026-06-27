@@ -2025,4 +2025,259 @@ mod tests {
             .to_string()
             .contains("proof verification failed at index 0"));
     }
+
+    // ── Task 4: validate_l1_anchor_linkage edge cases ─────────────────────────
+
+    fn prove_identity(guest_input: &GuestInput) -> anyhow::Result<B256> {
+        prove_shasta_proposal_with_validator(
+            guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+    }
+
+    /// Rebuild carry data after a mutation, then assert the prove path rejects with `expected`.
+    fn assert_guest_rejects(mut guest_input: GuestInput, expected: &str) {
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        let err = prove_identity(&guest_input).expect_err("expected guest rejection");
+        assert!(
+            error_chain_contains(&err, expected),
+            "error chain did not contain {expected:?}: {err:?}"
+        );
+    }
+
+    /// Known-good guest input whose anchor is stalled but linked against a real multi-header L1 chain.
+    /// Mirrors `accepts_stalled_anchor_linkage_with_matching_l1_header_chain`.
+    fn stalled_chain_input() -> GuestInput {
+        let mut guest_input = guest_input_with_single_block();
+        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
+        let anchor_header = headers.first().expect("anchor header").clone();
+        let origin_header = headers.last().expect("origin header").clone();
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers = headers;
+        guest_input.taiko.prover_data.last_anchor_block_number = Some(anchor_header.number);
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
+            blockHash: anchor_header.hash_slow(),
+            stateRoot: anchor_header.state_root,
+        })];
+        guest_input
+    }
+
+    #[test]
+    fn linkage_guest_control_stalled_chain_proves() {
+        let mut guest_input = stalled_chain_input();
+        guest_input.proof_carry_data =
+            build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
+        prove_identity(&guest_input).expect("known-good stalled chain proves");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_non_contiguous_ancestor_headers() {
+        let mut guest_input = stalled_chain_input();
+        // drop one middle header to create a number gap
+        let mid = guest_input.taiko.l1_ancestor_headers.len() / 2;
+        guest_input.taiko.l1_ancestor_headers.remove(mid);
+        assert_guest_rejects(guest_input, "must be contiguous");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_broken_parent_hash_chain() {
+        let mut guest_input = stalled_chain_input();
+        guest_input.taiko.l1_ancestor_headers[1].parent_hash = B256::from([0x01; 32]);
+        assert_guest_rejects(guest_input, "parent hash mismatch");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_last_ancestor_not_origin_number() {
+        let mut guest_input = stalled_chain_input();
+        // truncate the chain so the last header no longer reaches origin
+        guest_input.taiko.l1_ancestor_headers.pop();
+        assert_guest_rejects(guest_input, "last block number mismatch");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_l1_header_number_not_origin() {
+        let mut guest_input = stalled_chain_input();
+        // keep originBlockNumber, but make taiko.l1_header.number disagree with it
+        guest_input.taiko.l1_header.number += 1;
+        assert_guest_rejects(guest_input, "l1_header.number mismatch");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_forged_checkpoint_state_root() {
+        let mut guest_input = stalled_chain_input();
+        let anchor_header = guest_input.taiko.l1_ancestor_headers[0].clone();
+        guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
+            blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
+            blockHash: anchor_header.hash_slow(),
+            stateRoot: B256::from([0xFE; 32]), // forged
+        })];
+        assert_guest_rejects(guest_input, "not found in taiko.l1_ancestor_headers");
+    }
+
+    // ── Task 5: anchor-transaction common checks ──────────────────────────────
+
+    fn golden_touch_sign(tx: TxEip1559) -> reth_ethereum_primitives::TransactionSigned {
+        let signature = golden_touch_signer()
+            .sign_hash_sync(&tx.signature_hash())
+            .expect("golden touch signature");
+        tx.into_signed(signature).into()
+    }
+
+    fn base_checkpoint() -> AnchorV4Checkpoint {
+        // Matches the anchor checkpoint built inside guest_input_with_single_block (L1 block 7).
+        let header = sample_l1_header(TEST_PARENT_ANCHOR_BLOCK_NUMBER, B256::from([0x66; 32]));
+        AnchorV4Checkpoint {
+            blockNumber: header.number.try_into().expect("fits in uint48"),
+            blockHash: header.hash_slow(),
+            stateRoot: header.state_root,
+        }
+    }
+
+    #[test]
+    fn anchortx_rejects_wrong_recipient() {
+        let mut guest_input = guest_input_with_single_block();
+        let tx = unsigned_anchor_tx(&base_checkpoint(), Address::from([0x99; 20])); // not l2_contract
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "recipient mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_nonzero_priority_fee() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        tx.max_priority_fee_per_gas = 1; // must be 0
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "max_priority_fee_per_gas mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_max_fee_not_equal_base_fee() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        tx.max_fee_per_gas = 2; // base fee in the fixture header is 1
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "max_fee_per_gas mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_nonempty_access_list() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        // Build a non-empty access list via hand-crafted RLP since alloy_eips/alloy_eip2930
+        // are not direct dependencies. AccessList wraps Vec<AccessListItem>:
+        //   AccessListItem = RLP list[address(20 bytes), storageKeys(list of B256)]
+        //   AccessList = RLP list-of-items
+        //
+        // Encoding of AccessList([{addr:[0x01;20], keys:[B256::ZERO]}]):
+        //   B256::ZERO (32 zeros): 0xa0 + [0x00;32]              = 33 bytes
+        //   keys list (1 key):     0xe1 + [0xa0,0x00*32]         = 34 bytes (0xc0+33)
+        //   address [0x01;20]:     0x94 + [0x01;20]              = 21 bytes
+        //   item list (payload=55) 0xf7 + [0x94,0x01*20,0xe1,0xa0,0x00*32] = 56 bytes
+        //   outer list (payload=56>55) needs long-list:
+        //     [0xf8, 0x38] + item_list                           = 58 bytes total
+        {
+            use alloy_rlp::Decodable;
+            let item_payload_bytes = {
+                let mut v = Vec::new();
+                v.push(0x94u8); // 20-byte string prefix
+                v.extend_from_slice(&[0x01u8; 20]); // address
+                v.push(0xe1u8); // keys list header: 0xc0+33
+                v.push(0xa0u8); // 32-byte string prefix
+                v.extend_from_slice(&[0x00u8; 32]); // B256::ZERO
+                v
+            }; // len = 21 + 34 = 55
+
+            let item_list: Vec<u8> = {
+                let mut v = vec![0xc0u8 + item_payload_bytes.len() as u8]; // 0xf7
+                v.extend_from_slice(&item_payload_bytes);
+                v
+            }; // len = 56
+
+            // Outer list: payload=56 > 55 → long-list encoding [0xf8, 56, payload...]
+            let outer: Vec<u8> = {
+                let mut v = vec![0xf8u8, 56u8]; // long-list, length=56
+                v.extend_from_slice(&item_list);
+                v
+            }; // len = 58
+
+            let mut buf: &[u8] = &outer;
+            tx.access_list = Decodable::decode(&mut buf).expect("valid access list RLP");
+        }
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "access list must be empty");
+    }
+
+    #[test]
+    fn anchortx_rejects_wrong_chain_id() {
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        tx.chain_id = 167_001; // fixture chain is 167_000
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "chain_id mismatch");
+    }
+
+    #[test]
+    fn anchortx_rejects_wrong_selector_first_tx() {
+        // Replace the anchor tx with a non-anchorV4 call (wrong 4-byte selector) signed by golden touch.
+        // The selector check fires inside validate_anchor_transaction (alethia-reth-consensus) before
+        // reaching our decode_anchor_checkpoint path; the error emitted is "does not match the expected
+        // selector" rather than "not anchorV4".
+        let mut guest_input = guest_input_with_single_block();
+        let mut tx = unsigned_anchor_tx(&base_checkpoint(), test_anchor_address());
+        tx.input = alloy_primitives::Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]); // selector no longer matches anchorV4
+        guest_input.witnesses[0].block.body.transactions = vec![golden_touch_sign(tx)];
+        assert_guest_rejects(guest_input, "does not match the expected selector");
+    }
+
+    // ── Task 7: derivation guards + empty-sources parity ─────────────────────
+
+    #[test]
+    fn derivation_guest_empty_sources_skips_derivation() {
+        // DIVERGENCE(parity) P-2: the client rejects empty proposal.sources (EmptyDerivationSources);
+        // raiko2 derive_expected_shasta_blocks returns Ok(None) and still proves. Asserting current
+        // behavior — the guest accepts an empty-sources proposal and completes the proof, whereas the
+        // client would reject it. This divergence means raiko2 will prove blocks the client would never
+        // propose, creating a one-sided soundness gap if a proposer bypasses client-side checks.
+        let guest_input = guest_input_with_single_block(); // sources are empty by construction
+        assert!(guest_input.taiko.proposal_event.proposal.sources.is_empty());
+        let mut gi = guest_input;
+        gi.proof_carry_data =
+            build_proof_carry_data(&gi, ProofType::Native).expect("build carry data");
+        prove_identity(&gi).expect("empty-sources proposal still proves");
+    }
+
+    #[test]
+    fn derivation_guest_rejects_last_source_forced_inclusion() {
+        use raiko2_protocol::InputDataSource;
+        use raiko2_protocol_shasta::shasta::DerivationSource;
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource {
+            isForcedInclusion: true,
+            ..Default::default()
+        }];
+        // data_sources must match sources len to pass verify_proposal_mode_blob_usage (the
+        // earlier gate); then derive_expected_shasta_blocks fires the isForcedInclusion guard.
+        guest_input.taiko.data_sources = vec![InputDataSource::default()];
+        assert_guest_rejects(
+            guest_input,
+            "last Shasta derivation source must be a normal source",
+        );
+    }
+
+    #[test]
+    fn derivation_guest_rejects_data_source_count_mismatch() {
+        use raiko2_protocol_shasta::shasta::DerivationSource;
+        let mut guest_input = guest_input_with_single_block();
+        // last source is normal (passes the previous guard), but data_sources is empty (len 0 != 1)
+        guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
+        guest_input.taiko.data_sources = Vec::new();
+        assert_guest_rejects(guest_input, "data source count");
+    }
 }

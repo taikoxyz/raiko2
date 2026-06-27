@@ -369,6 +369,8 @@ pub struct ChainSpec {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     pub l1_contract: BTreeMap<ForkId, Address>,
     pub l2_contract: Option<Address>,
+    #[serde(default)]
+    pub l2_signal_service: Option<Address>,
     pub rpc: String,
     pub beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -400,6 +402,8 @@ struct BinaryChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    l2_signal_service: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -419,6 +423,7 @@ impl From<BinaryChainSpecHelper> for ChainSpec {
             eip_1559_constants: helper.eip_1559_constants,
             l1_contract: helper.l1_contract,
             l2_contract: helper.l2_contract,
+            l2_signal_service: helper.l2_signal_service,
             rpc: helper.rpc,
             beacon_rpc: helper.beacon_rpc,
             verifier_address_forks: helper.verifier_address_forks,
@@ -443,6 +448,8 @@ struct JsonChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    l2_signal_service: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -615,6 +622,7 @@ where
         eip_1559_constants,
         l1_contract: helper.l1_contract,
         l2_contract: helper.l2_contract,
+        l2_signal_service: helper.l2_signal_service,
         rpc: helper.rpc,
         beacon_rpc: helper.beacon_rpc,
         verifier_address_forks: helper.verifier_address_forks,
@@ -939,6 +947,7 @@ impl ChainSpec {
             eip_1559_constants,
             l1_contract: BTreeMap::new(),
             l2_contract: None,
+            l2_signal_service: None,
             rpc: String::new(),
             beacon_rpc: None,
             verifier_address_forks: BTreeMap::new(),
@@ -1355,6 +1364,84 @@ mod tests {
             spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
             Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn taiko_default_specs_define_l2_signal_service() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let expected = [
+            (
+                "taiko_mainnet",
+                address!("1670000000000000000000000000000000000005"),
+            ),
+            (
+                "taiko_dev",
+                address!("1670010000000000000000000000000000000005"),
+            ),
+            (
+                "taiko_masaya",
+                address!("1670110000000000000000000000000000000005"),
+            ),
+            (
+                "taiko_hoodi",
+                address!("1670130000000000000000000000000000000005"),
+            ),
+        ];
+
+        for (name, signal_service) in expected {
+            let spec = list
+                .iter()
+                .find(|spec| spec.name == name)
+                .ok_or_else(|| anyhow!("missing spec {name}"))?;
+            assert_eq!(spec.l2_signal_service, Some(signal_service), "{name}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn custom_chain_spec_can_define_l2_signal_service() -> Result<()> {
+        let json = serde_json::json!({
+            "name": "custom_taiko",
+            "chain_id": 999001,
+            "max_spec_id": "CANCUN",
+            "hard_forks": {
+                "FRONTIER": { "Block": 0 },
+                "SHASTA": { "Timestamp": 0 }
+            },
+            "eip_1559_constants": {
+                "base_fee_change_denominator": "0x8",
+                "base_fee_max_increase_denominator": "0x8",
+                "base_fee_max_decrease_denominator": "0x8",
+                "elasticity_multiplier": "0x2"
+            },
+            "l1_contract": {
+                "SHASTA": "0x0000000000000000000000000000000000000001"
+            },
+            "l2_contract": "0x0000000000000000000000000000000000000002",
+            "l2_signal_service": "0x0000000000000000000000000000000000000003",
+            "rpc": "https://example.com",
+            "beacon_rpc": null,
+            "verifier_address_forks": {
+                "SHASTA": {
+                    "SGX": null,
+                    "SP1": null,
+                    "RISC0": null,
+                    "SGXGETH": null
+                }
+            },
+            "genesis_time": 0,
+            "seconds_per_slot": 1,
+            "is_taiko": true
+        });
+
+        let spec: ChainSpec = serde_json::from_value(json)?;
+        assert_eq!(
+            spec.l2_signal_service,
+            Some(address!("0000000000000000000000000000000000000003"))
+        );
+
         Ok(())
     }
 

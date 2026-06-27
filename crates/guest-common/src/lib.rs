@@ -2048,11 +2048,33 @@ mod tests {
         );
     }
 
-    /// Known-good guest input whose anchor is stalled but linked against a real multi-header L1 chain.
-    /// Mirrors `accepts_stalled_anchor_linkage_with_matching_l1_header_chain`.
-    fn stalled_chain_input() -> GuestInput {
+    /// Build a contiguous, parent-linked L1 header chain for `[start, end]` (test helper; the
+    /// upstream base removed its own copy during the checkpoint-store rework).
+    fn sample_l1_header_chain(start: u64, end: u64) -> Vec<alloy_consensus::Header> {
+        let mut parent_hash = None;
+        (start..=end)
+            .map(|number| {
+                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                if let Some(hash) = parent_hash {
+                    header.parent_hash = hash;
+                }
+                parent_hash = Some(header.hash_slow());
+                header
+            })
+            .collect()
+    }
+
+    /// Known-good guest input whose anchor checkpoint sits at the parent anchor but the origin is
+    /// only a few blocks ahead — within the anchor offset window, so the stalled-bypass does NOT
+    /// apply and `validate_l1_anchor_linkage` runs the full `l1_ancestor_headers` linkage path
+    /// (contiguity, parent-hash, origin pinning). A far-ahead origin would take the checkpoint-store
+    /// bypass path instead and skip these checks.
+    fn linked_chain_input() -> GuestInput {
         let mut guest_input = guest_input_with_single_block();
-        let headers = sample_l1_header_chain(TEST_PARENT_ANCHOR_BLOCK_NUMBER, 600);
+        let headers = sample_l1_header_chain(
+            TEST_PARENT_ANCHOR_BLOCK_NUMBER,
+            TEST_PARENT_ANCHOR_BLOCK_NUMBER + 5,
+        );
         let anchor_header = headers.first().expect("anchor header").clone();
         let origin_header = headers.last().expect("origin header").clone();
         guest_input.taiko.l1_header = origin_header.clone();
@@ -2071,7 +2093,7 @@ mod tests {
 
     #[test]
     fn linkage_guest_control_stalled_chain_proves() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
         prove_identity(&guest_input).expect("known-good stalled chain proves");
@@ -2079,7 +2101,7 @@ mod tests {
 
     #[test]
     fn linkage_guest_rejects_non_contiguous_ancestor_headers() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         // drop one middle header to create a number gap
         let mid = guest_input.taiko.l1_ancestor_headers.len() / 2;
         guest_input.taiko.l1_ancestor_headers.remove(mid);
@@ -2088,14 +2110,14 @@ mod tests {
 
     #[test]
     fn linkage_guest_rejects_broken_parent_hash_chain() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         guest_input.taiko.l1_ancestor_headers[1].parent_hash = B256::from([0x01; 32]);
         assert_guest_rejects(guest_input, "parent hash mismatch");
     }
 
     #[test]
     fn linkage_guest_rejects_last_ancestor_not_origin_number() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         // truncate the chain so the last header no longer reaches origin
         guest_input.taiko.l1_ancestor_headers.pop();
         assert_guest_rejects(guest_input, "last block number mismatch");
@@ -2103,7 +2125,7 @@ mod tests {
 
     #[test]
     fn linkage_guest_rejects_l1_header_number_not_origin() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         // keep originBlockNumber, but make taiko.l1_header.number disagree with it
         guest_input.taiko.l1_header.number += 1;
         assert_guest_rejects(guest_input, "l1_header.number mismatch");
@@ -2111,7 +2133,7 @@ mod tests {
 
     #[test]
     fn linkage_guest_rejects_forged_checkpoint_state_root() {
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         let anchor_header = guest_input.taiko.l1_ancestor_headers[0].clone();
         guest_input.witnesses[0].block.body.transactions = vec![anchor_tx(&AnchorV4Checkpoint {
             blockNumber: anchor_header.number.try_into().expect("fits in uint48"),
@@ -2261,7 +2283,7 @@ mod tests {
     #[test]
     fn linkage_guest_rejects_last_ancestor_hash_mismatch() {
         // l1_header check passes, but the LAST ancestor header's hash no longer matches the origin hash.
-        let mut guest_input = stalled_chain_input();
+        let mut guest_input = linked_chain_input();
         let last = guest_input.taiko.l1_ancestor_headers.len() - 1;
         guest_input.taiko.l1_ancestor_headers[last].state_root = B256::from([0xCD; 32]);
         assert_guest_rejects(guest_input, "last hash mismatch");

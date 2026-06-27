@@ -711,4 +711,302 @@ mod tests {
             parent_context().anchor_block_number
         );
     }
+
+    // ---- Task 6: derivation determinism + validate_anchor_numbers parity (P-1) ----
+
+    fn manifest_with_anchors(anchors: &[u64]) -> DerivationSourceManifest {
+        DerivationSourceManifest {
+            blocks: anchors.iter().copied().map(block_manifest).collect(),
+        }
+    }
+
+    #[test]
+    fn derivation_normal_source_must_advance_anchor() {
+        // P-1: a normal (non-forced) source whose anchor never advances is INVALID at the derive layer.
+        let stalled = manifest_with_anchors(&[900]); // == parent anchor 900
+        assert!(!validate_anchor_numbers(
+            &stalled,
+            1000,
+            900,
+            false,
+            crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+        ));
+    }
+
+    #[test]
+    fn derivation_forced_inclusion_may_stall_anchor() {
+        // P-1 counterpart: forced-inclusion sources are allowed to stall.
+        let stalled = manifest_with_anchors(&[900]);
+        assert!(validate_anchor_numbers(
+            &stalled,
+            1000,
+            900,
+            true,
+            crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+        ));
+    }
+
+    #[test]
+    fn derivation_normal_source_advancing_anchor_is_valid() {
+        let advancing = manifest_with_anchors(&[901]);
+        assert!(validate_anchor_numbers(
+            &advancing,
+            1000,
+            900,
+            false,
+            crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+        ));
+    }
+
+    #[test]
+    fn derivation_rejects_anchor_above_origin() {
+        let too_high = manifest_with_anchors(&[1001]); // > origin 1000
+        assert!(!validate_anchor_numbers(
+            &too_high,
+            1000,
+            900,
+            false,
+            crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+        ));
+    }
+
+    #[test]
+    fn derivation_stalled_normal_source_collapses_to_default() {
+        // Normal source that does not advance the anchor -> default manifest with anchor = parent anchor.
+        // This is the P-1 "coerce to default (matches client)" evidence.
+        let source = DerivationSource::default(); // isForcedInclusion = false
+        let manifest = manifest_with_anchors(&[parent_context().anchor_block_number]); // stalled
+        let data_source = InputDataSource {
+            tx_data_from_calldata: manifest.encode_and_compress().expect("payload"),
+            ..Default::default()
+        };
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("prepared manifest");
+        assert_eq!(prepared.blocks.len(), 1);
+        assert_eq!(
+            prepared.blocks[0].anchor_block_number,
+            parent_context().anchor_block_number
+        );
+        assert!(prepared.blocks[0].transactions.is_empty());
+    }
+
+    #[test]
+    fn derivation_forced_inclusion_zero_blocks_defaults() {
+        let source = DerivationSource {
+            isForcedInclusion: true,
+            ..Default::default()
+        };
+        let empty = DerivationSourceManifest { blocks: Vec::new() };
+        let data_source = InputDataSource {
+            tx_data_from_calldata: empty.encode_and_compress().expect("payload"),
+            ..Default::default()
+        };
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("prepared manifest");
+        assert_eq!(prepared.blocks.len(), 1); // forced && len != 1 -> default
+    }
+
+    #[test]
+    fn derivation_invalid_blob_offset_defaults() {
+        // blobHashes present but offset beyond MAX_MANIFEST_OFFSET -> default manifest.
+        let mut source = DerivationSource::default();
+        source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
+        // offset = MAX_MANIFEST_OFFSET + 1, which exceeds the valid range
+        source.blobSlice.offset = alloy_primitives::Uint::from((MAX_MANIFEST_OFFSET as u64) + 1);
+        let data_source = InputDataSource {
+            tx_data_from_blob: vec![vec![0u8; BYTES_PER_BLOB]],
+            ..Default::default()
+        };
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("prepared manifest");
+        assert_eq!(prepared.blocks.len(), 1);
+        assert_eq!(
+            prepared.blocks[0].anchor_block_number,
+            parent_context().anchor_block_number
+        );
+    }
+
+    #[test]
+    fn derivation_over_max_blocks_collapses_to_default() {
+        let source = DerivationSource::default();
+        // Use TAIKO_HOODI_CHAIN_ID with proposal_timestamp=0 to stay pre-Unzen (192-block cap).
+        let max_blocks = crate::shasta::constants::DERIVATION_SOURCE_MAX_BLOCKS;
+        let over = DerivationSourceManifest {
+            blocks: (0..=max_blocks) // MAX + 1 blocks
+                .map(|i| {
+                    let mut b = block_manifest(901);
+                    b.timestamp = 1_001 + u64::try_from(i).expect("fits u64");
+                    b
+                })
+                .collect(),
+        };
+        let data_source = InputDataSource {
+            tx_data_from_calldata: over.encode_and_compress().expect("payload"),
+            ..Default::default()
+        };
+        let meta = ProposalMetadata {
+            proposal_timestamp: 0,
+            chain_id: crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+            ..proposal_metadata()
+        };
+        let prepared =
+            prepare_source_manifest(&source, Some(&data_source), parent_context(), meta, 0)
+                .expect("prepared manifest");
+        assert_eq!(
+            prepared.blocks.len(),
+            1,
+            "over-cap manifest must collapse to default"
+        );
+    }
+
+    // ---- Task 8: timestamp & gas-limit bound edges ----
+
+    fn one_block_at(timestamp: u64, gas_limit: u64) -> DerivationSourceManifest {
+        let mut b = block_manifest(900);
+        b.timestamp = timestamp;
+        b.gas_limit = gas_limit;
+        DerivationSourceManifest { blocks: vec![b] }
+    }
+
+    #[test]
+    fn bounds_timestamp_accepts_lower_edge_and_rejects_below() {
+        let chain = crate::shasta::constants::TAIKO_HOODI_CHAIN_ID;
+        let (parent_ts, proposal_ts, fork_ts) = (1_000u64, 2_000u64, 0u64);
+        let lower = compute_timestamp_lower_bound(parent_ts, proposal_ts, fork_ts, chain);
+        let gas = block_manifest(900).gas_limit;
+        assert!(validate_timestamps(
+            &one_block_at(lower, gas),
+            parent_ts,
+            proposal_ts,
+            fork_ts,
+            chain
+        ));
+        assert!(!validate_timestamps(
+            &one_block_at(lower - 1, gas),
+            parent_ts,
+            proposal_ts,
+            fork_ts,
+            chain
+        ));
+    }
+
+    #[test]
+    fn bounds_timestamp_accepts_proposal_edge_and_rejects_above() {
+        let chain = crate::shasta::constants::TAIKO_HOODI_CHAIN_ID;
+        let (parent_ts, proposal_ts, fork_ts) = (1_000u64, 2_000u64, 0u64);
+        let gas = block_manifest(900).gas_limit;
+        assert!(validate_timestamps(
+            &one_block_at(proposal_ts, gas),
+            parent_ts,
+            proposal_ts,
+            fork_ts,
+            chain
+        ));
+        assert!(!validate_timestamps(
+            &one_block_at(proposal_ts + 1, gas),
+            parent_ts,
+            proposal_ts,
+            fork_ts,
+            chain
+        ));
+    }
+
+    #[test]
+    fn bounds_timestamp_lower_bound_respects_fork_timestamp() {
+        // fork_ts dominates when it exceeds both parent+1 and the proposal-offset floor.
+        let lower = compute_timestamp_lower_bound(
+            1_000,
+            2_000,
+            1_900,
+            crate::shasta::constants::TAIKO_HOODI_CHAIN_ID,
+        );
+        assert_eq!(lower, 1_900);
+    }
+
+    #[test]
+    fn bounds_gas_limit_accepts_edges_and_rejects_outside() {
+        let parent_block_number = 10u64; // non-genesis
+        let parent_gas_limit = 30_000_000u64;
+        let effective = effective_parent_gas_limit(parent_block_number, parent_gas_limit);
+        let (lower, upper) = gas_limit_bounds(effective);
+
+        let at_upper = DerivationSourceManifest {
+            blocks: vec![{
+                let mut b = block_manifest(900);
+                b.gas_limit = upper;
+                b
+            }],
+        };
+        assert!(validate_gas_limit(
+            &at_upper,
+            parent_block_number,
+            parent_gas_limit
+        ));
+
+        let above_upper = DerivationSourceManifest {
+            blocks: vec![{
+                let mut b = block_manifest(900);
+                b.gas_limit = upper + 1;
+                b
+            }],
+        };
+        assert!(!validate_gas_limit(
+            &above_upper,
+            parent_block_number,
+            parent_gas_limit
+        ));
+
+        let at_lower = DerivationSourceManifest {
+            blocks: vec![{
+                let mut b = block_manifest(900);
+                b.gas_limit = lower;
+                b
+            }],
+        };
+        assert!(validate_gas_limit(
+            &at_lower,
+            parent_block_number,
+            parent_gas_limit
+        ));
+
+        if lower > 0 {
+            let below_lower = DerivationSourceManifest {
+                blocks: vec![{
+                    let mut b = block_manifest(900);
+                    b.gas_limit = lower - 1;
+                    b
+                }],
+            };
+            assert!(!validate_gas_limit(
+                &below_lower,
+                parent_block_number,
+                parent_gas_limit
+            ));
+        }
+    }
+
+    #[test]
+    fn bounds_effective_parent_gas_limit_genesis_vs_non_genesis() {
+        let g = 30_000_000u64;
+        assert_eq!(effective_parent_gas_limit(0, g), g); // genesis uses raw parent gas
+        assert_eq!(effective_parent_gas_limit(1, g), g - ANCHOR_V3_V4_GAS_LIMIT); // else subtract anchor gas
+    }
 }

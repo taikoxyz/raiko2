@@ -1140,17 +1140,25 @@ impl ChainSpec {
         &self,
         base: &TaikoChainSpec,
     ) -> Result<TaikoChainSpec> {
-        let Some(unzen) = self.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) else {
-            return Ok(base.clone());
-        };
         if self.chain_id != 167_001 {
             return Ok(base.clone());
         }
+
+        let Some(unzen) = self.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) else {
+            let mut spec = base.clone();
+            disable_unzen_eth_forks(&mut spec);
+            return Ok(spec);
+        };
 
         match unzen {
             ForkCondition::Timestamp(timestamp) => Ok(base
                 .clone_with_devnet_unzen_timestamp(*timestamp)
                 .unwrap_or_else(|| base.clone())),
+            ForkCondition::Tbd => {
+                let mut spec = base.clone();
+                disable_unzen_eth_forks(&mut spec);
+                Ok(spec)
+            }
             other => bail!(
                 "unsupported devnet Unzen fork condition for chain {}: {other:?}",
                 self.name
@@ -1205,6 +1213,13 @@ fn apply_unzen_eth_forks(spec: &mut TaikoChainSpec, condition: AlethiaForkCondit
         .insert(EthereumHardfork::Osaka, condition);
 }
 
+fn disable_unzen_eth_forks(spec: &mut TaikoChainSpec) {
+    spec.inner
+        .hardforks
+        .insert(AlethiaTaikoHardfork::Unzen, AlethiaForkCondition::Never);
+    apply_unzen_eth_forks(spec, AlethiaForkCondition::Never);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1214,6 +1229,7 @@ mod tests {
         hardfork::{TaikoHardfork, TaikoHardforks as _},
     };
     use alloy_primitives::address;
+    use reth_chainspec::EthereumHardforks as _;
 
     const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
 
@@ -1560,10 +1576,20 @@ mod tests {
 
         let taiko = spec.to_taiko_chain_spec()?;
         let shasta = taiko.taiko_fork_activation(TaikoHardfork::Shasta);
+        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+        let cancun = taiko.ethereum_fork_activation(EthereumHardfork::Cancun);
 
         assert!(
             shasta.active_at_timestamp(0),
             "Shasta must be active at genesis on internal devnet"
+        );
+        assert!(
+            !unzen.active_at_timestamp(u64::MAX),
+            "Shasta devnet must not inherit Unzen from alethia base spec"
+        );
+        assert!(
+            !cancun.active_at_timestamp(u64::MAX),
+            "Shasta devnet must not require Cancun blob gas header fields"
         );
         Ok(())
     }

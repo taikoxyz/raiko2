@@ -794,6 +794,9 @@ mod tests {
             parent_context().anchor_block_number
         );
         assert!(prepared.blocks[0].transactions.is_empty());
+        // Proves the collapse actually occurred: the inherited default takes the proposer as coinbase
+        // (0x22), whereas the pre-collapse manifest block had coinbase 0x11.
+        assert_eq!(prepared.blocks[0].coinbase, proposal_metadata().proposer);
     }
 
     #[test]

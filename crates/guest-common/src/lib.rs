@@ -2236,6 +2236,37 @@ mod tests {
         assert_guest_rejects(guest_input, "does not match the expected selector");
     }
 
+    #[test]
+    fn anchortx_rejects_missing_base_fee() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.witnesses[0].block.header.base_fee_per_gas = None;
+        assert_guest_rejects(guest_input, "missing base fee per gas");
+    }
+
+    #[test]
+    fn anchortx_rejects_missing_anchor_transaction() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.witnesses[0].block.body.transactions = Vec::new();
+        assert_guest_rejects(guest_input, "missing anchor transaction");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_l1_header_hash_not_origin() {
+        // l1_header.number still equals origin, but its hash no longer matches originBlockHash.
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.taiko.proposal_event.proposal.originBlockHash = B256::from([0xAB; 32]);
+        assert_guest_rejects(guest_input, "l1_header hash mismatch");
+    }
+
+    #[test]
+    fn linkage_guest_rejects_last_ancestor_hash_mismatch() {
+        // l1_header check passes, but the LAST ancestor header's hash no longer matches the origin hash.
+        let mut guest_input = stalled_chain_input();
+        let last = guest_input.taiko.l1_ancestor_headers.len() - 1;
+        guest_input.taiko.l1_ancestor_headers[last].state_root = B256::from([0xCD; 32]);
+        assert_guest_rejects(guest_input, "last hash mismatch");
+    }
+
     // ── Task 7: derivation guards + empty-sources parity ─────────────────────
 
     #[test]
@@ -2275,7 +2306,9 @@ mod tests {
     fn derivation_guest_rejects_data_source_count_mismatch() {
         use raiko2_protocol_shasta::shasta::DerivationSource;
         let mut guest_input = guest_input_with_single_block();
-        // last source is normal (passes the previous guard), but data_sources is empty (len 0 != 1)
+        // With proposal.sources non-empty but data_sources empty, verify_proposal_mode_blob_usage
+        // rejects immediately (before derive_expected_shasta_blocks is ever reached) because
+        // sources.len()==1 != data_sources.len()==0.
         guest_input.taiko.proposal_event.proposal.sources = vec![DerivationSource::default()];
         guest_input.taiko.data_sources = Vec::new();
         assert_guest_rejects(guest_input, "data source count");

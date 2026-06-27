@@ -1523,7 +1523,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call,
+        AnchorCheckpoint, AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS,
+        anchorV4Call, validate_l1_headers,
     };
     use alethia_reth_chainspec::{
         TAIKO_MAINNET,
@@ -2615,5 +2616,114 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+    }
+
+    fn chain_numbers(headers: &[Header]) -> Vec<u64> {
+        headers.iter().map(|h| h.number).collect()
+    }
+
+    fn checkpoint_for(header: &Header) -> AnchorCheckpoint {
+        AnchorCheckpoint {
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            state_root: header.state_root,
+        }
+    }
+
+    #[test]
+    fn linkage_host_accepts_contiguous_chain_with_matching_checkpoint() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let checkpoints = vec![checkpoint_for(&headers[0])];
+        let origin_hash = headers.last().unwrap().hash_slow();
+        validate_l1_headers(&headers, &numbers, &checkpoints, origin_hash).expect("valid chain");
+    }
+
+    #[test]
+    fn linkage_host_rejects_empty_headers() {
+        let err = validate_l1_headers(&[], &[], &[], B256::ZERO).expect_err("empty");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("no L1 headers returned"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_checkpoint_past_origin() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        // checkpoint at block 13 never matches any header => left over after the loop
+        let stray = AnchorCheckpoint {
+            block_number: 13,
+            block_hash: B256::ZERO,
+            state_root: B256::ZERO,
+        };
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[stray], origin_hash)
+            .expect_err("checkpoint past origin");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("not found in fetched L1 header chain"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_forged_checkpoint_hash_at_matching_number() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let mut forged = checkpoint_for(&headers[1]);
+        forged.block_hash = B256::from([0xFE; 32]); // right number, wrong hash
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[forged], origin_hash)
+            .expect_err("forged checkpoint hash");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("not found in fetched L1 header chain"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_number_mismatch_against_expected() {
+        let headers = sample_l1_header_chain(10, 12);
+        let bad_numbers = vec![10, 11, 13]; // last expected number disagrees with header 12
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &bad_numbers, &[], origin_hash)
+            .expect_err("number mismatch");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("number mismatch")));
+    }
+
+    #[test]
+    fn linkage_host_rejects_broken_parent_hash_chain() {
+        let mut headers = sample_l1_header_chain(10, 12);
+        headers[1].parent_hash = B256::from([0x01; 32]); // break link 10 -> 11
+        let numbers = chain_numbers(&headers);
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[], origin_hash)
+            .expect_err("broken parent hash");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("chain broken")));
+    }
+
+    #[test]
+    fn linkage_host_rejects_origin_hash_mismatch() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let err = validate_l1_headers(&headers, &numbers, &[], B256::from([0x07; 32]))
+            .expect_err("origin hash mismatch");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("origin block hash mismatch"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_does_not_check_first_header_parent_hash() {
+        // DIVERGENCE(parity) P-3: validate_l1_headers skips the parent_hash check for header[0]
+        // (previous_hash starts as None). However, mutating header[0].parent_hash changes its
+        // hash_slow() output, which then causes the parent_hash check for header[1] to fail.
+        // This test pins the actual observable effect: a garbage first-ancestor parent_hash
+        // propagates as a broken link at 10 -> 11, not as a direct first-header rejection.
+        let mut headers = sample_l1_header_chain(10, 12);
+        headers[0].parent_hash = B256::from([0xDE; 32]); // garbage first parent; changes header[0] hash
+        let numbers = chain_numbers(&headers);
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[], origin_hash)
+            .expect_err("corrupted first-header parent_hash propagates as broken link");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("chain broken")));
     }
 }

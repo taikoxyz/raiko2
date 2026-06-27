@@ -144,7 +144,10 @@ Registers a Shasta batch root task. The server expands it into proposal prove ta
 - `proposal.l1_inclusion_block_number` is required. The server derives canonical Shasta proposal
   data from RPC; request-time internal manifest overrides are not accepted.
 - `proposal.proposal_id` must fit Shasta's `uint48` protocol field.
-- `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation.
+- `proposal.last_anchor_block_number` participates in Shasta anchor monotonicity validation. It is
+  a request hint only. For stalled-anchor compatibility, raiko2 authenticates the parent anchor
+  checkpoint hash and state root from parent L2 SignalService state; callers do not provide those
+  values in the request body.
 - `proof_type` mapping:
   - `native -> native/local` only when the server route is `native/local`; otherwise rejected
   - `sp1 -> sp1/local | sp1/network` from the effective SP1 prover mode

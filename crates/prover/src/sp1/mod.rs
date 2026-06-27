@@ -364,6 +364,15 @@ where
                         .await
                     }
                     ProverMode::Network => {
+                        // Re-derive the expected proposal input hash via a local dry-run,
+                        // then verify the network proof commits to the same value.
+                        let proposal_elf = backend.elf(ProofStage::Proposal)?.to_vec();
+                        let mut execute_stdin = SP1Stdin::new();
+                        execute_stdin.write(&guest_input);
+                        let expected_input_hash =
+                            execute_proposal_expected_input_hash(proposal_elf, execute_stdin)
+                                .await?;
+
                         let mut stdin = SP1Stdin::new();
                         stdin.write(&guest_input);
                         let client = build_network_prover(&effective_config).await?;
@@ -374,6 +383,7 @@ where
                             proof_mode,
                             &effective_config,
                             &guest_input,
+                            expected_input_hash,
                             observer,
                         )
                         .await
@@ -828,6 +838,25 @@ async fn execute_proposal_with_local_client(
     .map_err(|err| blocking_sp1_join_error("proposal execute", &err))?
 }
 
+/// Runs the proposal guest locally with the CPU executor (no proof) to re-derive the
+/// input hash the network proof must commit to. Uses `ProverMode::Local` because
+/// `LocalSp1Client::new` rejects `ProverMode::Network`.
+async fn execute_proposal_expected_input_hash(
+    elf: Vec<u8>,
+    stdin: SP1Stdin,
+) -> RaikoResult<B256> {
+    tokio::task::spawn_blocking(move || {
+        let client = LocalSp1Client::new(ProverMode::Local);
+        let (public_values, _execution_report) = client.execute(elf, stdin).map_err(|e| {
+            tracing::error!("Failed to execute SP1 proposal dry-run: {:?}", e);
+            RaikoError::Guest(format!("SP1 proposal expected-hash execute failed: {e}"))
+        })?;
+        parse_shasta_proposal_input_hash(public_values.as_slice())
+    })
+    .await
+    .map_err(|err| blocking_sp1_join_error("proposal expected-hash execute", &err))?
+}
+
 async fn prove_proposal_with_local_client(
     prover_mode: ProverMode,
     setup: Arc<Sp1ProgramSetup>,
@@ -887,6 +916,7 @@ fn prove_proposal_with_client(
     .into())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prove_proposal_with_network_client(
     client: &NetworkProver,
     setup: &Sp1ProgramSetup,
@@ -894,6 +924,7 @@ async fn prove_proposal_with_network_client(
     proof_mode: SP1ProofMode,
     config: &Sp1Config,
     guest_input: &GuestInput,
+    expected_input_hash: B256,
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof> {
     let request = request_network_proof(
@@ -907,6 +938,7 @@ async fn prove_proposal_with_network_client(
 
     let public_values = request.proof.public_values.as_slice();
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
+    ensure_sp1_network_input_hash_matches("proposal", expected_input_hash, input_hash)?;
     let base_extra_data = with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))

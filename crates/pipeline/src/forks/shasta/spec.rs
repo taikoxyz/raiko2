@@ -16,6 +16,7 @@ use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
     chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
+    shasta_checkpoint_storage_slots, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
@@ -28,7 +29,9 @@ use raiko2_protocol_shasta::shasta::{
     manifest::BlockManifest,
     prepare_source_manifest_with_max_blocks,
 };
-use raiko2_provider::{AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig};
+use raiko2_provider::{
+    AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig, StorageProofTargets,
+};
 use raiko2_stateless::validate_block_with_witness_resources;
 use std::{
     future::Future,
@@ -128,12 +131,20 @@ where
             tx_list_count = tx_lists.as_ref().map(Vec::len).unwrap_or_default(),
             "derived shasta tx-list witness inputs"
         );
-        let witnesses = fetch_preflight_witnesses(
+        let mut witnesses = fetch_preflight_witnesses(
             provider,
             &chain_spec,
             ctx.request.proposal_id,
             &blocks,
             tx_lists.as_deref(),
+        )
+        .await?;
+        hydrate_shasta_parent_checkpoint_witness(
+            provider,
+            &chain_spec,
+            &blocks,
+            &manifest,
+            &mut witnesses,
         )
         .await?;
         info!(
@@ -520,6 +531,86 @@ fn merge_account_witness_nodes(
         witness.state =
             ExecutionWitness::canonicalize_state_nodes(std::mem::take(&mut witness.state));
     }
+}
+
+async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    witnesses: &mut [StatelessInput],
+) -> RaikoResult<()> {
+    let proposal = &manifest.proposal_event.proposal;
+    let origin_block_number = proposal.originBlockNumber.to::<u64>();
+    let anchor_checkpoints = blocks
+        .iter()
+        .map(decode_anchor_checkpoint)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let anchor_block_numbers = anchor_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .collect::<Vec<_>>();
+    let last_anchor_block_number = manifest
+        .prover_data
+        .last_anchor_block_number
+        .unwrap_or_default();
+    if !should_bypass_stalled_anchor_linkage(
+        &anchor_block_numbers,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_spec.chain_id,
+    ) {
+        return Ok(());
+    }
+
+    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.checkpoint_store_contract required for stalled Shasta anchor validation"
+                .to_string(),
+        )
+    })?;
+    let first_witness = witnesses.first_mut().ok_or_else(|| {
+        RaikoError::Preflight(
+            "cannot hydrate Shasta checkpoint proof without witnesses".to_string(),
+        )
+    })?;
+    let block_numbers = [first_witness.block.header.number];
+    let (block_hash_slot, state_root_slot) =
+        shasta_checkpoint_storage_slots(last_anchor_block_number);
+    let targets: StorageProofTargets = vec![vec![(
+        checkpoint_store,
+        vec![
+            storage_slot_key(block_hash_slot),
+            storage_slot_key(state_root_slot),
+        ],
+    )]];
+    let mut checkpoint_witness_nodes = retry_shasta_preflight_operation(
+        "fetch shasta parent checkpoint storage proof",
+        || async {
+            provider
+                .batch_storage_proof_witnesses(&block_numbers, &targets)
+                .await
+        },
+    )
+    .await?;
+    if checkpoint_witness_nodes.len() != 1 {
+        return Err(RaikoError::Provider(format!(
+            "provider returned {} checkpoint proof witness batches for 1 requested block",
+            checkpoint_witness_nodes.len()
+        )));
+    }
+    let nodes = checkpoint_witness_nodes.remove(0);
+    if nodes.is_empty() {
+        return Err(RaikoError::Provider(
+            "provider returned no checkpoint proof witness nodes for stalled Shasta anchor"
+                .to_string(),
+        ));
+    }
+    first_witness.witness.state.extend(nodes);
+    first_witness.witness.state = ExecutionWitness::canonicalize_state_nodes(std::mem::take(
+        &mut first_witness.witness.state,
+    ));
+    Ok(())
 }
 
 async fn fetch_preflight_chunk<P: Provider>(
@@ -981,6 +1072,44 @@ fn decode_anchor_checkpoint(
     })
 }
 
+async fn hydrate_stalled_shasta_origin_header<P: Provider>(
+    provider: &P,
+    origin_block_number: u64,
+    origin_block_hash: B256,
+    manifest: &mut raiko2_protocol_shasta::TaikoManifest,
+) -> RaikoResult<()> {
+    let origin_headers =
+        retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
+            provider.batch_l1_headers(&[origin_block_number]).await
+        })
+        .await?;
+    if origin_headers.len() != 1 {
+        return Err(RaikoError::Preflight(format!(
+            "provider returned {} origin L1 headers for 1 requested block",
+            origin_headers.len()
+        )));
+    }
+    let origin_header = origin_headers.into_iter().next().ok_or_else(|| {
+        RaikoError::Preflight("provider returned no origin L1 header".to_string())
+    })?;
+    if origin_header.number != origin_block_number {
+        return Err(RaikoError::Preflight(format!(
+            "origin L1 header number mismatch: expected {}, got {}",
+            origin_block_number, origin_header.number
+        )));
+    }
+    if origin_header.hash_slow() != origin_block_hash {
+        return Err(RaikoError::Preflight(format!(
+            "proposal origin block hash mismatch: expected {:?}, got {:?}",
+            origin_block_hash,
+            origin_header.hash_slow()
+        )));
+    }
+    manifest.l1_header = origin_header;
+    manifest.l1_ancestor_headers.clear();
+    Ok(())
+}
+
 async fn hydrate_shasta_l1_headers<P: Provider>(
     provider: &P,
     chain_id: u64,
@@ -1007,39 +1136,21 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         .prover_data
         .last_anchor_block_number
         .unwrap_or_default();
-    if should_bypass_stalled_anchor_linkage(
+    let bypass_stalled_anchor_linkage = should_bypass_stalled_anchor_linkage(
         &anchor_block_numbers,
         last_anchor_block_number,
         origin_block_number,
         chain_id,
-    ) {
-        let l1_headers =
-            retry_shasta_preflight_operation("fetch shasta origin l1 header", || async {
-                provider.batch_l1_headers(&[origin_block_number]).await
-            })
-            .await?;
-        let origin_header = l1_headers.into_iter().next().ok_or_else(|| {
-            RaikoError::Preflight("provider returned no Shasta origin L1 header".to_string())
-        })?;
-        if origin_header.number != origin_block_number {
-            return Err(RaikoError::Preflight(format!(
-                "proposal origin block number mismatch: expected {origin_block_number}, got {}",
-                origin_header.number
-            )));
-        }
-        if origin_header.hash_slow() != proposal.originBlockHash {
-            return Err(RaikoError::Preflight(format!(
-                "proposal origin block hash mismatch: expected {:?}, got {:?}",
-                proposal.originBlockHash,
-                origin_header.hash_slow()
-            )));
-        }
-
-        manifest.l1_header = origin_header;
-        manifest.l1_ancestor_headers.clear();
-        return Ok(());
+    );
+    if bypass_stalled_anchor_linkage {
+        return hydrate_stalled_shasta_origin_header(
+            provider,
+            origin_block_number,
+            proposal.originBlockHash,
+            manifest,
+        )
+        .await;
     }
-
     validate_anchor_progression(
         &anchor_block_numbers,
         last_anchor_block_number,
@@ -1412,7 +1523,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call,
+        AnchorCheckpoint, AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS,
+        anchorV4Call, validate_l1_headers,
     };
     use alethia_reth_chainspec::{
         TAIKO_MAINNET,
@@ -1429,13 +1541,14 @@ mod tests {
         ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
         WitnessStateNode,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
+        shasta_checkpoint_storage_slots, storage_slot_key,
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{
         BlobSlice, DerivationSource, ShastaEventData,
         manifest::{BlockManifest, DerivationSourceManifest},
     };
-    use raiko2_provider::Provider;
+    use raiko2_provider::{Provider, StorageProofTargets};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1456,6 +1569,8 @@ mod tests {
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
         account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
+        storage_proof_inputs: Arc<Mutex<StorageProofTargets>>,
+        storage_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
     }
 
     #[async_trait::async_trait]
@@ -1497,6 +1612,22 @@ mod tests {
                 .expect("account witness nodes lock")
                 .clone();
             Ok((vec![AddressMap::default()], nodes))
+        }
+
+        async fn batch_storage_proof_witnesses(
+            &self,
+            _blocks: &[u64],
+            targets: &StorageProofTargets,
+        ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+            *self
+                .storage_proof_inputs
+                .lock()
+                .expect("storage proof inputs lock") = targets.clone();
+            Ok(self
+                .storage_witness_nodes
+                .lock()
+                .expect("storage witness nodes lock")
+                .clone())
         }
 
         async fn batch_witnesses(&self, _blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
@@ -1637,6 +1768,20 @@ mod tests {
             timestamp: 777,
             ..Default::default()
         }
+    }
+
+    fn sample_l1_header_chain(start: u64, end: u64) -> Vec<Header> {
+        let mut parent_hash = None;
+        (start..=end)
+            .map(|number| {
+                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                if let Some(hash) = parent_hash {
+                    header.parent_hash = hash;
+                }
+                parent_hash = Some(header.hash_slow());
+                header
+            })
+            .collect()
     }
 
     fn sample_block(
@@ -1790,6 +1935,10 @@ mod tests {
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
             account_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
+                Bytes::from_static(&[0xc1, 0x80]),
+            )]])),
+            storage_proof_inputs: Arc::new(Mutex::new(Vec::new())),
+            storage_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
                 Bytes::from_static(&[0xc1, 0x80]),
             )]])),
         }
@@ -2193,7 +2342,7 @@ mod tests {
     #[test]
     fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_chain_id = 167_011;
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
             end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
@@ -2226,7 +2375,7 @@ mod tests {
     #[test]
     fn extract_block_range_rejects_more_than_unzen_max_blocks() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_chain_id = 167_011;
         let max_blocks =
             u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
@@ -2276,18 +2425,14 @@ mod tests {
 
         ctx.request.l2_chain_id = 167_001;
         let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let Some(ForkCondition::Timestamp(devnet_unzen_timestamp)) =
-            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
-        else {
-            panic!("taiko_dev should configure a timestamp-based Unzen fork");
-        };
+        assert!(
+            !devnet
+                .hard_forks
+                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        );
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &devnet,
-                1,
-                *devnet_unzen_timestamp,
-            ),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, u64::MAX),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_011;
@@ -2385,12 +2530,19 @@ mod tests {
     #[tokio::test]
     async fn preflight_bypasses_stalled_anchor_linkage() {
         let mut provider = sample_provider();
-        let origin_header = sample_l1_header(200, B256::from([0x77; 32]));
-        provider.block = sample_block(42, 10, B256::from([0x88; 32]), B256::from([0x99; 32]));
+        let l1_headers = sample_l1_header_chain(10, 200);
+        let anchor_header = l1_headers.first().expect("anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        provider.block = sample_block(
+            42,
+            anchor_header.number,
+            anchor_header.hash_slow(),
+            anchor_header.state_root,
+        );
         provider.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
         provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
-        provider.l1_headers = vec![origin_header.clone()];
+        provider.l1_headers = l1_headers;
         let ctx = sample_context(42, 201, 10);
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
@@ -2403,6 +2555,26 @@ mod tests {
 
         assert!(input.taiko.l1_ancestor_headers.is_empty());
         assert_eq!(input.taiko.l1_header.number, origin_header.number);
+        let checkpoint_store = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(input.taiko.chain_spec.chain_id)
+            .expect("supported test chain")
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (block_hash_slot, state_root_slot) =
+            shasta_checkpoint_storage_slots(anchor_header.number);
+        assert_eq!(
+            *provider
+                .storage_proof_inputs
+                .lock()
+                .expect("storage proof inputs lock"),
+            vec![vec![(
+                checkpoint_store,
+                vec![
+                    storage_slot_key(block_hash_slot),
+                    storage_slot_key(state_root_slot)
+                ]
+            )]]
+        );
     }
 
     #[tokio::test]
@@ -2444,5 +2616,114 @@ mod tests {
             vec![vec![4; 48]]
         );
         assert_eq!(input.taiko.data_sources[0].blob_proofs, vec![vec![5; 48]]);
+    }
+
+    fn chain_numbers(headers: &[Header]) -> Vec<u64> {
+        headers.iter().map(|h| h.number).collect()
+    }
+
+    fn checkpoint_for(header: &Header) -> AnchorCheckpoint {
+        AnchorCheckpoint {
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            state_root: header.state_root,
+        }
+    }
+
+    #[test]
+    fn linkage_host_accepts_contiguous_chain_with_matching_checkpoint() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let checkpoints = vec![checkpoint_for(&headers[0])];
+        let origin_hash = headers.last().unwrap().hash_slow();
+        validate_l1_headers(&headers, &numbers, &checkpoints, origin_hash).expect("valid chain");
+    }
+
+    #[test]
+    fn linkage_host_rejects_empty_headers() {
+        let err = validate_l1_headers(&[], &[], &[], B256::ZERO).expect_err("empty");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("no L1 headers returned"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_checkpoint_past_origin() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        // checkpoint at block 13 never matches any header => left over after the loop
+        let stray = AnchorCheckpoint {
+            block_number: 13,
+            block_hash: B256::ZERO,
+            state_root: B256::ZERO,
+        };
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[stray], origin_hash)
+            .expect_err("checkpoint past origin");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("not found in fetched L1 header chain"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_forged_checkpoint_hash_at_matching_number() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let mut forged = checkpoint_for(&headers[1]);
+        forged.block_hash = B256::from([0xFE; 32]); // right number, wrong hash
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[forged], origin_hash)
+            .expect_err("forged checkpoint hash");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("not found in fetched L1 header chain"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_rejects_number_mismatch_against_expected() {
+        let headers = sample_l1_header_chain(10, 12);
+        let bad_numbers = vec![10, 11, 13]; // last expected number disagrees with header 12
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &bad_numbers, &[], origin_hash)
+            .expect_err("number mismatch");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("number mismatch")));
+    }
+
+    #[test]
+    fn linkage_host_rejects_broken_parent_hash_chain() {
+        let mut headers = sample_l1_header_chain(10, 12);
+        headers[1].parent_hash = B256::from([0x01; 32]); // break link 10 -> 11
+        let numbers = chain_numbers(&headers);
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[], origin_hash)
+            .expect_err("broken parent hash");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("chain broken")));
+    }
+
+    #[test]
+    fn linkage_host_rejects_origin_hash_mismatch() {
+        let headers = sample_l1_header_chain(10, 12);
+        let numbers = chain_numbers(&headers);
+        let err = validate_l1_headers(&headers, &numbers, &[], B256::from([0x07; 32]))
+            .expect_err("origin hash mismatch");
+        assert!(
+            matches!(err, RaikoError::Preflight(msg) if msg.contains("origin block hash mismatch"))
+        );
+    }
+
+    #[test]
+    fn linkage_host_does_not_check_first_header_parent_hash() {
+        // DIVERGENCE(parity) P-3: validate_l1_headers skips the parent_hash check for header[0]
+        // (previous_hash starts as None). However, mutating header[0].parent_hash changes its
+        // hash_slow() output, which then causes the parent_hash check for header[1] to fail.
+        // This test pins the actual observable effect: a garbage first-ancestor parent_hash
+        // propagates as a broken link at 10 -> 11, not as a direct first-header rejection.
+        let mut headers = sample_l1_header_chain(10, 12);
+        headers[0].parent_hash = B256::from([0xDE; 32]); // garbage first parent; changes header[0] hash
+        let numbers = chain_numbers(&headers);
+        let origin_hash = headers.last().unwrap().hash_slow();
+        let err = validate_l1_headers(&headers, &numbers, &[], origin_hash)
+            .expect_err("corrupted first-header parent_hash propagates as broken link");
+        assert!(matches!(err, RaikoError::Preflight(msg) if msg.contains("chain broken")));
     }
 }

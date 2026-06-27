@@ -20,7 +20,10 @@ pub mod proof_type;
 mod serde_bincode;
 mod stateless;
 
-pub use chain_spec::{ChainSpec, GuestInputAbi, SupportedChainSpecs};
+pub use chain_spec::{
+    ChainSpec, GuestInputAbi, SupportedChainSpecs, shasta_checkpoint_storage_slots,
+    storage_slot_key,
+};
 pub use context::{
     L2BlockRange, PreflightOptions, PreflightRpcClientConfig, PreflightRpcRetryConfig,
     ProofContext, ProofRequest, ShastaCheckpoint, ShastaRequest,

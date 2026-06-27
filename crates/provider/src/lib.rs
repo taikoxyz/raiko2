@@ -7,7 +7,7 @@ pub mod on_the_spot_witness;
 pub mod rpc;
 
 use alloy::consensus::Header;
-use alloy_primitives::{Address, Bytes, map::AddressMap};
+use alloy_primitives::{Address, B256, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessStateNode};
 use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -19,6 +19,7 @@ pub use rpc::{DEFAULT_RPC_TIMEOUT_MS, RpcClientConfig, RpcRetryConfig};
 
 pub type AccountStateMaps = Vec<AddressMap<TrieAccount>>;
 pub type AccountProofWitnessNodes = Vec<Vec<WitnessStateNode>>;
+pub type StorageProofTargets = Vec<Vec<(Address, Vec<B256>)>>;
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
 ///
@@ -50,6 +51,14 @@ pub trait Provider: Send + Sync {
     ) -> RaikoResult<(Vec<AddressMap<TrieAccount>>, Vec<Vec<WitnessStateNode>>)> {
         let account_states = self.batch_accounts(blocks, accounts).await?;
         Ok((account_states, vec![Vec::new(); blocks.len()]))
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        blocks: &[u64],
+        _targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        Ok(vec![Vec::new(); blocks.len()])
     }
 
     async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;

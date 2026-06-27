@@ -5,7 +5,9 @@ use alethia_reth_chainspec::{
     hardfork::TaikoHardfork as AlethiaTaikoHardfork, spec::TaikoDevnetConfigExt,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
-use alloy_primitives::{Address, BlockNumber, ChainId, U256, address, map::HashMap, uint};
+use alloy_primitives::{
+    Address, B256, BlockNumber, ChainId, U256, address, keccak256, map::HashMap, uint,
+};
 use anyhow::{Result, anyhow, bail};
 use reth_chainspec::{ChainSpec as RethChainSpec, HOODI as RETH_HOODI, MAINNET as RETH_MAINNET};
 use reth_revm::primitives::hardfork::SpecId;
@@ -14,6 +16,24 @@ use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
+pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
+
+#[must_use]
+pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&U256::from(block_number).to_be_bytes::<32>());
+    encoded[32..]
+        .copy_from_slice(&U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT).to_be_bytes::<32>());
+
+    let block_hash_slot = U256::from_be_slice(keccak256(encoded).as_slice());
+    let state_root_slot = block_hash_slot + U256::from(1);
+    (block_hash_slot, state_root_slot)
+}
+
+#[must_use]
+pub fn storage_slot_key(slot: U256) -> B256 {
+    B256::from(slot.to_be_bytes::<32>())
+}
 
 #[derive(Clone, Debug)]
 pub struct SupportedChainSpecs(HashMap<String, ChainSpec>);
@@ -361,17 +381,14 @@ where
 pub struct ChainSpec {
     pub name: String,
     pub chain_id: ChainId,
-    #[serde(deserialize_with = "deserialize_spec_id")]
     pub max_spec_id: SpecId,
-    #[serde(deserialize_with = "deserialize_fork_id_map")]
     pub hard_forks: BTreeMap<ForkId, ForkCondition>,
     pub eip_1559_constants: Eip1559Constants,
-    #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     pub l1_contract: BTreeMap<ForkId, Address>,
     pub l2_contract: Option<Address>,
+    pub checkpoint_store_contract: Option<Address>,
     pub rpc: String,
     pub beacon_rpc: Option<String>,
-    #[serde(deserialize_with = "deserialize_verifier_address_forks")]
     pub verifier_address_forks: VerifierAddressForks,
     pub genesis_time: u64,
     pub seconds_per_slot: u64,
@@ -400,6 +417,8 @@ struct BinaryChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    checkpoint_store_contract: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -419,6 +438,7 @@ impl From<BinaryChainSpecHelper> for ChainSpec {
             eip_1559_constants: helper.eip_1559_constants,
             l1_contract: helper.l1_contract,
             l2_contract: helper.l2_contract,
+            checkpoint_store_contract: helper.checkpoint_store_contract,
             rpc: helper.rpc,
             beacon_rpc: helper.beacon_rpc,
             verifier_address_forks: helper.verifier_address_forks,
@@ -443,6 +463,8 @@ struct JsonChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
+    #[serde(default)]
+    checkpoint_store_contract: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -615,6 +637,7 @@ where
         eip_1559_constants,
         l1_contract: helper.l1_contract,
         l2_contract: helper.l2_contract,
+        checkpoint_store_contract: helper.checkpoint_store_contract,
         rpc: helper.rpc,
         beacon_rpc: helper.beacon_rpc,
         verifier_address_forks: helper.verifier_address_forks,
@@ -939,6 +962,7 @@ impl ChainSpec {
             eip_1559_constants,
             l1_contract: BTreeMap::new(),
             l2_contract: None,
+            checkpoint_store_contract: None,
             rpc: String::new(),
             beacon_rpc: None,
             verifier_address_forks: BTreeMap::new(),
@@ -1116,12 +1140,13 @@ impl ChainSpec {
         &self,
         base: &TaikoChainSpec,
     ) -> Result<TaikoChainSpec> {
-        let Some(unzen) = self.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) else {
-            return Ok(base.clone());
-        };
         if self.chain_id != 167_001 {
             return Ok(base.clone());
         }
+
+        let Some(unzen) = self.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)) else {
+            return Ok(base.clone());
+        };
 
         match unzen {
             ForkCondition::Timestamp(timestamp) => Ok(base
@@ -1470,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_sanitized_shasta_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let l1_spec = list
             .iter()
@@ -1480,15 +1505,13 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
-        let unzen_timestamp = 0;
-
         assert_eq!(l1_spec.chain_id, 32_382);
         assert_eq!(l1_spec.rpc, "https://example.com");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
             Some("https://beacon.example.com")
         );
-        assert_eq!(l1_spec.genesis_time, 1_780_630_944);
+        assert_eq!(l1_spec.genesis_time, 1_782_220_308);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
@@ -1497,17 +1520,18 @@ mod tests {
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))
         );
-        assert_eq!(
-            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-            Some(&ForkCondition::Timestamp(unzen_timestamp))
+        assert!(
+            !l2_spec
+                .hard_forks
+                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
         );
         assert_eq!(
-            l2_spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
-            address!("b432bbe475e569b2adef4830ae43d587932f139c")
+            l2_spec.get_fork_l1_contract_address_at(0, 0)?,
+            address!("b432bbe475e569B2ADef4830Ae43D587932F139C")
         );
         assert_eq!(
-            l2_spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::SgxGeth)?,
-            address!("698ceB7EF2E001347B1672389d6ca6aCE04b13C8")
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,
+            address!("FCA057AB211Dfaeb01FB8a36F4231Fb4021a6641")
         );
         Ok(())
     }
@@ -1528,7 +1552,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_devnet_to_alethia_chain_spec_enables_unzen_at_genesis() -> Result<()> {
+    fn taiko_devnet_to_alethia_chain_spec_enables_shasta_at_genesis() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -1536,11 +1560,16 @@ mod tests {
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
 
         let taiko = spec.to_taiko_chain_spec()?;
+        let shasta = taiko.taiko_fork_activation(TaikoHardfork::Shasta);
         let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
 
         assert!(
-            unzen.active_at_timestamp(0),
-            "Unzen must be active at genesis on internal devnet"
+            shasta.active_at_timestamp(0),
+            "Shasta must be active at genesis on internal devnet"
+        );
+        assert!(
+            unzen.active_at_timestamp(u64::MAX),
+            "Devnet must not force inherited Unzen to Never"
         );
         Ok(())
     }

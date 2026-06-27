@@ -144,4 +144,97 @@ mod tests {
             167_001
         ));
     }
+
+    // --- progression_* : window + monotonicity boundaries ---
+
+    #[test]
+    fn progression_accepts_anchor_at_lower_window_edge() {
+        // non-mainnet offset 128; origin 1000 => min_anchor 872
+        validate_anchor_progression(&[872], 0, 1000, 167_001).expect("lower edge is inclusive");
+    }
+
+    #[test]
+    fn progression_rejects_anchor_below_lower_window_edge() {
+        let err = validate_anchor_progression(&[871], 0, 1000, 167_001).expect_err("below window");
+        assert!(err.contains("outside valid range"));
+    }
+
+    #[test]
+    fn progression_accepts_anchor_at_origin() {
+        validate_anchor_progression(&[1000], 0, 1000, 167_001).expect("origin is inclusive");
+    }
+
+    #[test]
+    fn progression_rejects_anchor_above_origin() {
+        let err = validate_anchor_progression(&[1001], 0, 1000, 167_001).expect_err("above origin");
+        assert!(err.contains("outside valid range"));
+    }
+
+    #[test]
+    fn progression_rejects_regression_below_previous_in_batch() {
+        // all in window [872,1000]; third regresses below the second
+        let err =
+            validate_anchor_progression(&[900, 905, 902], 900, 1000, 167_001).expect_err("regress");
+        assert!(err.contains("regressed below previous anchor"));
+    }
+
+    #[test]
+    fn progression_rejects_empty_anchor_numbers() {
+        let err = validate_anchor_progression(&[], 0, 1000, 167_001).expect_err("empty");
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn progression_handles_origin_below_offset_via_saturating_min() {
+        // origin 50 < offset 128 => min_anchor saturates to 0; anchor 0 is valid
+        validate_anchor_progression(&[0], 0, 50, 167_001).expect("saturating min admits anchor 0");
+    }
+
+    // --- progression_* : stalled-bypass boundary (strict greater-than) ---
+
+    #[test]
+    fn bypass_is_exclusive_at_offset_boundary_non_mainnet() {
+        // origin - anchor == 128 (== offset) must NOT bypass (code uses strict `>`)
+        assert!(!should_bypass_stalled_anchor_linkage(
+            &[42, 42],
+            42,
+            170,
+            167_001
+        ));
+        // origin - anchor == 129 (> offset) bypasses
+        assert!(should_bypass_stalled_anchor_linkage(
+            &[42, 42],
+            42,
+            171,
+            167_001
+        ));
+    }
+
+    #[test]
+    fn bypass_is_exclusive_at_offset_boundary_mainnet() {
+        // mainnet offset 512
+        assert!(!should_bypass_stalled_anchor_linkage(
+            &[42, 42],
+            42,
+            554,
+            167_000
+        ));
+        assert!(should_bypass_stalled_anchor_linkage(
+            &[42, 42],
+            42,
+            555,
+            167_000
+        ));
+    }
+
+    #[test]
+    fn bypass_requires_all_anchors_equal_last() {
+        // first==last but a later anchor differs => not a stall => no bypass
+        assert!(!should_bypass_stalled_anchor_linkage(
+            &[42, 42, 43],
+            42,
+            1000,
+            167_001
+        ));
+    }
 }

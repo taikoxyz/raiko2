@@ -147,6 +147,10 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
         "unexpected l2_contract"
     );
     ensure!(
+        chain_spec.l2_signal_service == verified_chain_spec.l2_signal_service,
+        "unexpected l2_signal_service"
+    );
+    ensure!(
         chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
         "unexpected verifier_address_forks"
     );
@@ -1312,6 +1316,64 @@ mod tests {
         )
     }
 
+    fn parent_anchor_state_witness_missing_signal_service_storage_nodes(
+        anchor_address: Address,
+        signal_service_address: Address,
+        anchor_block_number: u64,
+        checkpoint_block_hash: B256,
+        checkpoint_state_root: B256,
+    ) -> (B256, Vec<WitnessStateNode>) {
+        let mut anchor_storage_trie = Trie::default();
+        anchor_storage_trie.insert(
+            keccak256(B256::from(U256::from(ANCHOR_BLOCK_STATE_SLOT))),
+            alloy_rlp::encode(U256::from(anchor_block_number)),
+        );
+
+        let mut signal_service_storage_trie = Trie::default();
+        let (block_hash_slot, state_root_slot) =
+            signal_service_checkpoint_storage_slots(anchor_block_number);
+        signal_service_storage_trie.insert(
+            keccak256(B256::from(block_hash_slot)),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint_block_hash.as_slice())),
+        );
+        signal_service_storage_trie.insert(
+            keccak256(B256::from(state_root_slot)),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint_state_root.as_slice())),
+        );
+
+        let mut state_trie = Trie::default();
+        state_trie.insert(
+            keccak256(anchor_address),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: anchor_storage_trie.hash_slow(),
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+        state_trie.insert(
+            keccak256(signal_service_address),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: signal_service_storage_trie.hash_slow(),
+                code_hash: KECCAK_EMPTY,
+            }),
+        );
+
+        let state_root = state_trie.hash_slow();
+        let state_nodes = state_trie
+            .rlp_nodes()
+            .into_iter()
+            .chain(anchor_storage_trie.rlp_nodes())
+            .map(WitnessStateNode::from_bytes)
+            .collect();
+        (
+            state_root,
+            ExecutionWitness::canonicalize_state_nodes(state_nodes),
+        )
+    }
+
     fn guest_input_with_single_block() -> GuestInput {
         let chain_spec = taiko_mainnet_chain_spec();
         let anchor_address = chain_spec
@@ -1457,6 +1519,22 @@ mod tests {
             subproof_input_hash,
             hash_shasta_subproof_input(&proof_carry_data)
         );
+    }
+
+    #[test]
+    fn rejects_known_chain_with_altered_l2_signal_service() {
+        let mut guest_input = guest_input_with_single_block();
+        guest_input.witnesses[0].chain_spec.l2_signal_service = Some(Address::from([0x99; 20]));
+
+        let err = prove_shasta_proposal_with_validator(
+            &guest_input,
+            |stateless_input, _ancestor_headers, _runtime| {
+                Ok(stateless_input.block.header.hash_slow())
+            },
+        )
+        .expect_err("altered l2_signal_service should fail known-chain validation");
+
+        assert!(error_chain_contains(&err, "unexpected l2_signal_service"));
     }
 
     #[test]
@@ -1685,9 +1763,33 @@ mod tests {
     fn stalled_anchor_rejects_missing_signal_service_checkpoint_proof() {
         let mut guest_input = guest_input_with_single_block();
         let origin_header = sample_l1_header(600, B256::from([0x77; 32]));
+        let chain_spec = guest_input.witnesses[0].chain_spec.clone();
+        let signal_service_address = chain_spec
+            .l2_signal_service
+            .expect("test chain spec must define SignalService address");
+        let parent_checkpoint = decode_anchor_checkpoint(&guest_input.witnesses[0].block)
+            .expect("fixture anchor checkpoint");
+        let (parent_state_root, parent_state_nodes) =
+            parent_anchor_state_witness_missing_signal_service_storage_nodes(
+                test_anchor_address(),
+                signal_service_address,
+                TEST_PARENT_ANCHOR_BLOCK_NUMBER,
+                parent_checkpoint.block_hash,
+                parent_checkpoint.state_root,
+            );
+
+        guest_input.proposal_ancestor_headers[0] =
+            WitnessHeader::from_header(alloy_consensus::Header {
+                state_root: parent_state_root,
+                ..guest_input.proposal_ancestor_headers[0]
+                    .full_header()
+                    .expect("full parent header")
+                    .clone()
+            });
+        guest_input.witnesses[0].witness.headers = guest_input.proposal_ancestor_headers.clone();
+        guest_input.witnesses[0].witness.state = parent_state_nodes;
         guest_input.taiko.l1_header = origin_header.clone();
         guest_input.taiko.l1_ancestor_headers.clear();
-        guest_input.witnesses[0].chain_spec.l2_signal_service = None;
         guest_input.taiko.prover_data.last_anchor_block_number = Some(7);
         guest_input.taiko.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
@@ -1705,7 +1807,7 @@ mod tests {
 
         assert!(error_chain_contains(
             &err,
-            "missing chain_spec.l2_signal_service"
+            "failed to read parent SignalService checkpoint blockHash"
         ));
     }
 

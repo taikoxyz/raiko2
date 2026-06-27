@@ -14,9 +14,9 @@ pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
 use alloy::{providers::ProviderBuilder, sol};
 use alloy_primitives::{Address, B256, Bytes};
+use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_primitives_shasta::{
     GuestInput, ShastaZkAggregationGuestInput, instance::sp1_contract_block_program_id,
 };
@@ -841,10 +841,7 @@ async fn execute_proposal_with_local_client(
 /// Runs the proposal guest locally with the CPU executor (no proof) to re-derive the
 /// input hash the network proof must commit to. Uses `ProverMode::Local` because
 /// `LocalSp1Client::new` rejects `ProverMode::Network`.
-async fn execute_proposal_expected_input_hash(
-    elf: Vec<u8>,
-    stdin: SP1Stdin,
-) -> RaikoResult<B256> {
+async fn execute_proposal_expected_input_hash(elf: Vec<u8>, stdin: SP1Stdin) -> RaikoResult<B256> {
     tokio::task::spawn_blocking(move || {
         let client = LocalSp1Client::new(ProverMode::Local);
         let (public_values, _execution_report) = client.execute(elf, stdin).map_err(|e| {
@@ -1054,7 +1051,9 @@ fn expected_sp1_aggregation_input_hash(
         |_, _| Ok(()),
     )
     .map_err(|e| {
-        RaikoError::Guest(format!("failed to compute expected SP1 aggregation input hash: {e}"))
+        RaikoError::Guest(format!(
+            "failed to compute expected SP1 aggregation input hash: {e}"
+        ))
     })
 }
 
@@ -1724,7 +1723,10 @@ mod tests {
         use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
         use raiko2_protocol_shasta::shasta::ProofCarryData;
 
-        let carry = ProofCarryData { chain_id: 1, ..ProofCarryData::default() };
+        let carry = ProofCarryData {
+            chain_id: 1,
+            ..ProofCarryData::default()
+        };
         let make = |image_id: [u32; 8]| ShastaZkAggregationGuestInput {
             image_id,
             block_inputs: vec![hash_shasta_subproof_input(&carry)],
@@ -1736,14 +1738,24 @@ mod tests {
         let hash = super::expected_sp1_aggregation_input_hash(&input).expect("hash");
 
         // Deterministic.
-        assert_eq!(hash, super::expected_sp1_aggregation_input_hash(&input).expect("hash"));
+        assert_eq!(
+            hash,
+            super::expected_sp1_aggregation_input_hash(&input).expect("hash")
+        );
         // The image id is bound into the committed hash.
         let other = make([9, 9, 9, 9, 9, 9, 9, 9]);
-        assert_ne!(hash, super::expected_sp1_aggregation_input_hash(&other).expect("hash"));
+        assert_ne!(
+            hash,
+            super::expected_sp1_aggregation_input_hash(&other).expect("hash")
+        );
         // A tampered network hash is rejected.
         assert!(
-            super::ensure_sp1_network_input_hash_matches("aggregation", hash, B256::repeat_byte(0xFF))
-                .is_err()
+            super::ensure_sp1_network_input_hash_matches(
+                "aggregation",
+                hash,
+                B256::repeat_byte(0xFF)
+            )
+            .is_err()
         );
     }
 
@@ -1762,7 +1774,10 @@ mod tests {
         match err {
             raiko2_primitives::RaikoError::Guest(message) => {
                 assert!(message.contains("aggregation"), "stage missing: {message}");
-                assert!(message.contains("do not match"), "reason missing: {message}");
+                assert!(
+                    message.contains("do not match"),
+                    "reason missing: {message}"
+                );
             }
             other => panic!("expected RaikoError::Guest, got {other:?}"),
         }

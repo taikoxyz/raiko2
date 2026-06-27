@@ -2341,7 +2341,7 @@ mod tests {
     #[test]
     fn extract_block_range_accepts_unzen_max_blocks_for_configured_environment() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_chain_id = 167_011;
         ctx.request.l2_block_range = Some(L2BlockRange {
             start: 1,
             end: u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64"),
@@ -2374,7 +2374,7 @@ mod tests {
     #[test]
     fn extract_block_range_rejects_more_than_unzen_max_blocks() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_001;
+        ctx.request.l2_chain_id = 167_011;
         let max_blocks =
             u64::try_from(super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS).expect("fits u64");
         ctx.request.l2_block_range = Some(L2BlockRange {
@@ -2424,18 +2424,14 @@ mod tests {
 
         ctx.request.l2_chain_id = 167_001;
         let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let Some(ForkCondition::Timestamp(devnet_unzen_timestamp)) =
-            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen))
-        else {
-            panic!("taiko_dev should configure a timestamp-based Unzen fork");
-        };
+        assert!(
+            !devnet
+                .hard_forks
+                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        );
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(
-                &devnet,
-                1,
-                *devnet_unzen_timestamp,
-            ),
-            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, u64::MAX),
+            super::DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_011;

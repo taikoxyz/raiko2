@@ -1494,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_dev_default_spec_matches_sanitized_unzen_devnet() -> Result<()> {
+    fn taiko_dev_default_spec_matches_sanitized_shasta_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let l1_spec = list
             .iter()
@@ -1504,15 +1504,13 @@ mod tests {
             .iter()
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
-        let unzen_timestamp = 0;
-
         assert_eq!(l1_spec.chain_id, 32_382);
         assert_eq!(l1_spec.rpc, "https://example.com");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
             Some("https://beacon.example.com")
         );
-        assert_eq!(l1_spec.genesis_time, 1_780_630_944);
+        assert_eq!(l1_spec.genesis_time, 1_782_220_308);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
@@ -1521,17 +1519,18 @@ mod tests {
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))
         );
-        assert_eq!(
-            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
-            Some(&ForkCondition::Timestamp(unzen_timestamp))
+        assert!(
+            !l2_spec
+                .hard_forks
+                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
         );
         assert_eq!(
-            l2_spec.get_fork_l1_contract_address_at(0, unzen_timestamp)?,
-            address!("b432bbe475e569b2adef4830ae43d587932f139c")
+            l2_spec.get_fork_l1_contract_address_at(0, 0)?,
+            address!("b432bbe475e569B2ADef4830Ae43D587932F139C")
         );
         assert_eq!(
-            l2_spec.get_fork_verifier_address(0, unzen_timestamp, ProofType::SgxGeth)?,
-            address!("698ceB7EF2E001347B1672389d6ca6aCE04b13C8")
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,
+            address!("FCA057AB211Dfaeb01FB8a36F4231Fb4021a6641")
         );
         Ok(())
     }
@@ -1552,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_devnet_to_alethia_chain_spec_enables_unzen_at_genesis() -> Result<()> {
+    fn taiko_devnet_to_alethia_chain_spec_enables_shasta_at_genesis() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -1560,11 +1559,11 @@ mod tests {
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
 
         let taiko = spec.to_taiko_chain_spec()?;
-        let unzen = taiko.taiko_fork_activation(TaikoHardfork::Unzen);
+        let shasta = taiko.taiko_fork_activation(TaikoHardfork::Shasta);
 
         assert!(
-            unzen.active_at_timestamp(0),
-            "Unzen must be active at genesis on internal devnet"
+            shasta.active_at_timestamp(0),
+            "Shasta must be active at genesis on internal devnet"
         );
         Ok(())
     }

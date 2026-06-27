@@ -357,26 +357,21 @@ where
 }
 
 /// Specification of a specific chain.
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChainSpec {
     pub name: String,
     pub chain_id: ChainId,
-    #[serde(deserialize_with = "deserialize_spec_id")]
     pub max_spec_id: SpecId,
-    #[serde(deserialize_with = "deserialize_fork_id_map")]
     pub hard_forks: BTreeMap<ForkId, ForkCondition>,
     pub eip_1559_constants: Eip1559Constants,
-    #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     pub l1_contract: BTreeMap<ForkId, Address>,
     pub l2_contract: Option<Address>,
     pub rpc: String,
     pub beacon_rpc: Option<String>,
-    #[serde(deserialize_with = "deserialize_verifier_address_forks")]
     pub verifier_address_forks: VerifierAddressForks,
     pub genesis_time: u64,
     pub seconds_per_slot: u64,
     pub is_taiko: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l2_signal_service: Option<Address>,
 }
 
@@ -389,6 +384,60 @@ pub enum GuestInputAbi {
 }
 
 type VerifierAddressForks = BTreeMap<ForkId, BTreeMap<ProofType, Option<Address>>>;
+
+#[derive(Serialize)]
+struct CurrentBinaryChainSpecHelper<'a> {
+    name: &'a str,
+    chain_id: ChainId,
+    max_spec_id: SpecId,
+    hard_forks: &'a BTreeMap<ForkId, ForkCondition>,
+    eip_1559_constants: &'a Eip1559Constants,
+    l1_contract: &'a BTreeMap<ForkId, Address>,
+    l2_contract: Option<Address>,
+    rpc: &'a str,
+    beacon_rpc: &'a Option<String>,
+    verifier_address_forks: &'a VerifierAddressForks,
+    genesis_time: u64,
+    seconds_per_slot: u64,
+    is_taiko: bool,
+    l2_signal_service: Option<Address>,
+}
+
+#[derive(Serialize)]
+struct LegacyBinaryChainSpecHelper<'a> {
+    name: &'a str,
+    chain_id: ChainId,
+    max_spec_id: SpecId,
+    hard_forks: &'a BTreeMap<ForkId, ForkCondition>,
+    eip_1559_constants: &'a Eip1559Constants,
+    l1_contract: &'a BTreeMap<ForkId, Address>,
+    l2_contract: Option<Address>,
+    rpc: &'a str,
+    beacon_rpc: &'a Option<String>,
+    verifier_address_forks: &'a VerifierAddressForks,
+    genesis_time: u64,
+    seconds_per_slot: u64,
+    is_taiko: bool,
+}
+
+#[derive(Serialize)]
+struct JsonChainSpecSerializeHelper<'a> {
+    name: &'a str,
+    chain_id: ChainId,
+    max_spec_id: SpecId,
+    hard_forks: &'a BTreeMap<ForkId, ForkCondition>,
+    eip_1559_constants: &'a Eip1559Constants,
+    l1_contract: &'a BTreeMap<ForkId, Address>,
+    l2_contract: Option<Address>,
+    rpc: &'a str,
+    beacon_rpc: &'a Option<String>,
+    verifier_address_forks: &'a VerifierAddressForks,
+    genesis_time: u64,
+    seconds_per_slot: u64,
+    is_taiko: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    l2_signal_service: Option<Address>,
+}
 
 #[derive(Deserialize)]
 struct BinaryChainSpecHelper {
@@ -881,6 +930,70 @@ where
     Ok(spec_id_map)
 }
 
+impl Serialize for ChainSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            return JsonChainSpecSerializeHelper {
+                name: &self.name,
+                chain_id: self.chain_id,
+                max_spec_id: self.max_spec_id,
+                hard_forks: &self.hard_forks,
+                eip_1559_constants: &self.eip_1559_constants,
+                l1_contract: &self.l1_contract,
+                l2_contract: self.l2_contract,
+                rpc: &self.rpc,
+                beacon_rpc: &self.beacon_rpc,
+                verifier_address_forks: &self.verifier_address_forks,
+                genesis_time: self.genesis_time,
+                seconds_per_slot: self.seconds_per_slot,
+                is_taiko: self.is_taiko,
+                l2_signal_service: self.l2_signal_service,
+            }
+            .serialize(serializer);
+        }
+
+        if self.uses_v0_1_0_guest_input_binary_layout() {
+            return LegacyBinaryChainSpecHelper {
+                name: &self.name,
+                chain_id: self.chain_id,
+                max_spec_id: self.max_spec_id,
+                hard_forks: &self.hard_forks,
+                eip_1559_constants: &self.eip_1559_constants,
+                l1_contract: &self.l1_contract,
+                l2_contract: self.l2_contract,
+                rpc: &self.rpc,
+                beacon_rpc: &self.beacon_rpc,
+                verifier_address_forks: &self.verifier_address_forks,
+                genesis_time: self.genesis_time,
+                seconds_per_slot: self.seconds_per_slot,
+                is_taiko: self.is_taiko,
+            }
+            .serialize(serializer);
+        }
+
+        CurrentBinaryChainSpecHelper {
+            name: &self.name,
+            chain_id: self.chain_id,
+            max_spec_id: self.max_spec_id,
+            hard_forks: &self.hard_forks,
+            eip_1559_constants: &self.eip_1559_constants,
+            l1_contract: &self.l1_contract,
+            l2_contract: self.l2_contract,
+            rpc: &self.rpc,
+            beacon_rpc: &self.beacon_rpc,
+            verifier_address_forks: &self.verifier_address_forks,
+            genesis_time: self.genesis_time,
+            seconds_per_slot: self.seconds_per_slot,
+            is_taiko: self.is_taiko,
+            l2_signal_service: self.l2_signal_service,
+        }
+        .serialize(serializer)
+    }
+}
+
 impl<'de> Deserialize<'de> for ChainSpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -922,6 +1035,38 @@ impl ChainSpec {
 
         self.remove_fork_verifier_proof_type(ProofType::SgxGeth);
         self.l2_signal_service = None;
+    }
+
+    fn uses_v0_1_0_guest_input_binary_layout(&self) -> bool {
+        if self.l2_signal_service.is_some() {
+            return false;
+        }
+        let Some((max_spec_id, hard_forks)) = v0_1_0_guest_input_hard_forks(&self.name) else {
+            return false;
+        };
+        let Some(canonical) = canonical_chain_spec(&self.name) else {
+            return false;
+        };
+        if self.chain_id != canonical.chain_id
+            || self.max_spec_id != max_spec_id
+            || self.hard_forks != hard_forks
+            || self.eip_1559_constants != canonical.eip_1559_constants
+            || self.is_taiko != canonical.is_taiko
+        {
+            return false;
+        }
+        let Some(l1_contract) = v0_1_0_guest_input_l1_contracts(&self.name) else {
+            return false;
+        };
+        if self.l1_contract != l1_contract {
+            return false;
+        }
+        let Some(verifier_address_forks) = v0_1_0_guest_input_verifier_address_forks(&self.name)
+        else {
+            return false;
+        };
+
+        self.verifier_address_forks == verifier_address_forks
     }
 
     /// Removes a verifier proof type from every configured fork.
@@ -1445,6 +1590,56 @@ mod tests {
             spec.l2_signal_service,
             Some(address!("0000000000000000000000000000000000000003"))
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn current_chain_spec_bincode_roundtrip_preserves_missing_l2_signal_service() -> Result<()> {
+        let spec = ChainSpec::new_single(
+            "custom".to_string(),
+            999,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+
+        assert!(spec.l2_signal_service.is_none());
+
+        let bytes = bincode::serialize(&spec)
+            .map_err(|e| anyhow!("bincode serialize current ChainSpec: {e}"))?;
+        let decoded: ChainSpec = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow!("bincode deserialize current ChainSpec: {e}"))?;
+
+        assert_eq!(decoded, spec);
+
+        Ok(())
+    }
+
+    #[test]
+    fn current_named_taiko_chain_spec_without_signal_service_uses_current_bincode_shape()
+    -> Result<()> {
+        let mut spec = ChainSpec::new_single(
+            "taiko_mainnet".to_string(),
+            167_000,
+            SpecId::CANCUN,
+            Eip1559Constants::default(),
+            true,
+        );
+        spec.l1_contract =
+            v0_1_0_guest_input_l1_contracts("taiko_mainnet").expect("legacy mainnet l1 contract");
+        spec.verifier_address_forks = v0_1_0_guest_input_verifier_address_forks("taiko_mainnet")
+            .expect("legacy mainnet verifiers");
+
+        assert!(spec.l2_signal_service.is_none());
+        assert!(!spec.uses_v0_1_0_guest_input_binary_layout());
+
+        let bytes = bincode::serialize(&spec)
+            .map_err(|e| anyhow!("bincode serialize current named ChainSpec: {e}"))?;
+        let decoded: ChainSpec = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow!("bincode deserialize current named ChainSpec: {e}"))?;
+
+        assert_eq!(decoded, spec);
 
         Ok(())
     }

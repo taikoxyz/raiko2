@@ -768,7 +768,7 @@ fn v0_1_0_guest_input_verifier_address_forks(name: &str) -> Option<VerifierAddre
                 ),
                 (
                     ProofType::Sp1,
-                    Some(address!("96337327648dcFA22b014009cf10A2D5E2F305f6")),
+                    Some(address!("73A0Db393ef87ce781ac7957bE10D6628432100F")),
                 ),
                 (
                     ProofType::Risc0,
@@ -1363,7 +1363,7 @@ mod tests {
         );
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, mainnet_shasta_timestamp(), ProofType::Sp1)?,
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
         );
         Ok(())
     }
@@ -1442,7 +1442,7 @@ mod tests {
                 mainnet_shasta_timestamp(),
                 ProofType::Sp1,
             )?,
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
         );
 
         let bytes = bincode::serialize(&projected)

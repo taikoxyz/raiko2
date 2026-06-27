@@ -14,9 +14,12 @@ pub use types::{Sp1ExecutionMetadata, Sp1Response};
 
 use alloy::{providers::ProviderBuilder, sol};
 use alloy_primitives::{Address, B256, Bytes};
+use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::{ProofStage, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
-use raiko2_primitives_shasta::{GuestInput, ShastaZkAggregationGuestInput};
+use raiko2_primitives_shasta::{
+    GuestInput, ShastaZkAggregationGuestInput, instance::sp1_contract_block_program_id,
+};
 use serde::Deserialize;
 use sp1_sdk::{
     HashableKey, NetworkProver, ProveRequest as _, Prover as _, SP1Proof, SP1ProofMode,
@@ -418,6 +421,7 @@ where
                 // The guest reads ShastaZkAggregationGuestInput via sp1_zkvm::io::read().
                 let mut stdin = SP1Stdin::new();
                 stdin.write(&aggregation_input);
+                let expected_input_hash = expected_sp1_aggregation_input_hash(&aggregation_input)?;
                 let client = build_network_prover(&effective_config).await?;
                 aggregate_with_network_client(
                     &client,
@@ -426,6 +430,7 @@ where
                     &input,
                     stdin,
                     &effective_config,
+                    expected_input_hash,
                     None,
                 )
                 .await
@@ -468,6 +473,7 @@ where
             ProverMode::Network => {
                 let mut stdin = SP1Stdin::new();
                 stdin.write(&aggregation_input);
+                let expected_input_hash = expected_sp1_aggregation_input_hash(&aggregation_input)?;
                 let client = build_network_prover(&effective_config).await?;
                 aggregate_with_network_client(
                     &client,
@@ -476,6 +482,7 @@ where
                     &input,
                     stdin,
                     &effective_config,
+                    expected_input_hash,
                     observer,
                 )
                 .await
@@ -984,6 +991,34 @@ fn aggregate_with_client(
     .into())
 }
 
+fn ensure_sp1_network_aggregation_input_hash_matches(
+    expected: B256,
+    actual: B256,
+) -> RaikoResult<()> {
+    if expected != actual {
+        return Err(RaikoError::Guest(format!(
+            "SP1 network aggregation public values mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn expected_sp1_aggregation_input_hash(
+    aggregation_input: &ShastaZkAggregationGuestInput,
+) -> RaikoResult<B256> {
+    aggregate_shasta_zk_with_verifier(
+        aggregation_input,
+        sp1_contract_block_program_id(&aggregation_input.image_id),
+        |_, _| Ok(()),
+    )
+    .map_err(|e| {
+        RaikoError::Guest(format!(
+            "failed to compute expected SP1 aggregation input hash: {e}"
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn aggregate_with_network_client(
     client: &NetworkProver,
     proposal_setup: &Sp1ProgramSetup,
@@ -991,6 +1026,7 @@ async fn aggregate_with_network_client(
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     config: &Sp1Config,
+    expected_input_hash: B256,
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof> {
     for proof in &input.proofs {
@@ -1024,6 +1060,7 @@ async fn aggregate_with_network_client(
 
     let public_values = request.proof.public_values.as_slice();
     let agg_input_hash = parse_shasta_aggregation_input_hash(public_values)?;
+    ensure_sp1_network_aggregation_input_hash_matches(expected_input_hash, agg_input_hash)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))
             .map_err(|e| RaikoError::Guest(format!("Failed to serialize SP1 metadata: {e}")))?;
@@ -1639,5 +1676,41 @@ mod tests {
 
         let loaded = load_sp1_subproof_for_aggregation(&proof).expect("load legacy subproof");
         assert!(matches!(loaded, sp1_sdk::SP1Proof::Compressed(_)));
+    }
+
+    #[test]
+    fn expected_sp1_aggregation_input_hash_binds_image_id() {
+        use raiko2_primitives_shasta::ShastaZkAggregationGuestInput;
+        use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
+        use raiko2_protocol_shasta::shasta::ProofCarryData;
+
+        let carry = ProofCarryData {
+            chain_id: 1,
+            ..ProofCarryData::default()
+        };
+        let make = |image_id: [u32; 8]| ShastaZkAggregationGuestInput {
+            image_id,
+            block_inputs: vec![hash_shasta_subproof_input(&carry)],
+            proof_carry_data_vec: vec![carry.clone()],
+            prover_address: alloy_primitives::Address::ZERO,
+        };
+
+        let input = make([1, 2, 3, 4, 5, 6, 7, 8]);
+        let hash = super::expected_sp1_aggregation_input_hash(&input).expect("hash");
+        let other = make([8, 7, 6, 5, 4, 3, 2, 1]);
+
+        assert_eq!(
+            hash,
+            super::expected_sp1_aggregation_input_hash(&input).expect("hash")
+        );
+        assert_ne!(
+            hash,
+            super::expected_sp1_aggregation_input_hash(&other).expect("hash")
+        );
+        assert!(super::ensure_sp1_network_aggregation_input_hash_matches(hash, hash).is_ok());
+        assert!(
+            super::ensure_sp1_network_aggregation_input_hash_matches(hash, B256::repeat_byte(0xff))
+                .is_err()
+        );
     }
 }

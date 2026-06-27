@@ -12,8 +12,8 @@ use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 
-use crate::Provider;
 use crate::rpc::{RpcClientConfig, build_rpc_client};
+use crate::{ParentStorageProofRequest, Provider};
 
 mod accounts;
 mod blobs;
@@ -64,6 +64,14 @@ pub(crate) trait L2Provider: Send + Sync {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
 
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        _parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.batch_witnesses(block_numbers).await
+    }
+
     async fn batch_witnesses_with_tx_lists(
         &self,
         _block_numbers: &[u64],
@@ -72,6 +80,16 @@ pub(crate) trait L2Provider: Send + Sync {
         Err(RaikoError::FeatureNotSupportedError(
             "L2 provider does not support tx-list execution witnesses".to_string(),
         ))
+    }
+
+    async fn batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+        _parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
     }
 }
 
@@ -169,6 +187,15 @@ impl L2Provider for RethL2Provider {
         self.fetch_witnesses(block_numbers).await
     }
 
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_parent_storage_proofs(block_numbers, parent_storage_proofs)
+            .await
+    }
+
     async fn batch_witnesses_with_tx_lists(
         &self,
         block_numbers: &[u64],
@@ -176,6 +203,20 @@ impl L2Provider for RethL2Provider {
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses_with_tx_lists(block_numbers, tx_lists)
             .await
+    }
+
+    async fn batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_tx_lists_and_parent_storage_proofs(
+            block_numbers,
+            tx_lists,
+            parent_storage_proofs,
+        )
+        .await
     }
 }
 
@@ -209,6 +250,15 @@ impl L2Provider for GethL2Provider {
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
     }
+
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_parent_storage_proofs(block_numbers, parent_storage_proofs)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -240,6 +290,15 @@ impl L2Provider for GethLocalWitnessL2Provider {
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
+    }
+
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.fetch_witnesses_with_parent_storage_proofs(block_numbers, parent_storage_proofs)
+            .await
     }
 }
 
@@ -429,6 +488,16 @@ impl Provider for NetworkProvider {
         self.l2_provider.batch_witnesses(block_numbers).await
     }
 
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.l2_provider
+            .batch_witnesses_with_parent_storage_proofs(block_numbers, parent_storage_proofs)
+            .await
+    }
+
     async fn batch_witnesses_with_tx_lists(
         &self,
         block_numbers: &[u64],
@@ -436,6 +505,21 @@ impl Provider for NetworkProvider {
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         self.l2_provider
             .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
+    }
+
+    async fn batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.l2_provider
+            .batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+                block_numbers,
+                tx_lists,
+                parent_storage_proofs,
+            )
             .await
     }
 

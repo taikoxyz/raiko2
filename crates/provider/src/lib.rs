@@ -7,7 +7,7 @@ pub mod on_the_spot_witness;
 pub mod rpc;
 
 use alloy::consensus::Header;
-use alloy_primitives::{Address, Bytes, map::AddressMap};
+use alloy_primitives::{Address, B256, Bytes, map::AddressMap};
 use alloy_trie::TrieAccount;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessStateNode};
 use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -19,6 +19,13 @@ pub use rpc::{DEFAULT_RPC_TIMEOUT_MS, RpcClientConfig, RpcRetryConfig};
 
 pub type AccountStateMaps = Vec<AddressMap<TrieAccount>>;
 pub type AccountProofWitnessNodes = Vec<Vec<WitnessStateNode>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentStorageProofRequest {
+    pub block_index: usize,
+    pub address: Address,
+    pub storage_keys: Vec<B256>,
+}
 
 /// The `Provider` trait defines asynchronous methods for batch retrieval of blockchain data.
 ///
@@ -54,6 +61,14 @@ pub trait Provider: Send + Sync {
 
     async fn batch_witnesses(&self, blocks: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
 
+    async fn batch_witnesses_with_parent_storage_proofs(
+        &self,
+        blocks: &[u64],
+        _parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.batch_witnesses(blocks).await
+    }
+
     async fn batch_witnesses_with_tx_lists(
         &self,
         _blocks: &[u64],
@@ -62,6 +77,15 @@ pub trait Provider: Send + Sync {
         Err(RaikoError::FeatureNotSupportedError(
             "provider does not support tx-list execution witnesses".to_string(),
         ))
+    }
+
+    async fn batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+        &self,
+        blocks: &[u64],
+        tx_lists: &[Bytes],
+        _parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        self.batch_witnesses_with_tx_lists(blocks, tx_lists).await
     }
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;

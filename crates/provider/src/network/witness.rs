@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer};
 use std::{fmt, sync::Arc, time::Instant};
 use tracing::info;
 
-use crate::on_the_spot_witness::execution_witness;
+use crate::{ParentStorageProofRequest, on_the_spot_witness::execution_witness};
 
 use super::{GethL2Provider, GethLocalWitnessL2Provider, RethL2Provider, RpcL2Provider};
 
@@ -127,6 +127,31 @@ fn witness_has_account_preimage(witness: &ExecutionWitness, address: Address) ->
         .keys
         .iter()
         .any(|key| key.len() == Address::len_bytes() && key.as_ref() == address.as_slice())
+}
+
+fn parent_storage_system_request(
+    witness_chunk: &[(u64, ExecutionWitness)],
+    request: &ParentStorageProofRequest,
+) -> RaikoResult<SystemProofRequest> {
+    let (block_number, _) = witness_chunk.get(request.block_index).ok_or_else(|| {
+        RaikoError::RPC(format!(
+            "parent storage proof block_index {} out of range",
+            request.block_index
+        ))
+    })?;
+    let parent_block_number = block_number.checked_sub(1).ok_or_else(|| {
+        RaikoError::RPC(format!(
+            "cannot fetch parent storage proof for genesis block {block_number}"
+        ))
+    })?;
+
+    Ok(SystemProofRequest {
+        block_idx: request.block_index,
+        block_number: *block_number,
+        parent_block_number,
+        address: request.address,
+        storage_keys: request.storage_keys.clone(),
+    })
 }
 
 fn should_fallback_to_on_the_spot(err: &RaikoError) -> bool {
@@ -404,6 +429,46 @@ impl RpcL2Provider {
 
         Ok(())
     }
+
+    async fn supplement_parent_storage_proofs(
+        &self,
+        witness_chunk: &mut [(u64, ExecutionWitness)],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<()> {
+        if parent_storage_proofs.is_empty() {
+            return Ok(());
+        }
+
+        let requests = parent_storage_proofs
+            .iter()
+            .map(|request| parent_storage_system_request(witness_chunk, request))
+            .collect::<RaikoResult<Vec<_>>>()?;
+        let proofs = self.fetch_system_account_proofs(&requests).await?;
+
+        for (block_idx, proof) in proofs {
+            let (_, witness) = &mut witness_chunk[block_idx];
+            witness.state.extend(
+                proof
+                    .account_proof
+                    .into_iter()
+                    .map(WitnessStateNode::from_bytes),
+            );
+            witness.state.extend(
+                proof
+                    .storage_proof
+                    .into_iter()
+                    .flat_map(|storage_proof| storage_proof.proof)
+                    .map(WitnessStateNode::from_bytes),
+            );
+        }
+
+        for (_, witness) in witness_chunk.iter_mut() {
+            witness.state =
+                ExecutionWitness::canonicalize_state_nodes(std::mem::take(&mut witness.state));
+        }
+
+        Ok(())
+    }
 }
 
 impl RethL2Provider {
@@ -640,6 +705,26 @@ impl RethL2Provider {
         }
     }
 
+    pub(super) async fn fetch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let witnesses = self.fetch_witnesses(block_numbers).await?;
+        let mut witness_chunk = block_numbers
+            .iter()
+            .copied()
+            .zip(witnesses.into_iter())
+            .collect::<Vec<_>>();
+        self.rpc
+            .supplement_parent_storage_proofs(&mut witness_chunk, parent_storage_proofs)
+            .await?;
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
+    }
+
     pub(super) async fn fetch_witnesses_with_tx_lists(
         &self,
         block_numbers: &[u64],
@@ -677,6 +762,29 @@ impl RethL2Provider {
             "fetched witnesses via debug_executionWitnessForTxList"
         );
         Ok(witnesses)
+    }
+
+    pub(super) async fn fetch_witnesses_with_tx_lists_and_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        tx_lists: &[Bytes],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let witnesses = self
+            .fetch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await?;
+        let mut witness_chunk = block_numbers
+            .iter()
+            .copied()
+            .zip(witnesses.into_iter())
+            .collect::<Vec<_>>();
+        self.rpc
+            .supplement_parent_storage_proofs(&mut witness_chunk, parent_storage_proofs)
+            .await?;
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
     }
 }
 
@@ -803,6 +911,26 @@ impl GethL2Provider {
         );
         Ok(witnesses)
     }
+
+    pub(super) async fn fetch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let witnesses = self.fetch_witnesses(block_numbers).await?;
+        let mut witness_chunk = block_numbers
+            .iter()
+            .copied()
+            .zip(witnesses.into_iter())
+            .collect::<Vec<_>>();
+        self.rpc
+            .supplement_parent_storage_proofs(&mut witness_chunk, parent_storage_proofs)
+            .await?;
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
+    }
 }
 
 impl GethLocalWitnessL2Provider {
@@ -833,11 +961,32 @@ impl GethLocalWitnessL2Provider {
         );
         Ok(witnesses)
     }
+
+    pub(super) async fn fetch_witnesses_with_parent_storage_proofs(
+        &self,
+        block_numbers: &[u64],
+        parent_storage_proofs: &[ParentStorageProofRequest],
+    ) -> RaikoResult<Vec<ExecutionWitness>> {
+        let witnesses = self.fetch_witnesses(block_numbers).await?;
+        let mut witness_chunk = block_numbers
+            .iter()
+            .copied()
+            .zip(witnesses.into_iter())
+            .collect::<Vec<_>>();
+        self.rpc
+            .supplement_parent_storage_proofs(&mut witness_chunk, parent_storage_proofs)
+            .await?;
+        Ok(witness_chunk
+            .into_iter()
+            .map(|(_, witness)| witness)
+            .collect())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParentStorageProofRequest;
     use alloy::primitives::{B256, Bytes};
 
     fn sample_header(number: u64) -> Header {
@@ -894,6 +1043,47 @@ mod tests {
         assert_eq!(
             message,
             "error sending debug_executionWitnessForTxList batch 3 for blocks [10834703, 10834704] (first_block=10834703, last_block=10834704, batch_size=2): deadline has elapsed"
+        );
+    }
+
+    #[test]
+    fn explicit_parent_storage_request_rejects_bad_block_index() {
+        let request = ParentStorageProofRequest {
+            block_index: 1,
+            address: Address::ZERO,
+            storage_keys: vec![B256::repeat_byte(0x01)],
+        };
+        let witness_chunk = vec![(10, ExecutionWitness::default())];
+
+        let err = parent_storage_system_request(&witness_chunk, &request)
+            .expect_err("out-of-range block index must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("parent storage proof block_index 1 out of range"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn explicit_parent_storage_request_targets_parent_block() {
+        let request = ParentStorageProofRequest {
+            block_index: 0,
+            address: Address::repeat_byte(0x22),
+            storage_keys: vec![B256::repeat_byte(0x33), B256::repeat_byte(0x44)],
+        };
+        let witness_chunk = vec![(10, ExecutionWitness::default())];
+
+        let system_request = parent_storage_system_request(&witness_chunk, &request)
+            .expect("valid parent storage request");
+
+        assert_eq!(system_request.block_idx, 0);
+        assert_eq!(system_request.block_number, 10);
+        assert_eq!(system_request.parent_block_number, 9);
+        assert_eq!(system_request.address, Address::repeat_byte(0x22));
+        assert_eq!(
+            system_request.storage_keys,
+            vec![B256::repeat_byte(0x33), B256::repeat_byte(0x44)]
         );
     }
 }

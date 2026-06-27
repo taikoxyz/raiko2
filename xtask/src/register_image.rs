@@ -328,7 +328,7 @@ fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
         RegisterImageProfile::MainnetShasta => (
             DEFAULT_RPC_URL_MAINNET_SHASTA.to_string(),
             address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"),
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6"),
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F"),
         ),
     };
 
@@ -820,7 +820,7 @@ mod tests {
         );
         assert_eq!(
             resolved.sp1_verifier,
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
         );
     }
 

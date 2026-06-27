@@ -20,8 +20,13 @@ pub use rpc::{DEFAULT_RPC_TIMEOUT_MS, RpcClientConfig, RpcRetryConfig};
 pub type AccountStateMaps = Vec<AddressMap<TrieAccount>>;
 pub type AccountProofWitnessNodes = Vec<Vec<WitnessStateNode>>;
 
+/// Request for parent-block account and storage proof nodes to append to an execution witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentStorageProofRequest {
+    /// Index into the requested block list and returned witness order.
+    ///
+    /// The proof is fetched at the selected block's parent block and appended to that selected
+    /// witness.
     pub block_index: usize,
     pub address: Address,
     pub storage_keys: Vec<B256>,
@@ -64,9 +69,15 @@ pub trait Provider: Send + Sync {
     async fn batch_witnesses_with_parent_storage_proofs(
         &self,
         blocks: &[u64],
-        _parent_storage_proofs: &[ParentStorageProofRequest],
+        parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.batch_witnesses(blocks).await
+        if parent_storage_proofs.is_empty() {
+            return self.batch_witnesses(blocks).await;
+        }
+
+        Err(RaikoError::FeatureNotSupportedError(
+            "provider does not support parent storage proof witnesses".to_string(),
+        ))
     }
 
     async fn batch_witnesses_with_tx_lists(
@@ -83,9 +94,15 @@ pub trait Provider: Send + Sync {
         &self,
         blocks: &[u64],
         tx_lists: &[Bytes],
-        _parent_storage_proofs: &[ParentStorageProofRequest],
+        parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.batch_witnesses_with_tx_lists(blocks, tx_lists).await
+        if parent_storage_proofs.is_empty() {
+            return self.batch_witnesses_with_tx_lists(blocks, tx_lists).await;
+        }
+
+        Err(RaikoError::FeatureNotSupportedError(
+            "provider does not support parent storage proof witnesses".to_string(),
+        ))
     }
 
     async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>>;
@@ -206,6 +223,52 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("provider does not support tx-list execution witnesses"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_parent_storage_witnesses_fail_fast_when_unsupported() {
+        let provider = MockProvider { blocks: vec![] };
+        let request = ParentStorageProofRequest {
+            block_index: 0,
+            address: Address::ZERO,
+            storage_keys: vec![B256::ZERO],
+        };
+
+        let err = provider
+            .batch_witnesses_with_parent_storage_proofs(&[1], &[request])
+            .await
+            .expect_err("default parent-storage witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("provider does not support parent storage proof witnesses"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_tx_list_parent_storage_witnesses_fail_fast_when_unsupported() {
+        let provider = MockProvider { blocks: vec![] };
+        let request = ParentStorageProofRequest {
+            block_index: 0,
+            address: Address::ZERO,
+            storage_keys: vec![B256::ZERO],
+        };
+
+        let err = provider
+            .batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+                &[1],
+                &[Bytes::from_static(&[0xc0])],
+                &[request],
+            )
+            .await
+            .expect_err("default tx-list parent-storage witness support must fail fast");
+
+        assert!(
+            err.to_string()
+                .contains("provider does not support parent storage proof witnesses"),
             "{err}"
         );
     }

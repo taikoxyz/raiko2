@@ -154,6 +154,20 @@ fn parent_storage_system_request(
     })
 }
 
+fn ensure_witness_count_matches_blocks(
+    provider: &str,
+    witness_count: usize,
+    block_count: usize,
+) -> RaikoResult<()> {
+    if witness_count == block_count {
+        return Ok(());
+    }
+
+    Err(RaikoError::RPC(format!(
+        "{provider} witness count ({witness_count}) does not match block count ({block_count})"
+    )))
+}
+
 fn should_fallback_to_on_the_spot(err: &RaikoError) -> bool {
     let RaikoError::RPC(message) = err else {
         return false;
@@ -711,6 +725,7 @@ impl RethL2Provider {
         parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         let witnesses = self.fetch_witnesses(block_numbers).await?;
+        ensure_witness_count_matches_blocks("reth", witnesses.len(), block_numbers.len())?;
         let mut witness_chunk = block_numbers
             .iter()
             .copied()
@@ -773,6 +788,7 @@ impl RethL2Provider {
         let witnesses = self
             .fetch_witnesses_with_tx_lists(block_numbers, tx_lists)
             .await?;
+        ensure_witness_count_matches_blocks("reth tx-list", witnesses.len(), block_numbers.len())?;
         let mut witness_chunk = block_numbers
             .iter()
             .copied()
@@ -918,6 +934,7 @@ impl GethL2Provider {
         parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         let witnesses = self.fetch_witnesses(block_numbers).await?;
+        ensure_witness_count_matches_blocks("geth", witnesses.len(), block_numbers.len())?;
         let mut witness_chunk = block_numbers
             .iter()
             .copied()
@@ -968,6 +985,11 @@ impl GethLocalWitnessL2Provider {
         parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
         let witnesses = self.fetch_witnesses(block_numbers).await?;
+        ensure_witness_count_matches_blocks(
+            "geth local witness",
+            witnesses.len(),
+            block_numbers.len(),
+        )?;
         let mut witness_chunk = block_numbers
             .iter()
             .copied()
@@ -1066,6 +1088,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_parent_storage_request_rejects_genesis_block() {
+        let request = ParentStorageProofRequest {
+            block_index: 0,
+            address: Address::ZERO,
+            storage_keys: vec![B256::repeat_byte(0x01)],
+        };
+        let witness_chunk = vec![(0, ExecutionWitness::default())];
+
+        let err = parent_storage_system_request(&witness_chunk, &request)
+            .expect_err("genesis parent storage proof must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("cannot fetch parent storage proof for genesis block"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn explicit_parent_storage_request_targets_parent_block() {
         let request = ParentStorageProofRequest {
             block_index: 0,
@@ -1085,5 +1126,14 @@ mod tests {
             system_request.storage_keys,
             vec![B256::repeat_byte(0x33), B256::repeat_byte(0x44)]
         );
+    }
+
+    #[test]
+    fn parent_storage_witness_count_guard_rejects_mismatch() {
+        let err = ensure_witness_count_matches_blocks("reth", 1, 2)
+            .expect_err("witness/block count mismatch must be rejected");
+
+        assert!(err.to_string().contains("witness count"), "{err}");
+        assert!(err.to_string().contains("block count"), "{err}");
     }
 }

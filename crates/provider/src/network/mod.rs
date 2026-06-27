@@ -67,9 +67,15 @@ pub(crate) trait L2Provider: Send + Sync {
     async fn batch_witnesses_with_parent_storage_proofs(
         &self,
         block_numbers: &[u64],
-        _parent_storage_proofs: &[ParentStorageProofRequest],
+        parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.batch_witnesses(block_numbers).await
+        if parent_storage_proofs.is_empty() {
+            return self.batch_witnesses(block_numbers).await;
+        }
+
+        Err(RaikoError::FeatureNotSupportedError(
+            "L2 provider does not support parent storage proof witnesses".to_string(),
+        ))
     }
 
     async fn batch_witnesses_with_tx_lists(
@@ -86,10 +92,17 @@ pub(crate) trait L2Provider: Send + Sync {
         &self,
         block_numbers: &[u64],
         tx_lists: &[Bytes],
-        _parent_storage_proofs: &[ParentStorageProofRequest],
+        parent_storage_proofs: &[ParentStorageProofRequest],
     ) -> RaikoResult<Vec<ExecutionWitness>> {
-        self.batch_witnesses_with_tx_lists(block_numbers, tx_lists)
-            .await
+        if parent_storage_proofs.is_empty() {
+            return self
+                .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+                .await;
+        }
+
+        Err(RaikoError::FeatureNotSupportedError(
+            "L2 provider does not support parent storage proof witnesses".to_string(),
+        ))
     }
 }
 

@@ -189,6 +189,7 @@ async fn main() -> Result<()> {
     };
 
     let mut ctx = ProofContext::new(request, ProverConfig::default());
+    ctx.preflight.resolved_l1_chain_spec = Some(resolved.l1_chain_spec.clone());
     ctx.l2_chain_spec = resolved.l2_chain_spec.to_taiko_chain_spec()?;
     ctx.preflight.rpc_client_config = Some(PreflightRpcClientConfig {
         timeout_ms: args.rpc_timeout_ms,

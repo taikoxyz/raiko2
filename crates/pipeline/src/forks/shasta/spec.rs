@@ -280,17 +280,16 @@ async fn fetch_preflight_witnesses<P: Provider>(
                     retry_shasta_preflight_operation(&operation, || {
                         let chain_spec = chain_spec.clone();
                         async {
-                            fetch_preflight_chunk(
-                                provider,
+                            let input = PreflightChunkInput {
                                 proposal_id,
                                 chunk_index,
                                 chunk_count,
-                                chunk_blocks,
-                                chunk_tx_lists,
-                                chunk_parent_storage_proofs,
+                                blocks: chunk_blocks,
+                                tx_lists: chunk_tx_lists,
+                                parent_storage_proofs: chunk_parent_storage_proofs,
                                 chain_spec,
-                            )
-                            .await
+                            };
+                            fetch_preflight_chunk(provider, input).await
                         }
                     })
                     .await
@@ -536,75 +535,96 @@ fn merge_account_witness_nodes(
     }
 }
 
-async fn fetch_preflight_chunk<P: Provider>(
+async fn fetch_preflight_execution_witnesses<P: Provider>(
     provider: &P,
+    block_numbers: &[u64],
+    tx_lists: Option<&[Bytes]>,
+    parent_storage_proofs: &[ParentStorageProofRequest],
+    use_canonical_witness: bool,
+) -> RaikoResult<(Vec<ExecutionWitness>, u128)> {
+    let started_at = Instant::now();
+    let witnesses = if let Some(tx_lists) = tx_lists
+        && !use_canonical_witness
+    {
+        if parent_storage_proofs.is_empty() {
+            provider
+                .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+                .await
+        } else {
+            provider
+                .batch_witnesses_with_tx_lists_and_parent_storage_proofs(
+                    block_numbers,
+                    tx_lists,
+                    parent_storage_proofs,
+                )
+                .await
+        }
+    } else if parent_storage_proofs.is_empty() {
+        provider.batch_witnesses(block_numbers).await
+    } else {
+        provider
+            .batch_witnesses_with_parent_storage_proofs(block_numbers, parent_storage_proofs)
+            .await
+    }?;
+
+    Ok((witnesses, started_at.elapsed().as_millis()))
+}
+
+struct PreflightChunkInput<'a> {
     proposal_id: u64,
     chunk_index: usize,
     chunk_count: usize,
-    blocks: &[reth_ethereum_primitives::Block],
-    tx_lists: Option<&[Bytes]>,
-    parent_storage_proofs: &[ParentStorageProofRequest],
+    blocks: &'a [reth_ethereum_primitives::Block],
+    tx_lists: Option<&'a [Bytes]>,
+    parent_storage_proofs: &'a [ParentStorageProofRequest],
     chain_spec: ChainSpec,
+}
+
+async fn fetch_preflight_chunk<P: Provider>(
+    provider: &P,
+    input: PreflightChunkInput<'_>,
 ) -> RaikoResult<(usize, Vec<StatelessInput>)> {
-    let block_numbers = blocks
+    let block_numbers = input
+        .blocks
         .iter()
         .map(|block| block.header.number)
         .collect::<Vec<_>>();
     let chunk_started_at = Instant::now();
     info!(
-        proposal_id,
-        chunk_index,
-        chunk_count,
+        proposal_id = input.proposal_id,
+        chunk_index = input.chunk_index,
+        chunk_count = input.chunk_count,
         first_block = block_numbers.first().copied(),
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
-        tx_list_witness = tx_lists.is_some(),
-        parent_storage_proof_count = parent_storage_proofs.len(),
+        tx_list_witness = input.tx_lists.is_some(),
+        parent_storage_proof_count = input.parent_storage_proofs.len(),
         "starting shasta preflight chunk"
     );
-    if let Some(tx_lists) = tx_lists
-        && tx_lists.len() != blocks.len()
+    if let Some(tx_lists) = input.tx_lists
+        && tx_lists.len() != input.blocks.len()
     {
         return Err(RaikoError::Preflight(format!(
             "tx-list witness count ({}) does not match block count ({})",
             tx_lists.len(),
-            blocks.len()
+            input.blocks.len()
         )));
     }
-    let use_canonical_witness =
-        tx_lists.is_some() && preflight_uses_canonical_witness_for_tx_lists(&chain_spec);
-    let witnesses = async {
-        let started_at = Instant::now();
-        let witnesses = if let Some(tx_lists) = tx_lists
-            && !use_canonical_witness
-        {
-            if parent_storage_proofs.is_empty() {
-                provider
-                    .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
-                    .await
-            } else {
-                provider
-                    .batch_witnesses_with_tx_lists_and_parent_storage_proofs(
-                        &block_numbers,
-                        tx_lists,
-                        parent_storage_proofs,
-                    )
-                    .await
-            }
-        } else if parent_storage_proofs.is_empty() {
-            provider.batch_witnesses(&block_numbers).await
-        } else {
-            provider
-                .batch_witnesses_with_parent_storage_proofs(&block_numbers, parent_storage_proofs)
-                .await
-        }?;
-        Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
-    };
-    let account_targets = blocks
+    let use_canonical_witness = input.tx_lists.is_some()
+        && preflight_uses_canonical_witness_for_tx_lists(&input.chain_spec);
+    let witnesses = fetch_preflight_execution_witnesses(
+        provider,
+        &block_numbers,
+        input.tx_lists,
+        input.parent_storage_proofs,
+        use_canonical_witness,
+    );
+    let account_targets = input
+        .blocks
         .iter()
         .enumerate()
         .map(|(index, _)| {
-            collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
+            collect_preflight_account_targets(input.tx_lists.map(|tx_lists| &tx_lists[index]))
         })
         .collect::<RaikoResult<Vec<_>>>()?;
     let accounts = fetch_preflight_accounts(
@@ -618,9 +638,9 @@ async fn fetch_preflight_chunk<P: Provider>(
         (accounts, account_witness_nodes, accounts_elapsed_ms),
     ) = try_join(witnesses, accounts).await?;
 
-    if blocks.len() != witnesses.len()
-        || blocks.len() != accounts.len()
-        || blocks.len() != account_witness_nodes.len()
+    if input.blocks.len() != witnesses.len()
+        || input.blocks.len() != accounts.len()
+        || input.blocks.len() != account_witness_nodes.len()
     {
         return Err(RaikoError::InvalidRequestConfig(
             "Provider returned mismatched input lengths".to_string(),
@@ -631,33 +651,34 @@ async fn fetch_preflight_chunk<P: Provider>(
         merge_account_witness_nodes(&mut witnesses, account_witness_nodes);
     }
 
-    let witnesses = blocks
+    let witnesses = input
+        .blocks
         .iter()
         .cloned()
         .zip(witnesses)
         .zip(accounts)
         .map(|((block, witness), accounts)| StatelessInput {
             block,
-            chain_spec: chain_spec.clone(),
+            chain_spec: input.chain_spec.clone(),
             witness,
             accounts,
         })
         .collect::<Vec<_>>();
 
     info!(
-        proposal_id,
-        chunk_index,
-        chunk_count,
+        proposal_id = input.proposal_id,
+        chunk_index = input.chunk_index,
+        chunk_count = input.chunk_count,
         first_block = block_numbers.first().copied(),
         last_block = block_numbers.last().copied(),
         block_count = block_numbers.len(),
-        tx_list_witness = tx_lists.is_some(),
+        tx_list_witness = input.tx_lists.is_some(),
         witnesses_elapsed_ms,
         accounts_elapsed_ms,
         total_elapsed_ms = chunk_started_at.elapsed().as_millis(),
         "completed shasta preflight chunk"
     );
-    Ok((chunk_index, witnesses))
+    Ok((input.chunk_index, witnesses))
 }
 
 fn derive_preflight_tx_lists(
@@ -2132,18 +2153,18 @@ mod tests {
             ..Default::default()
         };
 
-        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
-            &provider,
-            42,
-            0,
-            1,
-            std::slice::from_ref(&provider.block),
-            Some(&tx_lists),
-            &[],
+        let input = super::PreflightChunkInput {
+            proposal_id: 42,
+            chunk_index: 0,
+            chunk_count: 1,
+            blocks: std::slice::from_ref(&provider.block),
+            tx_lists: Some(&tx_lists),
+            parent_storage_proofs: &[],
             chain_spec,
-        )
-        .await
-        .expect("fetch preflight chunk");
+        };
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(&provider, input)
+            .await
+            .expect("fetch preflight chunk");
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
@@ -2200,18 +2221,18 @@ mod tests {
             ..Default::default()
         };
 
-        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
-            &provider,
-            42,
-            0,
-            1,
-            std::slice::from_ref(&provider.block),
-            Some(&tx_lists),
-            &[],
+        let input = super::PreflightChunkInput {
+            proposal_id: 42,
+            chunk_index: 0,
+            chunk_count: 1,
+            blocks: std::slice::from_ref(&provider.block),
+            tx_lists: Some(&tx_lists),
+            parent_storage_proofs: &[],
             chain_spec,
-        )
-        .await
-        .expect("fetch preflight chunk");
+        };
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(&provider, input)
+            .await
+            .expect("fetch preflight chunk");
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
@@ -2229,18 +2250,18 @@ mod tests {
             ..Default::default()
         };
 
-        let err = super::fetch_preflight_chunk(
-            &provider,
-            42,
-            0,
-            1,
-            std::slice::from_ref(&provider.block),
-            Some(&tx_lists),
-            &[],
+        let input = super::PreflightChunkInput {
+            proposal_id: 42,
+            chunk_index: 0,
+            chunk_count: 1,
+            blocks: std::slice::from_ref(&provider.block),
+            tx_lists: Some(&tx_lists),
+            parent_storage_proofs: &[],
             chain_spec,
-        )
-        .await
-        .expect_err("mismatched tx-list count should be rejected");
+        };
+        let err = super::fetch_preflight_chunk(&provider, input)
+            .await
+            .expect_err("mismatched tx-list count should be rejected");
 
         assert!(
             err.to_string()

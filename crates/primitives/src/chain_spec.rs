@@ -369,8 +369,6 @@ pub struct ChainSpec {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     pub l1_contract: BTreeMap<ForkId, Address>,
     pub l2_contract: Option<Address>,
-    #[serde(default)]
-    pub l2_signal_service: Option<Address>,
     pub rpc: String,
     pub beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -378,6 +376,8 @@ pub struct ChainSpec {
     pub genesis_time: u64,
     pub seconds_per_slot: u64,
     pub is_taiko: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_signal_service: Option<Address>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,8 +402,6 @@ struct BinaryChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
-    #[serde(default)]
-    l2_signal_service: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -411,6 +409,8 @@ struct BinaryChainSpecHelper {
     genesis_time: u64,
     seconds_per_slot: u64,
     is_taiko: bool,
+    #[serde(default)]
+    l2_signal_service: Option<Address>,
 }
 
 impl From<BinaryChainSpecHelper> for ChainSpec {
@@ -423,13 +423,13 @@ impl From<BinaryChainSpecHelper> for ChainSpec {
             eip_1559_constants: helper.eip_1559_constants,
             l1_contract: helper.l1_contract,
             l2_contract: helper.l2_contract,
-            l2_signal_service: helper.l2_signal_service,
             rpc: helper.rpc,
             beacon_rpc: helper.beacon_rpc,
             verifier_address_forks: helper.verifier_address_forks,
             genesis_time: helper.genesis_time,
             seconds_per_slot: helper.seconds_per_slot,
             is_taiko: helper.is_taiko,
+            l2_signal_service: helper.l2_signal_service,
         }
     }
 }
@@ -448,8 +448,6 @@ struct JsonChainSpecHelper {
     #[serde(default, deserialize_with = "deserialize_fork_id_map")]
     l1_contract: BTreeMap<ForkId, Address>,
     l2_contract: Option<Address>,
-    #[serde(default)]
-    l2_signal_service: Option<Address>,
     rpc: String,
     beacon_rpc: Option<String>,
     #[serde(deserialize_with = "deserialize_verifier_address_forks")]
@@ -458,6 +456,8 @@ struct JsonChainSpecHelper {
     seconds_per_slot: u64,
     #[serde(default)]
     is_taiko: Option<bool>,
+    #[serde(default)]
+    l2_signal_service: Option<Address>,
 }
 
 #[derive(Debug, Clone)]
@@ -622,13 +622,13 @@ where
         eip_1559_constants,
         l1_contract: helper.l1_contract,
         l2_contract: helper.l2_contract,
-        l2_signal_service: helper.l2_signal_service,
         rpc: helper.rpc,
         beacon_rpc: helper.beacon_rpc,
         verifier_address_forks: helper.verifier_address_forks,
         genesis_time: helper.genesis_time,
         seconds_per_slot: helper.seconds_per_slot,
         is_taiko,
+        l2_signal_service: helper.l2_signal_service,
     })
 }
 
@@ -921,6 +921,7 @@ impl ChainSpec {
         }
 
         self.remove_fork_verifier_proof_type(ProofType::SgxGeth);
+        self.l2_signal_service = None;
     }
 
     /// Removes a verifier proof type from every configured fork.
@@ -947,13 +948,13 @@ impl ChainSpec {
             eip_1559_constants,
             l1_contract: BTreeMap::new(),
             l2_contract: None,
-            l2_signal_service: None,
             rpc: String::new(),
             beacon_rpc: None,
             verifier_address_forks: BTreeMap::new(),
             genesis_time: 0u64,
             seconds_per_slot: 1u64,
             is_taiko,
+            l2_signal_service: None,
         }
     }
 
@@ -1222,8 +1223,11 @@ mod tests {
             "default chain spec list should not be empty"
         );
 
-        // Pick a deterministic entry (first) to avoid relying on a specific name existing.
-        let spec = &list[0];
+        let spec = list
+            .iter()
+            .find(|spec| spec.name == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+        assert!(spec.l2_signal_service.is_some());
 
         let bytes =
             bincode::serialize(spec).map_err(|e| anyhow!("bincode serialize ChainSpec: {e}"))?;
@@ -1507,11 +1511,67 @@ mod tests {
             address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn v0_1_0_guest_input_projection_serializes_as_legacy_chain_spec() -> Result<()> {
+        use std::io::{Cursor, Read};
+
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        struct LegacyChainSpecV010 {
+            name: String,
+            chain_id: ChainId,
+            max_spec_id: SpecId,
+            hard_forks: BTreeMap<ForkId, ForkCondition>,
+            eip_1559_constants: Eip1559Constants,
+            l1_contract: BTreeMap<ForkId, Address>,
+            l2_contract: Option<Address>,
+            rpc: String,
+            beacon_rpc: Option<String>,
+            verifier_address_forks: VerifierAddressForks,
+            genesis_time: u64,
+            seconds_per_slot: u64,
+            is_taiko: bool,
+        }
+
+        struct CountingReader<R> {
+            inner: R,
+            bytes_read: usize,
+        }
+
+        impl<R: Read> Read for CountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.inner.read(buf)?;
+                self.bytes_read += read;
+                Ok(read)
+            }
+        }
+
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
+            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
+        let projected = spec.project_for_guest_input_abi(GuestInputAbi::V0_1_0);
+
+        assert!(projected.l2_signal_service.is_none());
+
         let bytes = bincode::serialize(&projected)
             .map_err(|e| anyhow!("bincode serialize projected ChainSpec: {e}"))?;
-        let decoded: ChainSpec = bincode::deserialize(&bytes)
-            .map_err(|e| anyhow!("bincode deserialize projected ChainSpec: {e}"))?;
-        assert_eq!(decoded, projected);
+        let mut reader = CountingReader {
+            inner: Cursor::new(&bytes),
+            bytes_read: 0,
+        };
+        let legacy: LegacyChainSpecV010 = bincode::deserialize_from(&mut reader)
+            .map_err(|e| anyhow!("bincode deserialize legacy ChainSpec: {e}"))?;
+
+        assert_eq!(reader.bytes_read, bytes.len());
+        assert_eq!(legacy.name, projected.name);
+        assert_eq!(legacy.chain_id, projected.chain_id);
+        assert_eq!(legacy.l2_contract, projected.l2_contract);
+
         Ok(())
     }
 

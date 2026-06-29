@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use reqwest::{
     Client, Url,
     header::{CONTENT_TYPE, HeaderValue},
@@ -11,10 +11,15 @@ use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
 
-use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
+use crate::{
+    GuestInputCodec, Prover, ensure_shasta_aggregate_input_matches_carries,
+    ensure_shasta_proposal_input_matches_carry, with_shasta_extra_data,
+};
 
 use crate::remote_prover::{
-    adapter::{build_shasta_aggregate_request, build_shasta_packet},
+    adapter::{
+        build_shasta_aggregate_request, build_shasta_packet, build_shasta_packet_with_guest_input,
+    },
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
         RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
@@ -46,6 +51,13 @@ pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
+    request_encoding: ShastaRequestEncoding,
+}
+
+#[derive(Clone, Copy)]
+enum ShastaRequestEncoding {
+    ReplayPacket,
+    GuestInput,
 }
 
 impl Gaiko2Prover {
@@ -54,6 +66,21 @@ impl Gaiko2Prover {
     /// Returns an error when the gaiko2 base URL is empty, malformed, or the HTTP client
     /// cannot be constructed.
     pub fn new(config: &Gaiko2Config) -> RaikoResult<Self> {
+        Self::new_with_encoding(config, ShastaRequestEncoding::ReplayPacket)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the remote SGX base URL is empty, malformed, or the HTTP client
+    /// cannot be constructed.
+    pub fn new_for_guest_input(config: &Gaiko2Config) -> RaikoResult<Self> {
+        Self::new_with_encoding(config, ShastaRequestEncoding::GuestInput)
+    }
+
+    fn new_with_encoding(
+        config: &Gaiko2Config,
+        request_encoding: ShastaRequestEncoding,
+    ) -> RaikoResult<Self> {
         if config.base_url.trim().is_empty() {
             return Err(RaikoError::InvalidRequestConfig(
                 "gaiko2.base_url must not be empty".to_string(),
@@ -80,13 +107,17 @@ impl Gaiko2Prover {
             client,
             prove_url,
             aggregate_url,
+            request_encoding,
         })
     }
 }
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let packet = build_shasta_packet(input)?;
+        let packet = match self.request_encoding {
+            ShastaRequestEncoding::ReplayPacket => build_shasta_packet(input)?,
+            ShastaRequestEncoding::GuestInput => build_shasta_packet_with_guest_input(input)?,
+        };
         let payload = serde_json::to_vec(&packet)
             .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;
         Ok(Bytes::from(payload))
@@ -128,6 +159,11 @@ where
                 result.input
             ))
         })?;
+        ensure_shasta_proposal_input_matches_carry(
+            input_hash,
+            &packet.payload.proof_carry_data,
+            "gaiko2",
+        )?;
 
         let extra_data = with_shasta_extra_data(
             &packet.payload.proof_carry_data,
@@ -170,6 +206,19 @@ where
                 result.input
             ))
         })?;
+        let instance_address = parse_aggregate_instance_address(&result)?;
+        let carries = packet
+            .payload
+            .proofs
+            .iter()
+            .map(|proof| proof.proof_carry_data.clone())
+            .collect::<Vec<_>>();
+        ensure_shasta_aggregate_input_matches_carries(
+            input_hash,
+            &carries,
+            instance_address,
+            "gaiko2",
+        )?;
         let metadata = gaiko2_metadata(&envelope.schema, &result);
 
         Ok(Proof {
@@ -234,6 +283,18 @@ impl Gaiko2Prover {
 
         Ok((envelope, result))
     }
+}
+
+fn parse_aggregate_instance_address(result: &Raiko2ProofResult) -> RaikoResult<Address> {
+    let raw = result.instance_address.as_deref().ok_or_else(|| {
+        RaikoError::Guest("gaiko2 aggregate response missing instance_address".to_string())
+    })?;
+
+    Address::from_str(raw).map_err(|err| {
+        RaikoError::Guest(format!(
+            "invalid gaiko2 aggregate instance_address '{raw}': {err}"
+        ))
+    })
 }
 
 fn gaiko2_metadata(

@@ -39,7 +39,8 @@ use url::Url;
 use crate::{
     BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
     encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const MILLION_CYCLES: u64 = 1_000_000;
@@ -956,6 +957,9 @@ impl BoundlessProver {
                         "proposal" => parse_shasta_proposal_input_hash(journal)?,
                         _ => parse_shasta_aggregation_input_hash(journal)?,
                     };
+                    if let ("proposal", Some(carry)) = (proof_type, proposal_carry_data) {
+                        ensure_shasta_proposal_input_matches_carry(input_hash, carry, "boundless")?;
+                    }
                     if input_hash != expected_input_hash {
                         return Err(BoundlessAttemptError::Fatal(RaikoError::Guest(
                             "Boundless fulfillment journal does not match local dry-run journal"

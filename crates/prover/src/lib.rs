@@ -46,13 +46,14 @@ pub use sp1_config::{
 
 #[cfg(any(feature = "risc0", feature = "boundless"))]
 use alloy::sol_types::SolValue;
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
-use alloy_primitives::B256;
 use alloy_primitives::Bytes;
+use alloy_primitives::{Address, B256};
 use raiko2_pipeline::{PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
+    ShastaZkAggregationGuestInput, encode_proof_carry_data,
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+    proof_carry_from_proof,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -129,6 +130,57 @@ pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoRes
             public_values.len()
         )))
     }
+}
+
+pub(crate) fn ensure_shasta_proposal_input_matches_carry(
+    input_hash: B256,
+    carry: &ProofCarryData,
+    source: &str,
+) -> RaikoResult<()> {
+    let expected_input = hash_shasta_subproof_input(carry);
+    if input_hash != expected_input {
+        return Err(RaikoError::Guest(format!(
+            "{source} proposal input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn expected_shasta_aggregate_input(
+    carries: &[ProofCarryData],
+    prover_address: Address,
+) -> RaikoResult<B256> {
+    let first = carries.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot compute shasta aggregate input without proof carry data".to_string(),
+        )
+    })?;
+    let commitment =
+        build_shasta_commitment_from_proof_carry_data_vec(carries).ok_or_else(|| {
+            RaikoError::InvalidRequestConfig("invalid shasta proof carry data".into())
+        })?;
+
+    Ok(shasta_aggregation_output(
+        &commitment,
+        first.chain_id,
+        first.verifier,
+        prover_address,
+    ))
+}
+
+pub(crate) fn ensure_shasta_aggregate_input_matches_carries(
+    input_hash: B256,
+    carries: &[ProofCarryData],
+    prover_address: Address,
+    source: &str,
+) -> RaikoResult<()> {
+    let expected_input = expected_shasta_aggregate_input(carries, prover_address)?;
+    if input_hash != expected_input {
+        return Err(RaikoError::Guest(format!(
+            "{source} aggregate input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
@@ -443,8 +495,9 @@ mod tests {
         encode_risc0_proposal_seal_payload,
     };
     use super::{
-        encode_proof_carry_data, parse_shasta_aggregation_input_hash,
-        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+        encode_proof_carry_data, ensure_shasta_proposal_input_matches_carry,
+        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+        validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
@@ -468,6 +521,16 @@ mod tests {
     fn rejects_non_exact_shasta_proposal_public_input_length() {
         let err = parse_shasta_proposal_input_hash(&[0u8; 64]).expect_err("reject");
         assert!(err.to_string().contains("expected 32 bytes"));
+    }
+
+    #[test]
+    fn proposal_input_binding_rejects_carry_mismatch() {
+        let carry = ProofCarryData::default();
+        let err =
+            ensure_shasta_proposal_input_matches_carry(B256::repeat_byte(0x99), &carry, "test")
+                .expect_err("mismatched carry hash");
+
+        assert!(err.to_string().contains("input hash mismatch"));
     }
 
     #[test]

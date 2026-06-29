@@ -1,8 +1,8 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
 use raiko2_primitives::{ChainSpec, ExecutionWitness, Proof, StatelessInput};
-use raiko2_primitives_shasta::proof_carry_from_proof;
-use raiko2_protocol_shasta::shasta::ProofCarryData;
+use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
+use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -22,6 +22,8 @@ pub struct Raiko2ShastaPayload {
     pub chain_id: u64,
     pub blocks: Vec<Raiko2ReplayBlock>,
     pub proof_carry_data: ProofCarryData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_input: Option<GuestInput>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -66,13 +68,9 @@ pub struct Raiko2AggregateProof {
 impl Raiko2AggregateProof {
     /// # Errors
     ///
-    /// Returns an error when the proof is missing remote aggregate fields or shasta carry data.
+    /// Returns an error when the proof is missing remote aggregate fields, missing shasta carry
+    /// data, or carries an input hash that does not match the shasta carry data.
     pub fn from_proof(proof: &Proof) -> Result<Self, raiko2_primitives::RaikoError> {
-        let input = proof.input.ok_or_else(|| {
-            raiko2_primitives::RaikoError::InvalidRequestConfig(
-                "remote aggregation proof missing input".to_string(),
-            )
-        })?;
         let proof_hex = proof.proof.clone().ok_or_else(|| {
             raiko2_primitives::RaikoError::InvalidRequestConfig(
                 "remote aggregation proof missing proof bytes".to_string(),
@@ -83,9 +81,17 @@ impl Raiko2AggregateProof {
                 "remote aggregation proof missing shasta carry data".to_string(),
             )
         })?;
+        let expected_input = hash_shasta_subproof_input(&proof_carry_data);
+        if let Some(input) = proof.input
+            && input != expected_input
+        {
+            return Err(raiko2_primitives::RaikoError::InvalidRequestConfig(
+                "remote aggregation proof input hash does not match shasta carry data".to_string(),
+            ));
+        }
 
         Ok(Self {
-            input: input.to_string(),
+            input: expected_input.to_string(),
             proof: proof_hex,
             proof_carry_data,
         })

@@ -125,6 +125,12 @@ The harness posts the vendored proposal and aggregate fixtures to:
 
 - `POST /prove/shasta`
 
+This harness targets providers whose `/prove/shasta` input is the replay packet used by
+`gaiko2`/`sgxgeth`. That packet is valid provider input for gaiko2 because gaiko2 executes it
+internally, but it is not a `raiko2-sgx-prover` smoke test. `raiko2-sgx-prover` requires a complete
+`raiko2_primitives_shasta::GuestInput` envelope and runs the Shasta guest validation path before
+signing.
+
 It then builds a live aggregate request from the returned proposal proof and posts that derived
 request to:
 

@@ -33,6 +33,7 @@ fn shasta_packet_roundtrip_preserves_schema_and_payload() {
             chain_id: 167_013,
             blocks: vec![replay_block],
             proof_carry_data,
+            guest_input: None,
         },
     };
 

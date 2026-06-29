@@ -5,7 +5,7 @@ use alloy_primitives::B256;
 use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
-    adapter::build_shasta_packet,
+    adapter::{build_shasta_packet, build_shasta_packet_with_guest_input},
     protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
 };
 
@@ -42,6 +42,7 @@ fn adapter_projects_guest_input_into_execution_packet() {
     assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(packet.payload.blocks.len(), input.witnesses.len());
     assert_eq!(packet.payload.chain_id, input.proof_carry_data.chain_id);
+    assert!(packet.payload.guest_input.is_none());
     assert_eq!(
         packet.payload.proof_carry_data.transition_input.checkpoint,
         input.proof_carry_data.transition_input.checkpoint
@@ -52,6 +53,18 @@ fn adapter_projects_guest_input_into_execution_packet() {
         B256::from([0x11; 32])
     );
     assert_eq!(packet.payload.blocks[0].witness.headers.len(), 1);
+}
+
+#[test]
+fn adapter_can_embed_full_guest_input_for_sgx_runtime() {
+    let input = fixture_guest_input();
+    let packet = build_shasta_packet_with_guest_input(&input).expect("build packet");
+
+    assert!(packet.payload.blocks.is_empty());
+    let guest_input = packet.payload.guest_input.expect("guest input payload");
+    assert_eq!(guest_input.witnesses.len(), input.witnesses.len());
+    assert_eq!(guest_input.proof_carry_data, input.proof_carry_data);
+    assert_eq!(guest_input.taiko.proposal_id, input.taiko.proposal_id);
 }
 
 #[test]
@@ -93,6 +106,19 @@ fn adapter_rejects_guest_input_without_witnesses() {
         err.to_string()
             .contains("cannot build remote prover shasta packet without witnesses")
     );
+}
+
+#[test]
+fn adapter_rejects_unset_proof_carry_chain_id() {
+    let mut input = fixture_guest_input();
+    input.proof_carry_data.chain_id = 0;
+
+    let err = build_shasta_packet(&input).expect_err("reject unset carry chain id");
+    assert!(err.to_string().contains("proof_carry_data.chain_id"));
+
+    let err = build_shasta_packet_with_guest_input(&input)
+        .expect_err("reject unset carry chain id with guest input");
+    assert!(err.to_string().contains("proof_carry_data.chain_id"));
 }
 
 #[test]

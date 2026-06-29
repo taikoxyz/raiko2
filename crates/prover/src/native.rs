@@ -11,7 +11,9 @@ use raiko2_primitives_shasta::{
     instance::{words_to_bytes_be, words_to_bytes_le},
 };
 
-use crate::{GuestInputCodec, build_shasta_aggregation_input};
+use crate::{
+    GuestInputCodec, build_shasta_aggregation_input, ensure_shasta_proposal_input_matches_carry,
+};
 
 /// Native prover for local execution (returns public input only).
 #[derive(Debug, Default, Clone, Copy)]
@@ -64,6 +66,7 @@ where
             prove_shasta_proposal_for_proof_type(&input, ProofType::Native).map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Invalid native proposal input: {e}"))
             })?;
+        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "native")?;
         let signature = mock_signature(input_hash);
         let sgx_instance = signer_address();
         let proof =

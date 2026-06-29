@@ -9,13 +9,6 @@
 
 It replaces the old untracked repo-root `test.json` workflow.
 
-`shasta_remote_request_fixture_chain_167013_block_42.json` is a checked-in minimal remote prover
-request fixture used by:
-
-- `crates/sgx-runtime/tests/dump_valid_request.rs`
-- manual `curl` smoke tests against `raiko2-sgx-prover`
-- devops startup/link testing for the `sgx/remote` lane
-
 `tests/fixtures/remote_prover/` contains the canonical remote prover protocol goldens owned by
 `raiko2`:
 
@@ -30,6 +23,10 @@ These files define the strict `raiko2`-owned request contract for:
 Remote prover implementations are expected to accept byte-for-byte equivalent payloads for these
 fixtures. Provider-specific repositories may keep their own copies, but `raiko2` owns the canonical
 request goldens and validates them in `crates/prover/tests/remote_prover_fixture.rs`.
+These replay-packet fixtures target providers whose proposal input is the gaiko2/sgxgeth replay
+packet. That packet is valid input for gaiko2 because gaiko2 executes it internally. It is not the
+`raiko2-sgx-prover` proposal input, because `raiko2-sgx-prover` requires the full
+`raiko2_primitives_shasta::GuestInput` envelope and reruns Shasta guest validation before signing.
 
 ## Provenance
 
@@ -57,10 +54,4 @@ target/debug/preflight \
   --l2-end 5412416 \
   --proof-type native \
   --output tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json
-```
-
-Generate the SGX remote request fixture from the integration test:
-
-```bash
-cargo test -p raiko2-sgx-runtime --test dump_valid_request dump_valid_request_json -- --nocapture
 ```

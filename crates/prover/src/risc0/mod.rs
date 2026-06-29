@@ -19,8 +19,9 @@ use tracing::info;
 
 use crate::{
     GuestInputCodec, encode_risc0_aggregation_proof_payload, encode_risc0_proposal_proof_payload,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-    risc0_aggregation::build_risc0_aggregation_input_from_proofs, with_shasta_extra_data,
+    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, risc0_aggregation::build_risc0_aggregation_input_from_proofs,
+    with_shasta_extra_data,
 };
 
 /// RISC0 Prover for Shasta proposal proofs.
@@ -252,6 +253,7 @@ where
 
             let journal_bytes = &receipt.journal.bytes;
             let input_hash = parse_shasta_proposal_input_hash(journal_bytes)?;
+            ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "risc0")?;
 
             info!(
                 "Generated proposal receipt journal: {:?}",

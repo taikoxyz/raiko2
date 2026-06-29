@@ -83,6 +83,15 @@ const fn proposal_id_from_request(
         .proposal_id
 }
 
+fn shasta_request_block_count(
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+) -> usize {
+    request.payload.guest_input.as_ref().map_or_else(
+        || request.payload.blocks.len(),
+        |input| input.witnesses.len(),
+    )
+}
+
 fn aggregate_proposal_id_summary(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaAggregateRequest,
 ) -> String {
@@ -127,7 +136,8 @@ where
                             schema = %request.schema,
                             proposal_id = proposal_id_from_request(&request),
                             chain_id = request.payload.chain_id,
-                            block_count = request.payload.blocks.len(),
+                            block_count = shasta_request_block_count(&request),
+                            replay_block_count = request.payload.blocks.len(),
                             instance_id = state.service_config.instance_id,
                             "completed sgx shasta prove request"
                         );
@@ -138,7 +148,8 @@ where
                     warn!(
                         schema = %request.schema,
                         chain_id = request.payload.chain_id,
-                        block_count = request.payload.blocks.len(),
+                        block_count = shasta_request_block_count(&request),
+                        replay_block_count = request.payload.blocks.len(),
                         instance_id = state.service_config.instance_id,
                         code = err.code,
                         message = %err.message,
@@ -215,23 +226,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, B256};
+    use alloy_primitives::Address;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use raiko2_primitives::{ChainSpec, ExecutionWitness, StatelessInput};
-    use raiko2_protocol_shasta::shasta::{Checkpoint, ProofCarryData};
+    use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
         RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
         Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaPayload,
         Raiko2ShastaRequest,
     };
-    use reth_ethereum_primitives::Block;
     use secp256k1::SecretKey;
     use tower::util::ServiceExt;
 
-    use super::{SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router};
+    use super::{
+        SgxProver, aggregate_proposal_id_summary, proposal_id_from_request, router,
+        shasta_request_block_count,
+    };
     use crate::config::ServiceConfig;
     use crate::tee::TeeProvider;
 
@@ -252,42 +264,36 @@ mod tests {
         }
     }
 
-    fn u48(value: u64) -> alloy_primitives::Uint<48, 1> {
-        alloy_primitives::Uint::from_limbs([value])
-    }
-
     fn request_fixture() -> Raiko2ShastaRequest {
-        let mut stateless = StatelessInput {
-            block: Block::default(),
-            chain_spec: ChainSpec::default(),
-            witness: ExecutionWitness::default(),
-            accounts: Default::default(),
-        };
-        stateless.block.header.number = 42;
-        stateless.block.header.parent_hash = B256::from([0x11; 32]);
-        stateless.block.header.state_root = B256::from([0x33; 32]);
-        stateless.chain_spec.chain_id = 167_013;
-        let block_hash = stateless.block.header.hash_slow();
-
         let mut carry = ProofCarryData {
             chain_id: 167_013,
             ..ProofCarryData::default()
         };
-        carry.transition_input.parent_block_hash = B256::from([0x11; 32]);
-        carry.transition_input.checkpoint = Checkpoint {
-            blockNumber: u48(42),
-            blockHash: block_hash,
-            stateRoot: B256::from([0x33; 32]),
-        };
+        carry.transition_input.proposal_id = 42;
 
         Raiko2ShastaRequest {
             schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
             payload: Raiko2ShastaPayload {
                 chain_id: 167_013,
-                blocks: vec![stateless.into()],
+                blocks: Vec::new(),
                 proof_carry_data: carry,
+                guest_input: None,
             },
         }
+    }
+
+    #[test]
+    fn shasta_request_block_count_uses_guest_input_witnesses() {
+        let mut request = request_fixture();
+        request.payload.guest_input = Some(raiko2_primitives_shasta::GuestInput {
+            witnesses: vec![
+                raiko2_primitives::StatelessInput::default(),
+                raiko2_primitives::StatelessInput::default(),
+            ],
+            ..raiko2_primitives_shasta::GuestInput::default()
+        });
+
+        assert_eq!(shasta_request_block_count(&request), 2);
     }
 
     #[tokio::test]
@@ -315,7 +321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prove_shasta_route_returns_json_envelope() {
+    async fn prove_shasta_route_rejects_request_without_guest_input() {
         let app = router(SgxProver {
             provider: FakeProvider,
             service_config: ServiceConfig {
@@ -338,11 +344,11 @@ mod tests {
             .await
             .expect("prove response");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn prove_shasta_route_accepts_large_valid_request_bodies() {
+    async fn prove_shasta_route_accepts_large_request_bodies_before_validation() {
         let app = router(SgxProver {
             provider: FakeProvider,
             service_config: ServiceConfig {
@@ -366,7 +372,7 @@ mod tests {
             .await
             .expect("prove response");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

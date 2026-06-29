@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Duration};
 
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use reqwest::{
     Client, Url,
     header::{CONTENT_TYPE, HeaderValue},
@@ -12,7 +12,8 @@ use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, 
 use raiko2_primitives_shasta::GuestInput;
 
 use crate::{
-    GuestInputCodec, Prover, ensure_shasta_proposal_input_matches_carry, with_shasta_extra_data,
+    GuestInputCodec, Prover, ensure_shasta_aggregate_input_matches_carries,
+    ensure_shasta_proposal_input_matches_carry, with_shasta_extra_data,
 };
 
 use crate::remote_prover::{
@@ -205,6 +206,19 @@ where
                 result.input
             ))
         })?;
+        let instance_address = parse_aggregate_instance_address(&result)?;
+        let carries = packet
+            .payload
+            .proofs
+            .iter()
+            .map(|proof| proof.proof_carry_data.clone())
+            .collect::<Vec<_>>();
+        ensure_shasta_aggregate_input_matches_carries(
+            input_hash,
+            &carries,
+            instance_address,
+            "gaiko2",
+        )?;
         let metadata = gaiko2_metadata(&envelope.schema, &result);
 
         Ok(Proof {
@@ -269,6 +283,18 @@ impl Gaiko2Prover {
 
         Ok((envelope, result))
     }
+}
+
+fn parse_aggregate_instance_address(result: &Raiko2ProofResult) -> RaikoResult<Address> {
+    let raw = result.instance_address.as_deref().ok_or_else(|| {
+        RaikoError::Guest("gaiko2 aggregate response missing instance_address".to_string())
+    })?;
+
+    Address::from_str(raw).map_err(|err| {
+        RaikoError::Guest(format!(
+            "invalid gaiko2 aggregate instance_address '{raw}': {err}"
+        ))
+    })
 }
 
 fn gaiko2_metadata(

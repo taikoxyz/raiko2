@@ -46,12 +46,14 @@ pub use sp1_config::{
 
 #[cfg(any(feature = "risc0", feature = "boundless"))]
 use alloy::sol_types::SolValue;
-use alloy_primitives::B256;
 use alloy_primitives::Bytes;
+use alloy_primitives::{Address, B256};
 use raiko2_pipeline::{PipelineRoute, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::{
-    ShastaZkAggregationGuestInput, encode_proof_carry_data, proof_carry_from_proof,
+    ShastaZkAggregationGuestInput, encode_proof_carry_data,
+    instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
+    proof_carry_from_proof,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
@@ -139,6 +141,43 @@ pub(crate) fn ensure_shasta_proposal_input_matches_carry(
     if input_hash != expected_input {
         return Err(RaikoError::Guest(format!(
             "{source} proposal input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn expected_shasta_aggregate_input(
+    carries: &[ProofCarryData],
+    prover_address: Address,
+) -> RaikoResult<B256> {
+    let first = carries.first().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "cannot compute shasta aggregate input without proof carry data".to_string(),
+        )
+    })?;
+    let commitment =
+        build_shasta_commitment_from_proof_carry_data_vec(carries).ok_or_else(|| {
+            RaikoError::InvalidRequestConfig("invalid shasta proof carry data".into())
+        })?;
+
+    Ok(shasta_aggregation_output(
+        &commitment,
+        first.chain_id,
+        first.verifier,
+        prover_address,
+    ))
+}
+
+pub(crate) fn ensure_shasta_aggregate_input_matches_carries(
+    input_hash: B256,
+    carries: &[ProofCarryData],
+    prover_address: Address,
+    source: &str,
+) -> RaikoResult<()> {
+    let expected_input = expected_shasta_aggregate_input(carries, prover_address)?;
+    if input_hash != expected_input {
+        return Err(RaikoError::Guest(format!(
+            "{source} aggregate input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
         )));
     }
     Ok(())

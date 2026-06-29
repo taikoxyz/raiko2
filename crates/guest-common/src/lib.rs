@@ -1168,8 +1168,8 @@ mod tests {
     fn validate_known_chain_spec_rejects_tampered_field() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.l2_contract = Some(Address::ZERO); // diverge from the trusted spec
-        let err = validate_known_chain_spec(&spec)
-            .expect_err("tampered l2_contract must be rejected");
+        let err =
+            validate_known_chain_spec(&spec).expect_err("tampered l2_contract must be rejected");
         assert!(
             err.to_string().contains("l2_contract"),
             "unexpected error: {err}"

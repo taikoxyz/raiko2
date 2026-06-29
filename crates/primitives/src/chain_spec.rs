@@ -18,16 +18,51 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
 pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
 
+/// On-chain `SignalService.VERSION` for the nested checkpoint mapping layout. The flat layout
+/// (currently deployed) has no version key. The stalled-anchor probe covers the flat layout plus
+/// exactly this version; if the on-chain `VERSION` is ever bumped past this, update this constant or
+/// stalled-anchor checkpoint reads will fail closed.
+pub const SHASTA_CHECKPOINT_VERSION: u64 = 1;
+
+/// Solidity mapping slot: `keccak256(key_padded32 ++ base_slot_padded32)`.
+fn checkpoint_mapping_slot(key: U256, base_slot: U256) -> U256 {
+    let mut encoded = [0u8; 64];
+    encoded[..32].copy_from_slice(&key.to_be_bytes::<32>());
+    encoded[32..].copy_from_slice(&base_slot.to_be_bytes::<32>());
+    U256::from_be_slice(keccak256(encoded).as_slice())
+}
+
+/// `(blockHash_slot, stateRoot_slot)` for a `CheckpointRecord { blockHash; stateRoot; }` whose first
+/// field lives at `record_slot` (stateRoot is the next consecutive slot).
+fn checkpoint_record_slots(record_slot: U256) -> (U256, U256) {
+    (record_slot, record_slot + U256::from(1))
+}
+
+/// Flat layout (deployed today): `mapping(uint48 blockNumber => CheckpointRecord)` at slot 254.
 #[must_use]
 pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
-    let mut encoded = [0u8; 64];
-    encoded[..32].copy_from_slice(&U256::from(block_number).to_be_bytes::<32>());
-    encoded[32..]
-        .copy_from_slice(&U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT).to_be_bytes::<32>());
+    let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
+    checkpoint_record_slots(checkpoint_mapping_slot(U256::from(block_number), base))
+}
 
-    let block_hash_slot = U256::from_be_slice(keccak256(encoded).as_slice());
-    let state_root_slot = block_hash_slot + U256::from(1);
-    (block_hash_slot, state_root_slot)
+/// Nested layout (taiko-alethia-protocol v3.0.0): `mapping(uint256 version => mapping(uint48
+/// blockNumber => CheckpointRecord))` at slot 254, written at `_checkpoints[VERSION][blockNumber]`.
+#[must_use]
+pub fn shasta_checkpoint_storage_slots_nested(block_number: u64) -> (U256, U256) {
+    let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
+    let inner_base = checkpoint_mapping_slot(U256::from(SHASTA_CHECKPOINT_VERSION), base);
+    checkpoint_record_slots(checkpoint_mapping_slot(U256::from(block_number), inner_base))
+}
+
+/// Candidate `(blockHash_slot, stateRoot_slot)` pairs in read-precedence order: nested-v1 first,
+/// then flat. The host witness builder and the guest reader both consume this single source of truth
+/// so their slot derivations cannot drift.
+#[must_use]
+pub fn shasta_checkpoint_storage_slot_candidates(block_number: u64) -> [(U256, U256); 2] {
+    [
+        shasta_checkpoint_storage_slots_nested(block_number),
+        shasta_checkpoint_storage_slots(block_number),
+    ]
 }
 
 #[must_use]
@@ -1675,5 +1710,61 @@ mod tests {
         );
 
         assert!(spec.to_taiko_chain_spec().is_err());
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_slot_tests {
+    use super::{
+        SHASTA_CHECKPOINT_VERSION, SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT,
+        shasta_checkpoint_storage_slot_candidates, shasta_checkpoint_storage_slots,
+        shasta_checkpoint_storage_slots_nested,
+    };
+    use alloy_primitives::{U256, keccak256};
+
+    // Independent reference for a Solidity mapping slot: keccak256(key_padded32 ++ base_padded32).
+    fn reference_mapping_slot(key: U256, base: U256) -> U256 {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(&key.to_be_bytes::<32>());
+        buf[32..].copy_from_slice(&base.to_be_bytes::<32>());
+        U256::from_be_slice(keccak256(buf).as_slice())
+    }
+
+    #[test]
+    fn flat_slots_match_reference_and_are_consecutive() {
+        let n = 7u64;
+        let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
+        let expected_bh = reference_mapping_slot(U256::from(n), base);
+        let (bh, sr) = shasta_checkpoint_storage_slots(n);
+        assert_eq!(bh, expected_bh, "flat blockHash slot");
+        assert_eq!(sr, expected_bh + U256::from(1), "flat stateRoot slot is blockHash+1");
+    }
+
+    #[test]
+    fn nested_slots_nest_version_and_are_consecutive() {
+        let n = 7u64;
+        let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
+        let inner = reference_mapping_slot(U256::from(SHASTA_CHECKPOINT_VERSION), base);
+        let expected_bh = reference_mapping_slot(U256::from(n), inner);
+        let (bh, sr) = shasta_checkpoint_storage_slots_nested(n);
+        assert_eq!(bh, expected_bh, "nested blockHash slot");
+        assert_eq!(sr, expected_bh + U256::from(1), "nested stateRoot slot is blockHash+1");
+    }
+
+    #[test]
+    fn nested_and_flat_slots_differ() {
+        let n = 7u64;
+        assert_ne!(
+            shasta_checkpoint_storage_slots(n),
+            shasta_checkpoint_storage_slots_nested(n),
+        );
+    }
+
+    #[test]
+    fn candidates_are_nested_then_flat() {
+        let n = 7u64;
+        let candidates = shasta_checkpoint_storage_slot_candidates(n);
+        assert_eq!(candidates[0], shasta_checkpoint_storage_slots_nested(n), "nested first");
+        assert_eq!(candidates[1], shasta_checkpoint_storage_slots(n), "flat second");
     }
 }

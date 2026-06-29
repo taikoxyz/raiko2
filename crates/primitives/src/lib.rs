@@ -21,8 +21,9 @@ mod serde_bincode;
 mod stateless;
 
 pub use chain_spec::{
-    ChainSpec, GuestInputAbi, SupportedChainSpecs, shasta_checkpoint_storage_slots,
-    storage_slot_key,
+    ChainSpec, GuestInputAbi, SHASTA_CHECKPOINT_VERSION, SupportedChainSpecs,
+    shasta_checkpoint_storage_slot_candidates, shasta_checkpoint_storage_slots,
+    shasta_checkpoint_storage_slots_nested, storage_slot_key,
 };
 pub use context::{
     L2BlockRange, PreflightOptions, PreflightRpcClientConfig, PreflightRpcRetryConfig,

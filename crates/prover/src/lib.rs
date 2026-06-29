@@ -46,7 +46,6 @@ pub use sp1_config::{
 
 #[cfg(any(feature = "risc0", feature = "boundless"))]
 use alloy::sol_types::SolValue;
-#[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
 use alloy_primitives::B256;
 use alloy_primitives::Bytes;
 use raiko2_pipeline::{PipelineRoute, ProverBackend};
@@ -129,6 +128,20 @@ pub(crate) fn parse_shasta_proposal_input_hash(public_values: &[u8]) -> RaikoRes
             public_values.len()
         )))
     }
+}
+
+pub(crate) fn ensure_shasta_proposal_input_matches_carry(
+    input_hash: B256,
+    carry: &ProofCarryData,
+    source: &str,
+) -> RaikoResult<()> {
+    let expected_input = hash_shasta_subproof_input(carry);
+    if input_hash != expected_input {
+        return Err(RaikoError::Guest(format!(
+            "{source} proposal input hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(feature = "risc0", feature = "sp1", feature = "boundless", test))]
@@ -443,8 +456,9 @@ mod tests {
         encode_risc0_proposal_seal_payload,
     };
     use super::{
-        encode_proof_carry_data, parse_shasta_aggregation_input_hash,
-        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+        encode_proof_carry_data, ensure_shasta_proposal_input_matches_carry,
+        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
+        validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
@@ -468,6 +482,16 @@ mod tests {
     fn rejects_non_exact_shasta_proposal_public_input_length() {
         let err = parse_shasta_proposal_input_hash(&[0u8; 64]).expect_err("reject");
         assert!(err.to_string().contains("expected 32 bytes"));
+    }
+
+    #[test]
+    fn proposal_input_binding_rejects_carry_mismatch() {
+        let carry = ProofCarryData::default();
+        let err =
+            ensure_shasta_proposal_input_matches_carry(B256::repeat_byte(0x99), &carry, "test")
+                .expect_err("mismatched carry hash");
+
+        assert!(err.to_string().contains("input hash mismatch"));
     }
 
     #[test]

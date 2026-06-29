@@ -11,7 +11,9 @@ use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
 
-use crate::{GuestInputCodec, Prover, with_shasta_extra_data};
+use crate::{
+    GuestInputCodec, Prover, ensure_shasta_proposal_input_matches_carry, with_shasta_extra_data,
+};
 
 use crate::remote_prover::{
     adapter::{
@@ -156,6 +158,11 @@ where
                 result.input
             ))
         })?;
+        ensure_shasta_proposal_input_matches_carry(
+            input_hash,
+            &packet.payload.proof_carry_data,
+            "gaiko2",
+        )?;
 
         let extra_data = with_shasta_extra_data(
             &packet.payload.proof_carry_data,

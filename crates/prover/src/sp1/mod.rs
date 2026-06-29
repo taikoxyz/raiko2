@@ -42,7 +42,8 @@ use url::Url;
 
 use crate::{
     GuestInputCodec, ProverProgress, ProverProgressObserver, build_shasta_aggregation_input,
-    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+    parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 
 const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
@@ -785,6 +786,11 @@ async fn execute_proposal_with_local_client(
         })?;
         let public_values_raw = public_values.raw();
         let input_hash = parse_shasta_proposal_input_hash(public_values.as_slice())?;
+        ensure_shasta_proposal_input_matches_carry(
+            input_hash,
+            &guest_input.proof_carry_data,
+            "sp1",
+        )?;
         let metadata = serde_json::to_value(Sp1ExecutionMetadata::from_execution_report(
             public_values_raw,
             &execution_report,
@@ -858,6 +864,7 @@ fn prove_proposal_with_client(
 
     let public_values = proof.public_values.as_slice();
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
+    ensure_shasta_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
 
     Ok(Sp1Response {
         proof: encode_sp1_proposal_proof_payload(&proof, &setup.vk),
@@ -890,6 +897,7 @@ async fn prove_proposal_with_network_client(
 
     let public_values = request.proof.public_values.as_slice();
     let input_hash = parse_shasta_proposal_input_hash(public_values)?;
+    ensure_shasta_proposal_input_matches_carry(input_hash, &guest_input.proof_carry_data, "sp1")?;
     let base_extra_data = with_shasta_extra_data(&guest_input.proof_carry_data, "sp1", None)?;
     let network_metadata =
         serde_json::to_value(Sp1NetworkMetadata::from_config(request.request_id, config))

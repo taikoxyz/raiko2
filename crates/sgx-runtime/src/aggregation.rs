@@ -4,7 +4,10 @@ use alloy_primitives::{Address, B256};
 use raiko2_primitives_shasta::instance::{
     build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
 };
-use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
+use raiko2_protocol_shasta::{
+    libhash::hash_shasta_subproof_input,
+    shasta::{Commitment, ProofCarryData},
+};
 use raiko2_prover::remote_prover::protocol::{
     RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
 };
@@ -21,6 +24,11 @@ use crate::{
 
 const SHASTA_SGX_PROOF_LEN: usize = 89;
 
+struct ValidatedAggregateRequest {
+    carries: Vec<ProofCarryData>,
+    commitment: Commitment,
+}
+
 pub(crate) fn aggregate_request<P: TeeProvider>(
     provider: &P,
     instance_id: u32,
@@ -28,14 +36,12 @@ pub(crate) fn aggregate_request<P: TeeProvider>(
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
     let identity = load_signer_identity(provider)
         .map_err(|err| RequestFailure::prover_error(err.to_string()))?;
-    let carries = validate_request(request, instance_id, identity.instance_address)?;
-    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&carries)
-        .ok_or_else(|| RequestFailure::invalid_request("invalid shasta proof carry data"))?;
-    let first = carries.first().ok_or_else(|| {
+    let validated = validate_request(request, instance_id, identity.instance_address)?;
+    let first = validated.carries.first().ok_or_else(|| {
         RequestFailure::invalid_request("request must include at least one aggregate proof")
     })?;
     let input_hash = shasta_aggregation_output(
-        &commitment,
+        &validated.commitment,
         first.chain_id,
         first.verifier,
         identity.instance_address,
@@ -49,7 +55,7 @@ fn validate_request(
     request: &Raiko2ShastaAggregateRequest,
     expected_instance_id: u32,
     expected_instance_address: Address,
-) -> Result<Vec<ProofCarryData>, RequestFailure> {
+) -> Result<ValidatedAggregateRequest, RequestFailure> {
     if request.schema != RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA {
         return Err(RequestFailure::invalid_request(format!(
             "unsupported schema {:?}",
@@ -105,13 +111,13 @@ fn validate_request(
         carries.push(item.proof_carry_data.clone());
     }
 
-    if !validate_shasta_proof_carry_data_vec(&carries) {
-        return Err(RequestFailure::invalid_request(
-            "invalid shasta proof carry data",
-        ));
-    }
+    let commitment = build_shasta_commitment_from_proof_carry_data_vec(&carries)
+        .ok_or_else(|| RequestFailure::invalid_request("invalid shasta proof carry data"))?;
 
-    Ok(carries)
+    Ok(ValidatedAggregateRequest {
+        carries,
+        commitment,
+    })
 }
 
 fn validate_sgx_child_proof(
@@ -183,41 +189,6 @@ fn parse_hash(value: &str) -> Result<B256, String> {
         return Err(format!("expected 32 bytes, got {}", decoded.len()));
     }
     Ok(B256::from_slice(&decoded))
-}
-
-fn validate_shasta_proof_carry_data_vec(proof_carry_data_vec: &[ProofCarryData]) -> bool {
-    let Some(first) = proof_carry_data_vec.first() else {
-        return false;
-    };
-    let expected_actual_prover = first.transition_input.actual_prover;
-    if !proof_carry_data_vec
-        .iter()
-        .all(|item| item.transition_input.actual_prover == expected_actual_prover)
-    {
-        return false;
-    }
-
-    for window in proof_carry_data_vec.windows(2) {
-        let prev = &window[0];
-        let next = &window[1];
-        if prev.transition_input.proposal_id + 1 != next.transition_input.proposal_id {
-            return false;
-        }
-        if prev.transition_input.proposal_hash != next.transition_input.parent_proposal_hash {
-            return false;
-        }
-        if prev.chain_id != next.chain_id {
-            return false;
-        }
-        if prev.verifier != next.verifier {
-            return false;
-        }
-        if prev.transition_input.checkpoint.blockHash != next.transition_input.parent_block_hash {
-            return false;
-        }
-    }
-
-    true
 }
 
 #[cfg(test)]
@@ -417,5 +388,33 @@ mod tests {
         let err = aggregate_request(&provider, 7, &request).expect_err("instance mismatch");
 
         assert!(err.to_string().contains("instance address"));
+    }
+
+    #[test]
+    fn aggregate_request_rejects_out_of_range_proposal_ids_without_panicking() {
+        let signing_key = SecretKey::from_slice(&[13u8; 32]).expect("signing key");
+        let provider = FakeProvider {
+            secret_key: signing_key,
+            quote: vec![],
+        };
+        let instance_address = instance_address_for_key(&signing_key);
+        let mut request = aggregate_request_fixture();
+        request.payload.proofs[0]
+            .proof_carry_data
+            .transition_input
+            .proposal_id = u64::MAX;
+        request.payload.proofs[1]
+            .proof_carry_data
+            .transition_input
+            .proposal_id = 0;
+        for item in &mut request.payload.proofs {
+            let input = hash_shasta_subproof_input(&item.proof_carry_data);
+            item.input = format!("{input:#x}");
+            item.proof = sgx_proof_for_input(7, input, &signing_key, instance_address);
+        }
+
+        let err = aggregate_request(&provider, 7, &request).expect_err("invalid proposal ids");
+
+        assert!(err.to_string().contains("invalid shasta proof carry data"));
     }
 }

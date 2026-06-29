@@ -40,6 +40,13 @@ impl ApiError {
         }
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -59,6 +66,7 @@ const fn error_code(status: StatusCode) -> &'static str {
         StatusCode::BAD_REQUEST => "bad_request",
         StatusCode::NOT_FOUND => "not_found",
         StatusCode::UNAUTHORIZED => "unauthorized",
+        StatusCode::FORBIDDEN => "forbidden",
         StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
         _ => "internal_error",
     }

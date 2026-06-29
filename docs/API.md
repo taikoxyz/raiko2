@@ -20,17 +20,21 @@ The public API surface is:
 - `POST /v3/proof/aggregate`
 - `GET /v3/proof/report`
 - `GET /v3/proof/list`
-- `POST /v3/proof/prune`
+- `GET /v3/prover/status`
 - `GET /v3/tasks/{id}` (`raiko2` extension)
-- `POST /v3/tasks/{id}/cancel` (`raiko2` extension)
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
 
-The optional admin surface is disabled unless `server.admin_api_key` is configured:
+ACL-protected API surface requires an `x-api-key` whose ACL allows the listed feature:
 
-- `GET /admin/ballot`
-- `POST /admin/ballot`
+- A key with `admin` is accepted for any ACL-protected endpoint.
+- `POST /v3/proof/prune` requires `admin`
+- `POST /proof/prune` requires `admin`
+- `POST /v3/tasks/{id}/cancel` requires `admin`
+- `POST /v3/prover/clear` requires `prover.clear`
+- `GET /admin/ballot` requires `admin.ballot.read`
+- `POST /admin/ballot` requires `admin.ballot.write`
 
 `/v1/...` routes are removed.
 
@@ -74,12 +78,13 @@ Terminal counters and duration histograms also include `status`.
 ```http
 GET /admin/ballot
 POST /admin/ballot
-x-api-key: <server.admin_api_key>
+x-api-key: <server.acl.keys[].key with allow=["admin.ballot.read" or "admin.ballot.write"]>
 ```
 
-These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any`. The payload is a
-JSON object whose keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples.
-Only those two proof types are accepted.
+These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any`. `GET` requires
+`admin.ballot.read`; `POST` requires `admin.ballot.write`. The payload is a JSON object whose
+keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples. Only those two
+proof types are accepted.
 
 ## Submit Shasta Batch Proof
 
@@ -357,7 +362,10 @@ present.
 ```http
 POST /v3/proof/prune
 POST /proof/prune
+x-api-key: <server.acl.keys[].key with allow=["admin"]>
 ```
+
+Requires an ACL key that allows `admin`.
 
 Removes all registered root tasks, their child engine tasks, their runtime rows, and their task
 directories. Reusable proof artifacts under `cache/proofs/...` are retained.
@@ -367,6 +375,78 @@ directories. Reusable proof artifacts under `cache/proofs/...` are retained.
 ```json
 {
   "status": "ok"
+}
+```
+
+## Query Prover Status
+
+```http
+GET /v3/prover/status
+```
+
+Returns queue and external-network activity for non-terminal roots originally submitted with
+`proof_type=zk_any`. Concrete `sp1` or `risc0` tasks created by the admission draw are still grouped
+under the original `zk_any` request for this operator view.
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "clean": false,
+    "tasks": {
+      "pending": 1,
+      "ready": 0,
+      "retrying": 0,
+      "running": 2
+    },
+    "network": {
+      "sp1": {
+        "inflight_orders": 1
+      },
+      "risc0": {
+        "inflight_orders": 1
+      }
+    },
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 1
+    }
+  }
+}
+```
+
+`clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
+`retrying`, or `running` state, no resumable SP1 or RISC0 network submissions, and
+no skipped non-terminal roots with invalid metadata or unavailable pipelines.
+
+## Clear Prover
+
+```http
+POST /v3/prover/clear
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
+```
+
+Requires an ACL key that allows `prover.clear` or `admin`. Cancels every non-terminal root originally submitted
+with `proof_type=zk_any`, cascades cancellation to owned proposal and aggregation queue tasks, and
+marks the root runtime state `cancelled`.
+
+Shared child tasks still referenced by another live root are left running.
+Already submitted upstream SP1 or RISC0/Boundless orders cannot be cancelled, but cleared or
+otherwise terminal roots are no longer counted in this local status view.
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "cancelled": 2,
+  "skipped": {
+    "invalid_metadata": 0,
+    "unavailable_pipeline": 1
+  },
+  "failed": 0
 }
 ```
 
@@ -461,7 +541,10 @@ Returns the root-task view derived from the original batch request.
 
 ```http
 POST /v3/tasks/{id}/cancel
+x-api-key: <server.acl.keys[].key with allow=["admin"]>
 ```
+
+Requires an ACL key that allows `admin`.
 
 Cancelling a root task cascades to its proposal stage tasks and optional aggregate task. The root
 runtime is only marked `cancelled` after child-task cancellation succeeds; shared child tasks are
@@ -489,13 +572,21 @@ All API errors use the Hoodi-style envelope:
   geth endpoint and witnesses must always be assembled locally.
 - `rpc.pairs[*].l2_witness_rpc` is optional. When set, witness/debug traffic uses that endpoint
   while the rest of the provider keeps using `l2_rpc`.
+- `prover.guest_input_abi` defaults to `current`. Set `v0_1_0` only when intentionally
+  running v0.1.0 release guest ELFs with a newer host.
 - `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
   when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
-  `market` omits both price fields and delegates price selection to the Boundless SDK price
-  provider.
+  `market` delegates price selection to the Boundless SDK price provider, may set
+  `dynamic_pricing_timeout_modifier >= 1.0` to multiply `lockTimeout` and `timeout` after dynamic
+  pricing, and optionally accepts `max_price_per_mcycle` as a per-mcycle safety cap. The cap value
+  is multiplied by the quoted mcycle count; SDK autoprice offers whose resulting `maxPrice` exceeds
+  that total cap fail before submission. `market` must omit `min_price_per_mcycle`.
+- Expired Boundless requests are resubmitted automatically. `manual` pricing doubles the
+  offer's max price on each resubmission, capped at `4x` configured `max_price_per_mcycle`;
+  min price is unchanged. `market` resubmissions are re-priced by the SDK price provider.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.
@@ -516,17 +607,23 @@ All API errors use the Hoodi-style envelope:
   worker runs one queue task at a time; preflight chunk concurrency is controlled separately.
 - Shasta preflight retries retryable provider/RPC/IO failures inside the preflight stage with
   exponential backoff, while invalid request/configuration and deterministic validation failures
-  still fail fast. The queue task timeout remains the outer deadline for the whole stage.
+  still fail fast. Queue tasks no longer have a global wall-clock deadline.
 - `rpc.pairs[*].sp1_verifier_rpc_url` and `rpc.pairs[*].sp1_verifier_address` are optional
   pair-level settings that enable hosted `sp1.prover=network` verification through a remote
   Succinct verifier contract. Leaving them unset keeps that pair closed for hosted SP1 network
   proving. This verifier is separate from the Taiko Shasta verifier address in the chain spec.
-- `queue.task_timeout_secs` defaults to `14400` and is the total deadline for each queue task,
-  independent of proof type. Queue-level retry is disabled; each stage owns its own retry/resume
-  behavior within this timeout, so remote proof submissions are not blindly replayed by the
-  scheduler. `prove` and `aggregate` stages still use the configured queue lease and renew it while
-  the worker is healthy; if a worker exits, the next lease holder resumes from persisted remote
-  submission metadata or submits a fresh request when the previous remote request expired.
+- Queue tasks use a renewable lease for worker ownership but no global wall-clock timeout. RISC0
+  network routes own retry/rebid behavior in the Boundless prover. SP1 network routes retry failed
+  root tasks up to twenty times with a fixed five-minute delay.
+- Boundless storage upload is environment-driven. Set `BOUNDLESS_STORAGE_UPLOADER=gcs`,
+  `GCS_BUCKET=<your-gcs-bucket>`, and
+  `GCS_PUBLIC_URL=false` to use a private GCS bucket. The GCP
+  project is selected by gcloud/ADC, for example `<your-gcp-project>`, and is
+  not a raiko2 config value. `GCS_PUBLIC_URL=false` returns private `gs://` URLs,
+  so downstream downloaders need GCS credentials. Set `GCS_PUBLIC_URL=true` only
+  for publicly readable buckets. `STORAGE_UPLOADER` remains accepted for
+  compatibility. Optional `GCS_URL` supports custom endpoints, and
+  `GCS_CREDENTIALS_JSON` can provide service account JSON when ADC is not used.
 - `rpc.pairs[*].l2_witness_rpc` should ideally point to a witness-capable endpoint that supports
   `debug_executionWitness`.
 - `l2_provider = "reth"` expects `debug_executionWitness` headers as RLP-encoded bytes.

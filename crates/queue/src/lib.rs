@@ -17,6 +17,9 @@ pub use ready_sort::{
 pub use redis_store::RedisStore;
 pub use scheduler::{
     NewTask, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy, TaskLease, TaskView,
+    TaskViewState,
 };
 pub use store::{MemoryStore, StoreResult, TaskStore, TaskStoreError};
-pub use types::{Priority, TaskId, TaskIdCodecError, TaskState, decode_task_id, encode_task_id};
+pub use types::{
+    Priority, TaskId, TaskIdCodecError, TaskState, TaskStateKind, decode_task_id, encode_task_id,
+};

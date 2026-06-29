@@ -1,4 +1,4 @@
-use crate::{Priority, TaskExecutionPolicy, TaskId, TaskState};
+use crate::{Priority, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind};
 
 #[derive(Clone)]
 pub struct NewTask<P> {
@@ -14,12 +14,18 @@ pub struct TaskLease<P, Id> {
     pub attempt: u32,
     pub worker: String,
     pub execution_policy: TaskExecutionPolicy,
-    pub deadline_at_ms: u64,
 }
 
 #[derive(Clone)]
 pub struct TaskView<O, Id> {
     pub id: TaskId<Id>,
     pub state: TaskState<O, Id>,
+    pub priority: Priority,
+}
+
+#[derive(Clone)]
+pub struct TaskViewState<Id> {
+    pub id: TaskId<Id>,
+    pub state: TaskStateKind,
     pub priority: Priority,
 }

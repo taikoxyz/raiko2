@@ -16,10 +16,7 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{
-    HashableKey, ProvingKey as _,
-    blocking::{Prover as _, ProverClient},
-};
+use sp1_sdk::{HashableKey, SP1VerifyingKey};
 use xtask_build_guest::Backend;
 
 use crate::util;
@@ -331,7 +328,7 @@ fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
         RegisterImageProfile::MainnetShasta => (
             DEFAULT_RPC_URL_MAINNET_SHASTA.to_string(),
             address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"),
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6"),
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F"),
         ),
     };
 
@@ -430,15 +427,10 @@ fn build_sp1_calls(
     config: &ResolvedProfile,
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
-    let client = ProverClient::builder().cpu().build();
-    let proposal_pk = client
-        .setup(elves.proposal.as_ref().into())
-        .context("failed to setup SP1 proposal ELF")?;
-    let aggregation_pk = client
-        .setup(elves.aggregation.as_ref().into())
-        .context("failed to setup SP1 aggregation ELF")?;
-    let proposal_vk = proposal_pk.verifying_key();
-    let aggregation_vk = aggregation_pk.verifying_key();
+    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
+        .context("failed to load SP1 proposal VK")?;
+    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
+        .context("failed to load SP1 aggregation VK")?;
 
     Ok(vec![
         sp1_call(
@@ -828,7 +820,7 @@ mod tests {
         );
         assert_eq!(
             resolved.sp1_verifier,
-            address!("96337327648dcFA22b014009cf10A2D5E2F305f6")
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
         );
     }
 

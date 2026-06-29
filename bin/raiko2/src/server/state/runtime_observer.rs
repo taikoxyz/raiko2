@@ -17,6 +17,8 @@ use crate::server::task_metadata::{
 };
 use crate::server::telemetry::{self, MetricContext};
 #[cfg(test)]
+use raiko2_engine::ProverTaskConfig;
+#[cfg(test)]
 use raiko2_pipeline::PipelineRoute;
 
 #[derive(Clone)]
@@ -796,8 +798,9 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Proposal { .. } => None,
         }?;
 
+        let now = now_secs();
         let expires_at = runtime.expires_at?;
-        if expires_at <= now_secs() {
+        if expires_at <= now {
             return None;
         }
 
@@ -805,6 +808,8 @@ impl EngineObserver for RuntimeObserver {
             provider_request_id: runtime.provider_request_id.clone()?,
             remote_tx_hash: runtime.remote_tx_hash.clone(),
             expires_at,
+            submitted_at: runtime.submitted_at.unwrap_or(now),
+            max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
         })
     }
 }
@@ -899,7 +904,7 @@ mod tests {
             blob_proof_type: None,
             prover: None,
             graffiti: None,
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         }
     }
 
@@ -964,6 +969,7 @@ mod tests {
                     network: network.to_string(),
                     l1_network: l1_network.to_string(),
                     proof_type: ProofType::Native,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: None,
                     aggregate_requested: false,
@@ -983,6 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_records_boundless_submission_metadata_immediately() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer",
@@ -1007,6 +1014,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Risc0,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: None,
                     aggregate_requested: false,
@@ -1041,11 +1049,13 @@ mod tests {
                     provider_request_id: "0x1234".to_string(),
                     remote_tx_hash: Some("0xabcd".to_string()),
                     expires_at: future_expires_at,
+                    submitted_at: future_expires_at - 300,
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
                     offchain: false,
                     quoted_mcycles_count: Some(6_000),
                     evaluated_mcycles_count: Some(12_345),
+                    max_price_multiplier: 4,
                 }),
             )
             .await;
@@ -1065,9 +1075,11 @@ mod tests {
         assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
         assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
+        assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 300));
         assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
+        assert_eq!(runtime_entry.max_price_multiplier, Some(4));
         let mut record = runtime
             .get_task("task_public")
             .await?
@@ -1087,6 +1099,39 @@ mod tests {
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(resumed.expires_at, future_expires_at);
+        assert_eq!(resumed.submitted_at, future_expires_at - 300);
+        assert_eq!(resumed.max_price_multiplier, 4);
+
+        let mut record = runtime
+            .get_task("task_public")
+            .await?
+            .expect("runtime task");
+        let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
+        let runtime_entry = metadata
+            .runtime
+            .proposals
+            .get_mut(&task_ref)
+            .expect("proposal runtime exists");
+        runtime_entry.submitted_at = None;
+        runtime_entry.max_price_multiplier = None;
+        record.metadata = serde_json::to_value(metadata)?;
+        runtime.upsert_task(&record).await?;
+        let before_legacy_resume = now_secs();
+        let resumed = observer
+            .load_boundless_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("legacy boundless submission can resume");
+        let after_legacy_resume = now_secs();
+        assert_eq!(resumed.provider_request_id, "0x1234");
+        assert_eq!(resumed.expires_at, future_expires_at);
+        assert!((before_legacy_resume..=after_legacy_resume).contains(&resumed.submitted_at));
+        assert_eq!(resumed.max_price_multiplier, 1);
 
         let mut record = runtime
             .get_task("task_public")
@@ -1131,7 +1176,7 @@ mod tests {
         let aggregate_request = AggregationTaskRequest {
             request_id: "agg-42".to_string(),
             proposal_ids: vec![42],
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         };
         let aggregate_ref = aggregate_task_ref(pipeline, &aggregate_request);
         runtime
@@ -1147,6 +1192,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: true,
@@ -1396,6 +1442,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
@@ -1473,6 +1520,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_records_sp1_network_submission_metadata() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-sp1",
@@ -1495,6 +1543,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
@@ -1582,6 +1631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_loads_proposal_request_id_from_task_metadata_only() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-sp1-load-proposal",
@@ -1613,6 +1663,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: false,
@@ -1703,7 +1754,7 @@ mod tests {
         let aggregate_request = AggregationTaskRequest {
             request_id: "agg-42".to_string(),
             proposal_ids: vec![42, 43],
-            prover_config: Default::default(),
+            prover_config: ProverTaskConfig::default(),
         };
         let aggregate_task_id = EngineTaskId::new(EngineTaskKey::Aggregate {
             pipeline: PipelineKey::ShastaSp1,
@@ -1723,6 +1774,7 @@ mod tests {
                     network: "taiko_dev".to_string(),
                     l1_network: "ethereum".to_string(),
                     proof_type: ProofType::Sp1,
+                    requested_proof_type: None,
                     prover_type: None,
                     execution_mode: Some(ExecutionMode::Prove),
                     aggregate_requested: true,
@@ -1794,6 +1846,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn runtime_observer_does_not_decrement_inflight_after_process_restart() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
             "runtime-observer-no-negative-gauge",
@@ -1809,6 +1862,7 @@ mod tests {
             network: "telemetry_restart".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,

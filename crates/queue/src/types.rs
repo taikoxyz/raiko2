@@ -75,6 +75,31 @@ pub enum TaskState<O, Id> {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskStateKind {
+    Pending,
+    Ready,
+    Running,
+    Retrying,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl<O, Id> From<&TaskState<O, Id>> for TaskStateKind {
+    fn from(state: &TaskState<O, Id>) -> Self {
+        match state {
+            TaskState::Pending { .. } => Self::Pending,
+            TaskState::Ready => Self::Ready,
+            TaskState::Running { .. } => Self::Running,
+            TaskState::Retrying { .. } => Self::Retrying,
+            TaskState::Succeeded { .. } => Self::Succeeded,
+            TaskState::Failed { .. } => Self::Failed,
+            TaskState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 impl<O, Id> TaskState<O, Id> {
     #[must_use]
     pub const fn pending(remaining: usize) -> Self {

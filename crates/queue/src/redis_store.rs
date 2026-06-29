@@ -1,7 +1,7 @@
 use crate::{
-    Priority, ReadyQueueSort, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStore,
-    TaskStoreError, decode_task_id, encode_task_id, encoded_from_zset_member, sort_prefix_hex,
-    zset_member_from_encoded,
+    Priority, ReadyQueueSort, StoreResult, TaskExecutionPolicy, TaskId, TaskState, TaskStateKind,
+    TaskStore, TaskStoreError, decode_task_id, encode_task_id, encoded_from_zset_member,
+    sort_prefix_hex, zset_member_from_encoded,
 };
 use async_trait::async_trait;
 use redis::AsyncCommands;
@@ -21,7 +21,6 @@ const FIELD_CAUSED_BY: &str = "caused_by_dep";
 const FIELD_WORKER: &str = "worker";
 const FIELD_LEASE_UNTIL_MS: &str = "lease_until_ms";
 const FIELD_LEASE_DURATION_MS: &str = "lease_duration_ms";
-const FIELD_DEADLINE_AT_MS: &str = "deadline_at_ms";
 const FIELD_EXECUTION_POLICY: &str = "execution_policy";
 const FIELD_RUNNING_MEMBER: &str = "running_member";
 /// Hex-encoded [`ReadyQueueSort::ready_queue_sort_prefix`] (32 chars); used to build ZSET members.
@@ -35,6 +34,21 @@ const STATE_RETRYING: &str = "retrying";
 const STATE_SUCCEEDED: &str = "succeeded";
 const STATE_FAILED: &str = "failed";
 const STATE_CANCELLED: &str = "cancelled";
+
+fn task_state_kind(raw: &str) -> StoreResult<TaskStateKind> {
+    match raw {
+        STATE_PENDING => Ok(TaskStateKind::Pending),
+        STATE_READY => Ok(TaskStateKind::Ready),
+        STATE_RUNNING => Ok(TaskStateKind::Running),
+        STATE_RETRYING => Ok(TaskStateKind::Retrying),
+        STATE_SUCCEEDED => Ok(TaskStateKind::Succeeded),
+        STATE_FAILED => Ok(TaskStateKind::Failed),
+        STATE_CANCELLED => Ok(TaskStateKind::Cancelled),
+        other => Err(TaskStoreError::corrupt_msg(format!(
+            "unknown task state: {other}"
+        ))),
+    }
+}
 
 const SET_STATE_IF_RUNNING_SCRIPT: &str = r"
 local state = redis.call('HGET', KEYS[1], ARGV[1])
@@ -149,8 +163,46 @@ where
         format!("{}:ready:seq", self.namespace)
     }
 
+    fn task_index_key(&self) -> String {
+        format!("{}:tasks", self.namespace)
+    }
+
+    fn task_index_backfilled_key(&self) -> String {
+        format!("{}:tasks:backfilled", self.namespace)
+    }
+
     fn task_key_prefix(&self) -> String {
         format!("{}:task:", self.namespace)
+    }
+
+    async fn scan_task_index_ids_locked(
+        conn: &mut redis::aio::MultiplexedConnection,
+        prefix: &str,
+    ) -> StoreResult<Vec<String>> {
+        let pattern = format!("{prefix}*");
+        let mut cursor = 0u64;
+        let mut encoded_ids = Vec::new();
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(128)
+                .query_async(conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+            for key in keys {
+                if let Some(encoded) = key.strip_prefix(prefix) {
+                    encoded_ids.push(encoded.to_string());
+                }
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+        Ok(encoded_ids)
     }
 
     fn encode_id(id: &TaskId<Id>) -> StoreResult<String> {
@@ -341,24 +393,26 @@ where
         } else {
             0
         };
+        let encoded_id = Self::encode_id(&id)?;
         let inserted: i64 = redis::Script::new(
             r"
 local exists = redis.call('EXISTS', KEYS[1])
 if exists == 1 then
-  local state = redis.call('HGET', KEYS[1], ARGV[3])
-  if state == 'failed' or state == 'cancelled' then
+    local state = redis.call('HGET', KEYS[1], ARGV[3])
+    if state == 'failed' or state == 'cancelled' then
     redis.call('HSET', KEYS[1],
       ARGV[1], ARGV[2],
       ARGV[3], ARGV[4],
       ARGV[5], ARGV[6],
       ARGV[7], ARGV[8],
-      ARGV[9], ARGV[10],
-      ARGV[11], ARGV[12],
-      ARGV[13], ARGV[14])
-    redis.call('HDEL', KEYS[1], ARGV[15], ARGV[16], ARGV[17], ARGV[18], ARGV[19], ARGV[20], ARGV[21], ARGV[22])
-    return 2
-  end
-  return 0
+            ARGV[9], ARGV[10],
+            ARGV[11], ARGV[12],
+            ARGV[13], ARGV[14])
+        redis.call('HDEL', KEYS[1], ARGV[15], ARGV[16], ARGV[17], ARGV[18], ARGV[19], ARGV[20])
+        redis.call('SADD', KEYS[2], ARGV[22])
+        return 2
+    end
+    return 0
 end
 
 redis.call('HSET', KEYS[1],
@@ -366,13 +420,15 @@ redis.call('HSET', KEYS[1],
   ARGV[3], ARGV[4],
   ARGV[5], ARGV[6],
   ARGV[7], ARGV[8],
-  ARGV[9], ARGV[10],
-  ARGV[11], ARGV[12],
-  ARGV[13], ARGV[14])
+    ARGV[9], ARGV[10],
+    ARGV[11], ARGV[12],
+    ARGV[13], ARGV[14])
+redis.call('SADD', KEYS[2], ARGV[22])
 return 1
 ",
         )
         .key(&task_key)
+        .key(self.task_index_key())
         .arg(FIELD_PRIORITY)
         .arg(prio.as_str())
         .arg(FIELD_STATE)
@@ -393,8 +449,8 @@ return 1
         .arg(FIELD_WORKER)
         .arg(FIELD_LEASE_UNTIL_MS)
         .arg(FIELD_CAUSED_BY)
-        .arg(FIELD_DEADLINE_AT_MS)
         .arg(FIELD_RUNNING_MEMBER)
+        .arg(&encoded_id)
         .invoke_async(&mut *conn)
         .await
         .map_err(TaskStoreError::backend)?;
@@ -403,7 +459,6 @@ return 1
             return Ok(false);
         }
 
-        let encoded_id = Self::encode_id(&id)?;
         if inserted == 2 {
             self.remove_queue_memberships_locked(&mut conn, &task_key, &encoded_id)
                 .await?;
@@ -1049,6 +1104,113 @@ return 1
         Ok(Some((state, priority)))
     }
 
+    async fn get_view_state(
+        &self,
+        id: &TaskId<Id>,
+    ) -> StoreResult<Option<(TaskStateKind, Priority)>> {
+        let task_key = self.task_key(id)?;
+        let mut conn = self.conn.lock().await;
+        let (state, priority): (Option<String>, Option<String>) = redis::cmd("HMGET")
+            .arg(&task_key)
+            .arg(FIELD_STATE)
+            .arg(FIELD_PRIORITY)
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        let Some(priority) = priority else {
+            return Ok(None);
+        };
+        let priority = Priority::parse(priority.as_str())
+            .ok_or_else(|| TaskStoreError::corrupt_msg(format!("unknown priority: {priority}")))?;
+        Ok(Some((task_state_kind(state.as_str())?, priority)))
+    }
+
+    async fn list_view_states(&self) -> StoreResult<Vec<(TaskId<Id>, TaskStateKind, Priority)>> {
+        let prefix = self.task_key_prefix();
+        let index_key = self.task_index_key();
+        let backfilled_key = self.task_index_backfilled_key();
+        let mut conn = self.conn.lock().await;
+        let mut encoded_ids: Vec<String> = conn
+            .smembers(&index_key)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let mut views = Vec::new();
+
+        let index_backfilled: bool = conn
+            .exists(&backfilled_key)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        if !index_backfilled {
+            let scanned_ids = Self::scan_task_index_ids_locked(&mut conn, &prefix).await?;
+            if !scanned_ids.is_empty() {
+                let _: () = redis::cmd("SADD")
+                    .arg(&index_key)
+                    .arg(&scanned_ids)
+                    .query_async(&mut *conn)
+                    .await
+                    .map_err(TaskStoreError::backend)?;
+                encoded_ids.extend(scanned_ids);
+                encoded_ids.sort();
+                encoded_ids.dedup();
+            }
+            let _: () = redis::cmd("SET")
+                .arg(&backfilled_key)
+                .arg("1")
+                .query_async(&mut *conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+        }
+
+        if encoded_ids.is_empty() {
+            return Ok(views);
+        }
+
+        let mut batch = Vec::with_capacity(encoded_ids.len());
+        for encoded in encoded_ids {
+            let id = Self::decode_id(&encoded)?;
+            batch.push((format!("{prefix}{encoded}"), encoded, id));
+        }
+
+        let mut pipe = redis::pipe();
+        for (key, _, _) in &batch {
+            pipe.cmd("HMGET")
+                .arg(key)
+                .arg(FIELD_STATE)
+                .arg(FIELD_PRIORITY);
+        }
+        let rows: Vec<(Option<String>, Option<String>)> = pipe
+            .query_async(&mut *conn)
+            .await
+            .map_err(TaskStoreError::backend)?;
+        let mut stale_ids = Vec::new();
+        for ((_, encoded, id), (state, priority)) in batch.into_iter().zip(rows) {
+            let Some(state) = state else {
+                stale_ids.push(encoded);
+                continue;
+            };
+            let Some(priority) = priority else {
+                stale_ids.push(encoded);
+                continue;
+            };
+            let priority = Priority::parse(priority.as_str()).ok_or_else(|| {
+                TaskStoreError::corrupt_msg(format!("unknown priority: {priority}"))
+            })?;
+            views.push((id, task_state_kind(state.as_str())?, priority));
+        }
+        if !stale_ids.is_empty() {
+            let _: () = redis::cmd("SREM")
+                .arg(index_key)
+                .arg(stale_ids)
+                .query_async(&mut *conn)
+                .await
+                .map_err(TaskStoreError::backend)?;
+        }
+        Ok(views)
+    }
+
     async fn dependents_of(&self, dep: &TaskId<Id>) -> StoreResult<Vec<TaskId<Id>>> {
         let dep_key = self.dependents_key(dep)?;
         let mut conn = self.conn.lock().await;
@@ -1185,14 +1347,12 @@ return redis.call('HGET', KEYS[1], ARGV[5])
         &self,
         id: &TaskId<Id>,
         worker: &str,
-        task_timeout: Duration,
-    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy, u64)>> {
+    ) -> StoreResult<Option<(P, Priority, u32, TaskExecutionPolicy)>> {
         let task_key = self.task_key(id)?;
         let running_key = self.running_key();
         let encoded = Self::encode_id(id)?;
 
         let default_lease_ms = duration_millis_saturating(self.lease);
-        let task_timeout_ms = duration_millis_saturating(task_timeout);
         let script = redis::Script::new(
             r"
 local state = redis.call('HGET', KEYS[1], ARGV[1])
@@ -1202,33 +1362,26 @@ end
 
 local lease_duration_ms = tonumber(redis.call('HGET', KEYS[1], ARGV[12]) or ARGV[13])
 local lease_until_ms = tonumber(ARGV[10]) + lease_duration_ms
-local deadline_at_ms = redis.call('HGET', KEYS[1], ARGV[15])
-if not deadline_at_ms then
-  deadline_at_ms = tonumber(ARGV[10]) + tonumber(ARGV[16])
-  redis.call('HSET', KEYS[1], ARGV[15], deadline_at_ms)
-else
-  deadline_at_ms = tonumber(deadline_at_ms)
-end
 	local seq = redis.call('INCR', KEYS[3])
 	local running_member = string.format('%020d', seq) .. ARGV[11]
 	redis.call('HSET', KEYS[1],
 	  ARGV[1], ARGV[3],
 	  ARGV[4], ARGV[5],
 	  ARGV[9], lease_until_ms,
-	  ARGV[18], running_member)
-	redis.call('HDEL', KEYS[1], ARGV[17])
+ ARGV[16], running_member)
+            redis.call('HDEL', KEYS[1], ARGV[15])
 	local attempt = redis.call('HINCRBY', KEYS[1], ARGV[8], 1)
 	redis.call('ZADD', KEYS[2], lease_until_ms, running_member)
 
 local payload = redis.call('HGET', KEYS[1], ARGV[6])
 local priority = redis.call('HGET', KEYS[1], ARGV[7])
 local execution_policy = redis.call('HGET', KEYS[1], ARGV[14])
-return {payload, priority, attempt, execution_policy, deadline_at_ms}
+return {payload, priority, attempt, execution_policy}
 ",
         );
 
         let mut conn = self.conn.lock().await;
-        let result: Option<(Vec<u8>, String, i64, Vec<u8>, i64)> = script
+        let result: Option<(Vec<u8>, String, i64, Vec<u8>)> = script
             .key(task_key)
             .key(running_key)
             .key(self.ready_sequence_key())
@@ -1246,16 +1399,13 @@ return {payload, priority, attempt, execution_policy, deadline_at_ms}
             .arg(FIELD_LEASE_DURATION_MS)
             .arg(i64_from_u64(default_lease_ms, FIELD_LEASE_DURATION_MS)?)
             .arg(FIELD_EXECUTION_POLICY)
-            .arg(FIELD_DEADLINE_AT_MS)
-            .arg(i64_from_u64(task_timeout_ms, "task_timeout_ms")?)
             .arg(FIELD_READY_MEMBER)
             .arg(FIELD_RUNNING_MEMBER)
             .invoke_async(&mut *conn)
             .await
             .map_err(TaskStoreError::backend)?;
 
-        let Some((payload_bytes, prio, attempt, execution_policy_bytes, deadline_at_ms)) = result
-        else {
+        let Some((payload_bytes, prio, attempt, execution_policy_bytes)) = result else {
             return Ok(None);
         };
         let payload: P = bincode::deserialize(&payload_bytes)
@@ -1271,7 +1421,6 @@ return {payload, priority, attempt, execution_policy, deadline_at_ms}
             prio,
             bounded_i64_to_u32(attempt),
             execution_policy,
-            nonnegative_i64_to_u64(deadline_at_ms),
         )))
     }
 
@@ -1510,6 +1659,7 @@ return moved
         let encoded = Self::encode_id(id)?;
         let task_key = self.task_key(id)?;
         let dependents_key = self.dependents_key(id)?;
+        let task_index_key = self.task_index_key();
         let pattern = format!("{}:dependents:*", self.namespace);
 
         let mut conn = self.conn.lock().await;
@@ -1526,6 +1676,10 @@ return moved
             .cmd("DEL")
             .arg(&task_key)
             .arg(&dependents_key)
+            .ignore()
+            .cmd("SREM")
+            .arg(&task_index_key)
+            .arg(&encoded)
             .ignore()
             .query_async(&mut *conn)
             .await

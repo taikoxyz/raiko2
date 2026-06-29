@@ -13,7 +13,7 @@ pub fn bind_addr(config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::bind_addr;
-    use crate::config::{Config, ServerConfig};
+    use crate::config::{Config, ServerAclConfig, ServerConfig};
 
     #[test]
     fn bind_addr_respects_config_host() {
@@ -21,7 +21,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 1234,
-                admin_api_key: None,
+                acl: ServerAclConfig::default(),
             },
             ..Default::default()
         };
@@ -35,7 +35,7 @@ mod tests {
             server: ServerConfig {
                 host: "::1".to_string(),
                 port: 1234,
-                admin_api_key: None,
+                acl: ServerAclConfig::default(),
             },
             ..Default::default()
         };

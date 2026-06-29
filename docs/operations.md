@@ -184,9 +184,8 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
-- The default signing key is the checked-in [`docker/enclave-key.pem`](../docker/enclave-key.pem),
-  inherited from the historical `raiko` SGX release flow. Override `RAIKO2_SGX_ENCLAVE_KEY_HOST`
-  only when you intentionally need a different signer.
+- Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
+  signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
 - `raiko2-sgx` is the long-running sign server.
 - The SGX image is signed during `Dockerfile.sgx` build, and tee startup reuses the baked
@@ -281,7 +280,8 @@ runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from a
 
 ## Source Releases
 
-Use this flow when cutting a versioned source release such as `v0.1.0`.
+Use this flow when cutting a versioned ZK/runtime source release such as
+`vX.Y.Z`. Keep TEE provider metadata in its separate release flow below.
 
 Release prerequisites:
 
@@ -333,7 +333,7 @@ Recommended sequence:
 3. Export guest digests:
 
    ```bash
-   cargo run -p xtask-build-guest --bin guest-digests -- \
+   cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
      --output "${RELEASE_DIR}/guest-digests-summary.json"
    ```
 
@@ -350,31 +350,42 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes:
+5. Write release notes from the ZK source release template:
 
    ```bash
    cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
-   ## Summary
+## Summary
 
-   - release summary here
+- ZK/runtime source release summary.
 
-   ## Runtime Images
+## Runtime Image
 
-   - runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
-   - includes both `risc0` and `sp1` guest ELFs
+- runtime image: us-docker.pkg.dev/evmchain/images/raiko2@sha256:...
+- commit: <release commit SHA>
+- includes `risc0` guest ELFs and `sp1` guest ELF/VK artifacts
 
-   ## ZK Guest Digests
+## ZK Guest Digests
 
    - risc0 proposal image_id: 0x...
    - risc0 aggregation image_id: 0x...
    - sp1 proposal vk_bn254: 0x...
    - sp1 proposal vk_hash_bytes: 0x...
-   - sp1 aggregation vk_bn254: 0x...
-   - sp1 aggregation vk_hash_bytes: 0x...
+- sp1 aggregation vk_bn254: 0x...
+- sp1 aggregation vk_hash_bytes: 0x...
 
-   See attached `release-manifest-vX.Y.Z.json` and `guest-digests-summary.json`.
-   EOF
-   ```
+## Reproduce
+
+See `docs/operations.md#reproduce-zk-guest-digests`.
+
+## Release Assets
+
+- `release-manifest-vX.Y.Z.json`
+- `guest-digests-summary.json`
+- `risc0_shasta_*.elf`
+- `sp1_shasta_*.elf`
+- `sp1_shasta_*.vk.bin`
+EOF
+```
 
 6. Create the tag and GitHub Release:
 
@@ -387,7 +398,10 @@ Recommended sequence:
      --title "${TAG}" \
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
-     "${RELEASE_DIR}/guest-digests-summary.json"
+     "${RELEASE_DIR}/guest-digests-summary.json" \
+     crates/guests/elf/risc0_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.elf \
+     crates/guests/elf/sp1_shasta_*.vk.bin
    ```
 
 Expected release outputs:
@@ -397,17 +411,59 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
+- Shasta guest artifact assets:
+  - `risc0_shasta_*.elf`
+  - `sp1_shasta_*.elf`
+  - `sp1_shasta_*.vk.bin`
 
 Do not:
 
 - apply `register-image` automatically as part of the release cut
 - mix rollout or deployment steps into the release flow
+- mix TEE provider metadata into a ZK/runtime-only release
 - write release-only metadata back into the source tree
+
+### Reproduce ZK Guest Digests
+
+Use this when GitHub release notes need a stable reference for how ZK digest
+values were regenerated. This compares the published release digest asset with
+digests recomputed from the tag checkout.
+
+```bash
+export TAG=vX.Y.Z
+export REPRO_DIR=target/releases/${TAG}/zk-digest-repro
+
+git fetch --tags origin "${TAG}"
+git checkout "${TAG}"
+mkdir -p "${REPRO_DIR}"
+
+cargo run -r -p xtask-build-guest --bin guest-digests --features digests -- \
+  --output "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern guest-digests-summary.json \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '.digests | sort_by(.proof_system, .object_name, .stage, .digest_source)' \
+  "${REPRO_DIR}/guest-digests-summary.json" > "${REPRO_DIR}/release-digests.sorted.json"
+jq -S '.digests | sort_by(.proof_system, .object_name, .stage, .digest_source)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-digests.sorted.json"
+diff -u "${REPRO_DIR}/release-digests.sorted.json" "${REPRO_DIR}/source-digests.sorted.json"
+```
+
+Print the values for the release notes:
+
+```bash
+jq -r '.digests[]
+  | [.proof_system, .object_name, .stage, .digest_source, .digest]
+  | @tsv' "${REPRO_DIR}/from-source.json"
+```
 
 ## Release Images
 
-Use the `xtask` release entrypoint for runtime images. It ensures the checked-in guest ELFs are
-current, then builds and pushes the runtime image.
+Use the `xtask` release entrypoint for runtime images. It refreshes selected guest ELFs before
+building non-host runtime images unless `--skip-guest-refresh` is explicitly set.
 
 ```bash
 just release-image risc0 release-20260507-1013
@@ -427,9 +483,16 @@ process starts and does not rebuild guest sources by itself. The image sets
 `RAIKO2_GUEST_ELF_DIR=/app/crates/guests/elf` so ELF lookup does not depend on the container
 working directory.
 
-If `release-image` refreshes tracked guest ELF artifacts and leaves the worktree dirty, it stops
-before publishing. Review and commit the updated `crates/guests/elf` artifacts, then rerun the
-release command so the image provenance still matches committed repo state.
+For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
+released artifacts, download guest ELF/VK assets from GitHub Releases with
+`cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
+When running v0.1.0 release guest ELFs with a newer host, set
+`prover.guest_input_abi = "v0_1_0"`; leave the default `current` for locally built or current
+release ELFs.
+`release-image` refreshes guest ELFs for the selected non-host backend by default.
+If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
+and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
+provenance still matches the committed repo state.
 
 ## Register Guest Digests
 
@@ -454,6 +517,31 @@ Current behavior:
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
+## Boundless Storage Upload
+
+Boundless storage uploader selection is environment-driven. Use your private GCS
+bucket:
+
+```bash
+BOUNDLESS_STORAGE_UPLOADER=gcs
+GCS_BUCKET=<your-gcs-bucket>
+GCS_PUBLIC_URL=false
+```
+
+The GCP project is selected by the current gcloud/ADC context, for example
+`<your-gcp-project>`; raiko2 does not carry a separate project id setting. The
+bucket should enforce public access prevention, so `GCS_PUBLIC_URL=false` returns
+private `gs://` URLs and Boundless downloaders must have GCS credentials. Set
+`GCS_PUBLIC_URL=true` only for a publicly readable bucket that should return HTTPS
+URLs.
+
+Authentication uses Google ADC from the active environment
+(`GOOGLE_APPLICATION_CREDENTIALS`, workload identity, metadata server, or local
+application-default credentials). Inline service account JSON through
+`GCS_CREDENTIALS_JSON` is only needed when ADC is not available. Optional `GCS_URL`
+supports custom endpoints. `STORAGE_UPLOADER` remains accepted as a compatibility
+alias, and existing S3/Pinata/File settings continue to work.
+
 ## Release TEE Provider Metadata
 
 TEE-backed remote prover images have a separate pre-release metadata flow.
@@ -461,12 +549,18 @@ TEE-backed remote prover images have a separate pre-release metadata flow.
 Use:
 
 ```bash
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag release-20260514-tee-smoke --no-push
 ```
 
 for local smoke verification, and:
 
 ```bash
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
 cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z-rc1
 ```
 
@@ -475,7 +569,10 @@ for a formal pre-release export.
 This flow:
 
 - reads exact external provider pins from `release/providers.toml`
-- builds the local `raiko2-sgx` provider image
+- fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
+  `GCP_ENCLAVE_KEY_SECRET` is set
+- builds the local `raiko2-sgx` provider image with the signing key passed as a Docker BuildKit
+  secret
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
 - records immutable image digests
@@ -491,6 +588,80 @@ Use this manifest to hand off:
 - pushed image digest
 
 to whoever configures the on-chain verifier allowlists.
+
+`GCP_ENCLAVE_KEY_VERSION` defaults to `latest`. Omit `GCP_ENCLAVE_KEY_PROJECT` to use the active
+`gcloud` project. Release builds must set `GCP_ENCLAVE_KEY_SECRET`. For local non-release builds
+only, `RAIKO2_SGX_ENCLAVE_KEY_HOST` can point to a local key file.
+
+### TEE Provider Release Notes Template
+
+Use this only for TEE provider metadata releases. Do not include this section in
+ZK/runtime-only release notes.
+
+```markdown
+## Summary
+
+- TEE provider metadata release summary.
+
+## TEE Provider Images
+
+- `raiko2-sgx`: us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `<provider>`: <provider image digest ref>
+
+## TEE Attestation Metadata
+
+- `raiko2-sgx` `mr_enclave`: ...
+- `raiko2-sgx` `mr_signer`: ...
+- `<provider>` `mr_enclave`: ...
+- `<provider>` `mr_signer`: ...
+
+## Reproduce
+
+See `docs/operations.md#reproduce-tee-provider-metadata`.
+
+## Release Assets
+
+- `tee-attestation-manifest-vX.Y.Z.json`
+```
+
+### Reproduce TEE Provider Metadata
+
+Use this to regenerate TEE provider attestation metadata from the tag checkout.
+Official rebuilds need the release enclave signing key from GCP Secret Manager
+to reproduce `mr_signer`; a disposable local key can reproduce `mr_enclave` but
+will produce a different signer.
+
+```bash
+export TAG=vX.Y.Z
+export REPRO_DIR=target/releases/${TAG}/tee-provider-repro
+
+git fetch --tags origin "${TAG}"
+git checkout "${TAG}"
+
+GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+GCP_ENCLAVE_KEY_VERSION=latest \
+GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
+cargo run -r -p xtask -- release-tee-providers --tag "${TAG}" --no-push
+
+mkdir -p "${REPRO_DIR}"
+cp "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
+  "${REPRO_DIR}/from-source.json"
+
+gh release download "${TAG}" --repo taikoxyz/raiko2 \
+  --pattern "tee-attestation-manifest-${TAG}.json" \
+  --dir "${REPRO_DIR}" \
+  --clobber
+
+jq -S '[.providers[]
+  | {lane, provider, source, attestation}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/tee-attestation-manifest-${TAG}.json" > "${REPRO_DIR}/release-tee.sorted.json"
+jq -S '[.providers[]
+  | {lane, provider, source, attestation}]
+  | sort_by(.provider, .lane)' \
+  "${REPRO_DIR}/from-source.json" > "${REPRO_DIR}/source-tee.sorted.json"
+diff -u "${REPRO_DIR}/release-tee.sorted.json" "${REPRO_DIR}/source-tee.sorted.json"
+```
 
 This command does not:
 
@@ -536,6 +707,10 @@ Operator notes:
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
+  each resubmission doubles the offer's max price, capped at `4x` the configured
+  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
+  the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
@@ -561,12 +736,12 @@ at admission time and either routes the request to `sp1` / `risc0` or returns
 `zk_any` is only accepted when `aggregate = false`; aggregate requests must specify a concrete
 proof type such as `sp1` or `risc0`.
 
-Operators can adjust the in-memory `zk_any` ballot without restarting the server when
-`server.admin_api_key` is configured:
+Operators can adjust the in-memory `zk_any` ballot without restarting the server when an ACL key
+grants `admin.ballot.read` and `admin.ballot.write`:
 
 ```bash
-curl -H "x-api-key: $RAIKO2_ADMIN_API_KEY" http://localhost:8080/admin/ballot
-curl -X POST -H "x-api-key: $RAIKO2_ADMIN_API_KEY" -H "content-type: application/json" \
+curl -H "x-api-key: $RAIKO2_ACL_API_KEY" http://localhost:8080/admin/ballot
+curl -X POST -H "x-api-key: $RAIKO2_ACL_API_KEY" -H "content-type: application/json" \
   --data '{"Risc0":[0.1,10],"Sp1":[0.0,0]}' \
   http://localhost:8080/admin/ballot
 ```

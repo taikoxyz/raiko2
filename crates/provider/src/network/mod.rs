@@ -5,15 +5,15 @@ use alloy::{
 };
 use alloy_primitives::{Address, Bytes, map::AddressMap};
 use alloy_rpc_types_eth::Header as AlloyRpcHeader;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult};
+use raiko2_primitives::{ChainSpec, ExecutionWitness, RaikoError, RaikoResult, WitnessStateNode};
 use raiko2_protocol::{BlobProofType, InputDataSource};
 use raiko2_protocol_shasta::shasta::ShastaEventData;
 use reth_ethereum_primitives::Block as RethBlock;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 
-use crate::Provider;
 use crate::rpc::{RpcClientConfig, build_rpc_client};
+use crate::{Provider, StorageProofTargets};
 
 mod accounts;
 mod blobs;
@@ -49,6 +49,26 @@ pub(crate) trait L2Provider: Send + Sync {
         block_numbers: &[u64],
         addresses: &[Vec<Address>],
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>>;
+
+    async fn batch_accounts_with_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<(
+        Vec<AddressMap<alloy_trie::TrieAccount>>,
+        Vec<Vec<WitnessStateNode>>,
+    )> {
+        let accounts = self.batch_accounts(block_numbers, addresses).await?;
+        Ok((accounts, vec![Vec::new(); block_numbers.len()]))
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        _targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        Ok(vec![Vec::new(); block_numbers.len()])
+    }
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>>;
 
@@ -140,6 +160,29 @@ impl L2Provider for RethL2Provider {
         self.rpc.fetch_accounts(block_numbers, addresses).await
     }
 
+    async fn batch_accounts_with_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<(
+        Vec<AddressMap<alloy_trie::TrieAccount>>,
+        Vec<Vec<WitnessStateNode>>,
+    )> {
+        self.rpc
+            .fetch_accounts_with_proof_witnesses(block_numbers, addresses)
+            .await
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        self.rpc
+            .fetch_storage_proof_witnesses(block_numbers, targets)
+            .await
+    }
+
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
     }
@@ -168,6 +211,29 @@ impl L2Provider for GethL2Provider {
         self.rpc.fetch_accounts(block_numbers, addresses).await
     }
 
+    async fn batch_accounts_with_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<(
+        Vec<AddressMap<alloy_trie::TrieAccount>>,
+        Vec<Vec<WitnessStateNode>>,
+    )> {
+        self.rpc
+            .fetch_accounts_with_proof_witnesses(block_numbers, addresses)
+            .await
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        self.rpc
+            .fetch_storage_proof_witnesses(block_numbers, targets)
+            .await
+    }
+
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
         self.fetch_witnesses(block_numbers).await
     }
@@ -185,6 +251,29 @@ impl L2Provider for GethLocalWitnessL2Provider {
         addresses: &[Vec<Address>],
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
         self.rpc.fetch_accounts(block_numbers, addresses).await
+    }
+
+    async fn batch_accounts_with_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<(
+        Vec<AddressMap<alloy_trie::TrieAccount>>,
+        Vec<Vec<WitnessStateNode>>,
+    )> {
+        self.rpc
+            .fetch_accounts_with_proof_witnesses(block_numbers, addresses)
+            .await
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        self.rpc
+            .fetch_storage_proof_witnesses(block_numbers, targets)
+            .await
     }
 
     async fn batch_witnesses(&self, block_numbers: &[u64]) -> RaikoResult<Vec<ExecutionWitness>> {
@@ -358,6 +447,29 @@ impl Provider for NetworkProvider {
     ) -> RaikoResult<Vec<AddressMap<alloy_trie::TrieAccount>>> {
         self.l2_provider
             .batch_accounts(block_numbers, addresses)
+            .await
+    }
+
+    async fn batch_accounts_with_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        addresses: &[Vec<Address>],
+    ) -> RaikoResult<(
+        Vec<AddressMap<alloy_trie::TrieAccount>>,
+        Vec<Vec<WitnessStateNode>>,
+    )> {
+        self.l2_provider
+            .batch_accounts_with_proof_witnesses(block_numbers, addresses)
+            .await
+    }
+
+    async fn batch_storage_proof_witnesses(
+        &self,
+        block_numbers: &[u64],
+        targets: &StorageProofTargets,
+    ) -> RaikoResult<Vec<Vec<WitnessStateNode>>> {
+        self.l2_provider
+            .batch_storage_proof_witnesses(block_numbers, targets)
             .await
     }
 

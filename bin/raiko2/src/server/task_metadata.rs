@@ -38,6 +38,8 @@ pub(crate) struct TaskMetadata {
     #[serde(with = "lowercase")]
     pub(crate) proof_type: ProofType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) requested_proof_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) prover_type: Option<ProverType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) execution_mode: Option<ExecutionMode>,
@@ -64,6 +66,7 @@ pub(crate) struct BuildTaskMetadataParams<'a> {
     pub(crate) network: &'a str,
     pub(crate) l1_network: &'a str,
     pub(crate) proof_type: ProofType,
+    pub(crate) requested_proof_type: Option<&'a str>,
     pub(crate) prover_type: Option<ProverType>,
     pub(crate) execution_mode: Option<ExecutionMode>,
     pub(crate) aggregate_requested: bool,
@@ -122,9 +125,13 @@ pub(crate) struct TaskRuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) submitted_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_mcycles_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_multiplier: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<Sp1NetworkMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -498,11 +505,11 @@ impl TaskRuntimeMetadata {
             || self.sp1_fulfillment_strategy.is_some()
     }
 
-    const fn has_boundless_submission_resume(&self) -> bool {
+    pub(crate) const fn has_boundless_submission_resume(&self) -> bool {
         self.provider_request_id.is_some() && self.expires_at.is_some()
     }
 
-    const fn has_sp1_network_submission_progress(&self) -> bool {
+    pub(crate) const fn has_sp1_network_submission_progress(&self) -> bool {
         self.provider_request_id.is_some()
             && (self.sp1_network_mode.is_some()
                 || self.sp1_fulfillment_strategy.is_some()
@@ -525,8 +532,10 @@ impl TaskRuntimeMetadata {
         self.deployment = Some(progress.deployment.clone());
         self.offchain = Some(progress.offchain);
         self.expires_at = Some(progress.expires_at);
+        self.submitted_at = Some(progress.submitted_at);
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
+        self.max_price_multiplier = Some(progress.max_price_multiplier);
     }
 
     fn apply_sp1_network_submission(
@@ -565,6 +574,7 @@ mod tests {
             network: "taiko_hoodi".to_string(),
             l1_network: "hoodi".to_string(),
             proof_type: ProofType::Risc0,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,
@@ -587,6 +597,7 @@ mod tests {
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
             proof_type: ProofType::Native,
+            requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
             aggregate_requested: false,

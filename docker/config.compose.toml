@@ -57,9 +57,9 @@ order_stream_url = "https://base-mainnet.boundless.network"
 pricing_mode = "manual"
 ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
-lock_timeout_ms_per_mcycle = 200
-timeout_ms_per_mcycle = 410
-max_price_per_mcycle = "0.000000085"
+lock_timeout_ms_per_mcycle = 300
+timeout_ms_per_mcycle = 900
+max_price_per_mcycle = "0.0000006"
 min_price_per_mcycle = "0.000000010"
 lock_collateral = "20"
 
@@ -69,7 +69,7 @@ ramp_up_start_sec = 20
 ramp_up_period_blocks = 60
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
-max_price_per_mcycle = "0.00000006"
+max_price_per_mcycle = "0.0000008"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"
 
@@ -83,4 +83,3 @@ backend = "memory"
 namespace = "raiko2:docker"
 workers = 6
 maintenance_interval_ms = 200
-task_timeout_secs = 14400

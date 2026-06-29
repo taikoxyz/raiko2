@@ -19,6 +19,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v3/proof/report", get(handlers::report_proofs))
         .route("/v3/proof/list", get(handlers::list_proofs))
         .route("/v3/proof/prune", post(handlers::prune_proofs))
+        .route("/v3/prover/status", get(handlers::get_prover_status))
+        .route("/v3/prover/clear", post(handlers::clear_prover))
         .route(
             "/proof/batch/shasta",
             post(handlers::request_batch_shasta_proof),

@@ -71,18 +71,22 @@ That flow owns:
 
 ## Guest ELF Rule
 
-`release-image` ensures the checked-in guest ELF artifacts are current before building the runtime
-image.
+`release-image` refreshes guest ELF artifacts by default for non-host runtime images. Host image
+publication and guest ELF publication are decoupled. For unreleased testing, build local ELFs with `just build-guest all` or
+`cargo run -r -p xtask -- build-guest all`. Published guest ELFs are GitHub Release assets and can be
+downloaded separately:
 
-If that refresh leaves tracked changes in `crates/guests/elf`, `release-image` stops before
-publishing. In that case:
+```bash
+cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf
+```
 
-1. review the updated tracked artifacts
-2. commit them
-3. rerun `release-image`
+Use `--skip-guest-refresh` only when intentionally composing an image from already committed guest
+ELFs. Use `--refresh-guest-elves <risc0|sp1|all>` to override the default guest set. If a refresh leaves tracked
+changes in `crates/guests/elf`, `release-image` stops before publishing; review and commit those
+artifacts before retrying.
 
-Do not bypass this by using ad-hoc `docker build`. The published image must match committed release
-artifacts.
+Do not bypass this by using ad-hoc `docker build`. The published image must match the selected
+source revision and the guest ELF assets expected by the deployment.
 
 ## Optional Register Check
 

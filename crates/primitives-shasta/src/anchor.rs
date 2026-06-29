@@ -6,10 +6,9 @@ const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
 
 /// Returns the maximum permitted gap between the proposal origin block and any anchor block.
 ///
-/// Only mainnet uses the larger window. `167014` (the transition chain) was previously
-/// special-cased here despite having no trusted chain-spec entry; it was removed (F-1), and the
-/// guest now fails closed before proving any chain absent from the compiled-in spec list, so a
-/// special-cased-but-unlisted chain ID can no longer slip through.
+/// Only mainnet uses the larger window; every other chain uses the default. The guest fails closed
+/// before proving any chain absent from the compiled-in spec list, so a special-cased-but-unlisted
+/// chain ID can no longer slip through (F-1).
 #[must_use]
 pub const fn anchor_max_offset_for_chain(chain_id: u64) -> u64 {
     if chain_id == TAIKO_MAINNET_CHAIN_ID {
@@ -98,10 +97,8 @@ mod tests {
     }
 
     #[test]
-    fn unlisted_transition_chain_uses_default_window() {
-        // 167014 was previously special-cased to the mainnet window. It no longer is; since it has
-        // no trusted chain spec, the guest fails closed before proving it (see the F-1 fix).
-        assert_eq!(anchor_max_offset_for_chain(167_014), 128);
+    fn non_mainnet_chain_uses_default_window() {
+        assert_eq!(anchor_max_offset_for_chain(167_001), 128);
     }
 
     #[test]

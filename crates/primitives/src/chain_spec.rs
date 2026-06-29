@@ -51,7 +51,10 @@ pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
 pub fn shasta_checkpoint_storage_slots_nested(block_number: u64) -> (U256, U256) {
     let base = U256::from(SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT);
     let inner_base = checkpoint_mapping_slot(U256::from(SHASTA_CHECKPOINT_VERSION), base);
-    checkpoint_record_slots(checkpoint_mapping_slot(U256::from(block_number), inner_base))
+    checkpoint_record_slots(checkpoint_mapping_slot(
+        U256::from(block_number),
+        inner_base,
+    ))
 }
 
 /// Candidate `(blockHash_slot, stateRoot_slot)` pairs in read-precedence order: nested-v1 first,
@@ -1737,7 +1740,11 @@ mod checkpoint_slot_tests {
         let expected_bh = reference_mapping_slot(U256::from(n), base);
         let (bh, sr) = shasta_checkpoint_storage_slots(n);
         assert_eq!(bh, expected_bh, "flat blockHash slot");
-        assert_eq!(sr, expected_bh + U256::from(1), "flat stateRoot slot is blockHash+1");
+        assert_eq!(
+            sr,
+            expected_bh + U256::from(1),
+            "flat stateRoot slot is blockHash+1"
+        );
     }
 
     #[test]
@@ -1748,7 +1755,11 @@ mod checkpoint_slot_tests {
         let expected_bh = reference_mapping_slot(U256::from(n), inner);
         let (bh, sr) = shasta_checkpoint_storage_slots_nested(n);
         assert_eq!(bh, expected_bh, "nested blockHash slot");
-        assert_eq!(sr, expected_bh + U256::from(1), "nested stateRoot slot is blockHash+1");
+        assert_eq!(
+            sr,
+            expected_bh + U256::from(1),
+            "nested stateRoot slot is blockHash+1"
+        );
     }
 
     #[test]
@@ -1764,7 +1775,15 @@ mod checkpoint_slot_tests {
     fn candidates_are_nested_then_flat() {
         let n = 7u64;
         let candidates = shasta_checkpoint_storage_slot_candidates(n);
-        assert_eq!(candidates[0], shasta_checkpoint_storage_slots_nested(n), "nested first");
-        assert_eq!(candidates[1], shasta_checkpoint_storage_slots(n), "flat second");
+        assert_eq!(
+            candidates[0],
+            shasta_checkpoint_storage_slots_nested(n),
+            "nested first"
+        );
+        assert_eq!(
+            candidates[1],
+            shasta_checkpoint_storage_slots(n),
+            "flat second"
+        );
     }
 }

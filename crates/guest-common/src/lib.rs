@@ -96,11 +96,14 @@ struct DecodedAnchorCheckpoint {
 }
 
 fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
-    let Some(verified_chain_spec) =
-        SupportedChainSpecs::default().get_chain_spec_with_chain_id(chain_spec.chain_id)
-    else {
-        return Ok(());
-    };
+    let verified_chain_spec = SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(chain_spec.chain_id)
+        .with_context(|| {
+            format!(
+                "unknown chain_id {}: not in trusted chain-spec list",
+                chain_spec.chain_id
+            )
+        })?;
 
     ensure!(
         chain_spec.max_spec_id == verified_chain_spec.max_spec_id,
@@ -1141,6 +1144,36 @@ mod tests {
         SupportedChainSpecs::default()
             .get_chain_spec_with_chain_id(167_000)
             .expect("supported taiko mainnet chain spec")
+    }
+
+    #[test]
+    fn validate_known_chain_spec_rejects_unlisted_chain_id() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.chain_id = 424_242; // absent from config/chain_spec_list_default.json
+        let err = validate_known_chain_spec(&spec)
+            .expect_err("unlisted chain id must be rejected (F-1 regression)");
+        assert!(
+            err.to_string().contains("unknown chain_id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_known_chain_spec_accepts_listed_chain() {
+        validate_known_chain_spec(&taiko_mainnet_chain_spec())
+            .expect("listed mainnet chain spec must validate");
+    }
+
+    #[test]
+    fn validate_known_chain_spec_rejects_tampered_field() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.l2_contract = Some(Address::ZERO); // diverge from the trusted spec
+        let err = validate_known_chain_spec(&spec)
+            .expect_err("tampered l2_contract must be rejected");
+        assert!(
+            err.to_string().contains("l2_contract"),
+            "unexpected error: {err}"
+        );
     }
 
     fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {

@@ -109,6 +109,19 @@ fn adapter_rejects_guest_input_without_witnesses() {
 }
 
 #[test]
+fn adapter_rejects_unset_proof_carry_chain_id() {
+    let mut input = fixture_guest_input();
+    input.proof_carry_data.chain_id = 0;
+
+    let err = build_shasta_packet(&input).expect_err("reject unset carry chain id");
+    assert!(err.to_string().contains("proof_carry_data.chain_id"));
+
+    let err = build_shasta_packet_with_guest_input(&input)
+        .expect_err("reject unset carry chain id with guest input");
+    assert!(err.to_string().contains("proof_carry_data.chain_id"));
+}
+
+#[test]
 fn replay_block_wraps_stateless_input_fields() {
     let mut input = StatelessInput::default();
     input.block.header.number = 9;

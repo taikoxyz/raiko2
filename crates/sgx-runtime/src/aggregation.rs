@@ -127,11 +127,19 @@ fn validate_sgx_child_proof(
     expected_instance_id: u32,
     expected_instance_address: Address,
 ) -> Result<(), RequestFailure> {
-    let instance_id = u32::from_be_bytes(
-        proof_bytes[0..4]
-            .try_into()
-            .expect("SGX proof length was already checked"),
-    );
+    if proof_bytes.len() != SHASTA_SGX_PROOF_LEN {
+        return Err(RequestFailure::invalid_request(format!(
+            "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+            proof_bytes.len()
+        )));
+    }
+
+    let instance_id = u32::from_be_bytes(proof_bytes[0..4].try_into().map_err(|_| {
+        RequestFailure::invalid_request(format!(
+            "aggregate proof {index} length mismatch: got {} expected {SHASTA_SGX_PROOF_LEN}",
+            proof_bytes.len()
+        ))
+    })?);
     if instance_id != expected_instance_id {
         return Err(RequestFailure::invalid_request(format!(
             "aggregate proof {index} SGX instance id mismatch: got {instance_id} expected {expected_instance_id}"
@@ -145,15 +153,12 @@ fn validate_sgx_child_proof(
         )));
     }
 
-    let recovery_id = match proof_bytes[88] {
-        27 => RecoveryId::Zero,
-        28 => RecoveryId::One,
-        value => {
-            return Err(RequestFailure::invalid_request(format!(
-                "aggregate proof {index} has invalid SGX signature recovery id {value}"
-            )));
-        }
-    };
+    let recovery_id = RecoveryId::try_from(i32::from(proof_bytes[88]) - 27).map_err(|_| {
+        RequestFailure::invalid_request(format!(
+            "aggregate proof {index} has invalid SGX signature recovery id {}",
+            proof_bytes[88]
+        ))
+    })?;
     let signature =
         RecoverableSignature::from_compact(&proof_bytes[24..88], recovery_id).map_err(|err| {
             RequestFailure::invalid_request(format!(
@@ -204,7 +209,7 @@ mod tests {
     use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
     use std::str::FromStr;
 
-    use super::aggregate_request;
+    use super::{SHASTA_SGX_PROOF_LEN, aggregate_request, validate_sgx_child_proof};
     use crate::bootstrap::public_key_to_address;
     use crate::tee::TeeProvider;
 
@@ -388,6 +393,29 @@ mod tests {
         let err = aggregate_request(&provider, 7, &request).expect_err("instance mismatch");
 
         assert!(err.to_string().contains("instance address"));
+    }
+
+    #[test]
+    fn aggregate_child_proof_rejects_short_proof_without_panicking() {
+        let err = validate_sgx_child_proof(0, &[], B256::from([0u8; 32]), 0, Address::ZERO)
+            .expect_err("short child proof");
+
+        assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn aggregate_child_proof_accepts_extended_recovery_id_format() {
+        for recovery_id in [29, 30] {
+            let mut proof = vec![0u8; SHASTA_SGX_PROOF_LEN];
+            proof[88] = recovery_id;
+
+            let err = validate_sgx_child_proof(0, &proof, B256::from([0u8; 32]), 0, Address::ZERO)
+                .expect_err("invalid signature after accepting recovery id format");
+
+            let err = err.to_string();
+            assert!(err.contains("signature"));
+            assert!(!err.contains("recovery id"));
+        }
     }
 
     #[test]

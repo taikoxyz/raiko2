@@ -63,16 +63,19 @@ pub fn build_shasta_packet_with_guest_input(
 }
 
 fn shasta_packet_chain_id(input: &GuestInput) -> RaikoResult<u64> {
-    let first_witness = input.witnesses.first().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
+    if input.witnesses.is_empty() {
+        return Err(RaikoError::InvalidRequestConfig(
             "cannot build remote prover shasta packet without witnesses".to_string(),
-        )
-    })?;
-    if input.proof_carry_data.chain_id != 0 {
-        Ok(input.proof_carry_data.chain_id)
-    } else {
-        Ok(first_witness.chain_spec.chain_id)
+        ));
     }
+    if input.proof_carry_data.chain_id == 0 {
+        return Err(RaikoError::InvalidRequestConfig(
+            "cannot build remote prover shasta packet with unset proof_carry_data.chain_id"
+                .to_string(),
+        ));
+    }
+
+    Ok(input.proof_carry_data.chain_id)
 }
 
 /// # Errors

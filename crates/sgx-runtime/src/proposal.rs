@@ -24,7 +24,7 @@ pub(crate) fn prove_request<P: TeeProvider>(
     validate_request(request, guest_input)?;
     let input_hash =
         prove_shasta_proposal_for_proof_type(guest_input, ProofType::Sgx).map_err(|err| {
-            RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err:#}"))
+            RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err}"))
         })?;
     let expected_input = hash_shasta_subproof_input(&request.payload.proof_carry_data);
     if input_hash != expected_input {
@@ -63,9 +63,10 @@ fn validate_request(
             "GuestInput proof_carry_data mismatch",
         ));
     }
-    if let Some(first_witness) = guest_input.witnesses.first()
-        && first_witness.chain_spec.chain_id != request.payload.chain_id
-    {
+    let first_witness = guest_input.witnesses.first().ok_or_else(|| {
+        RequestFailure::invalid_request("GuestInput must include at least one witness")
+    })?;
+    if first_witness.chain_spec.chain_id != request.payload.chain_id {
         return Err(RequestFailure::invalid_request(format!(
             "GuestInput chain_id mismatch: payload={} witness={}",
             request.payload.chain_id, first_witness.chain_spec.chain_id
@@ -157,19 +158,18 @@ mod tests {
     }
 
     #[test]
-    fn prove_request_rejects_unverified_replay_packet() {
+    fn prove_request_rejects_legacy_replay_packet_without_guest_input() {
         let provider = FakeProvider {
             secret_key: SecretKey::from_slice(&[6u8; 32]).expect("secret key"),
             quote: vec![],
         };
         let request = request_fixture();
 
-        let err = prove_request(&provider, 9, &request).expect_err("unverified replay packet");
+        let err = prove_request(&provider, 9, &request).expect_err("legacy replay packet");
 
         assert!(
-            err.to_string().contains("GuestInput")
-                || err.to_string().contains("stateless")
-                || err.to_string().contains("witness")
+            err.to_string()
+                .contains("raiko2-sgx request must include GuestInput")
         );
     }
 
@@ -187,6 +187,9 @@ mod tests {
 
         let err = prove_request(&provider, 9, &request).expect_err("invalid guest input");
 
-        assert!(err.to_string().contains("GuestInput"));
+        assert!(
+            err.to_string()
+                .contains("GuestInput must include at least one witness")
+        );
     }
 }

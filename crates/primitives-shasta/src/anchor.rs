@@ -3,16 +3,25 @@
 const ANCHOR_MAX_OFFSET: u64 = 128;
 const MAINNET_ANCHOR_MAX_OFFSET: u64 = 512;
 const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
-const TAIKO_TRANSITION_CHAIN_ID: u64 = 167_014;
+
+/// Chain IDs that use the larger mainnet anchor window. Every ID listed here MUST have a trusted
+/// chain-spec entry in `config/chain_spec_list_default.json`; this is enforced by the consistency
+/// test in `crates/guest-common/tests/chain_spec_consistency.rs`. The guest fails closed before
+/// proving any chain ID that lacks such an entry, so the test keeps this set and the trusted spec
+/// list in sync (preventing a reintroduction of F-1).
+pub const MAINNET_WINDOW_CHAIN_IDS: &[u64] = &[TAIKO_MAINNET_CHAIN_ID];
 
 /// Returns the maximum permitted gap between the proposal origin block and any anchor block.
 #[must_use]
 pub const fn anchor_max_offset_for_chain(chain_id: u64) -> u64 {
-    if chain_id == TAIKO_MAINNET_CHAIN_ID || chain_id == TAIKO_TRANSITION_CHAIN_ID {
-        MAINNET_ANCHOR_MAX_OFFSET
-    } else {
-        ANCHOR_MAX_OFFSET
+    let mut i = 0;
+    while i < MAINNET_WINDOW_CHAIN_IDS.len() {
+        if MAINNET_WINDOW_CHAIN_IDS[i] == chain_id {
+            return MAINNET_ANCHOR_MAX_OFFSET;
+        }
+        i += 1;
     }
+    ANCHOR_MAX_OFFSET
 }
 
 /// Return true when old raiko's stalled-anchor linkage bypass applies.
@@ -89,8 +98,15 @@ mod tests {
     };
 
     #[test]
-    fn uses_mainnet_window_for_transition_chain() {
-        assert_eq!(anchor_max_offset_for_chain(167_014), 512);
+    fn mainnet_uses_large_anchor_window() {
+        assert_eq!(anchor_max_offset_for_chain(167_000), 512);
+    }
+
+    #[test]
+    fn unlisted_transition_chain_uses_default_window() {
+        // 167014 was previously special-cased to the mainnet window. It no longer is; since it has
+        // no trusted chain spec, the guest fails closed before proving it (see the F-1 fix).
+        assert_eq!(anchor_max_offset_for_chain(167_014), 128);
     }
 
     #[test]

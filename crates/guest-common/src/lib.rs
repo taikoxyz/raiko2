@@ -1176,6 +1176,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_known_chain_spec_rejects_tampered_checkpoint_store() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.checkpoint_store_contract = None; // diverge from the trusted spec
+        let err = validate_known_chain_spec(&spec)
+            .expect_err("tampered checkpoint_store_contract must be rejected");
+        assert!(
+            err.to_string().contains("checkpoint_store_contract"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_known_chain_spec_rejects_tampered_is_taiko() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.is_taiko = !spec.is_taiko; // diverge from the trusted spec
+        let err = validate_known_chain_spec(&spec).expect_err("tampered is_taiko must be rejected");
+        assert!(
+            err.to_string().contains("is_taiko"),
+            "unexpected error: {err}"
+        );
+    }
+
     fn sample_l1_header(number: u64, state_root: B256) -> alloy_consensus::Header {
         alloy_consensus::Header {
             number,

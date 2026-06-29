@@ -8,7 +8,9 @@ const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
 /// chain-spec entry in `config/chain_spec_list_default.json`; this is enforced by the consistency
 /// test in `crates/guest-common/tests/chain_spec_consistency.rs`. The guest fails closed before
 /// proving any chain ID that lacks such an entry, so the test keeps this set and the trusted spec
-/// list in sync (preventing a reintroduction of F-1).
+/// list in sync (preventing a reintroduction of F-1). Today this is mainnet-only; `167014` was
+/// deliberately removed (F-1), so do not re-add a chain ID here without also adding its trusted
+/// chain-spec entry.
 pub const MAINNET_WINDOW_CHAIN_IDS: &[u64] = &[TAIKO_MAINNET_CHAIN_ID];
 
 /// Returns the maximum permitted gap between the proposal origin block and any anchor block.

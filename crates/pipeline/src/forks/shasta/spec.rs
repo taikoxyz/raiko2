@@ -16,7 +16,7 @@ use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
     chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
-    shasta_checkpoint_storage_slots, storage_slot_key,
+    shasta_checkpoint_storage_slot_candidates, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
     GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
@@ -575,15 +575,16 @@ async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
         )
     })?;
     let block_numbers = [first_witness.block.header.number];
-    let (block_hash_slot, state_root_slot) =
-        shasta_checkpoint_storage_slots(last_anchor_block_number);
-    let targets: StorageProofTargets = vec![vec![(
-        checkpoint_store,
-        vec![
-            storage_slot_key(block_hash_slot),
-            storage_slot_key(state_root_slot),
-        ],
-    )]];
+    let storage_keys = shasta_checkpoint_storage_slot_candidates(last_anchor_block_number)
+        .into_iter()
+        .flat_map(|(block_hash_slot, state_root_slot)| {
+            [
+                storage_slot_key(block_hash_slot),
+                storage_slot_key(state_root_slot),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let targets: StorageProofTargets = vec![vec![(checkpoint_store, storage_keys)]];
     let mut checkpoint_witness_nodes = retry_shasta_preflight_operation(
         "fetch shasta parent checkpoint storage proof",
         || async {
@@ -1541,7 +1542,7 @@ mod tests {
         ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
         WitnessStateNode,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
-        shasta_checkpoint_storage_slots, storage_slot_key,
+        shasta_checkpoint_storage_slot_candidates, storage_slot_key,
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{
@@ -2560,20 +2561,21 @@ mod tests {
             .expect("supported test chain")
             .checkpoint_store_contract
             .expect("checkpoint store");
-        let (block_hash_slot, state_root_slot) =
-            shasta_checkpoint_storage_slots(anchor_header.number);
+        let expected_keys = shasta_checkpoint_storage_slot_candidates(anchor_header.number)
+            .into_iter()
+            .flat_map(|(block_hash_slot, state_root_slot)| {
+                [
+                    storage_slot_key(block_hash_slot),
+                    storage_slot_key(state_root_slot),
+                ]
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             *provider
                 .storage_proof_inputs
                 .lock()
                 .expect("storage proof inputs lock"),
-            vec![vec![(
-                checkpoint_store,
-                vec![
-                    storage_slot_key(block_hash_slot),
-                    storage_slot_key(state_root_slot)
-                ]
-            )]]
+            vec![vec![(checkpoint_store, expected_keys)]]
         );
     }
 

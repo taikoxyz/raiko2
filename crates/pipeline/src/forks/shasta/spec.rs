@@ -11,7 +11,7 @@ use alloy_consensus::{
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
-use futures::{StreamExt, future::try_join, stream};
+use futures::{StreamExt, stream};
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
@@ -53,6 +53,7 @@ sol! {
 
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
 const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
+#[cfg(test)]
 const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
 #[cfg(not(test))]
 const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -466,8 +467,70 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-const fn preflight_uses_canonical_witness_for_tx_lists(chain_spec: &ChainSpec) -> bool {
-    chain_spec.chain_id == TAIKO_MAINNET_CHAIN_ID
+fn preflight_requires_tx_list_witnesses(
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> bool {
+    chain_spec
+        .hard_forks
+        .get(&ForkId::Taiko(TaikoFork::Unzen))
+        .is_some_and(|fork| {
+            blocks
+                .iter()
+                .any(|block| fork.active(block.header.number, block.header.timestamp))
+        })
+}
+
+fn tx_list_witness_unavailable(err: &RaikoError) -> bool {
+    if matches!(err, RaikoError::FeatureNotSupportedError(_)) {
+        return true;
+    }
+
+    let (RaikoError::RPC(message)
+    | RaikoError::Provider(message)
+    | RaikoError::RpcWithContext { message, .. }) = err
+    else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    lower.contains("debug_executionwitnessfortxlist")
+        && (lower.contains("method not found")
+            || lower.contains("method_not_found")
+            || lower.contains("-32601")
+            || lower.contains("unsupported")
+            || lower.contains("not available"))
+}
+
+async fn fetch_preflight_chunk_witnesses<P: Provider>(
+    provider: &P,
+    block_numbers: &[u64],
+    tx_lists: Option<&[Bytes]>,
+    requires_tx_list_witness: bool,
+) -> RaikoResult<(Vec<ExecutionWitness>, bool, u128)> {
+    let started_at = Instant::now();
+    let (witnesses, use_canonical_witness) = if let Some(tx_lists) = tx_lists {
+        match provider
+            .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
+        {
+            Ok(witnesses) => (witnesses, false),
+            Err(err) if !requires_tx_list_witness && tx_list_witness_unavailable(&err) => {
+                warn!(
+                    error = %err,
+                    "falling back to canonical Shasta witnesses before Unzen because tx-list witness API is unavailable"
+                );
+                (provider.batch_witnesses(block_numbers).await?, true)
+            }
+            Err(err) => return Err(err),
+        }
+    } else {
+        (provider.batch_witnesses(block_numbers).await?, false)
+    };
+    Ok((
+        witnesses,
+        use_canonical_witness,
+        started_at.elapsed().as_millis(),
+    ))
 }
 
 fn derived_tx_list_signers(tx_list: &Bytes) -> RaikoResult<Vec<Address>> {
@@ -646,21 +709,16 @@ async fn fetch_preflight_chunk<P: Provider>(
             blocks.len()
         )));
     }
-    let use_canonical_witness =
-        tx_lists.is_some() && preflight_uses_canonical_witness_for_tx_lists(&chain_spec);
-    let witnesses = async {
-        let started_at = Instant::now();
-        let witnesses = if let Some(tx_lists) = tx_lists
-            && !use_canonical_witness
-        {
-            provider
-                .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
-                .await
-        } else {
-            provider.batch_witnesses(&block_numbers).await
-        }?;
-        Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
-    };
+    let requires_tx_list_witness =
+        tx_lists.is_some() && preflight_requires_tx_list_witnesses(&chain_spec, blocks);
+    let (mut witnesses, use_canonical_witness, witnesses_elapsed_ms) =
+        fetch_preflight_chunk_witnesses(
+            provider,
+            &block_numbers,
+            tx_lists,
+            requires_tx_list_witness,
+        )
+        .await?;
     let account_targets = blocks
         .iter()
         .enumerate()
@@ -668,16 +726,13 @@ async fn fetch_preflight_chunk<P: Provider>(
             collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
         })
         .collect::<RaikoResult<Vec<_>>>()?;
-    let accounts = fetch_preflight_accounts(
+    let (accounts, account_witness_nodes, accounts_elapsed_ms) = fetch_preflight_accounts(
         provider,
         &block_numbers,
         &account_targets,
         use_canonical_witness,
-    );
-    let (
-        (mut witnesses, witnesses_elapsed_ms),
-        (accounts, account_witness_nodes, accounts_elapsed_ms),
-    ) = try_join(witnesses, accounts).await?;
+    )
+    .await?;
 
     if blocks.len() != witnesses.len()
         || blocks.len() != accounts.len()
@@ -1549,9 +1604,12 @@ mod tests {
         manifest::{BlockManifest, DerivationSourceManifest},
     };
     use raiko2_provider::{Provider, StorageProofTargets};
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::{NativeBackend, PipelineKey};
@@ -1565,6 +1623,7 @@ mod tests {
         data_sources: Vec<InputDataSource>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
+        tx_list_witness_supported: bool,
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
@@ -1650,6 +1709,11 @@ mod tests {
             tx_lists: &[Bytes],
         ) -> RaikoResult<Vec<ExecutionWitness>> {
             self.tx_list_witness_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.tx_list_witness_supported {
+                return Err(RaikoError::FeatureNotSupportedError(
+                    "provider does not support tx-list execution witnesses".to_string(),
+                ));
+            }
             *self
                 .tx_list_witness_inputs
                 .lock()
@@ -1931,6 +1995,7 @@ mod tests {
             data_sources: Vec::new(),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
+            tx_list_witness_supported: true,
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
@@ -1941,6 +2006,34 @@ mod tests {
             storage_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
                 Bytes::from_static(&[0xc1, 0x80]),
             )]])),
+        }
+    }
+
+    fn empty_replay_tx_lists(provider: &TestProvider) -> Vec<Bytes> {
+        vec![
+            super::encode_replay_tx_list(
+                &provider.block,
+                &BlockManifest {
+                    timestamp: provider.block.header.timestamp,
+                    coinbase: provider.block.header.beneficiary,
+                    anchor_block_number: 10,
+                    gas_limit: provider.block.header.gas_limit,
+                    transactions: Vec::new(),
+                },
+            )
+            .expect("encode tx list"),
+        ]
+    }
+
+    fn unzen_active_chain_spec(name: &str, chain_id: u64) -> ChainSpec {
+        ChainSpec {
+            name: name.to_string(),
+            chain_id,
+            hard_forks: BTreeMap::from([(
+                ForkId::Taiko(TaikoFork::Unzen),
+                ForkCondition::Timestamp(0),
+            )]),
+            ..Default::default()
         }
     }
 
@@ -2141,11 +2234,7 @@ mod tests {
         let signers =
             super::derived_tx_list_signers(&tx_lists[0]).expect("recover derived tx list signers");
         assert!(!signers.is_empty());
-        let chain_spec = ChainSpec {
-            name: "taiko_hoodi".to_string(),
-            chain_id: 167_013,
-            ..Default::default()
-        };
+        let chain_spec = unzen_active_chain_spec("taiko_hoodi", 167_013);
 
         let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
             &provider,
@@ -2193,21 +2282,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mainnet_tx_list_preflight_uses_canonical_witness() {
+    async fn pre_unzen_tx_list_preflight_prefers_tx_list_witness_when_available() {
         let provider = sample_provider();
-        let tx_lists = vec![
-            super::encode_replay_tx_list(
-                &provider.block,
-                &BlockManifest {
-                    timestamp: provider.block.header.timestamp,
-                    coinbase: provider.block.header.beneficiary,
-                    anchor_block_number: 10,
-                    gas_limit: provider.block.header.gas_limit,
-                    transactions: Vec::new(),
-                },
-            )
-            .expect("encode tx list"),
-        ];
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = ChainSpec {
+            name: "taiko_mainnet".to_string(),
+            chain_id: super::TAIKO_MAINNET_CHAIN_ID,
+            ..Default::default()
+        };
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(witnesses[0].witness.state.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pre_unzen_tx_list_preflight_falls_back_to_canonical_when_tx_list_witness_unsupported()
+    {
+        let mut provider = sample_provider();
+        provider.tx_list_witness_supported = false;
+        let tx_lists = empty_replay_tx_lists(&provider);
         let chain_spec = ChainSpec {
             name: "taiko_mainnet".to_string(),
             chain_id: super::TAIKO_MAINNET_CHAIN_ID,
@@ -2228,8 +2335,55 @@ mod tests {
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
         assert_eq!(witnesses[0].witness.state.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unzen_tx_list_preflight_uses_tx_list_witness_even_on_mainnet_chain_id() {
+        let provider = sample_provider();
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = unzen_active_chain_spec("taiko_mainnet", super::TAIKO_MAINNET_CHAIN_ID);
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unzen_tx_list_preflight_rejects_provider_without_tx_list_witness() {
+        let mut provider = sample_provider();
+        provider.tx_list_witness_supported = false;
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = unzen_active_chain_spec("taiko_mainnet", super::TAIKO_MAINNET_CHAIN_ID);
+
+        let err = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect_err("preflight should require tx-list witness support after Unzen");
+
+        assert!(err.to_string().contains("tx-list execution witnesses"));
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

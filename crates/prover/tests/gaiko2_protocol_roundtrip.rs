@@ -3,9 +3,10 @@
 use alloy_primitives::{Address, B256};
 use raiko2_prover::remote_prover::protocol::{
     RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
-    RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofError, Raiko2ProofResponse, Raiko2ProofResult,
-    Raiko2ReplayBlock, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
-    Raiko2ShastaPayload, Raiko2ShastaRequest,
+    RAIKO2_SHASTA_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ProofError,
+    Raiko2ProofResponse, Raiko2ProofResult, Raiko2ReplayBlock, Raiko2ShastaAggregatePayload,
+    Raiko2ShastaAggregateRequest, Raiko2ShastaGuestInput, Raiko2ShastaPayload,
+    Raiko2ShastaPayloadV2, Raiko2ShastaRequest, Raiko2ShastaRequestV2,
 };
 
 #[test]
@@ -47,6 +48,50 @@ fn shasta_packet_roundtrip_preserves_schema_and_payload() {
     assert_eq!(
         decoded
             .payload
+            .proof_carry_data
+            .transition_input
+            .proposal_id,
+        7
+    );
+}
+
+#[test]
+fn shasta_v2_packet_roundtrip_preserves_guest_input_payload() {
+    let mut replay_block = Raiko2ReplayBlock::default();
+    replay_block.block.header.number = 42;
+    replay_block.block.header.parent_hash = B256::from([0x11; 32]);
+    replay_block.chain_spec.chain_id = 167_013;
+
+    let mut proof_carry_data = raiko2_protocol_shasta::shasta::ProofCarryData {
+        chain_id: 167_013,
+        ..Default::default()
+    };
+    proof_carry_data.transition_input.proposal_id = 7;
+
+    let packet = Raiko2ShastaRequestV2 {
+        schema: RAIKO2_SHASTA_REQUEST_V2_SCHEMA.to_string(),
+        payload: Raiko2ShastaPayloadV2 {
+            guest_input: Raiko2ShastaGuestInput {
+                witnesses: vec![replay_block],
+                proof_carry_data,
+                ..Default::default()
+            },
+        },
+    };
+
+    let json = serde_json::to_string(&packet).expect("serialize request");
+    let decoded: Raiko2ShastaRequestV2 = serde_json::from_str(&json).expect("deserialize request");
+
+    assert_eq!(decoded.schema, RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
+    assert_eq!(decoded.payload.guest_input.witnesses.len(), 1);
+    assert_eq!(
+        decoded.payload.guest_input.proof_carry_data.chain_id,
+        167_013
+    );
+    assert_eq!(
+        decoded
+            .payload
+            .guest_input
             .proof_carry_data
             .transition_input
             .proposal_id,

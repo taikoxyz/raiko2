@@ -1,13 +1,17 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, Proof, StatelessInput};
+use raiko2_primitives::{
+    ChainSpec, ExecutionWitness, Proof, StatelessInput, WitnessHeader, WitnessStateNode,
+};
 use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
+use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 pub const RAIKO2_SHASTA_REQUEST_SCHEMA: &str = "raiko2-shasta-request-v1";
+pub const RAIKO2_SHASTA_REQUEST_V2_SCHEMA: &str = "raiko2-shasta-request-v2";
 pub const RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA: &str = "raiko2-shasta-aggregate-request-v1";
 pub const RAIKO2_PROOF_RESPONSE_SCHEMA: &str = "raiko2-proof-v1";
 
@@ -24,6 +28,26 @@ pub struct Raiko2ShastaPayload {
     pub proof_carry_data: ProofCarryData,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_input: Option<GuestInput>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Raiko2ShastaRequestV2 {
+    pub schema: String,
+    pub payload: Raiko2ShastaPayloadV2,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Raiko2ShastaPayloadV2 {
+    pub guest_input: Raiko2ShastaGuestInput,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Raiko2ShastaGuestInput {
+    pub witnesses: Vec<Raiko2ReplayBlock>,
+    pub taiko: TaikoManifest,
+    pub proposal_ancestor_headers: Vec<WitnessHeader>,
+    pub proposal_state_nodes: Vec<WitnessStateNode>,
+    pub proof_carry_data: ProofCarryData,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

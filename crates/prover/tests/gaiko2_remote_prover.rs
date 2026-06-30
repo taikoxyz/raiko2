@@ -12,7 +12,8 @@ use raiko2_prover::{
     Prover,
     gaiko2::{Gaiko2Config, Gaiko2Prover},
     remote_prover::protocol::{
-        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofError,
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
+        RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ProofError,
     },
 };
 use serde_json::json;
@@ -50,7 +51,8 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
-            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA);
+            .body_contains(RAIKO2_SHASTA_REQUEST_V2_SCHEMA)
+            .body_contains("\"guest_input\"");
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({
@@ -135,7 +137,7 @@ async fn gaiko2_prover_rejects_response_input_mismatch() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
-            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA);
+            .body_contains(RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({

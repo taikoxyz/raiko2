@@ -9,24 +9,19 @@
 
 It replaces the old untracked repo-root `test.json` workflow.
 
-`tests/fixtures/remote_prover/` contains the canonical remote prover protocol goldens owned by
-`raiko2`:
+`tests/fixtures/remote_prover/` contains remote prover protocol fixtures owned by `raiko2`:
 
 - `shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
 - `shasta_aggregate_request_v1_single_fixture_proof.json`
 
-These files define the strict `raiko2`-owned request contract for:
+The aggregate fixture defines the strict `raiko2`-owned request contract for:
 
-- `raiko2-shasta-request-v1`
 - `raiko2-shasta-aggregate-request-v1`
 
-Remote prover implementations are expected to accept byte-for-byte equivalent payloads for these
-fixtures. Provider-specific repositories may keep their own copies, but `raiko2` owns the canonical
-request goldens and validates them in `crates/prover/tests/remote_prover_fixture.rs`.
-These replay-packet fixtures target providers whose proposal input is the gaiko2/sgxgeth replay
-packet. That packet is valid input for gaiko2 because gaiko2 executes it internally. It is not the
-`raiko2-sgx-prover` proposal input, because `raiko2-sgx-prover` requires the full
-`raiko2_primitives_shasta::GuestInput` envelope and reruns Shasta guest validation before signing.
+The v1 proposal fixture is a legacy replay-packet compatibility reference. Current gaiko2 proposal
+requests are generated from the shared `GuestInput` fixture as `raiko2-shasta-request-v2` packets
+with `payload.guest_input`. Provider-specific repositories may keep their own copies, but `raiko2`
+owns the adapter behavior and validates it in `crates/prover/tests/remote_prover_fixture.rs`.
 
 ## Provenance
 

@@ -3,21 +3,23 @@
 use std::{env, fs, path::PathBuf, str::FromStr};
 
 use alloy_primitives::Address;
+use raiko2_primitives_shasta::GuestInput;
 use raiko2_primitives_shasta::instance::{
     build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
 };
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
-use raiko2_prover::remote_prover::protocol::{
-    RAIKO2_PROOF_RESPONSE_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
-    Raiko2ShastaRequest,
+use raiko2_prover::remote_prover::{
+    adapter::build_shasta_packet,
+    protocol::{
+        RAIKO2_PROOF_RESPONSE_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
+        Raiko2ShastaRequestV2,
+    },
 };
 use reqwest::{Client, Url};
 
 #[test]
 fn live_aggregate_request_reuses_proposal_proof_from_same_provider() {
-    let request_body = fs::read_to_string(proposal_fixture_path()).expect("read proposal fixture");
-    let request: Raiko2ShastaRequest =
-        serde_json::from_str(&request_body).expect("parse proposal fixture");
+    let (request, _) = proposal_request();
     let response = Raiko2ProofResponse {
         schema: RAIKO2_PROOF_RESPONSE_SCHEMA.to_string(),
         status: raiko2_prover::remote_prover::protocol::Raiko2ProofStatus::Ok,
@@ -39,7 +41,7 @@ fn live_aggregate_request_reuses_proposal_proof_from_same_provider() {
     assert_eq!(aggregate.payload.proofs[0].input, "0x1234");
     assert_eq!(
         aggregate.payload.proofs[0].proof_carry_data,
-        request.payload.proof_carry_data
+        request.payload.guest_input.proof_carry_data
     );
 }
 
@@ -47,9 +49,7 @@ fn live_aggregate_request_reuses_proposal_proof_from_same_provider() {
 #[ignore = "requires RAIKO2_REMOTE_PROVER_BASE_URL"]
 async fn remote_prover_conformance_proposal() {
     let base_url = remote_prover_base_url();
-    let request_body = fs::read_to_string(proposal_fixture_path()).expect("read proposal fixture");
-    let request: Raiko2ShastaRequest =
-        serde_json::from_str(&request_body).expect("parse proposal fixture");
+    let (request, request_body) = proposal_request();
 
     let response = post_fixture(&base_url, "/prove/shasta", &request_body).await;
 
@@ -75,7 +75,7 @@ async fn remote_prover_conformance_proposal() {
         assert!(!quote.is_empty());
     }
 
-    let expected_input = hash_shasta_subproof_input(&request.payload.proof_carry_data);
+    let expected_input = hash_shasta_subproof_input(&request.payload.guest_input.proof_carry_data);
     assert_eq!(result.input, format!("{expected_input:#x}"));
 }
 
@@ -83,9 +83,7 @@ async fn remote_prover_conformance_proposal() {
 #[ignore = "requires RAIKO2_REMOTE_PROVER_BASE_URL"]
 async fn remote_prover_conformance_aggregate() {
     let base_url = remote_prover_base_url();
-    let proposal_body = fs::read_to_string(proposal_fixture_path()).expect("read proposal fixture");
-    let proposal_request: Raiko2ShastaRequest =
-        serde_json::from_str(&proposal_body).expect("parse proposal fixture");
+    let (proposal_request, proposal_body) = proposal_request();
     let proposal_response = post_fixture(&base_url, "/prove/shasta", &proposal_body).await;
     let request = build_live_aggregate_request(&proposal_request, &proposal_response);
     let request_body = serde_json::to_string(&request).expect("serialize live aggregate request");
@@ -157,14 +155,22 @@ async fn post_fixture(base_url: &Url, path: &str, body: &str) -> Raiko2ProofResp
     serde_json::from_str(&body).expect("parse remote prover response")
 }
 
-fn proposal_fixture_path() -> PathBuf {
+fn shared_guest_input_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
+        "../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
     )
 }
 
+fn proposal_request() -> (Raiko2ShastaRequestV2, String) {
+    let raw = fs::read_to_string(shared_guest_input_path()).expect("read shared guest input");
+    let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared guest input");
+    let request = build_shasta_packet(&guest_input).expect("build proposal request");
+    let body = serde_json::to_string(&request).expect("serialize proposal request");
+    (request, body)
+}
+
 fn build_live_aggregate_request(
-    proposal_request: &Raiko2ShastaRequest,
+    proposal_request: &Raiko2ShastaRequestV2,
     proposal_response: &Raiko2ProofResponse,
 ) -> Raiko2ShastaAggregateRequest {
     let result = proposal_response
@@ -180,7 +186,11 @@ fn build_live_aggregate_request(
                 raiko2_prover::remote_prover::protocol::Raiko2AggregateProof {
                     input: result.input.clone(),
                     proof: proof.clone(),
-                    proof_carry_data: proposal_request.payload.proof_carry_data.clone(),
+                    proof_carry_data: proposal_request
+                        .payload
+                        .guest_input
+                        .proof_carry_data
+                        .clone(),
                 },
             ],
         },

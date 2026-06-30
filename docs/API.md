@@ -419,6 +419,7 @@ under the original `zk_any` request for this operator view.
 ```
 
 `orphaned` counts non-terminal runtime records whose queue task is missing.
+The runtime cleanup pass cancels orphaned records on its next maintenance tick.
 `clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.

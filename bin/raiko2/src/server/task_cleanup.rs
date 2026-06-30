@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::server::state::{EngineHandle, PipelineFactory};
+use crate::server::state::{EngineHandle, EngineQueueTaskState, PipelineFactory};
 use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
@@ -13,6 +13,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
+const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: queue task missing";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeCleanupStats {
@@ -21,6 +22,7 @@ pub(crate) struct RuntimeCleanupStats {
     pub removed_roots: usize,
     pub skipped_shared_children: usize,
     pub retained_failures: usize,
+    pub orphaned_cancelled: usize,
 }
 
 impl RuntimeCleanupStats {
@@ -30,6 +32,7 @@ impl RuntimeCleanupStats {
             && self.removed_roots == 0
             && self.skipped_shared_children == 0
             && self.retained_failures == 0
+            && self.orphaned_cancelled == 0
     }
 }
 
@@ -85,8 +88,14 @@ pub(crate) async fn run_runtime_cleanup_pass(
     ttl_secs: u64,
     cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<RuntimeCleanupStats> {
+    let mut stats = RuntimeCleanupStats {
+        orphaned_cancelled: cancel_orphaned_runtime_tasks(runtime.as_ref(), pipelines.as_ref())
+            .await?,
+        ..RuntimeCleanupStats::default()
+    };
+
     if ttl_secs == 0 {
-        return Ok(RuntimeCleanupStats::default());
+        return Ok(stats);
     }
 
     let records = runtime
@@ -101,11 +110,8 @@ pub(crate) async fn run_runtime_cleanup_pass(
         updated_at: record.updated_at,
         task_id: record.task_id.clone(),
     });
-    let mut stats = RuntimeCleanupStats {
-        scanned: records.len(),
-        expired: records.len(),
-        ..RuntimeCleanupStats::default()
-    };
+    stats.scanned = records.len();
+    stats.expired = records.len();
 
     for record in records {
         match cleanup_expired_root_task(runtime.as_ref(), pipelines.as_ref(), &record).await {
@@ -121,6 +127,118 @@ pub(crate) async fn run_runtime_cleanup_pass(
     }
 
     Ok(stats)
+}
+
+async fn cancel_orphaned_runtime_tasks(
+    runtime: &RuntimeManager,
+    pipelines: &dyn PipelineFactory,
+) -> Result<usize> {
+    let records = runtime.list_tasks().await?;
+    let mut cancelled = 0usize;
+
+    for record in records {
+        if is_terminal_runtime_status(record.runner_status) {
+            continue;
+        }
+
+        let metadata: TaskMetadata = match serde_json::from_value(record.metadata.clone()) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "skipping orphaned runtime task check with invalid metadata"
+                );
+                continue;
+            }
+        };
+
+        if metadata.has_remote_submission_progress() {
+            continue;
+        }
+
+        let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key) else {
+            continue;
+        };
+
+        if has_active_queue_task(
+            &engine,
+            &metadata_queue_task_ids(&metadata, record.pipeline_key),
+        )
+        .await?
+        {
+            continue;
+        }
+
+        runtime
+            .sync_status(
+                &record.task_id,
+                RunnerStatus::Cancelled,
+                Some(ORPHANED_RUNTIME_ERROR.to_string()),
+                None,
+            )
+            .await
+            .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
+        cancelled += 1;
+        warn!(task_id = %record.task_id, "cancelled orphaned runtime task");
+    }
+
+    Ok(cancelled)
+}
+
+async fn has_active_queue_task(
+    engine: &Arc<dyn EngineHandle>,
+    task_ids: &HashSet<EngineTaskId>,
+) -> Result<bool> {
+    for task_id in task_ids {
+        let Some(view) = engine
+            .get_task_state(task_id.clone())
+            .await
+            .map_err(|err| anyhow!("failed load queue task: {err}"))?
+        else {
+            continue;
+        };
+
+        if is_active_queue_task_state(view.state) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn metadata_queue_task_ids(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> HashSet<EngineTaskId> {
+    let mut task_ids = HashSet::new();
+    for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
+        task_ids.extend(proposal_task_chain_ids(&task_id));
+    }
+    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
+        task_ids.insert(task_id);
+    }
+    task_ids
+}
+
+const fn is_terminal_runtime_status(status: RunnerStatus) -> bool {
+    matches!(
+        status,
+        RunnerStatus::Completed | RunnerStatus::Failed | RunnerStatus::Cancelled
+    )
+}
+
+const fn is_active_queue_task_state(state: EngineQueueTaskState) -> bool {
+    matches!(
+        state,
+        EngineQueueTaskState::Pending
+            | EngineQueueTaskState::Ready
+            | EngineQueueTaskState::Retrying
+            | EngineQueueTaskState::Running
+    )
 }
 
 pub(crate) async fn cancel_registered_tasks(
@@ -340,6 +458,7 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
                     removed_roots = stats.removed_roots,
                     skipped_shared_children = stats.skipped_shared_children,
                     retained_failures = stats.retained_failures,
+                    orphaned_cancelled = stats.orphaned_cancelled,
                     "runtime cleanup tick completed"
                 );
             }
@@ -404,7 +523,9 @@ mod tests {
         proposal_task_id, run_runtime_cleanup_pass,
     };
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
-    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
+    use crate::server::task_metadata::{
+        ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
+    };
     use anyhow::{Context, Result};
     use raiko2_engine::{
         AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
@@ -432,6 +553,64 @@ mod tests {
             }
             .is_idle()
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
+        let engine = Arc::new(MockEngine::default());
+        let factory = Arc::new(build_factory(engine));
+        let orphaned_task_id = encoded_proposal_task_id(10)?;
+        let remote_task_id = encoded_proposal_task_id(11)?;
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "orphaned-root",
+            &orphaned_task_id,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+
+        let mut remote_metadata = metadata_for_task(&remote_task_id);
+        remote_metadata.runtime.proposals.insert(
+            remote_task_id.clone(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xremote".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        register_runtime_task_with_metadata(
+            runtime.as_ref(),
+            "remote-root",
+            &remote_metadata,
+            RunnerStatus::Running,
+            now_ts(),
+        )
+        .await?;
+
+        let mut cursor = None;
+        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+
+        assert_eq!(
+            stats,
+            RuntimeCleanupStats {
+                orphaned_cancelled: 1,
+                ..RuntimeCleanupStats::default()
+            }
+        );
+        let orphaned = runtime
+            .get_task("orphaned-root")
+            .await?
+            .expect("orphaned root");
+        assert_eq!(orphaned.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(
+            orphaned.error.as_deref(),
+            Some("runtime task orphaned: queue task missing")
+        );
+        let remote = runtime.get_task("remote-root").await?.expect("remote root");
+        assert_eq!(remote.runner_status, RunnerStatus::Running);
+        Ok(())
     }
 
     #[derive(Default)]
@@ -553,6 +732,7 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 1,
                 retained_failures: 0,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_none());
@@ -589,6 +769,7 @@ mod tests {
                 removed_roots: 0,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_some());
@@ -630,6 +811,7 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                orphaned_cancelled: 0,
             }
         );
         assert_eq!(
@@ -658,6 +840,7 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 0,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-c").await?.is_none());
@@ -790,6 +973,36 @@ mod tests {
                     proposal_task_id,
                     network_pair,
                 ))?,
+                request_fingerprint: None,
+            })
+            .await?;
+        let mut record = runtime.get_task(task_id).await?.expect("runtime task");
+        record.runner_status = status;
+        record.updated_at = updated_at;
+        runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    async fn register_runtime_task_with_metadata(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        metadata: &TaskMetadata,
+        status: RunnerStatus,
+        updated_at: i64,
+    ) -> Result<()> {
+        runtime
+            .register_task(TaskRegistration {
+                task_id: task_id.to_string(),
+                pipeline_key: None,
+                route: "risc0/local".parse().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(1),
+                proof_ids: metadata
+                    .proposals
+                    .iter()
+                    .map(|proposal| proposal.task_id.clone())
+                    .collect(),
+                metadata: serde_json::to_value(metadata)?,
                 request_fingerprint: None,
             })
             .await?;

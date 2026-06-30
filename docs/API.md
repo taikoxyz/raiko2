@@ -89,8 +89,8 @@ proof types are accepted.
 ## V4 Prover API Spec
 
 V4 is the complete explicit-proof-type interface for proposal proving, aggregation, task lookup,
-status, and clear operations. It does not accept `zk_any`; taiko-client owns fallback between
-concrete proof types.
+status, and clear operations. It does not accept `zk_any`; callers must choose a concrete proof type
+for each request.
 
 V4 routes:
 
@@ -99,6 +99,12 @@ V4 routes:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
+
+Endpoint responsibilities:
+
+- `POST /v4/proof/proposal` registers or polls one proposal proof task only.
+- `POST /v4/proof/aggregation` registers or polls one aggregation proof task only.
+- `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
 
 V4 success envelope:
 
@@ -119,6 +125,23 @@ V4 error envelope:
 }
 ```
 
+All v4 errors return this JSON envelope with the matching HTTP status code. Clients should match the
+stable snake_case `error`; `message` is diagnostic and not stable.
+
+V4 error codes:
+
+| Error | HTTP | Description |
+| --- | --- | --- |
+| `missing_proof_type` | 400 | `proof_type` is required. |
+| `invalid_proof_type` | 400 | `zk_any` or another policy proof type was requested. |
+| `unsupported_proof_type` | 400 | The concrete proof type is not supported by v4. |
+| `invalid_network_pair` | 400 | `(network, l1_network)` is not configured. |
+| `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
+| `unsupported_fork` | 400 | The selected proposal or aggregation fork is not supported. |
+| `task_not_found` | 404 | The task ID does not exist. |
+| `request_conflict` | 409 | A repeated submission conflicts with the existing root task. |
+| `dependency_not_ready` | 409 | Aggregation dependencies are missing or not completed. |
+
 Common proof submission fields:
 
 | Field | Type | Required | Description |
@@ -136,6 +159,15 @@ Common proof-type validation:
 Proof submission validation:
 
 - Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
+- Proof submission request bodies are endpoint-specific. Legacy v3 batch fields or fields owned by
+  another v4 proof endpoint return `400 invalid_request`.
+- Unknown request body fields return `400 invalid_request`.
+
+Proof submission response shape:
+
+- `proof_type` echoes the requested concrete proof type.
+- Submission responses return one root task status. They do not embed the other proof endpoint's
+  result; use `GET /v4/tasks/{id}` for the detailed task view.
 
 ### Submit Proposal Proof
 
@@ -197,15 +229,26 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
-| `data.task_id` | string | Root task ID. |
+| `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | object/null | Final proof payload when `data.status=completed`. |
+| `data.proof` | object/null | Final proposal proof payload when `data.status=completed`; null only before completion. |
+
+Polling and idempotency:
+
+- Clients may repeat the same `POST /v4/proof/proposal` request to poll progress.
+- Repeated requests for the same `(network, l1_network, proposal_id, proof_type)` return the
+  existing root task and current status instead of registering duplicate work.
+- Repeated requests whose proof-input fields conflict with the existing root task return
+  `409 request_conflict`.
 
 Validation:
 
 - `l2_block_number_start` and `l2_block_number_end` define an inclusive range and must satisfy
   `l2_block_number_start <= l2_block_number_end`.
+- `proposals` is not accepted by the v4 proposal request.
 - `l2_block_numbers` is not accepted by the v4 proposal request.
+- `aggregate`, `proposal_id_start`, `proposal_id_end`, `aggregation_ids`, and `proofs` are not
+  accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
 - Unsupported proposal fork returns `400 unsupported_fork`.
 
@@ -224,21 +267,7 @@ Request:
   "l1_network": "ethereum",
   "proposal_id_start": 12345,
   "proposal_id_end": 12346,
-  "proof_type": "sp1",
-  "proofs": [
-    {
-      "proof": "0x...",
-      "input": "0x...",
-      "uuid": "...",
-      "extra_data": {}
-    },
-    {
-      "proof": "0x...",
-      "input": "0x...",
-      "uuid": "...",
-      "extra_data": {}
-    }
-  ]
+  "proof_type": "sp1"
 }
 ```
 
@@ -251,7 +280,6 @@ Request fields:
 | `proposal_id_start` | number | yes | First proposal ID covered by the aggregation. |
 | `proposal_id_end` | number | yes | Last proposal ID covered by the aggregation. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`. |
-| `proofs` | array | yes | Proposal proofs ordered by proposal ID. |
 
 Response:
 
@@ -272,20 +300,38 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
-| `data.task_id` | string | Root task ID. |
+| `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | object/null | Final aggregation proof payload when `data.status=completed`. |
+| `data.proof` | object/null | Final aggregation proof payload when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
+
+Polling and idempotency:
+
+- Clients may repeat the same `POST /v4/proof/aggregation` request to poll progress.
+- Repeated requests for the same `(network, l1_network, proposal_id_start, proposal_id_end,
+  proof_type)` return the existing root task and current status instead of registering duplicate work.
 
 Validation:
 
-- `proposal_id_start` and `proposal_id_end` define an inclusive range and must satisfy
+- `proposal_id_start` and `proposal_id_end` define an inclusive contiguous range and must satisfy
   `proposal_id_start <= proposal_id_end`.
-- `proofs.length` must equal `proposal_id_end - proposal_id_start + 1`.
-- `proofs` must be ordered by proposal ID, from `proposal_id_start` to `proposal_id_end`.
+- Proposal proofs for every proposal in the range must already exist in raiko2 local state for the
+  selected `proof_type`.
+- Each dependency is looked up by `(network, l1_network, proposal_id, proof_type)`.
+- All proposal proofs consumed by one aggregation request must use the requested `proof_type`.
+- Mixed-proof-type aggregation is not supported.
+- Missing or incomplete proposal proofs in the range return `409 dependency_not_ready`; the
+  aggregation endpoint does not register proposal proof work.
+- Unsupported aggregation fork returns `400 unsupported_fork`.
 - `aggregation_ids` is not accepted by the v4 aggregation request.
-- Required proof metadata follows the selected concrete backend.
+- `proofs` is not accepted by the v4 aggregation request.
+- `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`, `l2_block_number_start`,
+  `l2_block_number_end`, `last_anchor_block_number`, `checkpoint`, `prover`, and `blob_proof_type`
+  are not accepted by the v4 aggregation request.
 
 ### Query V4 Task
+
+Task lookup is an inspection/debugging endpoint. Taiko-client is expected to poll proposal and
+aggregation progress by repeating proof submission requests, not by calling this endpoint.
 
 ```http
 GET /v4/tasks/{id}
@@ -295,7 +341,7 @@ Path fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `id` | string | yes | Root task ID. |
+| `id` | string | yes | Opaque root task ID. |
 
 Response:
 
@@ -349,7 +395,7 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected for the task. |
-| `data.task_id` | string | Root task ID. |
+| `data.task_id` | string | Opaque root task ID. |
 | `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
 | `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
@@ -362,6 +408,8 @@ Response fields:
 | `data.proposals[].l2_block_number_start` | number | First L2 block number covered by the proposal. |
 | `data.proposals[].l2_block_number_end` | number | Last L2 block number covered by the proposal. |
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
+| `data.aggregate.proposal_id_start` | number | First proposal ID covered by the aggregation. |
+| `data.aggregate.proposal_id_end` | number | Last proposal ID covered by the aggregation. |
 | `data.proof` | object/string/null | Final root proof when completed. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
 | `data.proof_path` | string/null | Persisted proof artifact path. |
@@ -370,7 +418,9 @@ Response fields:
 Validation:
 
 - Unknown task ID returns `404 task_not_found`.
+- Unknown query parameters return `400 invalid_request`.
 - `l2_block_numbers` is not returned by the v4 task response.
+- `aggregation_ids` is not returned by the v4 task response.
 
 ### Query V4 Prover Status
 
@@ -402,6 +452,10 @@ Response fields:
 | --- | --- | --- |
 | `data.proof_type` | string | Concrete proof backend being reported. |
 | `data.clean` | boolean | True when the selected proof type has no non-terminal backlog. |
+
+Validation:
+
+- Unknown query parameters return `400 invalid_request`.
 
 ### Clear V4 Prover Backlog
 
@@ -443,6 +497,15 @@ Response fields:
 | --- | --- | --- |
 | `data.proof_type` | string | Concrete proof backend targeted by the clear operation. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
+
+Idempotency:
+
+- If the selected proof type has no non-terminal backlog, the response is `200 ok` with
+  `data.cancelled=0`.
+
+Validation:
+
+- Unknown request body fields return `400 invalid_request`.
 
 ## Submit Shasta Batch Proof
 

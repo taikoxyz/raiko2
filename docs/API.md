@@ -88,16 +88,17 @@ proof types are accepted.
 
 ## V4 Prover API Spec
 
-V4 is the explicit-proof-type interface for taiko-client RISC0-to-SP1 fallback. It keeps
-submission responses compatible with v3 and removes `zk_any` from the public interface.
+V4 is the complete explicit-proof-type interface for proposal proving, aggregation, task lookup,
+status, and clear operations. It does not accept `zk_any`; taiko-client owns fallback between
+concrete proof types.
 
-Initial v4 routes:
+V4 routes:
 
 - `POST /v4/proof/proposal`
+- `POST /v4/proof/aggregation`
+- `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
-
-Aggregation submission and task lookup stay on v3 until a v4 caller needs them.
 
 V4 success envelope:
 
@@ -114,11 +115,11 @@ V4 error envelope:
 {
   "status": "error",
   "error": "invalid_proof_type",
-  "message": "proof_type must be a concrete proof type"
+  "message": "proof_type must be one of: risc0, sp1"
 }
 ```
 
-Common request fields:
+Common proof submission fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -126,23 +127,15 @@ Common request fields:
 | `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`. |
 
-V4 prover arguments:
+Common proof-type validation:
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `prover_args` | object | no | Backend-specific prover options. |
-| `prover_args.sp1` | object | no | SP1 request-scoped overrides. Only valid when `proof_type=sp1`. |
-| `prover_args.sp1.prover` | string | no | SP1 prover mode override. |
-| `prover_args.sp1.mode` | string | no | SP1 execution mode override. |
-| `prover_args.sp1.recursion` | string | no | SP1 recursion mode override. |
-| `prover_args.sp1.cycle_limit` | number | no | SP1 cycle limit override. |
-| `prover_args.sp1.timeout_secs` | number | no | SP1 request timeout override. |
-| `prover_args.sp1.skip_simulation` | boolean | no | SP1 simulation skip override. |
-| `prover_args.sp1.max_price_per_pgu` | number | no | SP1 network prover price cap override. |
-| `prover_args.sp1.auction_timeout_secs` | number | no | SP1 network prover auction timeout override. |
+- Missing `proof_type` returns `400 missing_proof_type`.
+- `proof_type=zk_any` returns `400 invalid_proof_type`.
+- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
 
-`prover_args.native`, `prover_args.risc0`, `prover_args.sgx`, and `prover_args.sgxgeth`
-are reserved and rejected until those backends expose request-scoped options.
+Proof submission validation:
+
+- Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
 
 ### Submit Proposal Proof
 
@@ -184,7 +177,6 @@ Request fields:
 | `proof_type` | string | yes | One of `risc0`, `sp1`. |
 | `prover` | address | no | Designated prover address. |
 | `blob_proof_type` | string | no | Blob proof mode, when required by the selected fork. |
-| `prover_args` | object | no | Backend-specific prover options. |
 
 Response:
 
@@ -205,21 +197,180 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
-| `task_id` | string | Root task ID. |
-| `status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `proof` | object/null | Final proof payload when `data.status=completed`. |
+| `data.task_id` | string | Root task ID. |
+| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `data.proof` | object/null | Final proof payload when `data.status=completed`. |
 
 Validation:
 
-- `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
-- `prover_args` follows the v4 prover-argument rules above.
-- Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
 - `l2_block_number_start` and `l2_block_number_end` define an inclusive range and must satisfy
   `l2_block_number_start <= l2_block_number_end`.
 - `l2_block_numbers` is not accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
 - Unsupported proposal fork returns `400 unsupported_fork`.
+
+### Submit Aggregation Proof
+
+```http
+POST /v4/proof/aggregation
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "network": "taiko_mainnet",
+  "l1_network": "ethereum",
+  "proposal_id_start": 12345,
+  "proposal_id_end": 12346,
+  "proof_type": "sp1",
+  "proofs": [
+    {
+      "proof": "0x...",
+      "input": "0x...",
+      "uuid": "...",
+      "extra_data": {}
+    },
+    {
+      "proof": "0x...",
+      "input": "0x...",
+      "uuid": "...",
+      "extra_data": {}
+    }
+  ]
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
+| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
+| `proposal_id_start` | number | yes | First proposal ID covered by the aggregation. |
+| `proposal_id_end` | number | yes | Last proposal ID covered by the aggregation. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `proofs` | array | yes | Proposal proofs ordered by proposal ID. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "sp1",
+  "data": {
+    "task_id": "task_0x5678",
+    "status": "registered",
+    "proof": null
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend selected by the caller. |
+| `data.task_id` | string | Root task ID. |
+| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `data.proof` | object/null | Final aggregation proof payload when `data.status=completed`. |
+
+Validation:
+
+- `proposal_id_start` and `proposal_id_end` define an inclusive range and must satisfy
+  `proposal_id_start <= proposal_id_end`.
+- `proofs.length` must equal `proposal_id_end - proposal_id_start + 1`.
+- `proofs` must be ordered by proposal ID, from `proposal_id_start` to `proposal_id_end`.
+- `aggregation_ids` is not accepted by the v4 aggregation request.
+- Required proof metadata follows the selected concrete backend.
+
+### Query V4 Task
+
+```http
+GET /v4/tasks/{id}
+```
+
+Path fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | string | yes | Root task ID. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "risc0",
+  "data": {
+    "task_id": "task_0x1234",
+    "route": "risc0/network",
+    "prover_type": "network",
+    "execution_mode": "prove",
+    "status": "completed",
+    "network": "taiko_mainnet",
+    "l1_network": "ethereum",
+    "runtime": {
+      "runner_status": "completed",
+      "active_stage": "proposal",
+      "last_event": "completed",
+      "updated_at": 1742836800,
+      "engine_state_present": true
+    },
+    "current_index": null,
+    "proposals": [
+      {
+        "index": 0,
+        "proposal_id": 12345,
+        "checkpoint": null,
+        "task_id": "task_...",
+        "status": "completed",
+        "l1_inclusion_block_number": 100,
+        "l2_block_number_start": 200,
+        "l2_block_number_end": 201,
+        "last_anchor_block_number": 199,
+        "proof": "0x...",
+        "proof_ref": "proposal:...",
+        "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json"
+      }
+    ],
+    "aggregate": null,
+    "proof": "0x...",
+    "proof_ref": "proposal:...",
+    "proof_path": "cache/proofs/taiko_mainnet_ethereum/proposal_....json",
+    "error": null
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend selected for the task. |
+| `data.task_id` | string | Root task ID. |
+| `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
+| `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
+| `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
+| `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
+| `data.network` | string | L2 network key. |
+| `data.l1_network` | string | L1 network key. |
+| `data.runtime` | object/null | Persisted runtime snapshot. |
+| `data.current_index` | number/null | Current proposal index for multi-proposal roots. |
+| `data.proposals` | array | Proposal task views. |
+| `data.proposals[].l2_block_number_start` | number | First L2 block number covered by the proposal. |
+| `data.proposals[].l2_block_number_end` | number | Last L2 block number covered by the proposal. |
+| `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
+| `data.proof` | object/string/null | Final root proof when completed. |
+| `data.proof_ref` | string/null | Stable persisted proof reference. |
+| `data.proof_path` | string/null | Persisted proof artifact path. |
+| `data.error` | object/string/null | Terminal error detail when failed. |
+
+Validation:
+
+- Unknown task ID returns `404 task_not_found`.
+- `l2_block_numbers` is not returned by the v4 task response.
 
 ### Query V4 Prover Status
 
@@ -249,14 +400,8 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `proof_type` | string | Concrete proof backend being reported. |
-| `clean` | boolean | True when the selected proof type has no non-terminal backlog. |
-
-Validation:
-
-- Missing `proof_type` returns `400 missing_proof_type`.
-- `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
+| `data.proof_type` | string | Concrete proof backend being reported. |
+| `data.clean` | boolean | True when the selected proof type has no non-terminal backlog. |
 
 ### Clear V4 Prover Backlog
 
@@ -296,14 +441,8 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `proof_type` | string | Concrete proof backend targeted by the clear operation. |
-| `cancelled` | number | Non-terminal root tasks cancelled. |
-
-Validation:
-
-- Missing `proof_type` returns `400 missing_proof_type`.
-- `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
+| `data.proof_type` | string | Concrete proof backend targeted by the clear operation. |
+| `data.cancelled` | number | Non-terminal root tasks cancelled. |
 
 ## Submit Shasta Batch Proof
 

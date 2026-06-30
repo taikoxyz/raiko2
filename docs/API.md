@@ -89,8 +89,9 @@ proof types are accepted.
 ## V4 Prover API Spec
 
 V4 is the complete explicit-proof-type interface for proposal proving, aggregation, task lookup,
-status, and clear operations. It does not accept `zk_any`; callers must choose a concrete proof type
-for each request.
+status, and clear operations. A raiko2 instance serves one configured chain environment, so v4
+requests do not carry chain-selection fields. V4 does not accept `zk_any`; callers must choose a
+concrete proof type for each request.
 
 V4 routes:
 
@@ -135,7 +136,6 @@ V4 error codes:
 | `missing_proof_type` | 400 | `proof_type` is required. |
 | `invalid_proof_type` | 400 | `zk_any` or another policy proof type was requested. |
 | `unsupported_proof_type` | 400 | The concrete proof type is not supported by v4. |
-| `invalid_network_pair` | 400 | `(network, l1_network)` is not configured. |
 | `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
 | `unsupported_fork` | 400 | The selected proposal or aggregation fork is not supported. |
 | `task_not_found` | 404 | The task ID does not exist. |
@@ -146,8 +146,6 @@ Common proof submission fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
-| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`. |
 
 Common proof-type validation:
@@ -158,7 +156,6 @@ Common proof-type validation:
 
 Proof submission validation:
 
-- Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
 - Proof submission request bodies are endpoint-specific. Legacy v3 batch fields or fields owned by
   another v4 proof endpoint return `400 invalid_request`.
 - Unknown request body fields return `400 invalid_request`.
@@ -180,8 +177,6 @@ Request:
 
 ```json
 {
-  "network": "taiko_mainnet",
-  "l1_network": "ethereum",
   "proposal_id": 12345,
   "l1_inclusion_block_number": 100,
   "l2_block_number_start": 200,
@@ -189,8 +184,7 @@ Request:
   "last_anchor_block_number": 199,
   "checkpoint": null,
   "proof_type": "risc0",
-  "prover": "0x0000000000000000000000000000000000000000",
-  "blob_proof_type": "proof_of_equivalence"
+  "prover": "0x0000000000000000000000000000000000000000"
 }
 ```
 
@@ -198,8 +192,6 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
-| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `proposal_id` | number | yes | Taiko proposal ID to prove. |
 | `l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
 | `l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
@@ -208,7 +200,6 @@ Request fields:
 | `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`. |
 | `prover` | address | no | Designated prover address. |
-| `blob_proof_type` | string | no | Blob proof mode, when required by the selected fork. |
 
 Response:
 
@@ -236,8 +227,8 @@ Response fields:
 Polling and idempotency:
 
 - Clients may repeat the same `POST /v4/proof/proposal` request to poll progress.
-- Repeated requests for the same `(network, l1_network, proposal_id, proof_type)` return the
-  existing root task and current status instead of registering duplicate work.
+- Repeated requests for the same `(proposal_id, proof_type)` return the existing root task and
+  current status instead of registering duplicate work.
 - Repeated requests whose proof-input fields conflict with the existing root task return
   `409 request_conflict`.
 
@@ -247,8 +238,8 @@ Validation:
   `l2_block_number_start <= l2_block_number_end`.
 - `proposals` is not accepted by the v4 proposal request.
 - `l2_block_numbers` is not accepted by the v4 proposal request.
-- `aggregate`, `proposal_id_start`, `proposal_id_end`, `aggregation_ids`, and `proofs` are not
-  accepted by the v4 proposal request.
+- `network`, `l1_network`, `blob_proof_type`, `aggregate`, `proposal_id_start`, `proposal_id_end`,
+  `aggregation_ids`, and `proofs` are not accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
 - Unsupported proposal fork returns `400 unsupported_fork`.
 
@@ -263,8 +254,6 @@ Request:
 
 ```json
 {
-  "network": "taiko_mainnet",
-  "l1_network": "ethereum",
   "proposal_id_start": 12345,
   "proposal_id_end": 12346,
   "proof_type": "sp1"
@@ -275,8 +264,6 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
-| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `proposal_id_start` | number | yes | First proposal ID covered by the aggregation. |
 | `proposal_id_end` | number | yes | Last proposal ID covered by the aggregation. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`. |
@@ -307,8 +294,8 @@ Response fields:
 Polling and idempotency:
 
 - Clients may repeat the same `POST /v4/proof/aggregation` request to poll progress.
-- Repeated requests for the same `(network, l1_network, proposal_id_start, proposal_id_end,
-  proof_type)` return the existing root task and current status instead of registering duplicate work.
+- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
+  existing root task and current status instead of registering duplicate work.
 
 Validation:
 
@@ -316,7 +303,7 @@ Validation:
   `proposal_id_start <= proposal_id_end`.
 - Proposal proofs for every proposal in the range must already exist in raiko2 local state for the
   selected `proof_type`.
-- Each dependency is looked up by `(network, l1_network, proposal_id, proof_type)`.
+- Each dependency is looked up by `(proposal_id, proof_type)`.
 - All proposal proofs consumed by one aggregation request must use the requested `proof_type`.
 - Mixed-proof-type aggregation is not supported.
 - Missing or incomplete proposal proofs in the range return `409 dependency_not_ready`; the
@@ -324,9 +311,9 @@ Validation:
 - Unsupported aggregation fork returns `400 unsupported_fork`.
 - `aggregation_ids` is not accepted by the v4 aggregation request.
 - `proofs` is not accepted by the v4 aggregation request.
-- `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`, `l2_block_number_start`,
-  `l2_block_number_end`, `last_anchor_block_number`, `checkpoint`, `prover`, and `blob_proof_type`
-  are not accepted by the v4 aggregation request.
+- `network`, `l1_network`, `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`,
+  `l2_block_number_start`, `l2_block_number_end`, `last_anchor_block_number`, `checkpoint`,
+  `prover`, and `blob_proof_type` are not accepted by the v4 aggregation request.
 
 ### Query V4 Task
 
@@ -355,8 +342,6 @@ Response:
     "prover_type": "network",
     "execution_mode": "prove",
     "status": "completed",
-    "network": "taiko_mainnet",
-    "l1_network": "ethereum",
     "runtime": {
       "runner_status": "completed",
       "active_stage": "proposal",
@@ -400,8 +385,6 @@ Response fields:
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
 | `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
 | `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
-| `data.network` | string | L2 network key. |
-| `data.l1_network` | string | L1 network key. |
 | `data.runtime` | object/null | Persisted runtime snapshot. |
 | `data.current_index` | number/null | Current proposal index for multi-proposal roots. |
 | `data.proposals` | array | Proposal task views. |

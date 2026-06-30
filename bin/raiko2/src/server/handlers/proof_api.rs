@@ -1,7 +1,7 @@
 use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -40,7 +40,9 @@ use super::proof_types::{
     CanonicalProposal, ClearProverStatus, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
     LegacyTaskStatus, ProposalStatus, ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus,
     ProverTaskStatusCounts, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState,
-    ShastaProposal, TaskData, TaskRuntime,
+    ShastaProposal, TaskData, TaskRuntime, V4AggregationRequest, V4AggregationTaskData,
+    V4ApiErrorBody, V4ProofTaskData, V4ProofType, V4ProposalRequest, V4ProverClearRequest,
+    V4ProverStatusQuery,
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
@@ -58,6 +60,8 @@ use crate::server::task_metadata::{
     stage_task_ref,
 };
 use crate::server::telemetry::{self, MetricContext};
+
+const V4_MAX_RANGE_LEN: u64 = 100_000;
 
 #[derive(Clone)]
 struct CanonicalBatchSubmission {
@@ -120,6 +124,142 @@ struct TaskLookup {
     record: raiko2_runtime::RuntimeTaskRecord,
     metadata: TaskMetadata,
     engine: Arc<dyn EngineHandle>,
+}
+
+#[derive(Clone, Copy)]
+enum ProverTaskScope {
+    ZkAny,
+    ProofType(BatchProofType),
+}
+
+impl ProverTaskScope {
+    fn matches(self, metadata: &TaskMetadata) -> bool {
+        match self {
+            Self::ZkAny => is_zk_any_metadata(metadata),
+            Self::ProofType(proof_type) => {
+                metadata.requested_proof_type.as_deref() == Some(proof_type.as_str())
+            }
+        }
+    }
+}
+
+fn v4_collect_inclusive_range(
+    start: u64,
+    end: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<Vec<u64>, V4ApiError> {
+    if end < start {
+        return Err(V4ApiError::invalid_request(format!(
+            "{end_field} must be greater than or equal to {start_field}"
+        )));
+    }
+
+    let len = end - start + 1;
+    if len > V4_MAX_RANGE_LEN {
+        return Err(V4ApiError::invalid_request(format!(
+            "{start_field}..={end_field} range length {len} exceeds maximum {V4_MAX_RANGE_LEN}"
+        )));
+    }
+
+    Ok((start..=end).collect())
+}
+
+#[derive(Debug)]
+pub(crate) struct V4ApiError {
+    status: StatusCode,
+    error: &'static str,
+    message: String,
+}
+
+impl V4ApiError {
+    fn new(status: StatusCode, error: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            error,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
+    }
+
+    fn unsupported_proof_type(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "unsupported_proof_type", message)
+    }
+
+    fn request_conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "request_conflict", message)
+    }
+
+    fn dependency_not_ready(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "dependency_not_ready", message)
+    }
+
+    fn task_not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "task_not_found", message)
+    }
+
+    fn from_json_rejection(err: &JsonRejection) -> Self {
+        let message = err.to_string();
+        if message.contains("missing field `proof_type`") {
+            Self::new(
+                StatusCode::BAD_REQUEST,
+                "missing_proof_type",
+                "missing required field `proof_type`",
+            )
+        } else if message.contains("unknown variant") && message.contains("proof_type") {
+            Self::new(StatusCode::BAD_REQUEST, "invalid_proof_type", message)
+        } else {
+            Self::invalid_request(message)
+        }
+    }
+
+    fn from_query_rejection(err: &QueryRejection) -> Self {
+        let message = err.to_string();
+        if message.contains("missing field `proof_type`") {
+            Self::new(
+                StatusCode::BAD_REQUEST,
+                "missing_proof_type",
+                "missing required query parameter `proof_type`",
+            )
+        } else if message.contains("unknown variant") && message.contains("proof_type") {
+            Self::new(StatusCode::BAD_REQUEST, "invalid_proof_type", message)
+        } else {
+            Self::invalid_request(message)
+        }
+    }
+
+    fn from_api_error(err: ApiError) -> Self {
+        let code = match err.status {
+            StatusCode::BAD_REQUEST
+                if err.message.contains("proof_type=") && err.message.contains("not supported") =>
+            {
+                "unsupported_proof_type"
+            }
+            StatusCode::BAD_REQUEST => "invalid_request",
+            StatusCode::NOT_FOUND => "task_not_found",
+            StatusCode::CONFLICT => "request_conflict",
+            StatusCode::SERVICE_UNAVAILABLE => "unsupported_proof_type",
+            _ => "internal_error",
+        };
+        Self::new(err.status, code, err.message)
+    }
+}
+
+impl IntoResponse for V4ApiError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(V4ApiErrorBody {
+                status: "error",
+                error: self.error,
+                message: self.message,
+            }),
+        )
+            .into_response()
+    }
 }
 
 #[derive(Clone)]
@@ -197,7 +337,7 @@ async fn request_batch_shasta_proof_inner(
 
     match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
         TaskRegistrationOutcome::Existing(existing) => {
-            handle_existing_batch_task(&state, &submission, existing).await
+            handle_existing_batch_task(&state, &submission, existing, None).await
         }
         TaskRegistrationOutcome::Created(_) => {
             handle_created_batch_task(&state, &submission, &plan).await
@@ -253,6 +393,45 @@ async fn request_aggregation_proof_inner(
     }
 }
 
+pub async fn v4_request_proposal_proof(
+    State(state): State<AppState>,
+    req: Result<Json<V4ProposalRequest>, JsonRejection>,
+) -> Result<Json<ApiOk<V4ProofTaskData>>, V4ApiError> {
+    let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
+    let proof_type = req.proof_type;
+    let submission = v4_proposal_submission(&state, &req)?;
+    let request_fingerprint = v4_proposal_request_fingerprint(&submission)?;
+    submit_v4_submission(&state, &submission, &request_fingerprint).await?;
+    let data = load_task_data(&state, &submission.public_task_id)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    Ok(Json(ApiOk {
+        status: "ok",
+        proof_type: proof_type.as_str().to_string(),
+        data: v4_proposal_task_data(&state, data).await?,
+    }))
+}
+
+pub async fn v4_request_aggregation_proof(
+    State(state): State<AppState>,
+    req: Result<Json<V4AggregationRequest>, JsonRejection>,
+) -> Result<Json<ApiOk<V4AggregationTaskData>>, V4ApiError> {
+    let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
+    let proof_type = req.proof_type;
+    let proposal_id_start = req.proposal_id_start;
+    let proposal_id_end = req.proposal_id_end;
+    let submission = v4_aggregation_submission(&state, req).await?;
+    submit_v4_external_aggregation(&state, &submission).await?;
+    let data = load_task_data(&state, &submission.public_task_id)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    Ok(Json(ApiOk {
+        status: "ok",
+        proof_type: proof_type.as_str().to_string(),
+        data: v4_aggregation_task_data(&state, data, proposal_id_start, proposal_id_end).await?,
+    }))
+}
+
 pub async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -263,6 +442,64 @@ pub async fn get_task(
     Ok(Json(ApiOk {
         status: "ok",
         proof_type: lookup.metadata.proof_type.to_string(),
+        data,
+    }))
+}
+
+pub async fn v4_get_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiData<TaskData>>, V4ApiError> {
+    let data = load_task_data(&state, &id)
+        .await
+        .map_err(|err| match err.status {
+            StatusCode::NOT_FOUND => V4ApiError::task_not_found(err.message),
+            _ => V4ApiError::from_api_error(err),
+        })?;
+    Ok(Json(ApiData { status: "ok", data }))
+}
+
+pub async fn v4_get_prover_status(
+    State(state): State<AppState>,
+    query: Result<Query<V4ProverStatusQuery>, QueryRejection>,
+) -> Result<Json<ApiOk<ProverStatus>>, V4ApiError> {
+    let Query(query) = query.map_err(|err| V4ApiError::from_query_rejection(&err))?;
+    let (tasks, network, skipped) = collect_prover_status(
+        &state,
+        ProverTaskScope::ProofType(v4_batch_proof_type(query.proof_type)),
+    )
+    .await
+    .map_err(V4ApiError::from_api_error)?;
+    let data = ProverStatus {
+        clean: tasks.is_clean() && network.is_clean() && skipped.is_clean(),
+        tasks,
+        network,
+        skipped,
+    };
+    Ok(Json(ApiOk {
+        status: "ok",
+        proof_type: query.proof_type.as_str().to_string(),
+        data,
+    }))
+}
+
+pub async fn v4_clear_prover(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Result<Json<V4ProverClearRequest>, JsonRejection>,
+) -> Result<Json<ApiOk<ClearProverStatus>>, V4ApiError> {
+    let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
+    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)
+        .map_err(V4ApiError::from_api_error)?;
+    let data = clear_prover_tasks(
+        &state,
+        ProverTaskScope::ProofType(v4_batch_proof_type(req.proof_type)),
+    )
+    .await
+    .map_err(V4ApiError::from_api_error)?;
+    Ok(Json(ApiOk {
+        status: "ok",
+        proof_type: req.proof_type.as_str().to_string(),
         data,
     }))
 }
@@ -305,7 +542,7 @@ pub async fn cancel_task(
 pub async fn get_prover_status(
     State(state): State<AppState>,
 ) -> Result<Json<ApiData<ProverStatus>>, ApiError> {
-    let (tasks, network, skipped) = collect_prover_status(&state).await?;
+    let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny).await?;
     Ok(Json(ApiData {
         status: "ok",
         data: ProverStatus {
@@ -1117,13 +1354,16 @@ async fn register_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     aggregate: &PlannedAggregateTask,
 ) -> Result<TaskRegistrationOutcome, ApiError> {
+    let requested_proof_type = submission.route.proof_type();
+    let requested_proof_type = requested_proof_type.to_string();
     let mut metadata = build_task_metadata(
         &submission.pair,
         BuildTaskMetadataParams {
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
-            requested_proof_type: None,
+            // Runtime metadata is persisted as strings, but the request path keeps proof type typed.
+            requested_proof_type: Some(&requested_proof_type),
             prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
@@ -1303,6 +1543,7 @@ async fn handle_existing_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
+    replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
     info!(
         "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, proof_type={}, prover_type={}, pair={}",
@@ -1323,8 +1564,14 @@ async fn handle_existing_batch_task(
             return Ok(response);
         }
         if existing.pipeline_key != submission.route.pipeline_key() {
-            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
-                .await;
+            return replace_existing_batch_task(
+                state,
+                submission,
+                &existing,
+                &existing_metadata,
+                replacement_request_fingerprint,
+            )
+            .await;
         }
         if let Err(err) = recover_existing_task(state, &existing, || {
             reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata)
@@ -1338,8 +1585,14 @@ async fn handle_existing_batch_task(
                 error = %err.message,
                 "failed to recover reenqueueable task; replacing from scratch"
             );
-            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
-                .await;
+            return replace_existing_batch_task(
+                state,
+                submission,
+                &existing,
+                &existing_metadata,
+                None,
+            )
+            .await;
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
@@ -1350,8 +1603,11 @@ async fn replace_existing_batch_task(
     submission: &CanonicalBatchSubmission,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
+    replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
-    let request_fingerprint = batch_request_fingerprint(submission)?;
+    let request_fingerprint = replacement_request_fingerprint
+        .map(ToOwned::to_owned)
+        .map_or_else(|| batch_request_fingerprint(submission), Ok)?;
     let plan =
         build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
     cleanup_stale_root_before_replacement(state, existing, existing_metadata).await;
@@ -2047,6 +2303,7 @@ async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError>
 
 async fn collect_prover_status(
     state: &AppState,
+    scope: ProverTaskScope,
 ) -> Result<
     (
         ProverTaskStatusCounts,
@@ -2081,7 +2338,7 @@ async fn collect_prover_status(
                 continue;
             }
         };
-        if !is_zk_any_metadata(&metadata) {
+        if !scope.matches(&metadata) {
             continue;
         }
 
@@ -2134,6 +2391,111 @@ async fn collect_prover_status(
     }
 
     Ok((tasks, network, skipped))
+}
+
+async fn clear_prover_tasks(
+    state: &AppState,
+    scope: ProverTaskScope,
+) -> Result<ClearProverStatus, ApiError> {
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+    let mut status = ClearProverStatus {
+        status: "ok",
+        cancelled: 0,
+        failed: 0,
+        skipped: ProverSkippedStatusCounts::default(),
+    };
+
+    for record in records {
+        if is_terminal_runtime_status(record.runner_status) {
+            continue;
+        }
+
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                status.skipped.invalid_metadata = status.skipped.invalid_metadata.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping prover clear record with invalid metadata"
+                );
+                continue;
+            }
+        };
+
+        if !scope.matches(&metadata) {
+            continue;
+        }
+        if metadata.has_remote_submission_progress() {
+            status.skipped.remote_progress = status.skipped.remote_progress.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                "skipping prover clear record with remote submission progress"
+            );
+            continue;
+        }
+
+        let cancelled = match state
+            .runtime
+            .cancel_nonterminal_task(&record.task_id, None)
+            .await
+        {
+            Ok(cancelled) => cancelled,
+            Err(err) => {
+                status.failed = status.failed.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "failed to sync prover clear cancellation"
+                );
+                continue;
+            }
+        };
+        if !cancelled {
+            continue;
+        }
+        status.cancelled = status.cancelled.saturating_add(1);
+
+        let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
+            Ok(engine) => engine,
+            Err(err) if err.status == StatusCode::NOT_FOUND => {
+                status.skipped.unavailable_pipeline =
+                    status.skipped.unavailable_pipeline.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    network_pair = %metadata.network_pair,
+                    pipeline = %record.pipeline_key,
+                    error = %err.message,
+                    "skipping prover clear record with unavailable pipeline"
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+
+        if let Err(err) = cancel_registered_tasks(
+            &state.runtime,
+            &engine,
+            &record.task_id,
+            record.pipeline_key,
+            &metadata,
+        )
+        .await
+        {
+            status.failed = status.failed.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed to cancel prover record"
+            );
+        }
+    }
+
+    Ok(status)
 }
 
 type ProverQueueKey = (String, PipelineKey);
@@ -2729,6 +3091,354 @@ fn external_aggregate_request_fingerprint(
         ))
     })?;
     Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+}
+
+const fn v4_batch_proof_type(proof_type: V4ProofType) -> BatchProofType {
+    match proof_type {
+        V4ProofType::Risc0 => BatchProofType::Risc0,
+        V4ProofType::Sp1 => BatchProofType::Sp1,
+    }
+}
+
+fn v4_proposal_task_id(proof_type: V4ProofType, proposal_id: u64) -> String {
+    format!("v4:proposal:{}:{proposal_id}", proof_type.as_str())
+}
+
+fn v4_aggregation_task_id(
+    proof_type: V4ProofType,
+    proposal_id_start: u64,
+    proposal_id_end: u64,
+) -> String {
+    format!(
+        "v4:aggregation:{}:{proposal_id_start}:{proposal_id_end}",
+        proof_type.as_str()
+    )
+}
+
+fn v4_proposal_submission(
+    state: &AppState,
+    req: &V4ProposalRequest,
+) -> Result<CanonicalBatchSubmission, V4ApiError> {
+    let proof_type = req.proof_type;
+    let proposal_id = req.proposal_id;
+    let l2_block_numbers = v4_collect_inclusive_range(
+        req.l2_block_number_start,
+        req.l2_block_number_end,
+        "l2_block_number_start",
+        "l2_block_number_end",
+    )?;
+    let batch_req = BatchShastaRequest {
+        proposals: vec![ShastaProposal {
+            proposal_id,
+            checkpoint: req.checkpoint,
+            l1_inclusion_block_number: req.l1_inclusion_block_number,
+            l2_block_numbers,
+            last_anchor_block_number: req.last_anchor_block_number,
+        }],
+        proof_type: v4_batch_proof_type(proof_type),
+        aggregate: false,
+        prover: req.prover.map(|addr| addr.to_string()),
+        network: None,
+        l1_network: None,
+        blob_proof_type: None,
+        graffiti: None,
+        prover_args: PublicProverArgs::default(),
+    };
+
+    let mut submission = build_canonical_batch_submission(state, batch_req)
+        .map_err(V4ApiError::from_api_error)?
+        .ok_or_else(|| V4ApiError::unsupported_proof_type("proof type was not selected"))?;
+    submission.public_task_id = v4_proposal_task_id(proof_type, proposal_id);
+    Ok(submission)
+}
+
+async fn v4_aggregation_submission(
+    state: &AppState,
+    req: V4AggregationRequest,
+) -> Result<ExternalAggregateSubmission, V4ApiError> {
+    let proof_type = req.proof_type;
+    let aggregation_ids = v4_collect_inclusive_range(
+        req.proposal_id_start,
+        req.proposal_id_end,
+        "proposal_id_start",
+        "proposal_id_end",
+    )?;
+    let mut proofs = Vec::with_capacity(aggregation_ids.len());
+    for proposal_id in &aggregation_ids {
+        proofs.push(
+            v4_local_proposal_proof(state, proof_type, *proposal_id)
+                .await?
+                .proof,
+        );
+    }
+
+    let aggregate_req = AggregateProofRequest {
+        aggregation_ids,
+        proofs,
+        proof_type: v4_batch_proof_type(proof_type),
+        network: None,
+        l1_network: None,
+        graffiti: None,
+        prover: None,
+        blob_proof_type: None,
+        prover_args: PublicProverArgs::default(),
+    };
+    let mut submission = build_external_aggregate_submission(state, aggregate_req)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    submission.public_task_id =
+        v4_aggregation_task_id(proof_type, req.proposal_id_start, req.proposal_id_end);
+    Ok(submission)
+}
+
+async fn v4_local_proposal_proof(
+    state: &AppState,
+    proof_type: V4ProofType,
+    proposal_id: u64,
+) -> Result<ProofArtifactMaterial, V4ApiError> {
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| V4ApiError::from_api_error(ApiError::internal(err.to_string())))?;
+
+    for record in records {
+        let Ok(metadata) = parse_task_metadata(&record) else {
+            continue;
+        };
+        if metadata.requested_proof_type.as_deref() != Some(proof_type.as_str()) {
+            continue;
+        }
+
+        for proposal in &metadata.proposals {
+            let Some(request) = proposal.request.as_ref() else {
+                continue;
+            };
+            if request.proposal_id != proposal_id {
+                continue;
+            }
+            let material = load_proof_artifact_material(
+                &state.runtime,
+                &metadata.network_pair,
+                &proposal.task_id,
+            )
+            .await
+            .map_err(|err| {
+                V4ApiError::from_api_error(ApiError::internal(format!(
+                    "failed to load proposal proof artifact: {err}"
+                )))
+            })?;
+            if let Some(material) = material {
+                return Ok(material);
+            }
+        }
+    }
+
+    Err(V4ApiError::dependency_not_ready(format!(
+        "proposal proof {proposal_id} for proof_type={} is not completed in local state",
+        proof_type.as_str()
+    )))
+}
+
+fn v4_proposal_request_fingerprint(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, V4ApiError> {
+    let payload = serde_json::json!({
+        "api": "v4/proof/proposal",
+        "network_pair": submission.pair.key,
+        "route": submission.route.route.to_string(),
+        "requested_proof_type": submission.requested_proof_type.as_str(),
+        "prover_type": submission.prover_type.map(ProverType::as_str),
+        "prover": submission.prover.as_deref(),
+        "proposals": submission.proposals,
+        "aggregate_requested": submission.aggregate_requested,
+    });
+    let encoded = serde_json::to_vec(&payload).map_err(|err| {
+        V4ApiError::invalid_request(format!("failed to serialize request: {err}"))
+    })?;
+    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+}
+
+async fn submit_v4_submission(
+    state: &AppState,
+    submission: &CanonicalBatchSubmission,
+    request_fingerprint: &str,
+) -> Result<(), V4ApiError> {
+    if let Some(existing) = state
+        .runtime
+        .get_task(&submission.public_task_id)
+        .await
+        .map_err(|err| V4ApiError::from_api_error(ApiError::internal(err.to_string())))?
+    {
+        if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+            return Err(V4ApiError::request_conflict(
+                "same proof task key was submitted with different proof input",
+            ));
+        }
+        handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
+            .await
+            .map_err(V4ApiError::from_api_error)?;
+        return Ok(());
+    }
+
+    let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    register_batch_task(state, submission, &plan, request_fingerprint)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    handle_created_batch_task(state, submission, &plan)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    Ok(())
+}
+
+async fn submit_v4_external_aggregation(
+    state: &AppState,
+    submission: &ExternalAggregateSubmission,
+) -> Result<(), V4ApiError> {
+    if let Some(existing) = state
+        .runtime
+        .get_task(&submission.public_task_id)
+        .await
+        .map_err(|err| V4ApiError::from_api_error(ApiError::internal(err.to_string())))?
+    {
+        if existing.request_fingerprint.as_deref() != Some(submission.request_fingerprint.as_str())
+        {
+            return Err(V4ApiError::request_conflict(
+                "same aggregation task key was submitted with different proof input",
+            ));
+        }
+        let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())
+            .map_err(V4ApiError::from_api_error)?;
+        handle_existing_external_aggregate_task(state, &engine, submission, existing)
+            .await
+            .map_err(V4ApiError::from_api_error)?;
+        return Ok(());
+    }
+
+    let aggregate = PlannedAggregateTask {
+        task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
+        task_id: submission.task_id.clone(),
+        request: submission.request.clone(),
+    };
+    let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())
+        .map_err(V4ApiError::from_api_error)?;
+    register_external_aggregate_task(state, submission, &aggregate)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    handle_created_external_aggregate_task(state, &engine, submission, &aggregate)
+        .await
+        .map_err(V4ApiError::from_api_error)?;
+    Ok(())
+}
+
+async fn v4_proposal_task_data(
+    state: &AppState,
+    data: TaskData,
+) -> Result<V4ProofTaskData, V4ApiError> {
+    let proposal =
+        data.proposals.into_iter().next().ok_or_else(|| {
+            V4ApiError::invalid_request("proposal task did not contain a proposal")
+        })?;
+    let proof = v4_proof_from_status(
+        state,
+        &data.task_id,
+        &proposal.status,
+        proposal.proof_ref.as_deref(),
+        "proposal",
+    )
+    .await?;
+    Ok(V4ProofTaskData {
+        task_id: data.task_id,
+        route: data.route,
+        prover_type: data.prover_type,
+        status: proof_status_string(&proposal.status),
+        proof,
+    })
+}
+
+async fn v4_aggregation_task_data(
+    state: &AppState,
+    data: TaskData,
+    proposal_id_start: u64,
+    proposal_id_end: u64,
+) -> Result<V4AggregationTaskData, V4ApiError> {
+    let aggregate = data.aggregate.ok_or_else(|| {
+        V4ApiError::invalid_request("aggregation task did not contain aggregate data")
+    })?;
+    let proof = v4_proof_from_status(
+        state,
+        &data.task_id,
+        &aggregate.status,
+        aggregate.proof_ref.as_deref(),
+        "aggregation",
+    )
+    .await?;
+    Ok(V4AggregationTaskData {
+        task_id: data.task_id,
+        route: data.route,
+        prover_type: data.prover_type,
+        status: proof_status_string(&aggregate.status),
+        proof,
+        proposal_id_start,
+        proposal_id_end,
+    })
+}
+
+async fn v4_proof_from_status(
+    state: &AppState,
+    task_id: &str,
+    status: &ProofStatus,
+    proof_ref: Option<&str>,
+    task_kind: &'static str,
+) -> Result<Option<Proof>, V4ApiError> {
+    match (matches!(status, ProofStatus::Completed), proof_ref) {
+        (false, _) => Ok(None),
+        (true, None) => Err(V4ApiError::from_api_error(ApiError::internal(format!(
+            "completed {task_kind} task is missing proof artifact reference"
+        )))),
+        (true, Some(proof_ref)) => {
+            let record = state
+                .runtime
+                .get_task(task_id)
+                .await
+                .map_err(|err| {
+                    V4ApiError::from_api_error(ApiError::internal(format!(
+                        "failed to load task metadata: {err}"
+                    )))
+                })?
+                .ok_or_else(|| {
+                    V4ApiError::from_api_error(ApiError::internal(format!(
+                        "completed {task_kind} task was not found: {task_id}"
+                    )))
+                })?;
+            let metadata = parse_task_metadata(&record).map_err(V4ApiError::from_api_error)?;
+            // TaskData.proof is only a legacy status string. V4 responses must load the persisted
+            // artifact so optional fields such as quote, uuid, and kzg_proof are preserved.
+            let material =
+                load_proof_artifact_material(&state.runtime, &metadata.network_pair, proof_ref)
+                    .await
+                    .map_err(|err| {
+                        V4ApiError::from_api_error(ApiError::internal(format!(
+                            "failed to load completed {task_kind} proof artifact: {err}"
+                        )))
+                    })?
+                    .ok_or_else(|| {
+                        V4ApiError::from_api_error(ApiError::internal(format!(
+                            "completed {task_kind} proof artifact not found: {proof_ref}"
+                        )))
+                    })?;
+            Ok(Some(material.proof))
+        }
+    }
+}
+
+fn proof_status_string(status: &ProofStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{status:?}"))
 }
 
 fn aggregate_request_id(request_fingerprint: &str) -> String {
@@ -3652,7 +4362,7 @@ mod tests {
         .await?;
 
         let state = test_state_with_engines(runtime, Vec::new());
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3694,7 +4404,7 @@ mod tests {
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (_, network, skipped) = collect_prover_status(&state)
+        let (_, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3727,7 +4437,7 @@ mod tests {
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3770,7 +4480,7 @@ mod tests {
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3824,7 +4534,7 @@ mod tests {
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -4177,7 +4887,7 @@ mod tests {
         runtime.upsert_task(&record).await?;
         let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
 
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -4215,7 +4925,7 @@ mod tests {
         .await?;
         let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
 
-        let response = handle_existing_batch_task(&state, &submission, record.clone())
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
             .await
             .map_err(|err| anyhow::anyhow!(err.message))?;
 
@@ -4309,7 +5019,7 @@ mod tests {
         record.request_fingerprint = Some(request_fingerprint);
         runtime.upsert_task(&record).await?;
 
-        let response = handle_existing_batch_task(&state, &submission, record)
+        let response = handle_existing_batch_task(&state, &submission, record, None)
             .await
             .map_err(|err| anyhow!(err.message))?;
         let response = read_json_response(response).await;
@@ -4764,6 +5474,59 @@ mod tests {
                 .expect("stored aggregate input proof");
         assert_eq!(stored.proof, proof);
         Ok(())
+    }
+
+    #[test]
+    fn v4_collect_inclusive_range_rejects_oversized_ranges() {
+        let err = v4_collect_inclusive_range(
+            1,
+            V4_MAX_RANGE_LEN + 1,
+            "l2_block_number_start",
+            "l2_block_number_end",
+        )
+        .expect_err("oversized range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.error, "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn v4_completed_proof_response_preserves_full_artifact() {
+        let runtime = Arc::new(
+            RuntimeManager::new(unique_test_runtime_root("v4-full-proof-artifact"))
+                .expect("runtime manager"),
+        );
+        let state = test_state(
+            runtime.clone(),
+            Arc::new(RecordingEngine::new(PipelineKey::ShastaRisc0)),
+        );
+        let task_id = "v4-completed-proof-task";
+        let proof_ref = "v4-completed-proof-ref";
+        let mut proof = valid_native_proof();
+        proof.quote = Some("0xquote".to_string());
+        proof.uuid = Some("uuid-1".to_string());
+        proof.kzg_proof = Some("0xkzg".to_string());
+        write_test_proof_artifact(&runtime, "taiko_dev/ethereum", proof_ref, &proof)
+            .await
+            .expect("write proof artifact");
+
+        let metadata = task_metadata_with_stage(Some("proposal"));
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        record.task_id = task_id.to_string();
+        runtime.upsert_task(&record).await.expect("persist task");
+
+        let returned = v4_proof_from_status(
+            &state,
+            task_id,
+            &ProofStatus::Completed,
+            Some(proof_ref),
+            "proposal",
+        )
+        .await
+        .expect("load v4 proof")
+        .expect("completed proof");
+
+        assert_eq!(returned, proof);
     }
 
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {

@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use raiko2_primitives::{Proof, ShastaCheckpoint};
 use raiko2_prover::sp1_config::Sp1ConfigOverrides;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
@@ -129,6 +130,84 @@ pub(crate) struct ApiOk<T> {
 pub(crate) struct ApiData<T> {
     pub(crate) status: &'static str,
     pub(crate) data: T,
+}
+
+#[derive(Serialize)]
+pub(crate) struct V4ApiErrorBody {
+    pub(crate) status: &'static str,
+    pub(crate) error: &'static str,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum V4ProofType {
+    Risc0,
+    Sp1,
+}
+
+impl V4ProofType {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Risc0 => "risc0",
+            Self::Sp1 => "sp1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V4ProposalRequest {
+    pub(crate) proof_type: V4ProofType,
+    pub(crate) proposal_id: u64,
+    pub(crate) last_anchor_block_number: u64,
+    pub(crate) l1_inclusion_block_number: u64,
+    pub(crate) l2_block_number_start: u64,
+    pub(crate) l2_block_number_end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checkpoint: Option<ShastaCheckpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prover: Option<Address>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V4AggregationRequest {
+    pub(crate) proof_type: V4ProofType,
+    pub(crate) proposal_id_start: u64,
+    pub(crate) proposal_id_end: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V4ProverStatusQuery {
+    pub(crate) proof_type: V4ProofType,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V4ProverClearRequest {
+    pub(crate) proof_type: V4ProofType,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct V4ProofTaskData {
+    pub(crate) task_id: String,
+    pub(crate) route: String,
+    pub(crate) prover_type: Option<String>,
+    pub(crate) status: String,
+    pub(crate) proof: Option<Proof>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct V4AggregationTaskData {
+    pub(crate) task_id: String,
+    pub(crate) route: String,
+    pub(crate) prover_type: Option<String>,
+    pub(crate) status: String,
+    pub(crate) proof: Option<Proof>,
+    pub(crate) proposal_id_start: u64,
+    pub(crate) proposal_id_end: u64,
 }
 
 #[derive(Serialize)]
@@ -373,7 +452,7 @@ mod tests {
     use super::{
         ApiData, BatchProofType, BatchShastaRequest, ClearProverStatus, ProverNetworkBackendStatus,
         ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus, ProverTaskStatusCounts,
-        PruneStatus,
+        PruneStatus, V4AggregationRequest, V4ProofType, V4ProposalRequest,
     };
 
     #[test]
@@ -444,6 +523,7 @@ mod tests {
                 "cancelled": 2,
                 "skipped": {
                     "invalid_metadata": 1,
+                    "remote_progress": 0,
                     "unavailable_pipeline": 3
                 },
                 "failed": 4
@@ -452,5 +532,39 @@ mod tests {
 
         let prune = serde_json::to_value(PruneStatus { status: "ok" }).expect("serialize prune");
         assert_eq!(prune, serde_json::json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn v4_proposal_request_rejects_unknown_fields() {
+        let err = serde_json::from_value::<V4ProposalRequest>(serde_json::json!({
+            "proof_type": "risc0",
+            "proposal_id": 1,
+            "last_anchor_block_number": 10,
+            "l1_inclusion_block_number": 11,
+            "l2_block_number_start": 20,
+            "l2_block_number_end": 21,
+            "network": "taiko_dev"
+        }))
+        .expect_err("unknown v4 proposal fields must be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn v4_aggregation_request_accepts_only_explicit_proof_types() {
+        let req = serde_json::from_value::<V4AggregationRequest>(serde_json::json!({
+            "proof_type": "sp1",
+            "proposal_id_start": 10,
+            "proposal_id_end": 12
+        }))
+        .expect("deserialize v4 aggregation request");
+        assert!(matches!(req.proof_type, V4ProofType::Sp1));
+
+        let err = serde_json::from_value::<V4AggregationRequest>(serde_json::json!({
+            "proof_type": "zk_any",
+            "proposal_id_start": 10,
+            "proposal_id_end": 12
+        }))
+        .expect_err("zk_any is not a v4 proof type");
+        assert!(err.to_string().contains("unknown variant"));
     }
 }

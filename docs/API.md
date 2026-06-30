@@ -165,7 +165,6 @@ Request:
   "checkpoint": null,
   "proof_type": "risc0",
   "prover": "0x0000000000000000000000000000000000000000",
-  "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
   "blob_proof_type": "proof_of_equivalence"
 }
 ```
@@ -184,7 +183,6 @@ Request fields:
 | `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`. |
 | `prover` | address | no | Designated prover address. |
-| `graffiti` | bytes32 | no | Graffiti passed to proposal proof construction. |
 | `blob_proof_type` | string | no | Blob proof mode, when required by the selected fork. |
 | `prover_args` | object | no | Backend-specific prover options. |
 

@@ -355,6 +355,36 @@ pub async fn clear_prover(
         if !is_zk_any_metadata(&metadata) {
             continue;
         }
+        if metadata.has_remote_submission_progress() {
+            status.skipped.remote_progress = status.skipped.remote_progress.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                "skipping prover clear record with remote submission progress"
+            );
+            continue;
+        }
+
+        let cancelled = match state
+            .runtime
+            .cancel_nonterminal_task(&record.task_id, None)
+            .await
+        {
+            Ok(cancelled) => cancelled,
+            Err(err) => {
+                status.failed = status.failed.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "failed to sync prover clear cancellation"
+                );
+                continue;
+            }
+        };
+        if !cancelled {
+            continue;
+        }
+        status.cancelled = status.cancelled.saturating_add(1);
+
         let engine = match resolve_engine(&state, &metadata.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
@@ -371,6 +401,7 @@ pub async fn clear_prover(
             }
             Err(err) => return Err(err),
         };
+
         if let Err(err) = cancel_registered_tasks(
             &state.runtime,
             &engine,
@@ -386,22 +417,7 @@ pub async fn clear_prover(
                 error = %err,
                 "failed to cancel prover record"
             );
-            continue;
         }
-        if let Err(err) = state
-            .runtime
-            .sync_status(&record.task_id, RuntimeRunnerStatus::Cancelled, None, None)
-            .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to sync prover clear cancellation"
-            );
-            continue;
-        }
-        status.cancelled = status.cancelled.saturating_add(1);
     }
 
     Ok(Json(status))
@@ -2186,21 +2202,37 @@ async fn count_matching_queue_tasks(
         else {
             continue;
         };
-        seen.insert(view.id.clone());
-        count_queue_task_state(&view, counts);
+        if count_queue_task_state(&view, counts) {
+            seen.insert(view.id.clone());
+        }
     }
     Ok(seen)
 }
 
-const fn count_queue_task_state(view: &EngineQueueTaskView, counts: &mut ProverTaskStatusCounts) {
+const fn count_queue_task_state(
+    view: &EngineQueueTaskView,
+    counts: &mut ProverTaskStatusCounts,
+) -> bool {
     match view.state {
-        EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
-        EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
-        EngineQueueTaskState::Retrying => counts.retrying = counts.retrying.saturating_add(1),
-        EngineQueueTaskState::Running => counts.running = counts.running.saturating_add(1),
+        EngineQueueTaskState::Pending => {
+            counts.pending = counts.pending.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Ready => {
+            counts.ready = counts.ready.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Retrying => {
+            counts.retrying = counts.retrying.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Running => {
+            counts.running = counts.running.saturating_add(1);
+            true
+        }
         EngineQueueTaskState::Succeeded
         | EngineQueueTaskState::Failed
-        | EngineQueueTaskState::Cancelled => {}
+        | EngineQueueTaskState::Cancelled => false,
     }
 }
 
@@ -3137,6 +3169,52 @@ mod tests {
         }
     }
 
+    struct CancelFailEngine;
+
+    impl EngineHandle for CancelFailEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregation input submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "cancel failed",
+                )))
+            })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     struct ListingEngine {
         views: Vec<EngineQueueTaskView>,
         list_calls: AtomicUsize,
@@ -3661,7 +3739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prover_status_does_not_mark_present_terminal_queue_task_orphaned() -> Result<()> {
+    async fn prover_status_counts_terminal_queue_task_as_orphaned() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "prover-status-terminal-queue",
         ))?);
@@ -3696,7 +3774,11 @@ mod tests {
             .await
             .map_err(|err| anyhow!(err.message))?;
 
-        assert!(tasks.is_clean());
+        assert_eq!(tasks.orphaned, 1);
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.ready, 0);
+        assert_eq!(tasks.retrying, 0);
+        assert_eq!(tasks.running, 0);
         assert!(network.is_clean());
         assert!(skipped.is_clean());
         Ok(())
@@ -3778,6 +3860,22 @@ mod tests {
             PipelineKey::ShastaRisc0Network,
         )
         .await?;
+        let mut remote_metadata = metadata.clone();
+        remote_metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xremote".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        upsert_test_record(
+            &runtime,
+            "remote-progress",
+            RuntimeRunnerStatus::Running,
+            &remote_metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
@@ -3793,10 +3891,68 @@ mod tests {
             .await
             .expect("clear prover should not fail on skipped records");
 
-        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.cancelled, 2);
         assert_eq!(status.failed, 0);
         assert_eq!(status.skipped.invalid_metadata, 1);
         assert_eq!(status.skipped.unavailable_pipeline, 1);
+        assert_eq!(status.skipped.remote_progress, 1);
+        let missing_pipeline = runtime
+            .get_task("missing-pipeline")
+            .await?
+            .expect("missing pipeline record still present");
+        assert!(matches!(
+            missing_pipeline.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let cleared = runtime
+            .get_task("clearable")
+            .await?
+            .expect("clearable record still present");
+        assert!(matches!(
+            cleared.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let remote = runtime
+            .get_task("remote-progress")
+            .await?
+            .expect("remote progress record still present");
+        assert!(matches!(remote.runner_status, RuntimeRunnerStatus::Running));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_prover_keeps_runtime_cancelled_when_queue_cancel_fails() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "clear-prover-queue-fail",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "clearable",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_acl(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
+
+        let Json(status) = clear_prover(State(state), headers)
+            .await
+            .expect("clear prover should preserve runtime cancellation");
+
+        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.failed, 1);
         let cleared = runtime
             .get_task("clearable")
             .await?

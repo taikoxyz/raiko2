@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::server::state::EngineHandle;
 use crate::server::state::PipelineFactory;
+use crate::server::state::{EngineHandle, EngineQueueTaskState};
 use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
@@ -14,7 +14,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
-const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: queue task missing";
+const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeCleanupStats {
@@ -179,8 +179,7 @@ async fn cancel_orphaned_runtime_tasks(
         let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key) else {
             continue;
         };
-
-        if has_queue_task(
+        if has_active_queue_task(
             engine.as_ref(),
             &metadata_queue_task_ids(&metadata, record.pipeline_key),
         )
@@ -189,33 +188,60 @@ async fn cancel_orphaned_runtime_tasks(
             continue;
         }
 
-        runtime
-            .sync_status(
+        let cancelled_stale = runtime
+            .cancel_nonterminal_task_if_stale(
                 &record.task_id,
-                RunnerStatus::Cancelled,
+                record.updated_at,
                 Some(ORPHANED_RUNTIME_ERROR.to_string()),
-                None,
             )
             .await
             .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
+        if !cancelled_stale {
+            continue;
+        }
+
         cancelled += 1;
         warn!(task_id = %record.task_id, "cancelled orphaned runtime task");
+
+        if let Err(err) = cancel_registered_tasks(
+            runtime,
+            &engine,
+            &record.task_id,
+            record.pipeline_key,
+            &metadata,
+        )
+        .await
+        {
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed best-effort queue cleanup for orphaned runtime task"
+            );
+        }
     }
 
     Ok(cancelled)
 }
 
-async fn has_queue_task(
+async fn has_active_queue_task(
     engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
 ) -> Result<bool> {
     for task_id in task_ids {
-        if engine
+        let Some(view) = engine
             .get_task_state(task_id.clone())
             .await
             .map_err(|err| anyhow!("failed load queue task: {err}"))?
-            .is_some()
-        {
+        else {
+            continue;
+        };
+        if matches!(
+            view.state,
+            EngineQueueTaskState::Pending
+                | EngineQueueTaskState::Ready
+                | EngineQueueTaskState::Retrying
+                | EngineQueueTaskState::Running
+        ) {
             return Ok(true);
         }
     }
@@ -625,7 +651,7 @@ mod tests {
         assert_eq!(
             stats,
             RuntimeCleanupStats {
-                orphaned_cancelled: 1,
+                orphaned_cancelled: 2,
                 ..RuntimeCleanupStats::default()
             }
         );
@@ -636,23 +662,35 @@ mod tests {
         assert_eq!(orphaned.runner_status, RunnerStatus::Cancelled);
         assert_eq!(
             orphaned.error.as_deref(),
-            Some("runtime task orphaned: queue task missing")
+            Some("runtime task orphaned: no active local execution")
         );
         let remote = runtime.get_task("remote-root").await?.expect("remote root");
         assert_eq!(remote.runner_status, RunnerStatus::Running);
         let fresh = runtime.get_task("fresh-root").await?.expect("fresh root");
         assert_eq!(fresh.runner_status, RunnerStatus::Running);
         let queued = runtime.get_task("queued-root").await?.expect("queued root");
-        assert_eq!(queued.runner_status, RunnerStatus::Running);
+        assert_eq!(queued.runner_status, RunnerStatus::Cancelled);
         Ok(())
     }
 
-    #[derive(Default)]
     struct MockEngine {
         removed: Mutex<Vec<String>>,
         cancelled: Mutex<Vec<String>>,
         fail_on: HashSet<String>,
         queue_task_ids: HashSet<String>,
+        queue_task_state: EngineQueueTaskState,
+    }
+
+    impl Default for MockEngine {
+        fn default() -> Self {
+            Self {
+                removed: Mutex::new(Vec::new()),
+                cancelled: Mutex::new(Vec::new()),
+                fail_on: HashSet::new(),
+                queue_task_ids: HashSet::new(),
+                queue_task_state: EngineQueueTaskState::Succeeded,
+            }
+        }
     }
 
     impl MockEngine {
@@ -662,12 +700,24 @@ mod tests {
                 cancelled: Mutex::new(Vec::new()),
                 fail_on,
                 queue_task_ids: HashSet::new(),
+                queue_task_state: EngineQueueTaskState::Succeeded,
             }
         }
 
         fn with_queue_tasks(queue_task_ids: HashSet<String>) -> Self {
             Self {
                 queue_task_ids,
+                ..Self::default()
+            }
+        }
+
+        fn with_queue_task_state(
+            queue_task_ids: HashSet<String>,
+            queue_task_state: EngineQueueTaskState,
+        ) -> Self {
+            Self {
+                queue_task_ids,
+                queue_task_state,
                 ..Self::default()
             }
         }
@@ -714,12 +764,8 @@ mod tests {
             let present = self
                 .queue_task_ids
                 .contains(&encode_task_id(&id).expect("encode task id"));
-            Box::pin(async move {
-                Ok(present.then_some(EngineQueueTaskView {
-                    id,
-                    state: EngineQueueTaskState::Succeeded,
-                }))
-            })
+            let state = self.queue_task_state;
+            Box::pin(async move { Ok(present.then_some(EngineQueueTaskView { id, state })) })
         }
 
         fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -746,6 +792,44 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_cleanup_keeps_stale_root_with_active_queue_task() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned-active"))?);
+        let active_task_id = encoded_proposal_task_id(14)?;
+        let engine = Arc::new(MockEngine::with_queue_task_state(
+            HashSet::from([active_task_id.clone()]),
+            EngineQueueTaskState::Running,
+        ));
+        let factory = Arc::new(build_factory(engine.clone()));
+        let stale = now_ts().saturating_sub(7_201);
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "active-root",
+            &active_task_id,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+
+        assert_eq!(stats, RuntimeCleanupStats::default());
+        let active = runtime.get_task("active-root").await?.expect("active root");
+        assert_eq!(active.runner_status, RunnerStatus::Running);
+        assert!(engine.cancelled().is_empty());
+        Ok(())
     }
 
     #[tokio::test]

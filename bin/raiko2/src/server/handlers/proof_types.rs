@@ -305,11 +305,12 @@ pub(crate) struct ProverStatus {
 pub(crate) struct ProverSkippedStatusCounts {
     pub(crate) invalid_metadata: usize,
     pub(crate) unavailable_pipeline: usize,
+    pub(crate) remote_progress: usize,
 }
 
 impl ProverSkippedStatusCounts {
     pub(crate) const fn is_clean(&self) -> bool {
-        self.invalid_metadata == 0 && self.unavailable_pipeline == 0
+        self.invalid_metadata == 0 && self.unavailable_pipeline == 0 && self.remote_progress == 0
     }
 }
 
@@ -431,6 +432,7 @@ mod tests {
             skipped: ProverSkippedStatusCounts {
                 invalid_metadata: 1,
                 unavailable_pipeline: 3,
+                remote_progress: 0,
             },
             failed: 4,
         })

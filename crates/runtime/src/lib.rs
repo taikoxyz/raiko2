@@ -429,6 +429,82 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if the conditional runtime task cancellation cannot be persisted.
+    pub async fn cancel_nonterminal_task(
+        &self,
+        task_id: &str,
+        error: Option<String>,
+    ) -> Result<bool> {
+        self.cancel_nonterminal_task_matching(task_id, error, None)
+            .await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the stale runtime task cancellation cannot be persisted.
+    pub async fn cancel_nonterminal_task_if_stale(
+        &self,
+        task_id: &str,
+        updated_at_or_before: i64,
+        error: Option<String>,
+    ) -> Result<bool> {
+        self.cancel_nonterminal_task_matching(task_id, error, Some(updated_at_or_before))
+            .await
+    }
+
+    async fn cancel_nonterminal_task_matching(
+        &self,
+        task_id: &str,
+        error: Option<String>,
+        updated_at_or_before: Option<i64>,
+    ) -> Result<bool> {
+        let conn = self.connection().await?;
+        let task_id = task_id.to_string();
+        let updated_at = now_ts();
+        let runner_status = RunnerStatus::Cancelled.as_str();
+        let updated = conn
+            .call(move |conn| {
+                if let Some(updated_at_or_before) = updated_at_or_before {
+                    Ok(conn.execute(
+                        r"
+                        UPDATE runtime_tasks
+                        SET runner_status = ?1,
+                            error = ?2,
+                            updated_at = ?3
+                        WHERE task_id = ?4
+                          AND runner_status IN ('allocated', 'running')
+                          AND updated_at <= ?5
+                        ",
+                        params![
+                            runner_status,
+                            error,
+                            updated_at,
+                            task_id,
+                            updated_at_or_before
+                        ],
+                    )?)
+                } else {
+                    Ok(conn.execute(
+                        r"
+                        UPDATE runtime_tasks
+                        SET runner_status = ?1,
+                            error = ?2,
+                            updated_at = ?3
+                        WHERE task_id = ?4
+                          AND runner_status IN ('allocated', 'running')
+                        ",
+                        params![runner_status, error, updated_at, task_id],
+                    )?)
+                }
+            })
+            .await
+            .context("failed cancel non-terminal runtime task")?;
+
+        Ok(updated > 0)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the proof artifact record cannot be stored.
     pub async fn upsert_proof_artifact(
         &self,
@@ -1425,6 +1501,67 @@ mod tests {
             .await?;
         assert_eq!(stale_after.len(), 1);
         assert_eq!(stale_after[0].task_id, "running-task");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_cancels_only_matching_nonterminal_task() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-cancel-stale-nonterminal");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for (task_id, status, updated_at) in [
+            ("stale-running", RunnerStatus::Running, 10_i64),
+            ("fresh-running", RunnerStatus::Running, 30_i64),
+            ("failed-task", RunnerStatus::Failed, 10_i64),
+        ] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    pipeline_key: None,
+                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: Vec::new(),
+                    metadata: serde_json::json!({}),
+                    request_fingerprint: None,
+                })
+                .await?;
+            let mut record = runtime.get_task(task_id).await?.expect("task present");
+            record.runner_status = status;
+            record.updated_at = updated_at;
+            runtime.upsert_task(&record).await?;
+        }
+
+        assert!(
+            runtime
+                .cancel_nonterminal_task_if_stale("stale-running", 20, Some("stale".to_string()))
+                .await?
+        );
+        assert!(
+            !runtime
+                .cancel_nonterminal_task_if_stale("fresh-running", 20, None)
+                .await?
+        );
+        assert!(
+            !runtime
+                .cancel_nonterminal_task_if_stale("failed-task", 20, None)
+                .await?
+        );
+
+        let stale = runtime
+            .get_task("stale-running")
+            .await?
+            .expect("stale task");
+        assert_eq!(stale.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(stale.error.as_deref(), Some("stale"));
+        let fresh = runtime
+            .get_task("fresh-running")
+            .await?
+            .expect("fresh task");
+        assert_eq!(fresh.runner_status, RunnerStatus::Running);
+        let failed = runtime.get_task("failed-task").await?.expect("failed task");
+        assert_eq!(failed.runner_status, RunnerStatus::Failed);
 
         std::fs::remove_dir_all(root)?;
         Ok(())

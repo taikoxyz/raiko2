@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use raiko2_pipeline::ProverBackend;
 use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
 use raiko2_primitives_shasta::GuestInput;
+use raiko2_protocol_shasta::shasta::ProofCarryData;
 
 use crate::{
     GuestInputCodec, Prover, ensure_shasta_aggregate_input_matches_carries,
@@ -22,8 +23,8 @@ use crate::remote_prover::{
     },
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
-        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
-        Raiko2ShastaRequest,
+        RAIKO2_SHASTA_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ProofResponse,
+        Raiko2ProofResult, Raiko2ProofStatus, Raiko2ShastaRequest, Raiko2ShastaRequestV2,
     },
 };
 
@@ -114,12 +115,13 @@ impl Gaiko2Prover {
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let packet = match self.request_encoding {
-            ShastaRequestEncoding::ReplayPacket => build_shasta_packet(input)?,
-            ShastaRequestEncoding::GuestInput => build_shasta_packet_with_guest_input(input)?,
-        };
-        let payload = serde_json::to_vec(&packet)
-            .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;
+        let payload = match self.request_encoding {
+            ShastaRequestEncoding::ReplayPacket => serde_json::to_vec(&build_shasta_packet(input)?),
+            ShastaRequestEncoding::GuestInput => {
+                serde_json::to_vec(&build_shasta_packet_with_guest_input(input)?)
+            }
+        }
+        .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;
         Ok(Bytes::from(payload))
     }
 }
@@ -141,14 +143,7 @@ where
         _config: &ProverConfig,
         _backend: &B,
     ) -> RaikoResult<Proof> {
-        let packet: Raiko2ShastaRequest = serde_json::from_slice(input.as_ref())
-            .map_err(|err| RaikoError::Guest(format!("failed to decode gaiko2 packet: {err}")))?;
-        if packet.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
-            return Err(RaikoError::Guest(format!(
-                "unsupported remote prover request schema: {}",
-                packet.schema
-            )));
-        }
+        let proof_carry_data = self.proposal_carry_data_from_encoded(&input)?;
 
         let (envelope, result) = self
             .post_request(self.prove_url.clone(), input.to_vec())
@@ -159,14 +154,10 @@ where
                 result.input
             ))
         })?;
-        ensure_shasta_proposal_input_matches_carry(
-            input_hash,
-            &packet.payload.proof_carry_data,
-            "gaiko2",
-        )?;
+        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "gaiko2")?;
 
         let extra_data = with_shasta_extra_data(
-            &packet.payload.proof_carry_data,
+            &proof_carry_data,
             "gaiko2",
             Some(gaiko2_metadata(&envelope.schema, &result)),
         )?;
@@ -234,6 +225,37 @@ where
 }
 
 impl Gaiko2Prover {
+    fn proposal_carry_data_from_encoded(&self, input: &Bytes) -> RaikoResult<ProofCarryData> {
+        match self.request_encoding {
+            ShastaRequestEncoding::ReplayPacket => {
+                let packet: Raiko2ShastaRequestV2 = serde_json::from_slice(input.as_ref())
+                    .map_err(|err| {
+                        RaikoError::Guest(format!("failed to decode gaiko2 v2 packet: {err}"))
+                    })?;
+                if packet.schema != RAIKO2_SHASTA_REQUEST_V2_SCHEMA {
+                    return Err(RaikoError::Guest(format!(
+                        "unsupported remote prover request schema: {}",
+                        packet.schema
+                    )));
+                }
+                Ok(packet.payload.guest_input.proof_carry_data)
+            }
+            ShastaRequestEncoding::GuestInput => {
+                let packet: Raiko2ShastaRequest =
+                    serde_json::from_slice(input.as_ref()).map_err(|err| {
+                        RaikoError::Guest(format!("failed to decode gaiko2 packet: {err}"))
+                    })?;
+                if packet.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
+                    return Err(RaikoError::Guest(format!(
+                        "unsupported remote prover request schema: {}",
+                        packet.schema
+                    )));
+                }
+                Ok(packet.payload.proof_carry_data)
+            }
+        }
+    }
+
     async fn post_request(
         &self,
         url: Url,

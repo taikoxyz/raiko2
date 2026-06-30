@@ -6,7 +6,7 @@ use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
     adapter::{build_shasta_packet, build_shasta_packet_with_guest_input},
-    protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
+    protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ReplayBlock},
 };
 
 fn fixture_guest_input() -> GuestInput {
@@ -39,20 +39,42 @@ fn adapter_projects_guest_input_into_execution_packet() {
     let input = fixture_guest_input();
     let packet = build_shasta_packet(&input).expect("build packet");
 
-    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
-    assert_eq!(packet.payload.blocks.len(), input.witnesses.len());
-    assert_eq!(packet.payload.chain_id, input.proof_carry_data.chain_id);
-    assert!(packet.payload.guest_input.is_none());
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
     assert_eq!(
-        packet.payload.proof_carry_data.transition_input.checkpoint,
+        packet.payload.guest_input.witnesses.len(),
+        input.witnesses.len()
+    );
+    assert_eq!(
+        packet.payload.guest_input.proposal_ancestor_headers.len(),
+        1
+    );
+    assert_eq!(
+        packet
+            .payload
+            .guest_input
+            .proof_carry_data
+            .transition_input
+            .checkpoint,
         input.proof_carry_data.transition_input.checkpoint
     );
-    assert_eq!(packet.payload.blocks[0].block.header.number, 42);
     assert_eq!(
-        packet.payload.blocks[0].block.header.parent_hash,
+        packet.payload.guest_input.witnesses[0].block.header.number,
+        42
+    );
+    assert_eq!(
+        packet.payload.guest_input.witnesses[0]
+            .block
+            .header
+            .parent_hash,
         B256::from([0x11; 32])
     );
-    assert_eq!(packet.payload.blocks[0].witness.headers.len(), 1);
+    assert_eq!(
+        packet.payload.guest_input.witnesses[0]
+            .witness
+            .headers
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -60,6 +82,7 @@ fn adapter_can_embed_full_guest_input_for_sgx_runtime() {
     let input = fixture_guest_input();
     let packet = build_shasta_packet_with_guest_input(&input).expect("build packet");
 
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert!(packet.payload.blocks.is_empty());
     let guest_input = packet.payload.guest_input.expect("guest input payload");
     assert_eq!(guest_input.witnesses.len(), input.witnesses.len());
@@ -87,8 +110,8 @@ fn adapter_keeps_only_replay_parent_header_full() {
     input.witnesses.push(next_witness);
 
     let packet = build_shasta_packet(&input).expect("build packet");
-    let first_headers = &packet.payload.blocks[0].witness.headers;
-    let second_headers = &packet.payload.blocks[1].witness.headers;
+    let first_headers = &packet.payload.guest_input.witnesses[0].witness.headers;
+    let second_headers = &packet.payload.guest_input.witnesses[1].witness.headers;
 
     assert_eq!(first_headers.len(), 2);
     assert!(first_headers[0].full_header().is_none());

@@ -17,7 +17,7 @@ Hoodi-compatible v3 API.
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
-- Config-driven RPC pair allowlist via `rpc.pairs`
+- Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
 - In-process memory queue by default, with an optional Redis-backed queue
 
@@ -121,13 +121,13 @@ cargo test -p raiko2-prover --no-default-features \
   --test remote_prover_conformance -- --ignored --nocapture
 ```
 
-The harness posts the vendored proposal and aggregate fixtures to:
+The harness builds the proposal request from the shared Shasta `GuestInput` fixture and posts it to:
 
 - `POST /prove/shasta`
 
-This harness targets providers whose `/prove/shasta` input is the replay packet used by
-`gaiko2`/`sgxgeth`. That packet is valid provider input for gaiko2 because gaiko2 executes it
-internally, but it is not a `raiko2-sgx-prover` smoke test. `raiko2-sgx-prover` requires a complete
+This harness targets providers whose `/prove/shasta` input is the gaiko2 v2
+`raiko2-shasta-request-v2` packet with `payload.guest_input`. It is not a `raiko2-sgx-prover`
+smoke test. `raiko2-sgx-prover` requires the legacy v1 wrapper with a complete
 `raiko2_primitives_shasta::GuestInput` envelope and runs the Shasta guest validation path before
 signing.
 

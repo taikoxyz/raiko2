@@ -131,7 +131,7 @@ where
             &account_signers,
         )
         .await?;
-        let witnesses = build_preflight_witnesses(chain_spec.clone(), block_materials, accounts)?;
+        let witnesses = build_preflight_witnesses(&chain_spec, block_materials, accounts)?;
         validate_block_range(&witnesses, expected_proposal_id)?;
         let input = build_preflight_guest_input(manifest, witnesses, proof_type)?;
 
@@ -466,10 +466,10 @@ fn derive_preflight_source_blocks(
     if proposal.sources.is_empty() {
         return Ok(None);
     }
-    if !proposal
+    if proposal
         .sources
         .last()
-        .is_some_and(|source| !source.isForcedInclusion)
+        .is_none_or(|source| source.isForcedInclusion)
     {
         return Err(RaikoError::Preflight(
             "last Shasta derivation source must be a normal source".to_string(),
@@ -657,7 +657,7 @@ async fn fetch_preflight_account_chunk<P: Provider>(
 }
 
 fn build_preflight_witnesses(
-    chain_spec: ChainSpec,
+    chain_spec: &ChainSpec,
     block_materials: Vec<PreflightBlockMaterial>,
     accounts: Vec<AddressMap<TrieAccount>>,
 ) -> RaikoResult<Vec<StatelessInput>> {

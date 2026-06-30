@@ -93,21 +93,17 @@ pub(crate) async fn run_runtime_cleanup_pass(
     orphan_cursor: &mut Option<ExpiredTaskCursor>,
     terminal_cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<RuntimeCleanupStats> {
-    let mut stats = RuntimeCleanupStats {
-        orphaned_cancelled: cancel_orphaned_runtime_tasks(
-            runtime.as_ref(),
-            pipelines.as_ref(),
-            ttl_secs,
-            orphan_cursor,
-        )
-        .await?,
-        ..RuntimeCleanupStats::default()
-    };
-
     if ttl_secs == 0 {
-        return Ok(stats);
+        return Ok(RuntimeCleanupStats::default());
     }
 
+    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
+        runtime.as_ref(),
+        pipelines.as_ref(),
+        ttl_secs,
+        orphan_cursor,
+    )
+    .await?;
     let records = runtime
         .list_expired_terminal_tasks(
             now_ts(),
@@ -120,8 +116,12 @@ pub(crate) async fn run_runtime_cleanup_pass(
         updated_at: record.updated_at,
         task_id: record.task_id.clone(),
     });
-    stats.scanned = records.len();
-    stats.expired = records.len();
+    let mut stats = RuntimeCleanupStats {
+        scanned: records.len(),
+        expired: records.len(),
+        orphaned_cancelled,
+        ..RuntimeCleanupStats::default()
+    };
 
     for record in records {
         match cleanup_expired_root_task(runtime.as_ref(), pipelines.as_ref(), &record).await {
@@ -181,7 +181,7 @@ async fn cancel_orphaned_runtime_tasks(
         };
 
         if has_queue_task(
-            &engine,
+            engine.as_ref(),
             &metadata_queue_task_ids(&metadata, record.pipeline_key),
         )
         .await?
@@ -206,7 +206,7 @@ async fn cancel_orphaned_runtime_tasks(
 }
 
 async fn has_queue_task(
-    engine: &Arc<dyn EngineHandle>,
+    engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
 ) -> Result<bool> {
     for task_id in task_ids {

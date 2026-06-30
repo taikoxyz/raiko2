@@ -2104,7 +2104,7 @@ async fn collect_prover_status(
 
     let mut seen_groups = HashMap::new();
     for (engine_key, (engine, task_ids)) in queue_groups {
-        let seen = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
+        let seen = count_matching_queue_tasks(engine.as_ref(), &task_ids, &mut tasks).await?;
         seen_groups.insert(engine_key, seen);
     }
 
@@ -2170,7 +2170,7 @@ fn metadata_queue_task_ids(
 }
 
 async fn count_matching_queue_tasks(
-    engine: &Arc<dyn EngineHandle>,
+    engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
     counts: &mut ProverTaskStatusCounts,
 ) -> Result<HashSet<EngineTaskId>, ApiError> {

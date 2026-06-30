@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::server::state::{EngineHandle, PipelineFactory};
+use crate::server::state::PipelineFactory;
+use crate::server::state::{EngineHandle, EngineQueueTaskState};
 use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
@@ -13,6 +14,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
 const RUNTIME_CLEANUP_BATCH_SIZE: usize = 64;
+const ORPHANED_RUNTIME_ERROR: &str = "runtime task orphaned: no active local execution";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RuntimeCleanupStats {
@@ -21,6 +23,7 @@ pub(crate) struct RuntimeCleanupStats {
     pub removed_roots: usize,
     pub skipped_shared_children: usize,
     pub retained_failures: usize,
+    pub orphaned_cancelled: usize,
 }
 
 impl RuntimeCleanupStats {
@@ -30,6 +33,7 @@ impl RuntimeCleanupStats {
             && self.removed_roots == 0
             && self.skipped_shared_children == 0
             && self.retained_failures == 0
+            && self.orphaned_cancelled == 0
     }
 }
 
@@ -48,14 +52,16 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     }
 
     tokio::spawn(async move {
-        let mut cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
         let interval_duration = Duration::from_millis(config.queue.maintenance_interval_ms);
         log_runtime_cleanup_stats(
             run_runtime_cleanup_pass(
                 Arc::clone(&runtime),
                 Arc::clone(&pipelines),
                 config.runtime.inactive_ttl_secs,
-                &mut cursor,
+                &mut orphan_cursor,
+                &mut terminal_cursor,
             )
             .await,
         );
@@ -71,7 +77,8 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                     Arc::clone(&runtime),
                     Arc::clone(&pipelines),
                     config.runtime.inactive_ttl_secs,
-                    &mut cursor,
+                    &mut orphan_cursor,
+                    &mut terminal_cursor,
                 )
                 .await,
             );
@@ -83,27 +90,36 @@ pub(crate) async fn run_runtime_cleanup_pass(
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
     ttl_secs: u64,
-    cursor: &mut Option<ExpiredTaskCursor>,
+    orphan_cursor: &mut Option<ExpiredTaskCursor>,
+    terminal_cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<RuntimeCleanupStats> {
     if ttl_secs == 0 {
         return Ok(RuntimeCleanupStats::default());
     }
 
+    let orphaned_cancelled = cancel_orphaned_runtime_tasks(
+        runtime.as_ref(),
+        pipelines.as_ref(),
+        ttl_secs,
+        orphan_cursor,
+    )
+    .await?;
     let records = runtime
         .list_expired_terminal_tasks(
             now_ts(),
             ttl_secs,
-            cursor.as_ref(),
+            terminal_cursor.as_ref(),
             RUNTIME_CLEANUP_BATCH_SIZE,
         )
         .await?;
-    *cursor = records.last().map(|record| ExpiredTaskCursor {
+    *terminal_cursor = records.last().map(|record| ExpiredTaskCursor {
         updated_at: record.updated_at,
         task_id: record.task_id.clone(),
     });
     let mut stats = RuntimeCleanupStats {
         scanned: records.len(),
         expired: records.len(),
+        orphaned_cancelled,
         ..RuntimeCleanupStats::default()
     };
 
@@ -121,6 +137,133 @@ pub(crate) async fn run_runtime_cleanup_pass(
     }
 
     Ok(stats)
+}
+
+async fn cancel_orphaned_runtime_tasks(
+    runtime: &RuntimeManager,
+    pipelines: &dyn PipelineFactory,
+    ttl_secs: u64,
+    cursor: &mut Option<ExpiredTaskCursor>,
+) -> Result<usize> {
+    let records = runtime
+        .list_stale_nonterminal_tasks(
+            now_ts(),
+            ttl_secs,
+            cursor.as_ref(),
+            RUNTIME_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+    *cursor = records.last().map(|record| ExpiredTaskCursor {
+        updated_at: record.updated_at,
+        task_id: record.task_id.clone(),
+    });
+    let mut cancelled = 0usize;
+
+    for record in records {
+        let metadata: TaskMetadata = match serde_json::from_value(record.metadata.clone()) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "skipping orphaned runtime task check with invalid metadata"
+                );
+                continue;
+            }
+        };
+
+        if metadata.has_remote_submission_progress() {
+            continue;
+        }
+
+        let Some(engine) = pipelines.get(&metadata.network_pair, record.pipeline_key) else {
+            continue;
+        };
+        if has_active_queue_task(
+            engine.as_ref(),
+            &metadata_queue_task_ids(&metadata, record.pipeline_key),
+        )
+        .await?
+        {
+            continue;
+        }
+
+        let cancelled_stale = runtime
+            .cancel_nonterminal_task_if_stale(
+                &record.task_id,
+                record.updated_at,
+                Some(ORPHANED_RUNTIME_ERROR.to_string()),
+            )
+            .await
+            .with_context(|| format!("failed cancel orphaned runtime task {}", record.task_id))?;
+        if !cancelled_stale {
+            continue;
+        }
+
+        cancelled += 1;
+        warn!(task_id = %record.task_id, "cancelled orphaned runtime task");
+
+        if let Err(err) = cancel_registered_tasks(
+            runtime,
+            &engine,
+            &record.task_id,
+            record.pipeline_key,
+            &metadata,
+        )
+        .await
+        {
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed best-effort queue cleanup for orphaned runtime task"
+            );
+        }
+    }
+
+    Ok(cancelled)
+}
+
+async fn has_active_queue_task(
+    engine: &dyn EngineHandle,
+    task_ids: &HashSet<EngineTaskId>,
+) -> Result<bool> {
+    for task_id in task_ids {
+        let Some(view) = engine
+            .get_task_state(task_id.clone())
+            .await
+            .map_err(|err| anyhow!("failed load queue task: {err}"))?
+        else {
+            continue;
+        };
+        if matches!(
+            view.state,
+            EngineQueueTaskState::Pending
+                | EngineQueueTaskState::Ready
+                | EngineQueueTaskState::Retrying
+                | EngineQueueTaskState::Running
+        ) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn metadata_queue_task_ids(
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+) -> HashSet<EngineTaskId> {
+    let mut task_ids = HashSet::new();
+    for proposal in &metadata.proposals {
+        let Some(task_id) = proposal.engine_task_id(pipeline_key) else {
+            continue;
+        };
+        task_ids.extend(proposal_task_chain_ids(&task_id));
+    }
+    if let Some(task_id) = metadata.aggregate_engine_task_id(pipeline_key) {
+        task_ids.insert(task_id);
+    }
+    task_ids
 }
 
 pub(crate) async fn cancel_registered_tasks(
@@ -340,6 +483,7 @@ fn log_runtime_cleanup_stats(result: Result<RuntimeCleanupStats>) {
                     removed_roots = stats.removed_roots,
                     skipped_shared_children = stats.skipped_shared_children,
                     retained_failures = stats.retained_failures,
+                    orphaned_cancelled = stats.orphaned_cancelled,
                     "runtime cleanup tick completed"
                 );
             }
@@ -403,8 +547,12 @@ mod tests {
         ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_task_chain_ids,
         proposal_task_id, run_runtime_cleanup_pass,
     };
-    use crate::server::state::{EngineHandle, StaticPipelineFactory};
-    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
+    use crate::server::state::{
+        EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
+    };
+    use crate::server::task_metadata::{
+        ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
+    };
     use anyhow::{Context, Result};
     use raiko2_engine::{
         AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
@@ -434,11 +582,115 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
+    #[tokio::test]
+    async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
+        let orphaned_task_id = encoded_proposal_task_id(10)?;
+        let remote_task_id = encoded_proposal_task_id(11)?;
+        let queued_task_id = encoded_proposal_task_id(13)?;
+        let engine = Arc::new(MockEngine::with_queue_tasks(HashSet::from([
+            queued_task_id.clone(),
+        ])));
+        let factory = Arc::new(build_factory(engine));
+        let now = now_ts();
+        let stale = now.saturating_sub(7_201);
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "orphaned-root",
+            &orphaned_task_id,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "fresh-root",
+            &encoded_proposal_task_id(12)?,
+            RunnerStatus::Running,
+            now,
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "queued-root",
+            &queued_task_id,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+
+        let mut remote_metadata = metadata_for_task(&remote_task_id);
+        remote_metadata.runtime.proposals.insert(
+            remote_task_id.clone(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xremote".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        register_runtime_task_with_metadata(
+            runtime.as_ref(),
+            "remote-root",
+            &remote_metadata,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+
+        assert_eq!(
+            stats,
+            RuntimeCleanupStats {
+                orphaned_cancelled: 2,
+                ..RuntimeCleanupStats::default()
+            }
+        );
+        let orphaned = runtime
+            .get_task("orphaned-root")
+            .await?
+            .expect("orphaned root");
+        assert_eq!(orphaned.runner_status, RunnerStatus::Cancelled);
+        assert_eq!(
+            orphaned.error.as_deref(),
+            Some("runtime task orphaned: no active local execution")
+        );
+        let remote = runtime.get_task("remote-root").await?.expect("remote root");
+        assert_eq!(remote.runner_status, RunnerStatus::Running);
+        let fresh = runtime.get_task("fresh-root").await?.expect("fresh root");
+        assert_eq!(fresh.runner_status, RunnerStatus::Running);
+        let queued = runtime.get_task("queued-root").await?.expect("queued root");
+        assert_eq!(queued.runner_status, RunnerStatus::Cancelled);
+        Ok(())
+    }
+
     struct MockEngine {
         removed: Mutex<Vec<String>>,
         cancelled: Mutex<Vec<String>>,
         fail_on: HashSet<String>,
+        queue_task_ids: HashSet<String>,
+        queue_task_state: EngineQueueTaskState,
+    }
+
+    impl Default for MockEngine {
+        fn default() -> Self {
+            Self {
+                removed: Mutex::new(Vec::new()),
+                cancelled: Mutex::new(Vec::new()),
+                fail_on: HashSet::new(),
+                queue_task_ids: HashSet::new(),
+                queue_task_state: EngineQueueTaskState::Succeeded,
+            }
+        }
     }
 
     impl MockEngine {
@@ -447,6 +699,26 @@ mod tests {
                 removed: Mutex::new(Vec::new()),
                 cancelled: Mutex::new(Vec::new()),
                 fail_on,
+                queue_task_ids: HashSet::new(),
+                queue_task_state: EngineQueueTaskState::Succeeded,
+            }
+        }
+
+        fn with_queue_tasks(queue_task_ids: HashSet<String>) -> Self {
+            Self {
+                queue_task_ids,
+                ..Self::default()
+            }
+        }
+
+        fn with_queue_task_state(
+            queue_task_ids: HashSet<String>,
+            queue_task_state: EngineQueueTaskState,
+        ) -> Self {
+            Self {
+                queue_task_ids,
+                queue_task_state,
+                ..Self::default()
             }
         }
 
@@ -486,10 +758,14 @@ mod tests {
 
         fn get_task_state(
             &self,
-            _id: EngineTaskId,
+            id: EngineTaskId,
         ) -> BoxFuture<'_, Result<Option<crate::server::state::EngineQueueTaskView>, TaskStoreError>>
         {
-            Box::pin(async { Ok(None) })
+            let present = self
+                .queue_task_ids
+                .contains(&encode_task_id(&id).expect("encode task id"));
+            let state = self.queue_task_state;
+            Box::pin(async move { Ok(present.then_some(EngineQueueTaskView { id, state })) })
         }
 
         fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -519,6 +795,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_cleanup_keeps_stale_root_with_active_queue_task() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned-active"))?);
+        let active_task_id = encoded_proposal_task_id(14)?;
+        let engine = Arc::new(MockEngine::with_queue_task_state(
+            HashSet::from([active_task_id.clone()]),
+            EngineQueueTaskState::Running,
+        ));
+        let factory = Arc::new(build_factory(engine.clone()));
+        let stale = now_ts().saturating_sub(7_201);
+
+        register_runtime_task(
+            runtime.as_ref(),
+            "active-root",
+            &active_task_id,
+            RunnerStatus::Running,
+            stale,
+        )
+        .await?;
+
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
+
+        assert_eq!(stats, RuntimeCleanupStats::default());
+        let active = runtime.get_task("active-root").await?.expect("active root");
+        assert_eq!(active.runner_status, RunnerStatus::Running);
+        assert!(engine.cancelled().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_cleanup_removes_expired_root_but_keeps_shared_child_tasks() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("ttl-shared"))?);
         let engine = Arc::new(MockEngine::default());
@@ -542,8 +856,16 @@ mod tests {
         )
         .await?;
 
-        let mut cursor = None;
-        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
 
         assert_eq!(
             stats,
@@ -553,6 +875,7 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 1,
                 retained_failures: 0,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_none());
@@ -578,8 +901,16 @@ mod tests {
         )
         .await?;
 
-        let mut cursor = None;
-        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
 
         assert_eq!(
             stats,
@@ -589,6 +920,7 @@ mod tests {
                 removed_roots: 0,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-root").await?.is_some());
@@ -601,7 +933,8 @@ mod tests {
         let failing_stage = first_stage_task_id(1)?;
         let engine = Arc::new(MockEngine::new(HashSet::from([failing_stage])));
         let factory = Arc::new(build_factory(engine));
-        let mut cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
 
         register_runtime_task(
             runtime.as_ref(),
@@ -620,8 +953,14 @@ mod tests {
         )
         .await?;
 
-        let first =
-            run_runtime_cleanup_pass(runtime.clone(), factory.clone(), 7_200, &mut cursor).await?;
+        let first = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
         assert_eq!(
             first,
             RuntimeCleanupStats {
@@ -630,10 +969,11 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 1,
+                orphaned_cancelled: 0,
             }
         );
         assert_eq!(
-            cursor,
+            terminal_cursor,
             Some(ExpiredTaskCursor {
                 updated_at: 2,
                 task_id: "expired-b".to_string()
@@ -649,7 +989,14 @@ mod tests {
         )
         .await?;
 
-        let second = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let second = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
         assert_eq!(
             second,
             RuntimeCleanupStats {
@@ -658,6 +1005,7 @@ mod tests {
                 removed_roots: 1,
                 skipped_shared_children: 0,
                 retained_failures: 0,
+                orphaned_cancelled: 0,
             }
         );
         assert!(runtime.get_task("expired-c").await?.is_none());
@@ -790,6 +1138,36 @@ mod tests {
                     proposal_task_id,
                     network_pair,
                 ))?,
+                request_fingerprint: None,
+            })
+            .await?;
+        let mut record = runtime.get_task(task_id).await?.expect("runtime task");
+        record.runner_status = status;
+        record.updated_at = updated_at;
+        runtime.upsert_task(&record).await?;
+        Ok(())
+    }
+
+    async fn register_runtime_task_with_metadata(
+        runtime: &RuntimeManager,
+        task_id: &str,
+        metadata: &TaskMetadata,
+        status: RunnerStatus,
+        updated_at: i64,
+    ) -> Result<()> {
+        runtime
+            .register_task(TaskRegistration {
+                task_id: task_id.to_string(),
+                pipeline_key: None,
+                route: "risc0/local".parse().expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(1),
+                proof_ids: metadata
+                    .proposals
+                    .iter()
+                    .map(|proposal| proposal.task_id.clone())
+                    .collect(),
+                metadata: serde_json::to_value(metadata)?,
                 request_fingerprint: None,
             })
             .await?;

@@ -399,7 +399,8 @@ under the original `zk_any` request for this operator view.
       "pending": 1,
       "ready": 0,
       "retrying": 0,
-      "running": 2
+      "running": 2,
+      "orphaned": 0
     },
     "network": {
       "sp1": {
@@ -411,14 +412,18 @@ under the original `zk_any` request for this operator view.
     },
     "skipped": {
       "invalid_metadata": 0,
-      "unavailable_pipeline": 1
+      "unavailable_pipeline": 1,
+      "remote_progress": 0
     }
   }
 }
 ```
 
+`orphaned` counts non-terminal runtime records without active local queue execution and without
+remote submission progress. The runtime cleanup pass cancels stale orphaned records after
+`runtime.inactive_ttl_secs`.
 `clean=true` means there are no matching non-terminal queue tasks in `pending`, `ready`,
-`retrying`, or `running` state, no resumable SP1 or RISC0 network submissions, and
+`retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
 ## Clear Prover
@@ -428,13 +433,12 @@ POST /v3/prover/clear
 x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
 ```
 
-Requires an ACL key that allows `prover.clear` or `admin`. Cancels every non-terminal root originally submitted
-with `proof_type=zk_any`, cascades cancellation to owned proposal and aggregation queue tasks, and
-marks the root runtime state `cancelled`.
+Requires an ACL key that allows `prover.clear` or `admin`. Marks every non-terminal root originally
+submitted with `proof_type=zk_any` as `cancelled` first, then best-effort cancels owned proposal and
+aggregation queue tasks.
 
 Shared child tasks still referenced by another live root are left running.
-Already submitted upstream SP1 or RISC0/Boundless orders cannot be cancelled, but cleared or
-otherwise terminal roots are no longer counted in this local status view.
+Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipped.
 
 ### Response
 
@@ -444,7 +448,8 @@ otherwise terminal roots are no longer counted in this local status view.
   "cancelled": 2,
   "skipped": {
     "invalid_metadata": 0,
-    "unavailable_pipeline": 1
+    "unavailable_pipeline": 1,
+    "remote_progress": 0
   },
   "failed": 0
 }

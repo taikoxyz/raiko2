@@ -355,6 +355,36 @@ pub async fn clear_prover(
         if !is_zk_any_metadata(&metadata) {
             continue;
         }
+        if metadata.has_remote_submission_progress() {
+            status.skipped.remote_progress = status.skipped.remote_progress.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                "skipping prover clear record with remote submission progress"
+            );
+            continue;
+        }
+
+        let cancelled = match state
+            .runtime
+            .cancel_nonterminal_task(&record.task_id, None)
+            .await
+        {
+            Ok(cancelled) => cancelled,
+            Err(err) => {
+                status.failed = status.failed.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "failed to sync prover clear cancellation"
+                );
+                continue;
+            }
+        };
+        if !cancelled {
+            continue;
+        }
+        status.cancelled = status.cancelled.saturating_add(1);
+
         let engine = match resolve_engine(&state, &metadata.network_pair, record.pipeline_key) {
             Ok(engine) => engine,
             Err(err) if err.status == StatusCode::NOT_FOUND => {
@@ -371,6 +401,7 @@ pub async fn clear_prover(
             }
             Err(err) => return Err(err),
         };
+
         if let Err(err) = cancel_registered_tasks(
             &state.runtime,
             &engine,
@@ -386,22 +417,7 @@ pub async fn clear_prover(
                 error = %err,
                 "failed to cancel prover record"
             );
-            continue;
         }
-        if let Err(err) = state
-            .runtime
-            .sync_status(&record.task_id, RuntimeRunnerStatus::Cancelled, None, None)
-            .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to sync prover clear cancellation"
-            );
-            continue;
-        }
-        status.cancelled = status.cancelled.saturating_add(1);
     }
 
     Ok(Json(status))
@@ -2102,20 +2118,18 @@ async fn collect_prover_status(
         });
     }
 
-    let mut counted_groups = HashMap::new();
+    let mut seen_groups = HashMap::new();
     for (engine_key, (engine, task_ids)) in queue_groups {
-        let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
-        counted_groups.insert(engine_key, counted);
+        let seen = count_matching_queue_tasks(engine.as_ref(), &task_ids, &mut tasks).await?;
+        seen_groups.insert(engine_key, seen);
     }
 
     for root in queue_roots {
-        let has_counted_task = counted_groups.get(&root.engine_key).is_some_and(|counted| {
-            root.task_ids
-                .iter()
-                .any(|task_id| counted.contains(task_id))
-        });
-        if !has_counted_task && !root.has_remote_progress {
-            tasks.pending = tasks.pending.saturating_add(1);
+        let has_queue_task = seen_groups
+            .get(&root.engine_key)
+            .is_some_and(|seen| root.task_ids.iter().any(|task_id| seen.contains(task_id)));
+        if !has_queue_task && !root.has_remote_progress {
+            tasks.orphaned = tasks.orphaned.saturating_add(1);
         }
     }
 
@@ -2172,14 +2186,14 @@ fn metadata_queue_task_ids(
 }
 
 async fn count_matching_queue_tasks(
-    engine: &Arc<dyn EngineHandle>,
+    engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
     counts: &mut ProverTaskStatusCounts,
 ) -> Result<HashSet<EngineTaskId>, ApiError> {
     if task_ids.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut counted = HashSet::new();
+    let mut seen = HashSet::new();
     for task_id in task_ids {
         let Some(view) = engine
             .get_task_state(task_id.clone())
@@ -2189,10 +2203,10 @@ async fn count_matching_queue_tasks(
             continue;
         };
         if count_queue_task_state(&view, counts) {
-            counted.insert(view.id);
+            seen.insert(view.id.clone());
         }
     }
-    Ok(counted)
+    Ok(seen)
 }
 
 const fn count_queue_task_state(
@@ -2200,15 +2214,26 @@ const fn count_queue_task_state(
     counts: &mut ProverTaskStatusCounts,
 ) -> bool {
     match view.state {
-        EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
-        EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
-        EngineQueueTaskState::Retrying => counts.retrying = counts.retrying.saturating_add(1),
-        EngineQueueTaskState::Running => counts.running = counts.running.saturating_add(1),
+        EngineQueueTaskState::Pending => {
+            counts.pending = counts.pending.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Ready => {
+            counts.ready = counts.ready.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Retrying => {
+            counts.retrying = counts.retrying.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Running => {
+            counts.running = counts.running.saturating_add(1);
+            true
+        }
         EngineQueueTaskState::Succeeded
         | EngineQueueTaskState::Failed
-        | EngineQueueTaskState::Cancelled => return false,
+        | EngineQueueTaskState::Cancelled => false,
     }
-    true
 }
 
 fn count_network_inflight(
@@ -3144,6 +3169,52 @@ mod tests {
         }
     }
 
+    struct CancelFailEngine;
+
+    impl EngineHandle for CancelFailEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregation input submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "cancel failed",
+                )))
+            })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     struct ListingEngine {
         views: Vec<EngineQueueTaskView>,
         list_calls: AtomicUsize,
@@ -3633,6 +3704,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prover_status_counts_missing_queue_task_as_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-orphaned",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "orphaned-root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.orphaned, 1);
+        assert!(network.is_clean());
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_counts_terminal_queue_task_as_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-terminal-queue",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request.clone());
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request,
+        });
+        upsert_test_record(
+            &runtime,
+            "root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
+            id: task_id,
+            state: EngineQueueTaskState::Succeeded,
+        }]));
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::clone(&engine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(tasks.orphaned, 1);
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.ready, 0);
+        assert_eq!(tasks.retrying, 0);
+        assert_eq!(tasks.running, 0);
+        assert!(network.is_clean());
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn prover_status_lists_queue_once_per_engine_and_counts_unique_tasks() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "prover-status-list-once",
@@ -3708,6 +3860,22 @@ mod tests {
             PipelineKey::ShastaRisc0Network,
         )
         .await?;
+        let mut remote_metadata = metadata.clone();
+        remote_metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xremote".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        upsert_test_record(
+            &runtime,
+            "remote-progress",
+            RuntimeRunnerStatus::Running,
+            &remote_metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
@@ -3723,10 +3891,68 @@ mod tests {
             .await
             .expect("clear prover should not fail on skipped records");
 
-        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.cancelled, 2);
         assert_eq!(status.failed, 0);
         assert_eq!(status.skipped.invalid_metadata, 1);
         assert_eq!(status.skipped.unavailable_pipeline, 1);
+        assert_eq!(status.skipped.remote_progress, 1);
+        let missing_pipeline = runtime
+            .get_task("missing-pipeline")
+            .await?
+            .expect("missing pipeline record still present");
+        assert!(matches!(
+            missing_pipeline.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let cleared = runtime
+            .get_task("clearable")
+            .await?
+            .expect("clearable record still present");
+        assert!(matches!(
+            cleared.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let remote = runtime
+            .get_task("remote-progress")
+            .await?
+            .expect("remote progress record still present");
+        assert!(matches!(remote.runner_status, RuntimeRunnerStatus::Running));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_prover_keeps_runtime_cancelled_when_queue_cancel_fails() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "clear-prover-queue-fail",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "clearable",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_acl(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
+
+        let Json(status) = clear_prover(State(state), headers)
+            .await
+            .expect("clear prover should preserve runtime cancellation");
+
+        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.failed, 1);
         let cleared = runtime
             .get_task("clearable")
             .await?
@@ -3750,9 +3976,8 @@ mod tests {
             axum::http::HeaderValue::from_static("secret-with-extra-bytes"),
         );
 
-        let err = match clear_prover(State(state), headers).await {
-            Ok(_) => panic!("oversized API key should fail"),
-            Err(err) => err,
+        let Err(err) = clear_prover(State(state), headers).await else {
+            panic!("oversized API key should fail");
         };
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(err.message, "invalid API key");

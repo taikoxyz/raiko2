@@ -40,9 +40,7 @@ use super::proof_types::{
     CanonicalProposal, ClearProverStatus, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
     LegacyTaskStatus, ProposalStatus, ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus,
     ProverTaskStatusCounts, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState,
-    ShastaProposal, TaskData, TaskRuntime, V4AggregationRequest, V4AggregationTaskData,
-    V4ApiErrorBody, V4ProofTaskData, V4ProofType, V4ProposalRequest, V4ProverClearRequest,
-    V4ProverStatusQuery,
+    ShastaProposal, TaskData, TaskRuntime, V4ApiErrorBody, v4,
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
@@ -395,8 +393,8 @@ async fn request_aggregation_proof_inner(
 
 pub async fn v4_request_proposal_proof(
     State(state): State<AppState>,
-    req: Result<Json<V4ProposalRequest>, JsonRejection>,
-) -> Result<Json<ApiOk<V4ProofTaskData>>, V4ApiError> {
+    req: Result<Json<v4::ProposalRequest>, JsonRejection>,
+) -> Result<Json<ApiOk<v4::ProofTaskData>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let submission = v4_proposal_submission(&state, &req)?;
@@ -414,8 +412,8 @@ pub async fn v4_request_proposal_proof(
 
 pub async fn v4_request_aggregation_proof(
     State(state): State<AppState>,
-    req: Result<Json<V4AggregationRequest>, JsonRejection>,
-) -> Result<Json<ApiOk<V4AggregationTaskData>>, V4ApiError> {
+    req: Result<Json<v4::AggregationRequest>, JsonRejection>,
+) -> Result<Json<ApiOk<v4::AggregationTaskData>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let proposal_id_start = req.proposal_id_start;
@@ -461,7 +459,7 @@ pub async fn v4_get_task(
 
 pub async fn v4_get_prover_status(
     State(state): State<AppState>,
-    query: Result<Query<V4ProverStatusQuery>, QueryRejection>,
+    query: Result<Query<v4::ProverStatusQuery>, QueryRejection>,
 ) -> Result<Json<ApiOk<ProverStatus>>, V4ApiError> {
     let Query(query) = query.map_err(|err| V4ApiError::from_query_rejection(&err))?;
     let (tasks, network, skipped) = collect_prover_status(
@@ -486,7 +484,7 @@ pub async fn v4_get_prover_status(
 pub async fn v4_clear_prover(
     State(state): State<AppState>,
     headers: HeaderMap,
-    req: Result<Json<V4ProverClearRequest>, JsonRejection>,
+    req: Result<Json<v4::ProverClearRequest>, JsonRejection>,
 ) -> Result<Json<ApiOk<ClearProverStatus>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)
@@ -3093,19 +3091,19 @@ fn external_aggregate_request_fingerprint(
     Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
 }
 
-const fn v4_batch_proof_type(proof_type: V4ProofType) -> BatchProofType {
+const fn v4_batch_proof_type(proof_type: v4::ProofType) -> BatchProofType {
     match proof_type {
-        V4ProofType::Risc0 => BatchProofType::Risc0,
-        V4ProofType::Sp1 => BatchProofType::Sp1,
+        v4::ProofType::Risc0 => BatchProofType::Risc0,
+        v4::ProofType::Sp1 => BatchProofType::Sp1,
     }
 }
 
-fn v4_proposal_task_id(proof_type: V4ProofType, proposal_id: u64) -> String {
+fn v4_proposal_task_id(proof_type: v4::ProofType, proposal_id: u64) -> String {
     format!("v4:proposal:{}:{proposal_id}", proof_type.as_str())
 }
 
 fn v4_aggregation_task_id(
-    proof_type: V4ProofType,
+    proof_type: v4::ProofType,
     proposal_id_start: u64,
     proposal_id_end: u64,
 ) -> String {
@@ -3117,7 +3115,7 @@ fn v4_aggregation_task_id(
 
 fn v4_proposal_submission(
     state: &AppState,
-    req: &V4ProposalRequest,
+    req: &v4::ProposalRequest,
 ) -> Result<CanonicalBatchSubmission, V4ApiError> {
     let proof_type = req.proof_type;
     let proposal_id = req.proposal_id;
@@ -3154,7 +3152,7 @@ fn v4_proposal_submission(
 
 async fn v4_aggregation_submission(
     state: &AppState,
-    req: V4AggregationRequest,
+    req: v4::AggregationRequest,
 ) -> Result<ExternalAggregateSubmission, V4ApiError> {
     let proof_type = req.proof_type;
     let aggregation_ids = v4_collect_inclusive_range(
@@ -3193,7 +3191,7 @@ async fn v4_aggregation_submission(
 
 async fn v4_local_proposal_proof(
     state: &AppState,
-    proof_type: V4ProofType,
+    proof_type: v4::ProofType,
     proposal_id: u64,
 ) -> Result<ProofArtifactMaterial, V4ApiError> {
     let records = state
@@ -3336,7 +3334,7 @@ async fn submit_v4_external_aggregation(
 async fn v4_proposal_task_data(
     state: &AppState,
     data: TaskData,
-) -> Result<V4ProofTaskData, V4ApiError> {
+) -> Result<v4::ProofTaskData, V4ApiError> {
     let proposal =
         data.proposals.into_iter().next().ok_or_else(|| {
             V4ApiError::invalid_request("proposal task did not contain a proposal")
@@ -3349,7 +3347,7 @@ async fn v4_proposal_task_data(
         "proposal",
     )
     .await?;
-    Ok(V4ProofTaskData {
+    Ok(v4::ProofTaskData {
         task_id: data.task_id,
         route: data.route,
         prover_type: data.prover_type,
@@ -3363,7 +3361,7 @@ async fn v4_aggregation_task_data(
     data: TaskData,
     proposal_id_start: u64,
     proposal_id_end: u64,
-) -> Result<V4AggregationTaskData, V4ApiError> {
+) -> Result<v4::AggregationTaskData, V4ApiError> {
     let aggregate = data.aggregate.ok_or_else(|| {
         V4ApiError::invalid_request("aggregation task did not contain aggregate data")
     })?;
@@ -3375,7 +3373,7 @@ async fn v4_aggregation_task_data(
         "aggregation",
     )
     .await?;
-    Ok(V4AggregationTaskData {
+    Ok(v4::AggregationTaskData {
         task_id: data.task_id,
         route: data.route,
         prover_type: data.prover_type,

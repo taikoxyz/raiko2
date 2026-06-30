@@ -126,6 +126,24 @@ Common `proof_type` values:
 | `native` | yes | no | no |
 | `zk_any` | no | no | no |
 
+V4 prover arguments:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `prover_args` | object | no | Backend-specific prover options. |
+| `prover_args.sp1` | object | no | SP1 request-scoped overrides. Only valid when `proof_type=sp1`. |
+| `prover_args.sp1.prover` | string | no | SP1 prover mode override. |
+| `prover_args.sp1.mode` | string | no | SP1 execution mode override. |
+| `prover_args.sp1.recursion` | string | no | SP1 recursion mode override. |
+| `prover_args.sp1.cycle_limit` | number | no | SP1 cycle limit override. |
+| `prover_args.sp1.timeout_secs` | number | no | SP1 request timeout override. |
+| `prover_args.sp1.skip_simulation` | boolean | no | SP1 simulation skip override. |
+| `prover_args.sp1.max_price_per_pgu` | number | no | SP1 network prover price cap override. |
+| `prover_args.sp1.auction_timeout_secs` | number | no | SP1 network prover auction timeout override. |
+
+`prover_args.native`, `prover_args.risc0`, `prover_args.sgx`, and `prover_args.sgxgeth`
+are reserved and rejected until those backends expose request-scoped options.
+
 ### Submit Proposal Proof
 
 ```http
@@ -197,6 +215,7 @@ Response fields:
 Validation:
 
 - `proof_type=zk_any` returns `400 invalid_proof_type`.
+- `prover_args` follows the v4 prover-argument rules above.
 - Unknown `proof_type` returns `400 invalid_proof_type`.
 - Unsupported concrete `proof_type` for the configured network returns `400 unsupported_proof_type`.
 - Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
@@ -221,6 +240,14 @@ Request:
   "l1_network": "ethereum",
   "aggregation_ids": [12345, 12346],
   "proof_type": "sp1",
+  "prover": "0x0000000000000000000000000000000000000000",
+  "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "blob_proof_type": "proof_of_equivalence",
+  "prover_args": {
+    "sp1": {
+      "cycle_limit": 100000000
+    }
+  },
   "proofs": [
     {
       "proposal_id": 12345,
@@ -242,6 +269,10 @@ Request fields:
 | `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `aggregation_ids` | number[] | yes | Proposal IDs covered by the aggregation. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `prover` | address | no | Designated prover address. |
+| `graffiti` | bytes32 | no | Graffiti passed to aggregation proof construction. |
+| `blob_proof_type` | string | no | Blob proof mode, when required by the selected fork. |
+| `prover_args` | object | no | Backend-specific prover options. |
 | `proofs` | object[] | yes | Proposal proof payloads to aggregate. |
 | `proofs[].proposal_id` | number | yes | Proposal ID for this proof payload. |
 | `proofs[].proof` | string/object | backend-specific | Proof bytes or structured proof payload. |
@@ -276,6 +307,7 @@ Response fields:
 Validation:
 
 - `proof_type=zk_any` returns `400 invalid_proof_type`.
+- `prover_args` follows the v4 prover-argument rules above.
 - Empty `aggregation_ids` returns `400 invalid_request`.
 - Empty `proofs` returns `400 invalid_request`.
 - A `proofs[].proposal_id` not present in `aggregation_ids` returns `400 invalid_request`.

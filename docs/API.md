@@ -86,6 +86,381 @@ These endpoints mirror old `raiko` dynamic ballot control for `proof_type=zk_any
 keys are `Sp1` and `Risc0`, and whose values are `[probability, per_day]` tuples. Only those two
 proof types are accepted.
 
+## V4 Prover API Spec
+
+V4 success envelope:
+
+```json
+{
+  "status": "ok",
+  "data": {}
+}
+```
+
+V4 error envelope:
+
+```json
+{
+  "status": "error",
+  "error": "invalid_proof_type",
+  "message": "proof_type must be a concrete proof type"
+}
+```
+
+Common request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
+| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
+| `proof_type` | string | yes | Concrete proof backend. `zk_any` is rejected. |
+
+Common `proof_type` values:
+
+| Value | Proposal | Aggregation | Status/Clear |
+| --- | --- | --- | --- |
+| `risc0` | yes | yes | yes |
+| `sp1` | yes | yes | yes |
+| `sgx` | yes | yes | no |
+| `sgxgeth` | yes | yes | no |
+| `native` | yes | no | no |
+| `zk_any` | no | no | no |
+
+### Submit Proposal Proof
+
+```http
+POST /v4/proof/proposal
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "network": "taiko_mainnet",
+  "l1_network": "ethereum",
+  "proposal_id": 12345,
+  "l1_inclusion_block_number": 100,
+  "l2_block_numbers": [200, 201],
+  "last_anchor_block_number": 199,
+  "checkpoint": null,
+  "proof_type": "risc0",
+  "prover": "0x0000000000000000000000000000000000000000",
+  "graffiti": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "blob_proof_type": "proof_of_equivalence",
+  "prover_args": {}
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
+| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
+| `proposal_id` | number | yes | Taiko proposal ID to prove. |
+| `l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
+| `l2_block_numbers` | number[] | yes | L2 block numbers covered by the proposal. |
+| `last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
+| `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`, `native`. |
+| `prover` | address | no | Designated prover address. |
+| `graffiti` | bytes32 | no | Graffiti passed to proposal proof construction. |
+| `blob_proof_type` | string | no | Blob proof mode, when required by the selected fork. |
+| `prover_args` | object | no | Backend-specific prover options, such as `sp1.cycle_limit`. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "risc0",
+  "data": {
+    "task_id": "task_0x1234",
+    "status": "registered",
+    "proof": null
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend selected by the caller. |
+| `task_id` | string | Root task ID. |
+| `status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `proof` | object/null | Final proof payload when `data.status=completed`. |
+
+Validation:
+
+- `proof_type=zk_any` returns `400 invalid_proof_type`.
+- Unknown `proof_type` returns `400 invalid_proof_type`.
+- Unsupported concrete `proof_type` for the configured network returns `400 unsupported_proof_type`.
+- Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
+- `l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
+- Invalid or unavailable proposal context returns `400 invalid_request`.
+- Unsupported proposal fork returns `400 unsupported_fork`.
+
+### Submit Aggregation Proof
+
+```http
+POST /v4/proof/aggregation
+Content-Type: application/json
+```
+
+Request:
+
+```json
+{
+  "network": "taiko_mainnet",
+  "l1_network": "ethereum",
+  "aggregation_ids": [12345, 12346],
+  "proof_type": "sp1",
+  "proofs": [
+    {
+      "proposal_id": 12345,
+      "proof": "0x",
+      "quote": "0x",
+      "input": {},
+      "uuid": "017c1f17-8f1a-4f62-8f71-7e2a5b5d7800",
+      "extra_data": {}
+    }
+  ]
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `network` | string | yes | L2 network key configured in `rpc.pairs`. |
+| `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
+| `aggregation_ids` | number[] | yes | Proposal IDs covered by the aggregation. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proofs` | object[] | yes | Proposal proof payloads to aggregate. |
+| `proofs[].proposal_id` | number | yes | Proposal ID for this proof payload. |
+| `proofs[].proof` | string/object | backend-specific | Proof bytes or structured proof payload. |
+| `proofs[].quote` | string/object | backend-specific | Quote or receipt payload. |
+| `proofs[].input` | object | backend-specific | Guest input or public input payload. |
+| `proofs[].uuid` | string | backend-specific | External prover order or proof UUID. |
+| `proofs[].extra_data` | object | no | Backend-specific metadata. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "sp1",
+  "data": {
+    "task_id": "task_0x5678",
+    "status": "registered",
+    "proof": null
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend selected by the caller. |
+| `task_id` | string | Root task ID. |
+| `status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `proof` | object/null | Final aggregation proof payload when `data.status=completed`. |
+
+Validation:
+
+- `proof_type=zk_any` returns `400 invalid_proof_type`.
+- Empty `aggregation_ids` returns `400 invalid_request`.
+- Empty `proofs` returns `400 invalid_request`.
+- A `proofs[].proposal_id` not present in `aggregation_ids` returns `400 invalid_request`.
+- Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
+- Unsupported aggregation fork returns `400 unsupported_fork`.
+
+### Query V4 Task
+
+```http
+GET /v4/tasks/{id}
+```
+
+Path fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | string | yes | Root task ID returned by a v4 submission route. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "task_id": "task_0x1234",
+    "kind": "proposal",
+    "network": "taiko_mainnet",
+    "l1_network": "ethereum",
+    "proposal_id": 12345,
+    "aggregation_ids": null,
+    "proof_type": "risc0",
+    "status": "completed",
+    "proof": {},
+    "error": null
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `task_id` | string | Root task ID. |
+| `kind` | string | `proposal` or `aggregation`. |
+| `network` | string | L2 network key. |
+| `l1_network` | string | L1 network key. |
+| `proposal_id` | number/null | Proposal ID for proposal tasks. |
+| `aggregation_ids` | number[]/null | Aggregation IDs for aggregation tasks. |
+| `proof_type` | string | Concrete proof backend selected by the caller. |
+| `status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `proof` | object/null | Final proof payload when available. |
+| `error` | string/null | Failure reason when `status=failed`. |
+
+Validation:
+
+- Unknown `id` returns `404 task_not_found`.
+
+### Query V4 Prover Status
+
+```http
+GET /v4/prover/status?proof_type=risc0&network=taiko_mainnet&l1_network=ethereum
+```
+
+Query fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `network` | string | no | Optional L2 network filter. |
+| `l1_network` | string | no | Optional L1 network filter. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "proof_type": "risc0",
+    "network": "taiko_mainnet",
+    "l1_network": "ethereum",
+    "clean": false,
+    "tasks": {
+      "pending": 1,
+      "ready": 0,
+      "retrying": 0,
+      "running": 1,
+      "orphaned": 0
+    },
+    "remote": {
+      "inflight_orders": 0
+    },
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 0
+    }
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend being reported. |
+| `network` | string/null | L2 network filter, or null when unfiltered. |
+| `l1_network` | string/null | L1 network filter, or null when unfiltered. |
+| `clean` | boolean | True when the selected proof type has no non-terminal backlog. |
+| `tasks.pending` | number | Matching queue tasks waiting to become ready. |
+| `tasks.ready` | number | Matching queue tasks ready to run. |
+| `tasks.retrying` | number | Matching queue tasks waiting for retry. |
+| `tasks.running` | number | Matching queue tasks currently running. |
+| `tasks.orphaned` | number | Matching non-terminal tasks whose runtime record is missing or stale. |
+| `remote.inflight_orders` | number | Matching external prover orders with resumable progress. |
+| `skipped.invalid_metadata` | number | Non-terminal roots skipped because metadata is unreadable. |
+| `skipped.unavailable_pipeline` | number | Non-terminal roots skipped because their pipeline is unavailable. |
+
+Validation:
+
+- Missing `proof_type` returns `400 missing_proof_type`.
+- `proof_type=zk_any` returns `400 invalid_proof_type`.
+- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
+- Supplying only one of `network` or `l1_network` returns `400 invalid_network_pair`.
+
+### Clear V4 Prover Backlog
+
+```http
+POST /v4/prover/clear
+Content-Type: application/json
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
+```
+
+Request:
+
+```json
+{
+  "proof_type": "risc0",
+  "network": "taiko_mainnet",
+  "l1_network": "ethereum"
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `network` | string | no | Optional L2 network filter. |
+| `l1_network` | string | no | Optional L1 network filter. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "proof_type": "risc0",
+    "network": "taiko_mainnet",
+    "l1_network": "ethereum",
+    "cancelled": 2,
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 0,
+      "remote_progress": 1,
+      "failed": 0
+    }
+  }
+}
+```
+
+Response fields:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `proof_type` | string | Concrete proof backend targeted by the clear operation. |
+| `network` | string/null | L2 network filter, or null when unfiltered. |
+| `l1_network` | string/null | L1 network filter, or null when unfiltered. |
+| `cancelled` | number | Non-terminal root tasks cancelled. |
+| `skipped.invalid_metadata` | number | Roots skipped because metadata is unreadable. |
+| `skipped.unavailable_pipeline` | number | Roots skipped because their pipeline is unavailable. |
+| `skipped.remote_progress` | number | Roots skipped because an external prover order has resumable progress. |
+| `skipped.failed` | number | Roots that failed during cancellation. |
+
+Validation:
+
+- Missing `proof_type` returns `400 missing_proof_type`.
+- `proof_type=zk_any` returns `400 invalid_proof_type`.
+- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
+- Supplying only one of `network` or `l1_network` returns `400 invalid_network_pair`.
+
 ## Submit Shasta Batch Proof
 
 ```http

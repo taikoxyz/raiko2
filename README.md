@@ -17,7 +17,7 @@ Hoodi-compatible v3 API.
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
-- Config-driven RPC pair allowlist via `rpc.pairs`
+- Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
 - In-process memory queue by default, with an optional Redis-backed queue
 

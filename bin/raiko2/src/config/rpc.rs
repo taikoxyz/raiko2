@@ -38,6 +38,7 @@ fn default_rpc_pairs() -> Vec<NetworkPairConfig> {
         network: "taiko_hoodi".to_string(),
         l1_network: "hoodi".to_string(),
         l1_rpc: None,
+        beacon_rpc: None,
         l2_rpc: None,
         l2_provider: L2ProviderKind::default(),
         l2_witness_rpc: None,
@@ -55,6 +56,14 @@ pub(crate) fn is_valid_url(url: &str) -> bool {
     matches!(url.scheme(), "http" | "https" | "ws" | "wss") && url.host_str().is_some()
 }
 
+/// Validate that a string is a valid HTTP URL.
+pub(crate) fn is_valid_http_url(url: &str) -> bool {
+    let Ok(url) = Url::parse(url) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+}
+
 /// Explicitly allowed L2/L1 network pair.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +72,8 @@ pub struct NetworkPairConfig {
     pub l1_network: String,
     #[serde(default)]
     pub l1_rpc: Option<String>,
+    #[serde(default)]
+    pub beacon_rpc: Option<String>,
     #[serde(default)]
     pub l2_rpc: Option<String>,
     #[serde(default)]
@@ -266,6 +277,15 @@ impl RpcConfig {
                     pair.l2_witness_rpc
                 );
             }
+            if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc
+                && !is_valid_http_url(beacon_rpc)
+            {
+                bail!(
+                    "{}: beacon_rpc = '{}'",
+                    validation::INVALID_RPC_URL,
+                    beacon_rpc
+                );
+            }
             match (&pair.sp1_verifier_rpc_url, &pair.sp1_verifier_address) {
                 (Some(rpc_url), Some(address)) => {
                     if !is_valid_url(rpc_url) {
@@ -351,9 +371,12 @@ fn resolve_pair(
     let l2_spec = known_specs
         .get_chain_spec(&pair.network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L2 network '{}'", pair.network))?;
-    let l1_spec = known_specs
+    let mut l1_spec = known_specs
         .get_chain_spec(&pair.l1_network)
         .ok_or_else(|| anyhow::anyhow!("unsupported L1 network '{}'", pair.l1_network))?;
+    if let Some(beacon_rpc) = &pair.beacon_rpc {
+        l1_spec.beacon_rpc = Some(beacon_rpc.clone());
+    }
     let l2_rpc = pair.l2_rpc.clone().unwrap_or_else(|| l2_spec.rpc.clone());
 
     Ok(ResolvedNetworkPair {

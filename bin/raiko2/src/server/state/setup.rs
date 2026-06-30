@@ -1,6 +1,6 @@
 use crate::config::{Config, ResolvedNetworkPair};
 use anyhow::Result;
-use raiko2_primitives::{ProofContext, ProofRequest, ProofType};
+use raiko2_primitives::{PROOF_CONTEXT_L1_BEACON_RPC_KEY, ProofContext, ProofRequest, ProofType};
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{RetryPolicy, SchedulerConfig};
 use std::time::Duration;
@@ -34,6 +34,12 @@ pub(crate) fn build_context(
             "hoodi_l1_network".to_string(),
             serde_json::json!(pair.l1_network),
         );
+        if let Some(beacon_rpc) = &pair.l1_spec.beacon_rpc {
+            config_obj.insert(
+                PROOF_CONTEXT_L1_BEACON_RPC_KEY.to_string(),
+                serde_json::json!(beacon_rpc),
+            );
+        }
     }
     let _ = config;
     Ok(context)
@@ -157,9 +163,11 @@ pub(crate) fn queue_namespace(base: &str, pair: &ResolvedNetworkPair, key: Pipel
 #[cfg(test)]
 mod tests {
     use super::{
-        boundless_prover_config, boundless_scheduler_config, risc0_prover_config, scheduler_config,
+        boundless_prover_config, boundless_scheduler_config, build_context, risc0_prover_config,
+        scheduler_config,
     };
     use crate::config::Config;
+    use raiko2_primitives::{PROOF_CONTEXT_L1_BEACON_RPC_KEY, ProofType};
     use raiko2_queue::RetryPolicy;
     use std::time::Duration;
 
@@ -210,6 +218,28 @@ mod tests {
 
         let scheduler = scheduler_config(&config);
         assert_eq!(scheduler.lease_duration, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn build_context_carries_l1_beacon_rpc_override() {
+        let mut config = Config::default();
+        config.rpc.pairs[0].beacon_rpc = Some("https://hoodi-beacon.example.test".to_string());
+        let pair = config
+            .rpc
+            .resolved_pairs()
+            .expect("resolved rpc pairs")
+            .pop()
+            .expect("default pair");
+
+        let context = build_context(&config, &pair, ProofType::Native).expect("proof context");
+
+        assert_eq!(
+            context
+                .config
+                .get(PROOF_CONTEXT_L1_BEACON_RPC_KEY)
+                .and_then(|value| value.as_str()),
+            Some("https://hoodi-beacon.example.test")
+        );
     }
 
     #[test]

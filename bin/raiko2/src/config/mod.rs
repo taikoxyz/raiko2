@@ -303,6 +303,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("wss://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: Some("https://witness.taiko-rpc.example.com".to_string()),
@@ -322,6 +323,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("not-a-valid-url".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("http://localhost:9545".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -337,12 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn test_rpc_config_invalid_beacon_url() {
+        let config = RpcConfig {
+            pairs: vec![NetworkPairConfig {
+                network: "taiko_hoodi".to_string(),
+                l1_network: "hoodi".to_string(),
+                l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: Some("ws://beacon.example.com".to_string()),
+                l2_rpc: Some("http://localhost:9545".to_string()),
+                l2_provider: L2ProviderKind::Reth,
+                l2_witness_rpc: None,
+                sp1_verifier_rpc_url: None,
+                sp1_verifier_address: None,
+                boundless: BoundlessPairConfig::default(),
+            }],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("beacon_rpc"));
+    }
+
+    #[test]
     fn test_rpc_config_rejects_partial_sp1_verifier_pair() {
         let config = RpcConfig {
             pairs: vec![NetworkPairConfig {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -370,6 +395,7 @@ mod tests {
                 network: "taiko_hoodi".to_string(),
                 l1_network: "hoodi".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -392,6 +418,7 @@ mod tests {
                 network: "taiko_mainnet".to_string(),
                 l1_network: "ethereum".to_string(),
                 l1_rpc: Some("https://eth.llamarpc.com".to_string()),
+                beacon_rpc: None,
                 l2_rpc: Some("https://taiko-rpc.example.com".to_string()),
                 l2_provider: L2ProviderKind::Reth,
                 l2_witness_rpc: None,
@@ -757,6 +784,45 @@ maintenance_interval_ms = 200
         assert_eq!(pair.l1_chain_id(), 560048);
         assert_eq!(pair.l2_chain_id(), 167013);
         assert_eq!(config.rpc.client.concurrency_limit, 24);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_pair_config_accepts_l1_beacon_rpc_override() {
+        let config_toml = r#"
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[rpc]
+pairs = [
+  { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "http://hoodi.example.test:8545", beacon_rpc = "https://hoodi-beacon.example.test", l2_rpc = "http://taiko-hoodi.example.test:8545" },
+]
+
+[prover]
+guest_system = "native"
+runner = "local"
+
+[queue]
+backend = "memory"
+namespace = "raiko2:queue"
+workers = 1
+maintenance_interval_ms = 200
+"#;
+        let path = write_temp_config(config_toml);
+
+        let cli = Cli::parse_from(["raiko2", "--config", path.to_str().expect("path utf8")]);
+
+        let config = Config::load(&cli).expect("config load");
+        let pair = config
+            .rpc
+            .resolve_pair("taiko_hoodi", "hoodi")
+            .expect("resolved pair");
+        assert_eq!(
+            pair.l1_spec.beacon_rpc.as_deref(),
+            Some("https://hoodi-beacon.example.test")
+        );
 
         let _ = std::fs::remove_file(path);
     }

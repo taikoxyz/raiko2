@@ -12,8 +12,8 @@ use alloy_sol_types::{SolCall, sol};
 use alloy_trie::TrieAccount;
 use futures::{StreamExt, future::try_join, stream};
 use raiko2_primitives::{
-    ChainSpec, ExecutionWitness, ProofContext, ProofType, RaikoError, RaikoResult, StatelessInput,
-    SupportedChainSpecs,
+    ChainSpec, ExecutionWitness, PROOF_CONTEXT_L1_BEACON_RPC_KEY, ProofContext, ProofType,
+    RaikoError, RaikoResult, StatelessInput, SupportedChainSpecs,
     chain_spec::{ForkCondition, ForkId, TaikoFork},
 };
 use raiko2_primitives_shasta::{
@@ -729,14 +729,22 @@ fn chain_spec_from_context(ctx: &ProofContext) -> ChainSpec {
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
-    SupportedChainSpecs::default()
+    let mut chain_spec = SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l1_chain_id)
         .ok_or_else(|| {
             RaikoError::InvalidRequestConfig(format!(
                 "unsupported l1_chain_id {} for Shasta preflight",
                 ctx.request.l1_chain_id
             ))
-        })
+        })?;
+    if let Some(beacon_rpc) = ctx
+        .config
+        .get(PROOF_CONTEXT_L1_BEACON_RPC_KEY)
+        .and_then(|value| value.as_str())
+    {
+        chain_spec.beacon_rpc = Some(beacon_rpc.to_string());
+    }
+    Ok(chain_spec)
 }
 
 async fn resolve_shasta_proposal_event<P: Provider>(
@@ -1260,8 +1268,9 @@ mod tests {
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
-        ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType, ProverConfig,
-        RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs, WitnessHeader,
+        ExecutionWitness, L2BlockRange, PROOF_CONTEXT_L1_BEACON_RPC_KEY, ProofContext,
+        ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult, ShastaRequest,
+        SupportedChainSpecs, WitnessHeader,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
@@ -1276,6 +1285,22 @@ mod tests {
     };
 
     use crate::{NativeBackend, PipelineKey};
+
+    #[test]
+    fn l1_chain_spec_from_context_uses_configured_beacon_rpc_override() {
+        let mut ctx = ProofContext::new(ProofRequest::default(), ProverConfig::default());
+        ctx.request.l1_chain_id = 560_048;
+        ctx.config = serde_json::json!({
+            PROOF_CONTEXT_L1_BEACON_RPC_KEY: "https://hoodi-beacon.example.test"
+        });
+
+        let chain_spec = super::l1_chain_spec_from_context(&ctx).expect("l1 chain spec");
+
+        assert_eq!(
+            chain_spec.beacon_rpc.as_deref(),
+            Some("https://hoodi-beacon.example.test")
+        );
+    }
 
     #[derive(Clone)]
     struct TestProvider {

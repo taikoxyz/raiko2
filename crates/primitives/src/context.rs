@@ -85,6 +85,9 @@ impl Default for ProofRequest {
     }
 }
 
+/// Context config key carrying an optional L1 beacon RPC endpoint override.
+pub const PROOF_CONTEXT_L1_BEACON_RPC_KEY: &str = "l1_beacon_rpc";
+
 /// Proof context containing chain specs and request parameters.
 #[derive(Debug, Clone)]
 pub struct ProofContext {

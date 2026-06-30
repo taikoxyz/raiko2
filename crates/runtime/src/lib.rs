@@ -595,6 +595,75 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if stale non-terminal runtime task records cannot be loaded.
+    pub async fn list_stale_nonterminal_tasks(
+        &self,
+        now_ts: i64,
+        ttl_secs: u64,
+        after: Option<&ExpiredTaskCursor>,
+        limit: usize,
+    ) -> Result<Vec<RuntimeTaskRecord>> {
+        if ttl_secs == 0 || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connection().await?;
+        let ttl_secs = i64::try_from(ttl_secs).unwrap_or(i64::MAX);
+        let cutoff = now_ts.saturating_sub(ttl_secs);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.cloned();
+        let tasks = conn
+            .call(move |conn| {
+                let mut stmt = if after.is_some() {
+                    conn.prepare(
+                        r"
+                        SELECT
+                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            updated_at
+                        FROM runtime_tasks
+                        WHERE runner_status IN ('allocated', 'running')
+                          AND updated_at <= ?1
+                          AND (updated_at > ?2 OR (updated_at = ?2 AND task_id > ?3))
+                        ORDER BY updated_at ASC, task_id ASC
+                        LIMIT ?4
+                        ",
+                    )?
+                } else {
+                    conn.prepare(
+                        r"
+                        SELECT
+                            task_id, pipeline_key, route, guest_system, runner, task_kind, proposal_id,
+                            proof_ids_json, runner_status, task_dir, image_ref, provider_request_id,
+                            remote_tx_hash, proof_path, error, metadata_json, request_fingerprint,
+                            updated_at
+                        FROM runtime_tasks
+                        WHERE runner_status IN ('allocated', 'running')
+                          AND updated_at <= ?1
+                        ORDER BY updated_at ASC, task_id ASC
+                        LIMIT ?2
+                        ",
+                    )?
+                };
+                let mut rows = if let Some(after) = after {
+                    stmt.query(params![cutoff, after.updated_at, after.task_id, limit])?
+                } else {
+                    stmt.query(params![cutoff, limit])?
+                };
+                let mut tasks = Vec::new();
+                while let Some(row) = rows.next()? {
+                    tasks.push(runtime_task_record_from_row(row)?);
+                }
+                Ok(tasks)
+            })
+            .await
+            .context("failed to list stale non-terminal runtime tasks")?;
+        Ok(tasks)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if the task record or workspace cannot be deleted.
     pub async fn remove_task(&self, task_id: &str) -> Result<bool> {
         let Some(record) = self.get_task(task_id).await? else {
@@ -890,6 +959,13 @@ fn migrate_runtime_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS runtime_tasks_request_fingerprint_uq
         ON runtime_tasks(request_fingerprint)
         WHERE request_fingerprint IS NOT NULL
+        ",
+        [],
+    )?;
+    conn.execute(
+        r"
+        CREATE INDEX IF NOT EXISTS runtime_tasks_status_updated_at_idx
+        ON runtime_tasks(runner_status, updated_at, task_id)
         ",
         [],
     )?;
@@ -1292,6 +1368,63 @@ mod tests {
         assert_eq!(expired.len(), 2);
         assert_eq!(expired[0].task_id, "completed-task");
         assert_eq!(expired[1].task_id, "cancelled-task");
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_lists_only_stale_nonterminal_tasks() -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-stale-nonterminal");
+        let runtime = RuntimeManager::new(root.clone())?;
+        for task_id in [
+            "allocated-task",
+            "running-task",
+            "fresh-task",
+            "failed-task",
+        ] {
+            runtime
+                .register_task(TaskRegistration {
+                    task_id: task_id.to_string(),
+                    pipeline_key: None,
+                    route: "risc0/local".parse::<PipelineRoute>().expect("parse route"),
+                    task_kind: "hoodi_batch".to_string(),
+                    proposal_id: Some(7),
+                    proof_ids: Vec::new(),
+                    metadata: serde_json::json!({}),
+                    request_fingerprint: None,
+                })
+                .await?;
+        }
+
+        for (task_id, status, updated_at) in [
+            ("allocated-task", RunnerStatus::Allocated, 10_i64),
+            ("running-task", RunnerStatus::Running, 20_i64),
+            ("fresh-task", RunnerStatus::Running, 40_i64),
+            ("failed-task", RunnerStatus::Failed, 10_i64),
+        ] {
+            let mut record = runtime.get_task(task_id).await?.expect("task present");
+            record.runner_status = status;
+            record.updated_at = updated_at;
+            runtime.upsert_task(&record).await?;
+        }
+
+        let stale = runtime
+            .list_stale_nonterminal_tasks(7_230, 7_200, None, 8)
+            .await?;
+        assert_eq!(stale.len(), 2);
+        assert_eq!(stale[0].task_id, "allocated-task");
+        assert_eq!(stale[1].task_id, "running-task");
+
+        let after = ExpiredTaskCursor {
+            updated_at: stale[0].updated_at,
+            task_id: stale[0].task_id.clone(),
+        };
+        let stale_after = runtime
+            .list_stale_nonterminal_tasks(7_230, 7_200, Some(&after), 8)
+            .await?;
+        assert_eq!(stale_after.len(), 1);
+        assert_eq!(stale_after[0].task_id, "running-task");
 
         std::fs::remove_dir_all(root)?;
         Ok(())

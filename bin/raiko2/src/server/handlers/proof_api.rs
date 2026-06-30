@@ -2102,19 +2102,17 @@ async fn collect_prover_status(
         });
     }
 
-    let mut counted_groups = HashMap::new();
+    let mut seen_groups = HashMap::new();
     for (engine_key, (engine, task_ids)) in queue_groups {
-        let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
-        counted_groups.insert(engine_key, counted);
+        let seen = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
+        seen_groups.insert(engine_key, seen);
     }
 
     for root in queue_roots {
-        let has_counted_task = counted_groups.get(&root.engine_key).is_some_and(|counted| {
-            root.task_ids
-                .iter()
-                .any(|task_id| counted.contains(task_id))
-        });
-        if !has_counted_task && !root.has_remote_progress {
+        let has_queue_task = seen_groups
+            .get(&root.engine_key)
+            .is_some_and(|seen| root.task_ids.iter().any(|task_id| seen.contains(task_id)));
+        if !has_queue_task && !root.has_remote_progress {
             tasks.orphaned = tasks.orphaned.saturating_add(1);
         }
     }
@@ -2179,7 +2177,7 @@ async fn count_matching_queue_tasks(
     if task_ids.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut counted = HashSet::new();
+    let mut seen = HashSet::new();
     for task_id in task_ids {
         let Some(view) = engine
             .get_task_state(task_id.clone())
@@ -2188,17 +2186,13 @@ async fn count_matching_queue_tasks(
         else {
             continue;
         };
-        if count_queue_task_state(&view, counts) {
-            counted.insert(view.id);
-        }
+        seen.insert(view.id.clone());
+        count_queue_task_state(&view, counts);
     }
-    Ok(counted)
+    Ok(seen)
 }
 
-const fn count_queue_task_state(
-    view: &EngineQueueTaskView,
-    counts: &mut ProverTaskStatusCounts,
-) -> bool {
+const fn count_queue_task_state(view: &EngineQueueTaskView, counts: &mut ProverTaskStatusCounts) {
     match view.state {
         EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
         EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
@@ -2206,9 +2200,8 @@ const fn count_queue_task_state(
         EngineQueueTaskState::Running => counts.running = counts.running.saturating_add(1),
         EngineQueueTaskState::Succeeded
         | EngineQueueTaskState::Failed
-        | EngineQueueTaskState::Cancelled => return false,
+        | EngineQueueTaskState::Cancelled => {}
     }
-    true
 }
 
 fn count_network_inflight(
@@ -3668,6 +3661,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prover_status_does_not_mark_present_terminal_queue_task_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-terminal-queue",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request.clone());
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request,
+        });
+        upsert_test_record(
+            &runtime,
+            "root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
+            id: task_id,
+            state: EngineQueueTaskState::Succeeded,
+        }]));
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::clone(&engine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert!(tasks.is_clean());
+        assert!(network.is_clean());
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn prover_status_lists_queue_once_per_engine_and_counts_unique_tasks() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
             "prover-status-list-once",
@@ -3785,9 +3820,8 @@ mod tests {
             axum::http::HeaderValue::from_static("secret-with-extra-bytes"),
         );
 
-        let err = match clear_prover(State(state), headers).await {
-            Ok(_) => panic!("oversized API key should fail"),
-            Err(err) => err,
+        let Err(err) = clear_prover(State(state), headers).await else {
+            panic!("oversized API key should fail");
         };
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(err.message, "invalid API key");

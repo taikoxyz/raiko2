@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::server::state::{EngineHandle, EngineQueueTaskState, PipelineFactory};
+use crate::server::state::EngineHandle;
+use crate::server::state::PipelineFactory;
 use crate::server::task_metadata::TaskMetadata;
 use anyhow::{Context, Result, anyhow};
 use raiko2_engine::{EngineTaskId, EngineTaskKey, ProposalTaskRequest};
@@ -51,14 +52,16 @@ pub(crate) fn spawn_runtime_cleanup_loop(
     }
 
     tokio::spawn(async move {
-        let mut cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
         let interval_duration = Duration::from_millis(config.queue.maintenance_interval_ms);
         log_runtime_cleanup_stats(
             run_runtime_cleanup_pass(
                 Arc::clone(&runtime),
                 Arc::clone(&pipelines),
                 config.runtime.inactive_ttl_secs,
-                &mut cursor,
+                &mut orphan_cursor,
+                &mut terminal_cursor,
             )
             .await,
         );
@@ -74,7 +77,8 @@ pub(crate) fn spawn_runtime_cleanup_loop(
                     Arc::clone(&runtime),
                     Arc::clone(&pipelines),
                     config.runtime.inactive_ttl_secs,
-                    &mut cursor,
+                    &mut orphan_cursor,
+                    &mut terminal_cursor,
                 )
                 .await,
             );
@@ -86,11 +90,17 @@ pub(crate) async fn run_runtime_cleanup_pass(
     runtime: Arc<RuntimeManager>,
     pipelines: Arc<dyn PipelineFactory>,
     ttl_secs: u64,
-    cursor: &mut Option<ExpiredTaskCursor>,
+    orphan_cursor: &mut Option<ExpiredTaskCursor>,
+    terminal_cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<RuntimeCleanupStats> {
     let mut stats = RuntimeCleanupStats {
-        orphaned_cancelled: cancel_orphaned_runtime_tasks(runtime.as_ref(), pipelines.as_ref())
-            .await?,
+        orphaned_cancelled: cancel_orphaned_runtime_tasks(
+            runtime.as_ref(),
+            pipelines.as_ref(),
+            ttl_secs,
+            orphan_cursor,
+        )
+        .await?,
         ..RuntimeCleanupStats::default()
     };
 
@@ -102,11 +112,11 @@ pub(crate) async fn run_runtime_cleanup_pass(
         .list_expired_terminal_tasks(
             now_ts(),
             ttl_secs,
-            cursor.as_ref(),
+            terminal_cursor.as_ref(),
             RUNTIME_CLEANUP_BATCH_SIZE,
         )
         .await?;
-    *cursor = records.last().map(|record| ExpiredTaskCursor {
+    *terminal_cursor = records.last().map(|record| ExpiredTaskCursor {
         updated_at: record.updated_at,
         task_id: record.task_id.clone(),
     });
@@ -132,15 +142,24 @@ pub(crate) async fn run_runtime_cleanup_pass(
 async fn cancel_orphaned_runtime_tasks(
     runtime: &RuntimeManager,
     pipelines: &dyn PipelineFactory,
+    ttl_secs: u64,
+    cursor: &mut Option<ExpiredTaskCursor>,
 ) -> Result<usize> {
-    let records = runtime.list_tasks().await?;
+    let records = runtime
+        .list_stale_nonterminal_tasks(
+            now_ts(),
+            ttl_secs,
+            cursor.as_ref(),
+            RUNTIME_CLEANUP_BATCH_SIZE,
+        )
+        .await?;
+    *cursor = records.last().map(|record| ExpiredTaskCursor {
+        updated_at: record.updated_at,
+        task_id: record.task_id.clone(),
+    });
     let mut cancelled = 0usize;
 
     for record in records {
-        if is_terminal_runtime_status(record.runner_status) {
-            continue;
-        }
-
         let metadata: TaskMetadata = match serde_json::from_value(record.metadata.clone()) {
             Ok(metadata) => metadata,
             Err(err) => {
@@ -161,7 +180,7 @@ async fn cancel_orphaned_runtime_tasks(
             continue;
         };
 
-        if has_active_queue_task(
+        if has_queue_task(
             &engine,
             &metadata_queue_task_ids(&metadata, record.pipeline_key),
         )
@@ -186,20 +205,17 @@ async fn cancel_orphaned_runtime_tasks(
     Ok(cancelled)
 }
 
-async fn has_active_queue_task(
+async fn has_queue_task(
     engine: &Arc<dyn EngineHandle>,
     task_ids: &HashSet<EngineTaskId>,
 ) -> Result<bool> {
     for task_id in task_ids {
-        let Some(view) = engine
+        if engine
             .get_task_state(task_id.clone())
             .await
             .map_err(|err| anyhow!("failed load queue task: {err}"))?
-        else {
-            continue;
-        };
-
-        if is_active_queue_task_state(view.state) {
+            .is_some()
+        {
             return Ok(true);
         }
     }
@@ -222,23 +238,6 @@ fn metadata_queue_task_ids(
         task_ids.insert(task_id);
     }
     task_ids
-}
-
-const fn is_terminal_runtime_status(status: RunnerStatus) -> bool {
-    matches!(
-        status,
-        RunnerStatus::Completed | RunnerStatus::Failed | RunnerStatus::Cancelled
-    )
-}
-
-const fn is_active_queue_task_state(state: EngineQueueTaskState) -> bool {
-    matches!(
-        state,
-        EngineQueueTaskState::Pending
-            | EngineQueueTaskState::Ready
-            | EngineQueueTaskState::Retrying
-            | EngineQueueTaskState::Running
-    )
 }
 
 pub(crate) async fn cancel_registered_tasks(
@@ -522,7 +521,9 @@ mod tests {
         ExpiredTaskCursor, RuntimeCleanupStats, cancel_registered_tasks, proposal_task_chain_ids,
         proposal_task_id, run_runtime_cleanup_pass,
     };
-    use crate::server::state::{EngineHandle, StaticPipelineFactory};
+    use crate::server::state::{
+        EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
+    };
     use crate::server::task_metadata::{
         ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
     };
@@ -558,17 +559,38 @@ mod tests {
     #[tokio::test]
     async fn runtime_cleanup_cancels_orphaned_roots_without_remote_progress() -> Result<()> {
         let runtime = Arc::new(RuntimeManager::new(unique_runtime_root("orphaned"))?);
-        let engine = Arc::new(MockEngine::default());
-        let factory = Arc::new(build_factory(engine));
         let orphaned_task_id = encoded_proposal_task_id(10)?;
         let remote_task_id = encoded_proposal_task_id(11)?;
+        let queued_task_id = encoded_proposal_task_id(13)?;
+        let engine = Arc::new(MockEngine::with_queue_tasks(HashSet::from([
+            queued_task_id.clone(),
+        ])));
+        let factory = Arc::new(build_factory(engine));
+        let now = now_ts();
+        let stale = now.saturating_sub(7_201);
 
         register_runtime_task(
             runtime.as_ref(),
             "orphaned-root",
             &orphaned_task_id,
             RunnerStatus::Running,
-            now_ts(),
+            stale,
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "fresh-root",
+            &encoded_proposal_task_id(12)?,
+            RunnerStatus::Running,
+            now,
+        )
+        .await?;
+        register_runtime_task(
+            runtime.as_ref(),
+            "queued-root",
+            &queued_task_id,
+            RunnerStatus::Running,
+            stale,
         )
         .await?;
 
@@ -585,12 +607,20 @@ mod tests {
             "remote-root",
             &remote_metadata,
             RunnerStatus::Running,
-            now_ts(),
+            stale,
         )
         .await?;
 
-        let mut cursor = None;
-        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
 
         assert_eq!(
             stats,
@@ -610,6 +640,10 @@ mod tests {
         );
         let remote = runtime.get_task("remote-root").await?.expect("remote root");
         assert_eq!(remote.runner_status, RunnerStatus::Running);
+        let fresh = runtime.get_task("fresh-root").await?.expect("fresh root");
+        assert_eq!(fresh.runner_status, RunnerStatus::Running);
+        let queued = runtime.get_task("queued-root").await?.expect("queued root");
+        assert_eq!(queued.runner_status, RunnerStatus::Running);
         Ok(())
     }
 
@@ -618,6 +652,7 @@ mod tests {
         removed: Mutex<Vec<String>>,
         cancelled: Mutex<Vec<String>>,
         fail_on: HashSet<String>,
+        queue_task_ids: HashSet<String>,
     }
 
     impl MockEngine {
@@ -626,6 +661,14 @@ mod tests {
                 removed: Mutex::new(Vec::new()),
                 cancelled: Mutex::new(Vec::new()),
                 fail_on,
+                queue_task_ids: HashSet::new(),
+            }
+        }
+
+        fn with_queue_tasks(queue_task_ids: HashSet<String>) -> Self {
+            Self {
+                queue_task_ids,
+                ..Self::default()
             }
         }
 
@@ -665,10 +708,18 @@ mod tests {
 
         fn get_task_state(
             &self,
-            _id: EngineTaskId,
+            id: EngineTaskId,
         ) -> BoxFuture<'_, Result<Option<crate::server::state::EngineQueueTaskView>, TaskStoreError>>
         {
-            Box::pin(async { Ok(None) })
+            let present = self
+                .queue_task_ids
+                .contains(&encode_task_id(&id).expect("encode task id"));
+            Box::pin(async move {
+                Ok(present.then_some(EngineQueueTaskView {
+                    id,
+                    state: EngineQueueTaskState::Succeeded,
+                }))
+            })
         }
 
         fn cancel(&self, id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -721,8 +772,16 @@ mod tests {
         )
         .await?;
 
-        let mut cursor = None;
-        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
 
         assert_eq!(
             stats,
@@ -758,8 +817,16 @@ mod tests {
         )
         .await?;
 
-        let mut cursor = None;
-        let stats = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
+        let stats = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
 
         assert_eq!(
             stats,
@@ -782,7 +849,8 @@ mod tests {
         let failing_stage = first_stage_task_id(1)?;
         let engine = Arc::new(MockEngine::new(HashSet::from([failing_stage])));
         let factory = Arc::new(build_factory(engine));
-        let mut cursor = None;
+        let mut orphan_cursor = None;
+        let mut terminal_cursor = None;
 
         register_runtime_task(
             runtime.as_ref(),
@@ -801,8 +869,14 @@ mod tests {
         )
         .await?;
 
-        let first =
-            run_runtime_cleanup_pass(runtime.clone(), factory.clone(), 7_200, &mut cursor).await?;
+        let first = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory.clone(),
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
         assert_eq!(
             first,
             RuntimeCleanupStats {
@@ -815,7 +889,7 @@ mod tests {
             }
         );
         assert_eq!(
-            cursor,
+            terminal_cursor,
             Some(ExpiredTaskCursor {
                 updated_at: 2,
                 task_id: "expired-b".to_string()
@@ -831,7 +905,14 @@ mod tests {
         )
         .await?;
 
-        let second = run_runtime_cleanup_pass(runtime.clone(), factory, 7_200, &mut cursor).await?;
+        let second = run_runtime_cleanup_pass(
+            runtime.clone(),
+            factory,
+            7_200,
+            &mut orphan_cursor,
+            &mut terminal_cursor,
+        )
+        .await?;
         assert_eq!(
             second,
             RuntimeCleanupStats {

@@ -319,11 +319,16 @@ pub(crate) struct ProverTaskStatusCounts {
     pub(crate) ready: usize,
     pub(crate) retrying: usize,
     pub(crate) running: usize,
+    pub(crate) orphaned: usize,
 }
 
 impl ProverTaskStatusCounts {
     pub(crate) const fn is_clean(&self) -> bool {
-        self.pending == 0 && self.ready == 0 && self.retrying == 0 && self.running == 0
+        self.pending == 0
+            && self.ready == 0
+            && self.retrying == 0
+            && self.running == 0
+            && self.orphaned == 0
     }
 }
 
@@ -405,6 +410,7 @@ mod tests {
                     ready: 2,
                     retrying: 1,
                     running: 6,
+                    orphaned: 5,
                 },
                 network: ProverNetworkStatus {
                     sp1: ProverNetworkBackendStatus { inflight_orders: 3 },
@@ -416,6 +422,7 @@ mod tests {
         .expect("serialize status");
         assert_eq!(status["status"], "ok");
         assert_eq!(status["data"]["tasks"]["ready"], 2);
+        assert_eq!(status["data"]["tasks"]["orphaned"], 5);
         assert_eq!(status["data"]["network"]["sp1"]["inflight_orders"], 3);
 
         let clear = serde_json::to_value(ClearProverStatus {

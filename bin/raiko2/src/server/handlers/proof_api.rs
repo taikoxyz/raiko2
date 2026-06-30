@@ -2115,7 +2115,7 @@ async fn collect_prover_status(
                 .any(|task_id| counted.contains(task_id))
         });
         if !has_counted_task && !root.has_remote_progress {
-            tasks.pending = tasks.pending.saturating_add(1);
+            tasks.orphaned = tasks.orphaned.saturating_add(1);
         }
     }
 
@@ -3628,6 +3628,41 @@ mod tests {
             .map_err(|err| anyhow!(err.message))?;
 
         assert_eq!(network.risc0.inflight_orders, 0);
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_counts_missing_queue_task_as_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-orphaned",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "orphaned-root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.orphaned, 1);
+        assert!(network.is_clean());
         assert!(skipped.is_clean());
         Ok(())
     }

@@ -4,7 +4,8 @@
 
 - **Proposal proof**: A proof for one Taiko proposal. Public prover interfaces should use this term
   instead of Shasta-specific `batch` wording. The covered L2 blocks are contiguous; the HTTP prover
-  request carries the full `l2_block_numbers` list.
+  v4 request carries an inclusive `l2_block_number_start`/`l2_block_number_end` range instead of
+  the legacy `l2_block_numbers` list.
 - **Aggregation proof**: A proof that aggregates multiple proposal proofs for submission.
 - **Concrete proof type**: A caller-selected prover backend such as `risc0` or `sp1`. It excludes
   policy names such as `zk_any`.

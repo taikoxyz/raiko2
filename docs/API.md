@@ -141,7 +141,8 @@ Request:
   "l1_network": "ethereum",
   "proposal_id": 12345,
   "l1_inclusion_block_number": 100,
-  "l2_block_numbers": [200, 201],
+  "l2_block_number_start": 200,
+  "l2_block_number_end": 201,
   "last_anchor_block_number": 199,
   "checkpoint": null,
   "proof_type": "risc0",
@@ -160,7 +161,8 @@ Request fields:
 | `l1_network` | string | yes | L1 network key configured in `rpc.pairs`. |
 | `proposal_id` | number | yes | Taiko proposal ID to prove. |
 | `l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
-| `l2_block_numbers` | number[] | yes | L2 block numbers covered by the proposal. |
+| `l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
+| `l2_block_number_end` | number | yes | Last L2 block number covered by the proposal. |
 | `last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
 | `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`, `native`. |
@@ -198,7 +200,9 @@ Validation:
 - Unknown `proof_type` returns `400 invalid_proof_type`.
 - Unsupported concrete `proof_type` for the configured network returns `400 unsupported_proof_type`.
 - Unknown `(network, l1_network)` returns `400 invalid_network_pair`.
-- `l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
+- `l2_block_number_start` and `l2_block_number_end` define an inclusive range and must satisfy
+  `l2_block_number_start <= l2_block_number_end`.
+- `l2_block_numbers` is not accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
 - Unsupported proposal fork returns `400 unsupported_fork`.
 

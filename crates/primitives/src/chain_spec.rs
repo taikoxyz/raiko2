@@ -922,6 +922,26 @@ impl ChainSpec {
         spec
     }
 
+    /// Aligns this config-level Taiko fork table with the Alethia runtime chainspec used by
+    /// execution, while preserving raiko2 overlay fields such as RPCs, contracts, and verifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chain is marked as Taiko but no built-in Alethia runtime
+    /// chainspec exists for its chain ID.
+    pub fn align_taiko_runtime_forks(&self) -> Result<Self> {
+        if !self.is_taiko {
+            return Ok(self.clone());
+        }
+
+        let runtime_spec = self.to_taiko_chain_spec()?;
+        let canonical = canonical_taiko_chain_spec(runtime_spec.as_ref());
+        let mut spec = self.clone();
+        spec.max_spec_id = canonical.max_spec_id;
+        spec.hard_forks = canonical.hard_forks;
+        Ok(spec)
+    }
+
     fn apply_v0_1_0_guest_input_compat(&mut self) {
         if let Some((max_spec_id, hard_forks)) = v0_1_0_guest_input_hard_forks(&self.name) {
             self.max_spec_id = max_spec_id;
@@ -1576,6 +1596,35 @@ mod tests {
             AlethiaForkCondition::Timestamp(0),
             "Unzen must be active at genesis on internal devnet"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn aligns_taiko_runtime_forks_from_alethia_runtime_spec() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let mut spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_dev")
+            .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
+        spec.max_spec_id = SpecId::SHANGHAI;
+        spec.hard_forks = BTreeMap::from([(
+            ForkId::Taiko(TaikoFork::Shasta),
+            ForkCondition::Timestamp(0),
+        )]);
+
+        let aligned = spec.align_taiko_runtime_forks()?;
+
+        assert_eq!(aligned.max_spec_id, SpecId::OSAKA);
+        assert_eq!(
+            aligned.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
+            Some(&ForkCondition::Timestamp(0))
+        );
+        assert_eq!(
+            aligned.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
+        );
+        assert_eq!(aligned.l1_contract, spec.l1_contract);
+        assert_eq!(aligned.verifier_address_forks, spec.verifier_address_forks);
         Ok(())
     }
 

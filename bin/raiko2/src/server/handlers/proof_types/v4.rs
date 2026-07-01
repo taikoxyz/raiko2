@@ -26,6 +26,9 @@ pub(crate) struct TaskResponse<T> {
 pub(crate) enum ProofType {
     Risc0,
     Sp1,
+    Sgx,
+    #[serde(rename = "sgxgeth")]
+    SgxGeth,
 }
 
 impl ProofType {
@@ -33,6 +36,8 @@ impl ProofType {
         match self {
             Self::Risc0 => "risc0",
             Self::Sp1 => "sp1",
+            Self::Sgx => "sgx",
+            Self::SgxGeth => "sgxgeth",
         }
     }
 }

@@ -261,6 +261,8 @@ const fn batch_proof_type(proof_type: wire::ProofType) -> BatchProofType {
     match proof_type {
         wire::ProofType::Risc0 => BatchProofType::Risc0,
         wire::ProofType::Sp1 => BatchProofType::Sp1,
+        wire::ProofType::Sgx => BatchProofType::Sgx,
+        wire::ProofType::SgxGeth => BatchProofType::SgxGeth,
     }
 }
 

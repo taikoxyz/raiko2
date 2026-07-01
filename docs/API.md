@@ -127,7 +127,7 @@ V4 error envelope:
 {
   "status": "error",
   "error": "invalid_proof_type",
-  "message": "proof_type must be one of: risc0, sp1"
+  "message": "proof_type must be one of: risc0, sp1, sgx, sgxgeth"
 }
 ```
 
@@ -151,13 +151,13 @@ Common proof submission fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`. |
+| `proof_type` | string | yes | Concrete proof backend. One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Common proof-type validation:
 
 - Missing `proof_type` returns `400 missing_proof_type`.
 - `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Any `proof_type` other than `risc0` or `sp1` returns `400 unsupported_proof_type`.
+- Any concrete `proof_type` that the configured server route cannot serve returns `400 unsupported_proof_type`.
 
 Proof submission validation:
 
@@ -208,7 +208,7 @@ Request fields:
 | `l2_block_number_end` | number | yes | Last L2 block number covered by the proposal. |
 | `last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
 | `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
-| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `prover` | address | no | Designated prover address. |
 
 Response:
@@ -283,7 +283,7 @@ Request fields:
 | --- | --- | --- | --- |
 | `proposal_id_start` | number | yes | First proposal ID covered by the aggregation. |
 | `proposal_id_end` | number | yes | Last proposal ID covered by the aggregation. |
-| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -432,7 +432,7 @@ Query fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 
@@ -477,7 +477,7 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proof_type` | string | yes | One of `risc0`, `sp1`. |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 
 Response:
 

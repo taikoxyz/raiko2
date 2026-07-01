@@ -421,4 +421,25 @@ mod tests {
         .expect_err("zk_any is not a v4 proof type");
         assert!(err.to_string().contains("unknown variant"));
     }
+
+    #[test]
+    fn v4_proposal_request_accepts_sgx_proof_types() {
+        for (proof_type, expected) in [
+            ("sgx", v4::ProofType::Sgx),
+            ("sgxgeth", v4::ProofType::SgxGeth),
+        ] {
+            let req = serde_json::from_value::<v4::ProposalRequest>(serde_json::json!({
+                "proof_type": proof_type,
+                "proposal_id_start": 1,
+                "proposal_id_end": 1,
+                "l1_inclusion_block_number": 2,
+                "l2_block_number_start": 3,
+                "l2_block_number_end": 3,
+                "last_anchor_block_number": 1
+            }))
+            .expect("deserialize v4 proposal request");
+
+            assert_eq!(req.proof_type, expected);
+        }
+    }
 }

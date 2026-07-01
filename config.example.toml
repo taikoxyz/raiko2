@@ -109,6 +109,8 @@ batch_quote_strategy = "raiko_agent"
 aggregation_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+# How long to wait for an unlocked market request before rebidding.
+rebid_timeout_ms = 300000
 
 # Optional request sampling policy for proof_type=zk_any.
 # When disabled or not drawn, the server returns data.status = "zk_any_not_drawn"

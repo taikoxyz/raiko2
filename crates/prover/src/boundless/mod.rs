@@ -51,10 +51,6 @@ const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-// Stop polling an unlocked low-price request after five minutes and resubmit at
-// a higher max price. Once a request is locked, keep waiting for that request to
-// avoid duplicate fills.
-const BOUNDLESS_NO_LOCK_REBID_DELAY: Duration = Duration::from_secs(5 * 60);
 // Cap manual max-price escalation at four doublings (16x). This gives an
 // initial quote plus four higher-price submissions.
 const RETRY_PRICE_MAX_DOUBLINGS: u64 = 4;
@@ -163,14 +159,14 @@ struct NoLockTimeout {
     action: NoLockTimeoutAction,
 }
 
-const fn no_lock_timeout_for_attempt(attempt: u64) -> NoLockTimeout {
+fn no_lock_timeout_for_attempt(attempt: u64, rebid_timeout_ms: u64) -> NoLockTimeout {
     let action = if should_rebid_unlocked_request(attempt) {
         NoLockTimeoutAction::Rebid
     } else {
         NoLockTimeoutAction::Abort
     };
     NoLockTimeout {
-        delay: BOUNDLESS_NO_LOCK_REBID_DELAY,
+        delay: Duration::from_millis(rebid_timeout_ms.max(1)),
         action,
     }
 }
@@ -1119,7 +1115,8 @@ impl BoundlessProver {
                 max_price_multiplier = submission.max_price_multiplier,
                 "Using Boundless market submission"
             );
-            let no_lock_timeout = no_lock_timeout_for_attempt(attempt);
+            let no_lock_timeout =
+                no_lock_timeout_for_attempt(attempt, self.config.rebid_timeout_ms);
 
             match self
                 .poll_until_fulfilled(
@@ -1515,9 +1512,11 @@ mod tests {
     use std::{
         env,
         sync::{Mutex, MutexGuard},
+        time::Duration,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
 
     const STORAGE_ENV_VARS: &[&str] = &[
         "BOUNDLESS_STORAGE_UPLOADER",
@@ -1734,11 +1733,19 @@ mod tests {
 
     #[test]
     fn no_lock_deadline_uses_submission_wall_clock() {
-        let timeout = no_lock_timeout_for_attempt(1);
+        let timeout = no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS);
 
         assert!(!no_lock_deadline_elapsed(1_000, timeout, 1_299));
         assert!(no_lock_deadline_elapsed(1_000, timeout, 1_300));
         assert!(no_lock_deadline_elapsed(1_000, timeout, 1_600));
+    }
+
+    #[test]
+    fn no_lock_timeout_uses_configured_rebid_delay() {
+        let timeout = no_lock_timeout_for_attempt(1, 900_000);
+
+        assert_eq!(timeout.delay, Duration::from_millis(900_000));
+        assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
     }
 
     #[test]
@@ -1754,19 +1761,19 @@ mod tests {
     #[test]
     fn no_lock_timeout_aborts_after_final_rebid_attempt() {
         assert_eq!(
-            no_lock_timeout_for_attempt(1).action,
+            no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS).action,
             NoLockTimeoutAction::Rebid
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(4).action,
+            no_lock_timeout_for_attempt(4, TEST_REBID_TIMEOUT_MS).action,
             NoLockTimeoutAction::Rebid
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(5).action,
+            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS).action,
             NoLockTimeoutAction::Abort
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(6).action,
+            no_lock_timeout_for_attempt(6, TEST_REBID_TIMEOUT_MS).action,
             NoLockTimeoutAction::Abort
         );
     }

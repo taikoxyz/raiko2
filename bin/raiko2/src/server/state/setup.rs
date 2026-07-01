@@ -166,6 +166,7 @@ pub(crate) fn boundless_prover_config(
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
+        rebid_timeout_ms: boundless.rebid_timeout_ms,
     }
 }
 
@@ -323,6 +324,7 @@ mod tests {
     #[test]
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
+        config.prover.boundless.rebid_timeout_ms = 900_000;
         config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
         config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
         config.rpc.pairs[0].boundless.aggregation_quote_strategy =
@@ -357,6 +359,7 @@ mod tests {
             boundless.offer_params.aggregation.timeout_ms_per_mcycle,
             7_000
         );
+        assert_eq!(boundless.rebid_timeout_ms, 900_000);
     }
 
     #[test]

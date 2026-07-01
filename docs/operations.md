@@ -686,6 +686,7 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+rebid_timeout_ms = 300000
 
 [prover.boundless.deployment]
 deployment_type = "base"
@@ -704,6 +705,8 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
+  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

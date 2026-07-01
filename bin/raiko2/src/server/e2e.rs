@@ -27,7 +27,7 @@ use tower::ServiceExt;
 use super::app;
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
-    app_with_engine, app_with_observed_native_fixture_engine,
+    Sp1FixtureEngine, app_with_engine, app_with_observed_native_fixture_engine,
     app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
     app_with_risc0_fixture_engine, base_config, native_fixture_engine_for_pipeline,
     risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc,
@@ -351,6 +351,115 @@ fn v4_proposal_request() -> Value {
     })
 }
 
+fn v4_sp1_proposal_request(proposal_id: u64) -> Value {
+    json!({
+        "proof_type": "sp1",
+        "proposal_id_start": proposal_id,
+        "proposal_id_end": proposal_id,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 1,
+        "l2_block_number_start": proposal_id,
+        "l2_block_number_end": proposal_id
+    })
+}
+
+fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> Value {
+    json!({
+        "proof_type": "sp1",
+        "proposal_id_start": proposal_id_start,
+        "proposal_id_end": proposal_id_end
+    })
+}
+
+fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+    config.server.acl.keys = vec![
+        acl_key(
+            "submit",
+            "submit-secret",
+            vec![ServerAclFeature::ProverSubmit],
+        ),
+        acl_key("clear", "clear-secret", vec![ServerAclFeature::ProverClear]),
+    ];
+
+    app_with_observed_sp1_fixture_engine(config)
+}
+
+async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, proposal_id: u64) {
+    let proposal_payload = v4_sp1_proposal_request(proposal_id);
+
+    let (status, first) = post_json_with_api_key(
+        app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        proposal_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["proof_type"], "sp1");
+    assert_eq!(first["proposal_id_start"], proposal_id);
+    assert_eq!(first["proposal_id_end"], proposal_id);
+    assert_eq!(
+        first["data"]["task_id"],
+        format!("v4:proposal:sp1:{proposal_id}:{proposal_id}")
+    );
+    assert_eq!(first["data"]["status"], "pending");
+    assert!(first["data"]["proof"].is_null(), "{first}");
+
+    Box::pin(drive_engine_to_idle(engine)).await;
+
+    let (status, completed) =
+        post_json_with_api_key(app, "/v4/proof/proposal", "submit-secret", proposal_payload).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
+}
+
+async fn complete_v4_sp1_aggregation(
+    app: &Router,
+    engine: &Sp1FixtureEngine,
+    proposal_id_start: u64,
+    proposal_id_end: u64,
+) {
+    let aggregation_payload = v4_sp1_aggregation_request(proposal_id_start, proposal_id_end);
+
+    let (status, first) = post_json_with_api_key(
+        app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        aggregation_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["proof_type"], "sp1");
+    assert_eq!(first["proposal_id_start"], proposal_id_start);
+    assert_eq!(first["proposal_id_end"], proposal_id_end);
+    assert_eq!(
+        first["data"]["task_id"],
+        format!("v4:aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
+    );
+    assert_eq!(first["data"]["status"], "pending");
+    assert!(first["data"]["proof"].is_null(), "{first}");
+
+    Box::pin(drive_engine_to_idle(engine)).await;
+
+    let (status, completed) = post_json_with_api_key(
+        app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        aggregation_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
 #[tokio::test]
 async fn e2e_ready_ok_with_matching_chain_id() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -397,6 +506,17 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unauthorized");
+
+    let (status, body) = post_json(
+        &app,
+        "/v4/proof/aggregation",
+        v4_sp1_aggregation_request(1, 1),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unauthorized");
 }
 
 #[tokio::test]
@@ -423,6 +543,77 @@ async fn e2e_v4_submit_rate_limits_acl_key() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "rate_limited");
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        v4_sp1_aggregation_request(1, 1),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "rate_limited");
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_proposal(&app, &engine, 3).await;
+
+    let (status, task) = get_json(&app, "/v4/tasks/v4:proposal:sp1:3:3").await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["status"], "ok");
+    assert_eq!(task["data"]["task_id"], "v4:proposal:sp1:3:3");
+    assert_eq!(task["data"]["status"], "completed");
+    assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_proposal(&app, &engine, 3).await;
+    complete_v4_sp1_aggregation(&app, &engine, 3, 3).await;
+
+    let (status, status_body) = get_json(&app, "/v4/prover/status?proof_type=sp1").await;
+    assert_eq!(status, StatusCode::OK, "{status_body}");
+    assert_eq!(status_body["status"], "ok");
+    assert_eq!(status_body["proof_type"], "sp1");
+
+    let (status, clear_body) = post_json(
+        &app,
+        "/v4/prover/clear",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{clear_body}");
+
+    let (status, clear_body) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "submit-secret",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{clear_body}");
+
+    let (status, clear_body) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "clear-secret",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{clear_body}");
+    assert_eq!(clear_body["status"], "ok");
+    assert_eq!(clear_body["proof_type"], "sp1");
 }
 
 #[tokio::test]

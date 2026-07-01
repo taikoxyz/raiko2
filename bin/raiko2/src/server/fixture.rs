@@ -20,7 +20,7 @@ use raiko2_primitives::{
     Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
 };
 use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data};
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ShastaEventData};
 use raiko2_prover::{
     GuestInputCodec, Prover,
     native::NativeProver,
@@ -379,7 +379,8 @@ where
             }
             ExecutionMode::Prove => Ok(Proof {
                 proof: Some("0xfixture-sp1-proof".to_string()),
-                input: Some(B256::ZERO),
+                input: Some(hash_shasta_subproof_input(&guest_input.proof_carry_data)),
+                uuid: Some(format!("0x{}", "00".repeat(32))),
                 extra_data: proof_carry_extra_data(&guest_input, None)?,
                 ..Default::default()
             }),

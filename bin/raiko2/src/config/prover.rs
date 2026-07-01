@@ -3,7 +3,8 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec,
+        BatchQuoteStrategy, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, OfferParamsConfig,
+        validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -272,6 +273,8 @@ pub struct BoundlessConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_boundless_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_boundless_rebid_timeout_ms")]
+    pub rebid_timeout_ms: u64,
 }
 
 impl Default for BoundlessConfig {
@@ -292,6 +295,7 @@ impl Default for BoundlessConfig {
             offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
+            rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
         }
     }
 }
@@ -304,6 +308,9 @@ impl BoundlessConfig {
         }
         if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
+        }
+        if self.rebid_timeout_ms == 0 {
+            bail!("prover.boundless.rebid_timeout_ms must be > 0");
         }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
@@ -347,6 +354,10 @@ const fn default_boundless_poll_interval_ms() -> u64 {
 
 const fn default_boundless_timeout_ms() -> u64 {
     3_600_000
+}
+
+const fn default_boundless_rebid_timeout_ms() -> u64 {
+    DEFAULT_REBID_TIMEOUT_MS
 }
 
 #[cfg(test)]
@@ -424,6 +435,20 @@ mod tests {
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
                 .contains("aggregation_quoted_mcycles")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_zero_boundless_rebid_timeout() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_timeout_ms = 0;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("zero rebid timeout should fail")
+                .to_string()
+                .contains("prover.boundless.rebid_timeout_ms")
         );
     }
 

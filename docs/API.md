@@ -1005,6 +1005,9 @@ All API errors use the Hoodi-style envelope:
 - `prover.boundless.batch_quoted_mcycles` controls proposal quote cycles for `risc0/network`
   when set; `prover.boundless.aggregation_quoted_mcycles` controls aggregation quote cycles.
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
+- `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
+  Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
+  It is separate from the overall `prover.boundless.timeout_ms` fulfillment deadline.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` delegates price selection to the Boundless SDK price provider, may set

@@ -222,7 +222,7 @@ Response fields:
 | `proof_type` | string | Concrete proof backend selected by the caller. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | object/null | Final proposal proof payload when `data.status=completed`; null only before completion. |
+| `data.proof` | string/null | Final proposal proof hex string when `data.status=completed`; null only before completion. |
 
 Polling and idempotency:
 
@@ -289,7 +289,7 @@ Response fields:
 | `proof_type` | string | Concrete proof backend selected by the caller. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | object/null | Final aggregation proof payload when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
+| `data.proof` | string/null | Final aggregation proof hex string when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
 
 Polling and idempotency:
 

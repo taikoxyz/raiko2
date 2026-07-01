@@ -420,8 +420,6 @@ pub async fn v4_request_aggregation_proof(
 ) -> Result<Json<ApiOk<v4::AggregationTaskData>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
-    let proposal_id_start = req.proposal_id_start;
-    let proposal_id_end = req.proposal_id_end;
     let submission = v4_aggregation_submission(&state, req).await?;
     submit_v4_external_aggregation(&state, &submission).await?;
     let data = load_task_data(&state, &submission.public_task_id)
@@ -430,7 +428,7 @@ pub async fn v4_request_aggregation_proof(
     Ok(Json(ApiOk {
         status: "ok",
         proof_type: proof_type.as_str().to_string(),
-        data: v4_aggregation_task_data(&state, data, proposal_id_start, proposal_id_end).await?,
+        data: v4_aggregation_task_data(&state, data).await?,
     }))
 }
 
@@ -3363,8 +3361,6 @@ async fn v4_proposal_task_data(
     .await?;
     Ok(v4::ProofTaskData {
         task_id: data.task_id,
-        route: data.route,
-        prover_type: data.prover_type,
         status: proof_status_string(&proposal.status),
         proof,
     })
@@ -3373,8 +3369,6 @@ async fn v4_proposal_task_data(
 async fn v4_aggregation_task_data(
     state: &AppState,
     data: TaskData,
-    proposal_id_start: u64,
-    proposal_id_end: u64,
 ) -> Result<v4::AggregationTaskData, V4ApiError> {
     let aggregate = data.aggregate.ok_or_else(|| {
         V4ApiError::invalid_request("aggregation task did not contain aggregate data")
@@ -3389,12 +3383,8 @@ async fn v4_aggregation_task_data(
     .await?;
     Ok(v4::AggregationTaskData {
         task_id: data.task_id,
-        route: data.route,
-        prover_type: data.prover_type,
         status: proof_status_string(&aggregate.status),
         proof,
-        proposal_id_start,
-        proposal_id_end,
     })
 }
 
@@ -3404,7 +3394,7 @@ async fn v4_proof_from_status(
     status: &ProofStatus,
     proof_ref: Option<&str>,
     task_kind: &'static str,
-) -> Result<Option<Proof>, V4ApiError> {
+) -> Result<Option<String>, V4ApiError> {
     match (matches!(status, ProofStatus::Completed), proof_ref) {
         (false, _) => Ok(None),
         (true, None) => Err(V4ApiError::from_api_error(ApiError::internal(format!(
@@ -3426,8 +3416,8 @@ async fn v4_proof_from_status(
                     )))
                 })?;
             let metadata = parse_task_metadata(&record).map_err(V4ApiError::from_api_error)?;
-            // TaskData.proof is only a legacy status string. V4 responses must load the persisted
-            // artifact so optional fields such as quote, uuid, and kzg_proof are preserved.
+            // TaskData.proof is only a legacy status string. V4 exposes the
+            // chain-submittable proof hex and leaves artifact details to task inspection.
             let material =
                 load_proof_artifact_material(&state.runtime, &metadata.network_pair, proof_ref)
                     .await
@@ -3441,7 +3431,11 @@ async fn v4_proof_from_status(
                             "completed {task_kind} proof artifact not found: {proof_ref}"
                         )))
                     })?;
-            Ok(Some(material.proof))
+            material.proof.proof.map(Some).ok_or_else(|| {
+                V4ApiError::from_api_error(ApiError::internal(format!(
+                    "completed {task_kind} proof artifact is missing proof hex"
+                )))
+            })
         }
     }
 }
@@ -5503,7 +5497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v4_completed_proof_response_preserves_full_artifact() {
+    async fn v4_completed_proof_response_returns_proof_hex() {
         let runtime = Arc::new(
             RuntimeManager::new(unique_test_runtime_root("v4-full-proof-artifact"))
                 .expect("runtime manager"),
@@ -5518,6 +5512,7 @@ mod tests {
         proof.quote = Some("0xquote".to_string());
         proof.uuid = Some("uuid-1".to_string());
         proof.kzg_proof = Some("0xkzg".to_string());
+        let expected = proof.proof.clone().expect("test proof hex");
         write_test_proof_artifact(&runtime, "taiko_dev/ethereum", proof_ref, &proof)
             .await
             .expect("write proof artifact");
@@ -5538,7 +5533,7 @@ mod tests {
         .expect("load v4 proof")
         .expect("completed proof");
 
-        assert_eq!(returned, proof);
+        assert_eq!(returned, expected);
     }
 
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {

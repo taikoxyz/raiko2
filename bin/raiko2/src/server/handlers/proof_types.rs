@@ -134,7 +134,7 @@ pub(crate) struct ApiData<T> {
 /// Client-facing v4 HTTP wire types.
 pub(crate) mod v4 {
     use alloy_primitives::Address;
-    use raiko2_primitives::{Proof, ShastaCheckpoint};
+    use raiko2_primitives::ShastaCheckpoint;
     use serde::{Deserialize, Serialize};
 
     /// Error payload returned by v4 endpoints.
@@ -205,22 +205,16 @@ pub(crate) mod v4 {
     #[derive(Debug, Serialize)]
     pub(crate) struct ProofTaskData {
         pub(crate) task_id: String,
-        pub(crate) route: String,
-        pub(crate) prover_type: Option<String>,
         pub(crate) status: String,
-        pub(crate) proof: Option<Proof>,
+        pub(crate) proof: Option<String>,
     }
 
     /// Response data for a v4 aggregation task.
     #[derive(Debug, Serialize)]
     pub(crate) struct AggregationTaskData {
         pub(crate) task_id: String,
-        pub(crate) route: String,
-        pub(crate) prover_type: Option<String>,
         pub(crate) status: String,
-        pub(crate) proof: Option<Proof>,
-        pub(crate) proposal_id_start: u64,
-        pub(crate) proposal_id_end: u64,
+        pub(crate) proof: Option<String>,
     }
 }
 

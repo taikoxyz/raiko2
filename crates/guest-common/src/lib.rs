@@ -106,11 +106,23 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
         })?;
 
     ensure!(
-        chain_spec.max_spec_id == verified_chain_spec.max_spec_id,
+        chain_spec.is_taiko == verified_chain_spec.is_taiko,
+        "unexpected is_taiko"
+    );
+
+    let runtime_chain_spec = chain_spec
+        .align_taiko_runtime_forks()
+        .context("failed to align GuestInput chain_spec runtime forks")?;
+    let verified_runtime_chain_spec = verified_chain_spec
+        .align_taiko_runtime_forks()
+        .context("failed to align trusted chain_spec runtime forks")?;
+
+    ensure!(
+        runtime_chain_spec.max_spec_id == verified_runtime_chain_spec.max_spec_id,
         "unexpected max_spec_id"
     );
     ensure!(
-        chain_spec.hard_forks == verified_chain_spec.hard_forks,
+        runtime_chain_spec.hard_forks == verified_runtime_chain_spec.hard_forks,
         "unexpected hard_forks"
     );
     ensure!(
@@ -132,10 +144,6 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
     ensure!(
         chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
         "unexpected verifier_address_forks"
-    );
-    ensure!(
-        chain_spec.is_taiko == verified_chain_spec.is_taiko,
-        "unexpected is_taiko"
     );
 
     Ok(())
@@ -1162,6 +1170,17 @@ mod tests {
     fn validate_known_chain_spec_accepts_listed_chain() {
         validate_known_chain_spec(&taiko_mainnet_chain_spec())
             .expect("listed mainnet chain spec must validate");
+    }
+
+    #[test]
+    fn validate_known_chain_spec_accepts_runtime_aligned_devnet() {
+        let spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_001)
+            .expect("supported taiko devnet chain spec")
+            .align_taiko_runtime_forks()
+            .expect("runtime-aligned devnet chain spec");
+
+        validate_known_chain_spec(&spec).expect("runtime-aligned devnet chain spec must validate");
     }
 
     #[test]

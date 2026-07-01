@@ -165,8 +165,8 @@ Shasta request envelope that includes the full `GuestInput` and post it to the S
 
 ```bash
 cargo run -r -p raiko2-prover --example dump_gaiko2_shasta_fixture -- \
-  /tmp/proposal-17771.json \
-  /tmp/proposal-17771.raiko2-sgx-request.json
+  target/regression/proposal-17771.json \
+  target/regression/proposal-17771.raiko2-sgx-request.json
 
 curl -sS \
   -H 'content-type: application/json' \

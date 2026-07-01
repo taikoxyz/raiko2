@@ -1,125 +1,17 @@
+#[path = "proof_types/v3.rs"]
+pub(crate) mod v3;
 #[path = "proof_types/v4.rs"]
 pub(crate) mod v4;
 
+pub(crate) use v3::{AggregateProofRequest, BatchShastaRequest};
+pub(super) use v3::{BatchProofType, PublicProverArgs, ShastaProposal};
+
 use raiko2_primitives::{Proof, ShastaCheckpoint};
-use raiko2_prover::sp1_config::Sp1ConfigOverrides;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::server::state::ProofStatus;
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum BatchProofType {
-    Native,
-    Sp1,
-    Risc0,
-    #[serde(rename = "boundless", alias = "BOUNDLESS")]
-    Boundless,
-    Sgx,
-    #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
-    SgxGeth,
-    ZkAny,
-}
-
-impl BatchProofType {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Sp1 => "sp1",
-            Self::Risc0 => "risc0",
-            Self::Boundless => "boundless",
-            Self::Sgx => "sgx",
-            Self::SgxGeth => "sgxgeth",
-            Self::ZkAny => "zk_any",
-        }
-    }
-
-    pub(super) const fn is_public_batch_request_type(self) -> bool {
-        matches!(
-            self,
-            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
-        )
-    }
-
-    pub(super) const fn is_concrete_public_proof_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BatchShastaRequest {
-    pub(super) proposals: Vec<ShastaProposal>,
-    #[serde(default)]
-    pub(super) aggregate: bool,
-    pub(super) proof_type: BatchProofType,
-    #[serde(default)]
-    pub(super) network: Option<String>,
-    #[serde(default)]
-    pub(super) l1_network: Option<String>,
-    #[serde(default)]
-    pub(super) graffiti: Option<String>,
-    #[serde(default)]
-    pub(super) prover: Option<String>,
-    #[serde(default)]
-    pub(super) blob_proof_type: Option<String>,
-    #[serde(flatten)]
-    pub(super) prover_args: PublicProverArgs,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AggregateProofRequest {
-    #[serde(default)]
-    pub(super) aggregation_ids: Vec<u64>,
-    pub(super) proofs: Vec<Proof>,
-    pub(super) proof_type: BatchProofType,
-    #[serde(default)]
-    pub(super) network: Option<String>,
-    #[serde(default)]
-    pub(super) l1_network: Option<String>,
-    #[serde(default)]
-    pub(super) graffiti: Option<String>,
-    #[serde(default)]
-    pub(super) prover: Option<String>,
-    #[serde(default)]
-    pub(super) blob_proof_type: Option<String>,
-    #[serde(flatten)]
-    pub(super) prover_args: PublicProverArgs,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ShastaProposal {
-    pub(super) proposal_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) checkpoint: Option<ShastaCheckpoint>,
-    pub(super) l1_inclusion_block_number: u64,
-    pub(super) l2_block_numbers: Vec<u64>,
-    pub(super) last_anchor_block_number: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub(super) struct PublicProverArgs {
-    pub(super) native: Option<Value>,
-    pub(super) sgx: Option<Value>,
-    pub(super) sgxgeth: Option<Value>,
-    pub(super) sp1: Option<Sp1ConfigOverrides>,
-    pub(super) risc0: Option<Value>,
-}
-
-impl PublicProverArgs {
-    pub(super) const fn is_empty(&self) -> bool {
-        self.native.is_none()
-            && self.sgx.is_none()
-            && self.sgxgeth.is_none()
-            && self.sp1.is_none()
-            && self.risc0.is_none()
-    }
-}
 
 #[derive(Serialize)]
 pub(crate) struct ApiOk<T> {

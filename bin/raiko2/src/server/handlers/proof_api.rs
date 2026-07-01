@@ -1,8 +1,7 @@
 use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use raiko2_engine::{
@@ -27,14 +26,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use super::super::auth::authorize_acl_feature;
+use super::super::auth::{authorize_acl_feature, authorize_acl_feature_with_rate_limit};
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
     public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
 };
+#[path = "proof_api/v3.rs"]
+pub(crate) mod v3;
 #[path = "proof_api/v4.rs"]
 pub(crate) mod v4;
 
@@ -147,354 +148,6 @@ impl ProverTaskScope {
 struct ProofLocation {
     proof_ref: Option<String>,
     proof_path: Option<String>,
-}
-
-pub async fn request_batch_shasta_proof(
-    state: State<AppState>,
-    req: Result<Json<BatchShastaRequest>, JsonRejection>,
-) -> Response {
-    match request_batch_shasta_proof_inner(state, req).await {
-        Ok(response) => response,
-        Err(err) => legacy_api_error_response(err),
-    }
-}
-
-async fn request_batch_shasta_proof_inner(
-    State(state): State<AppState>,
-    req: Result<Json<BatchShastaRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let requested_proof_type = req.proof_type;
-    let requested_aggregate = req.aggregate;
-    let requested_network = req.network.clone();
-    let requested_l1_network = req.l1_network.clone();
-    let proposal_ids = req
-        .proposals
-        .iter()
-        .map(|proposal| proposal.proposal_id)
-        .collect::<Vec<_>>();
-    let not_drawn_batch_id = req.proposals.first().map(|proposal| proposal.proposal_id);
-    let Some(mut submission) = build_canonical_batch_submission(&state, req)? else {
-        info!(
-            proof_type = requested_proof_type.as_str(),
-            aggregate = requested_aggregate,
-            network = requested_network.as_deref().unwrap_or("default"),
-            l1_network = requested_l1_network.as_deref().unwrap_or("default"),
-            proposal_count = proposal_ids.len(),
-            "received hoodi shasta batch request not drawn"
-        );
-        debug!(
-            proposal_ids = ?proposal_ids,
-            "received hoodi shasta batch request not drawn proposal ids"
-        );
-        return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
-    };
-    let request_fingerprint = batch_request_fingerprint(&submission)?;
-    submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
-    let plan =
-        build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
-
-    info!(
-        task_id = submission.public_task_id.as_str(),
-        proof_type = requested_proof_type.as_str(),
-        selected_proof_type = %submission.route.proof_type(),
-        prover_type = prover_type_label(submission.prover_type),
-        aggregate = submission.aggregate_requested,
-        pair = submission.pair.key.as_str(),
-        route = %submission.route.route,
-        proposal_count = proposal_ids.len(),
-        "received hoodi shasta batch request"
-    );
-    debug!(
-        task_id = submission.public_task_id.as_str(),
-        proposal_ids = ?proposal_ids,
-        "received hoodi shasta batch request proposal ids"
-    );
-    resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-
-    match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
-        TaskRegistrationOutcome::Existing(existing) => {
-            handle_existing_batch_task(&state, &submission, existing, None).await
-        }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_batch_task(&state, &submission, &plan).await
-        }
-    }
-}
-
-pub async fn request_aggregation_proof(
-    state: State<AppState>,
-    req: Result<Json<AggregateProofRequest>, JsonRejection>,
-) -> Response {
-    match request_aggregation_proof_inner(state, req).await {
-        Ok(response) => response,
-        Err(err) => legacy_api_error_response(err),
-    }
-}
-
-async fn request_aggregation_proof_inner(
-    State(state): State<AppState>,
-    req: Result<Json<AggregateProofRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let requested_proof_type = req.proof_type;
-    let proof_count = req.proofs.len();
-    let aggregation_ids = req.aggregation_ids.clone();
-    let submission = build_external_aggregate_submission(&state, req).await?;
-    let engine = resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-    let aggregate = planned_external_aggregate_task(&submission);
-
-    info!(
-        task_id = submission.public_task_id.as_str(),
-        proof_type = requested_proof_type.as_str(),
-        selected_proof_type = %submission.route.proof_type(),
-        prover_type = prover_type_label(submission.prover_type),
-        pair = submission.pair.key.as_str(),
-        route = %submission.route.route,
-        proofs = proof_count,
-        aggregation_ids = ?aggregation_ids,
-        "received hoodi aggregate request"
-    );
-
-    match register_external_aggregate_task(&state, &submission, &aggregate).await? {
-        TaskRegistrationOutcome::Existing(existing) => {
-            handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
-        }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_external_aggregate_task(&state, &engine, &submission, &aggregate).await
-        }
-    }
-}
-
-pub async fn get_task(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiOk<TaskData>>, ApiError> {
-    let data = load_task_data(&state, &id).await?;
-    let lookup = load_task_lookup(&state, &id).await?;
-
-    Ok(Json(ApiOk {
-        status: "ok",
-        proof_type: lookup.metadata.proof_type.to_string(),
-        data,
-    }))
-}
-
-pub async fn cancel_task(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<ApiOk<TaskData>>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
-
-    let TaskLookup {
-        record,
-        metadata,
-        engine,
-    } = load_task_lookup(&state, &id).await?;
-
-    if matches!(
-        record.runner_status,
-        RuntimeRunnerStatus::Completed
-            | RuntimeRunnerStatus::Failed
-            | RuntimeRunnerStatus::Cancelled
-    ) {
-        return get_task(State(state), Path(id)).await;
-    }
-
-    cancel_registered_tasks(&state.runtime, &engine, &id, record.pipeline_key, &metadata)
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-    state
-        .runtime
-        .sync_status(&id, RuntimeRunnerStatus::Cancelled, None, None)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to sync runtime cancellation: {err}")))?;
-
-    get_task(State(state), Path(id)).await
-}
-
-pub async fn get_prover_status(
-    State(state): State<AppState>,
-) -> Result<Json<ApiData<ProverStatus>>, ApiError> {
-    let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny).await?;
-    Ok(Json(ApiData {
-        status: "ok",
-        data: ProverStatus {
-            clean: tasks.is_clean() && network.is_clean() && skipped.is_clean(),
-            tasks,
-            network,
-            skipped,
-        },
-    }))
-}
-
-pub async fn clear_prover(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<ClearProverStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)?;
-
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-
-    let mut status = ClearProverStatus {
-        status: "ok",
-        cancelled: 0,
-        skipped: ProverSkippedStatusCounts::default(),
-        failed: 0,
-    };
-
-    for record in records {
-        if is_terminal_runtime_status(record.runner_status) {
-            continue;
-        }
-        let metadata = match parse_task_metadata(&record) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                status.skipped.invalid_metadata = status.skipped.invalid_metadata.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    error = %err.message,
-                    "skipping prover clear record with invalid metadata"
-                );
-                continue;
-            }
-        };
-        if !is_zk_any_metadata(&metadata) {
-            continue;
-        }
-        if metadata.has_remote_submission_progress() {
-            status.skipped.remote_progress = status.skipped.remote_progress.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                "skipping prover clear record with remote submission progress"
-            );
-            continue;
-        }
-
-        let cancelled = match state
-            .runtime
-            .cancel_nonterminal_task(&record.task_id, None)
-            .await
-        {
-            Ok(cancelled) => cancelled,
-            Err(err) => {
-                status.failed = status.failed.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    error = %err,
-                    "failed to sync prover clear cancellation"
-                );
-                continue;
-            }
-        };
-        if !cancelled {
-            continue;
-        }
-        status.cancelled = status.cancelled.saturating_add(1);
-
-        let engine = match resolve_engine(&state, &metadata.network_pair, record.pipeline_key) {
-            Ok(engine) => engine,
-            Err(err) if err.status == StatusCode::NOT_FOUND => {
-                status.skipped.unavailable_pipeline =
-                    status.skipped.unavailable_pipeline.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    network_pair = %metadata.network_pair,
-                    pipeline = %record.pipeline_key,
-                    error = %err.message,
-                    "skipping prover clear record with unavailable pipeline"
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-
-        if let Err(err) = cancel_registered_tasks(
-            &state.runtime,
-            &engine,
-            &record.task_id,
-            record.pipeline_key,
-            &metadata,
-        )
-        .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to cancel prover record"
-            );
-        }
-    }
-
-    Ok(Json(status))
-}
-
-pub async fn report_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
-    let tasks = load_all_task_data(&state).await?;
-    Ok(Json(tasks))
-}
-
-pub async fn list_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
-    let tasks = load_all_task_data(&state)
-        .await?
-        .into_iter()
-        .filter(|task| matches!(task.status, ProofStatus::Completed) && task.proof.is_some())
-        .collect::<Vec<_>>();
-    Ok(Json(tasks))
-}
-
-pub async fn prune_proofs(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<PruneStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
-
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-    let mut removed_engine_task_ids = HashSet::new();
-
-    for record in records {
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-            .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
-
-        remove_task_children(
-            &engine,
-            record.pipeline_key,
-            &metadata,
-            &mut removed_engine_task_ids,
-        )
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-        state
-            .runtime
-            .remove_task(&record.task_id)
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))
-            })?;
-    }
-
-    Ok(Json(PruneStatus { status: "ok" }))
 }
 
 fn build_canonical_batch_submission(
@@ -3249,9 +2902,9 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 mod tests {
     use super::*;
     use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
-    use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
+    use axum::{extract::State, http::HeaderMap};
     use http_body_util::BodyExt;
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
@@ -3630,12 +3283,7 @@ mod tests {
         let config = Config::default();
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaNative, engine);
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     fn test_state_with_engines(
@@ -3647,12 +3295,7 @@ mod tests {
         for (pipeline_key, engine) in engines {
             factory.insert("taiko_dev/ethereum", pipeline_key, engine);
         }
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     fn runtime_record(
@@ -3767,17 +3410,13 @@ mod tests {
             id: "ops".to_string(),
             key: "secret".to_string(),
             allow: vec![ServerAclFeature::ProverClear],
+            rate_limit_per_minute: None,
         });
         let mut factory = StaticPipelineFactory::default();
         for (pipeline_key, engine) in engines {
             factory.insert("taiko_dev/ethereum", pipeline_key, engine);
         }
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     #[tokio::test]
@@ -4034,7 +3673,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
 
-        let Json(status) = clear_prover(State(state), headers)
+        let Json(status) = v3::clear_prover(State(state), headers)
             .await
             .expect("clear prover should not fail on skipped records");
 
@@ -4094,7 +3733,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
 
-        let Json(status) = clear_prover(State(state), headers)
+        let Json(status) = v3::clear_prover(State(state), headers)
             .await
             .expect("clear prover should preserve runtime cancellation");
 
@@ -4123,7 +3762,7 @@ mod tests {
             axum::http::HeaderValue::from_static("secret-with-extra-bytes"),
         );
 
-        let Err(err) = clear_prover(State(state), headers).await else {
+        let Err(err) = v3::clear_prover(State(state), headers).await else {
             panic!("oversized API key should fail");
         };
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
@@ -5016,16 +4655,14 @@ mod tests {
 
         let mut config = Config::default();
         config.runtime.root = unique_test_runtime_root("resolve-engine-network-config");
-        let zk_any_sampler = ZkAnySampler::from_config(&config.prover.zk_any);
-        let state = AppState {
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime: Arc::new(
+        let state = AppState::from_parts(
+            Arc::new(config),
+            Arc::new(factory),
+            Arc::new(
                 RuntimeManager::new(unique_test_runtime_root("resolve-engine-network-runtime"))
                     .expect("runtime manager"),
             ),
-            zk_any_sampler: Arc::new(Mutex::new(zk_any_sampler)),
-        };
+        );
 
         let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
             panic!("network pipeline should be unavailable");

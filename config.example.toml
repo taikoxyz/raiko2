@@ -14,6 +14,7 @@ port = 8080
 # [server.acl]
 # keys = [
 #   { id = "admin", key = "change-me", allow = ["admin"] },
+#   { id = "submit", key = "submit-key", allow = ["prover.submit"], rate_limit_per_minute = 600 },
 # ]
 
 [rpc]

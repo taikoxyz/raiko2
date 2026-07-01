@@ -170,6 +170,7 @@ mod tests {
                 ServerAclFeature::AdminBallotRead,
                 ServerAclFeature::AdminBallotWrite,
             ],
+            rate_limit_per_minute: None,
         }];
         config.prover.guest_system = GuestSystem::Native;
         config.prover.runner = RunnerKind::Local;

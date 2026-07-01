@@ -12,11 +12,12 @@ use super::{
     CanonicalBatchSubmission, ClearProverStatus, ExternalAggregateSubmission, PlannedAggregateTask,
     ProofArtifactMaterial, ProofStatus, ProverStatus, ProverTaskScope, ProverType,
     PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref,
-    authorize_acl_feature, build_canonical_batch_submission, build_external_aggregate_submission,
-    build_submission_plan, clear_prover_tasks, collect_prover_status, handle_created_batch_task,
-    handle_created_external_aggregate_task, handle_existing_batch_task,
-    handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
-    parse_task_metadata, register_batch_task, register_external_aggregate_task, resolve_engine,
+    authorize_acl_feature, authorize_acl_feature_with_rate_limit, build_canonical_batch_submission,
+    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
+    collect_prover_status, handle_created_batch_task, handle_created_external_aggregate_task,
+    handle_existing_batch_task, handle_existing_external_aggregate_task,
+    load_proof_artifact_material, load_task_data, parse_task_metadata, register_batch_task,
+    register_external_aggregate_task, resolve_engine,
 };
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
@@ -24,8 +25,11 @@ pub(super) const MAX_RANGE_LEN: u64 = 100_000;
 
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Result<Json<wire::ProposalRequest>, JsonRejection>,
 ) -> Result<Json<wire::TaskResponse<wire::ProofTaskData>>, Error> {
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
+        .map_err(Error::from_api_error)?;
     let Json(req) = req.map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let proposal_id_start = req.proposal_id_start;
@@ -47,8 +51,11 @@ pub(crate) async fn request_proposal_proof(
 
 pub(crate) async fn request_aggregation_proof(
     State(state): State<AppState>,
+    headers: HeaderMap,
     req: Result<Json<wire::AggregationRequest>, JsonRejection>,
 ) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, Error> {
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
+        .map_err(Error::from_api_error)?;
     let Json(req) = req.map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let proposal_id_start = req.proposal_id_start;
@@ -223,8 +230,12 @@ impl Error {
                 "unsupported_proof_type"
             }
             StatusCode::BAD_REQUEST => "invalid_request",
+            StatusCode::NOT_FOUND if err.message == "ACL feature is not enabled" => "not_found",
             StatusCode::NOT_FOUND => "task_not_found",
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::FORBIDDEN => "forbidden",
             StatusCode::CONFLICT => "request_conflict",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
             StatusCode::SERVICE_UNAVAILABLE => "unsupported_proof_type",
             _ => "internal_error",
         };

@@ -33,8 +33,13 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `POST /proof/prune` requires `admin`
 - `POST /v3/tasks/{id}/cancel` requires `admin`
 - `POST /v3/prover/clear` requires `prover.clear`
+- `POST /v4/proof/proposal` requires `prover.submit`
+- `POST /v4/proof/aggregation` requires `prover.submit`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
+
+ACL keys may set `rate_limit_per_minute`; rate-limited endpoints return `429 rate_limited` after
+the key exceeds its configured 60-second request window.
 
 `/v1/...` routes are removed.
 
@@ -173,6 +178,7 @@ Proof submission response shape:
 ```http
 POST /v4/proof/proposal
 Content-Type: application/json
+x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Request:
@@ -258,6 +264,7 @@ Validation:
 ```http
 POST /v4/proof/aggregation
 Content-Type: application/json
+x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Request:
@@ -372,8 +379,7 @@ Response:
         "task_id": "task_...",
         "status": "completed",
         "l1_inclusion_block_number": 100,
-        "l2_block_number_start": 200,
-        "l2_block_number_end": 201,
+        "l2_block_numbers": [200, 201],
         "last_anchor_block_number": 199,
         "proof": "0x...",
         "proof_ref": "proposal:...",
@@ -402,15 +408,12 @@ Response fields:
 | `data.runtime` | object/null | Persisted runtime snapshot. |
 | `data.current_index` | number/null | Current proposal index for multi-proposal roots. |
 | `data.proposals` | array | Proposal task views. |
-| `data.proposals[].l2_block_number_start` | number | First L2 block number covered by the proposal. |
-| `data.proposals[].l2_block_number_end` | number | Last L2 block number covered by the proposal. |
+| `data.proposals[].l2_block_numbers` | array | L2 block numbers covered by the proposal. |
 | `data.aggregate` | object/null | Aggregation task view, when the root has aggregation. |
-| `data.aggregate.proposal_id_start` | number | First proposal ID covered by the aggregation. |
-| `data.aggregate.proposal_id_end` | number | Last proposal ID covered by the aggregation. |
-| `data.proof` | object/string/null | Final root proof when completed. |
+| `data.proof` | string/null | Final root proof hex string when completed. |
 | `data.proof_ref` | string/null | Stable persisted proof reference. |
 | `data.proof_path` | string/null | Persisted proof artifact path. |
-| `data.error` | object/string/null | Terminal error detail when failed. |
+| `data.error` | string/null | Terminal error detail when failed. |
 
 Validation:
 

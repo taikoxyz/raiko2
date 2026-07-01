@@ -1,6 +1,6 @@
 //! Shared fixture-backed local server harness.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Header;
@@ -40,7 +40,6 @@ use tracing::info;
 use super::AppState;
 use super::app;
 use super::net;
-use super::sampling::ZkAnySampler;
 use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
 use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
@@ -703,16 +702,14 @@ where
 {
     let mut factory = StaticPipelineFactory::default();
     factory.insert(network_pair.to_string(), pipeline_key, Arc::new(engine));
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime: Arc::new(
+    AppState::from_parts(
+        Arc::new(config),
+        Arc::new(factory),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    }
+    )
 }
 
 #[cfg(test)]
@@ -743,13 +740,7 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
         PipelineKey::ShastaRisc0,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -771,13 +762,7 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
         PipelineKey::ShastaSp1,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (state, engine)
 }
@@ -805,13 +790,7 @@ pub(crate) fn app_with_observed_native_fixture_engine(
         PipelineKey::ShastaNative,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -839,13 +818,7 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
         PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -890,7 +863,6 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
         "raiko2-fixture-runtime",
     ))?);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
     let observer = engine_observer(Arc::clone(&runtime));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
@@ -928,12 +900,11 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(sp1_engine),
     );
 
-    Ok(AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
+    Ok(AppState::from_parts(
+        Arc::new(config),
+        Arc::new(factory),
         runtime,
-        zk_any_sampler,
-    })
+    ))
 }
 
 pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {

@@ -3,7 +3,7 @@
 //! These tests exercise the HTTP handlers + engine orchestration without relying on
 //! external RPC endpoints. A minimal JSON-RPC server is spun up only for `/ready`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use alloy_primitives::{hex, keccak256};
 use axum::{
@@ -33,7 +33,6 @@ use super::fixture::{
     risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc,
     state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
-use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
     ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
@@ -76,10 +75,20 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
 }
 
 fn acl_key(id: &str, key: &str, allow: Vec<ServerAclFeature>) -> ServerAclKey {
+    acl_key_with_rate_limit(id, key, allow, None)
+}
+
+fn acl_key_with_rate_limit(
+    id: &str,
+    key: &str,
+    allow: Vec<ServerAclFeature>,
+    rate_limit_per_minute: Option<u32>,
+) -> ServerAclKey {
     ServerAclKey {
         id: id.to_string(),
         key: key.to_string(),
         allow,
+        rate_limit_per_minute,
     }
 }
 
@@ -311,6 +320,37 @@ where
     panic!("engine did not drain after 32 steps");
 }
 
+fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "submit",
+        "submit-secret",
+        vec![ServerAclFeature::ProverSubmit],
+        rate_limit_per_minute,
+    )];
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
+            RuntimeManager::new(unique_runtime_root("raiko2-e2e-v4-submit-acl"))
+                .expect("runtime manager"),
+        ),
+    );
+    app::build_router(state)
+}
+
+fn v4_proposal_request() -> Value {
+    json!({
+        "proof_type": "risc0",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 10,
+        "l1_inclusion_block_number": 11,
+        "l2_block_number_start": 20,
+        "l2_block_number_end": 21
+    })
+}
+
 #[tokio::test]
 async fn e2e_ready_ok_with_matching_chain_id() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -327,17 +367,14 @@ async fn e2e_ready_ok_with_matching_chain_id() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -349,6 +386,43 @@ async fn e2e_ready_ok_with_matching_chain_id() {
 
     l1_handle.abort();
     l2_handle.abort();
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_requires_submit_acl_key() {
+    let app = v4_submit_acl_app(None);
+
+    let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_rate_limits_acl_key() {
+    let app = v4_submit_acl_app(Some(1));
+
+    let (first_status, _) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+    assert_ne!(first_status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "rate_limited");
 }
 
 #[tokio::test]
@@ -367,17 +441,14 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-l1-mismatch-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -415,17 +486,14 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key = "not-a-private-key".to_string();
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-boundless-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -467,17 +535,14 @@ async fn e2e_ready_fails_when_l2_witness_chain_id_mismatches() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.rpc.pairs[0].l2_witness_rpc = Some(l2_witness_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-l2-witness-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -516,17 +581,14 @@ async fn e2e_ready_fails_when_sp1_verification_is_disabled() {
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-sp1-verify-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -566,17 +628,14 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
         deterministic_test_private_key("raiko2:e2e-ready-boundless");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-multi-zk-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -1037,12 +1096,11 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
         PipelineKey::ShastaRisc0,
         Arc::new(restarted_engine.clone()),
     );
-    let restarted_state = AppState {
-        config: Arc::clone(&state.config),
-        pipelines: Arc::new(factory),
-        runtime: Arc::clone(&state.runtime),
-        zk_any_sampler: Arc::clone(&state.zk_any_sampler),
-    };
+    let restarted_state = AppState::from_parts(
+        Arc::clone(&state.config),
+        Arc::new(factory),
+        Arc::clone(&state.runtime),
+    );
     let restarted_app = app::build_router(restarted_state);
 
     let (status, second) = post_json(&restarted_app, "/v3/proof/batch/shasta", payload).await;

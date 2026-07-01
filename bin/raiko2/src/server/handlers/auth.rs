@@ -1,16 +1,35 @@
 use axum::http::HeaderMap;
+use std::time::Duration;
 
 use super::errors::ApiError;
 use crate::config::ServerAclFeature;
 use crate::server::state::AppState;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 pub(crate) fn authorize_acl_feature(
     state: &AppState,
     headers: &HeaderMap,
     feature: ServerAclFeature,
 ) -> Result<(), ApiError> {
+    authorize_acl_key(state, headers, feature).map(|_| ())
+}
+
+pub(crate) fn authorize_acl_feature_with_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    feature: ServerAclFeature,
+) -> Result<(), ApiError> {
+    let (key_index, rate_limit_per_minute) = authorize_acl_key(state, headers, feature)?;
+    enforce_rate_limit(state, key_index, rate_limit_per_minute)
+}
+
+fn authorize_acl_key(
+    state: &AppState,
+    headers: &HeaderMap,
+    feature: ServerAclFeature,
+) -> Result<(usize, Option<u32>), ApiError> {
     let feature_enabled = state
         .config
         .server
@@ -42,15 +61,17 @@ pub(crate) fn authorize_acl_feature(
     }
 
     let mut key_known = false;
-    let mut authorized = false;
-    for key in &state.config.server.acl.keys {
+    let mut authorized = None;
+    for (key_index, key) in state.config.server.acl.keys.iter().enumerate() {
         let matches = constant_time_eq(actual_key, &key.key);
         let allows_feature = acl_allows_feature(&key.allow, feature);
         key_known |= matches;
-        authorized |= matches && allows_feature;
+        if matches && allows_feature {
+            authorized = Some((key_index, key.rate_limit_per_minute));
+        }
     }
-    if authorized {
-        return Ok(());
+    if let Some(key) = authorized {
+        return Ok(key);
     }
 
     if key_known {
@@ -60,6 +81,25 @@ pub(crate) fn authorize_acl_feature(
     }
 
     Err(ApiError::unauthorized("invalid API key"))
+}
+
+fn enforce_rate_limit(
+    state: &AppState,
+    key_index: usize,
+    limit_per_minute: Option<u32>,
+) -> Result<(), ApiError> {
+    let Some(limit_per_minute) = limit_per_minute else {
+        return Ok(());
+    };
+
+    let allowed = state
+        .acl_rate_limiter
+        .allow_request(key_index, limit_per_minute, RATE_LIMIT_WINDOW)
+        .map_err(|()| ApiError::internal("failed to lock ACL rate limiter"))?;
+    if !allowed {
+        return Err(ApiError::too_many_requests("rate limit exceeded"));
+    }
+    Ok(())
 }
 
 fn acl_allows_feature(allow: &[ServerAclFeature], feature: ServerAclFeature) -> bool {

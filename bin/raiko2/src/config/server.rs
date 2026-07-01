@@ -27,6 +27,8 @@ pub struct ServerAclKey {
     pub key: String,
     #[serde(default)]
     pub allow: Vec<ServerAclFeature>,
+    #[serde(default)]
+    pub rate_limit_per_minute: Option<u32>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
@@ -37,6 +39,8 @@ pub enum ServerAclFeature {
     AdminBallotRead,
     #[serde(rename = "admin.ballot.write")]
     AdminBallotWrite,
+    #[serde(rename = "prover.submit")]
+    ProverSubmit,
     #[serde(rename = "prover.clear")]
     ProverClear,
 }
@@ -91,6 +95,9 @@ impl ServerAclConfig {
             }
             if acl_key.allow.is_empty() {
                 bail!("server.acl.keys[].allow must not be empty");
+            }
+            if acl_key.rate_limit_per_minute == Some(0) {
+                bail!("server.acl.keys[].rate_limit_per_minute must be > 0 when set");
             }
         }
         Ok(())

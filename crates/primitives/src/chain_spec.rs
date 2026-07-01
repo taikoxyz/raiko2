@@ -737,7 +737,7 @@ fn v0_1_0_guest_input_l1_contracts(name: &str) -> Option<BTreeMap<ForkId, Addres
         )])),
         "taiko_dev" => Some(BTreeMap::from([(
             ForkId::Standard(SpecId::CANCUN),
-            address!("12100faa7b157e9947340b44409fc7e27ec0abef"),
+            address!("83e383dec6E3C2CD167E3bF6aA8c36F0e55Ad910"),
         )])),
         "taiko_masaya" => Some(BTreeMap::from([(
             ForkId::Taiko(TaikoFork::Shasta),
@@ -781,7 +781,7 @@ fn v0_1_0_guest_input_verifier_address_forks(name: &str) -> Option<VerifierAddre
             verifiers([
                 (
                     ProofType::Sgx,
-                    Some(address!("2184bace3e668bf0eecb22c5ccf02cfca87c8a67")),
+                    Some(address!("936d8dCd9B731D3fe146BF3E1520e9d790A3a67d")),
                 ),
                 (
                     ProofType::Sp1,
@@ -1506,16 +1506,16 @@ mod tests {
             .find(|spec| spec.name == "taiko_dev")
             .ok_or_else(|| anyhow!("missing taiko_dev spec"))?;
         assert_eq!(l1_spec.chain_id, 32_382);
-        assert_eq!(l1_spec.rpc, "https://example.com");
+        assert_eq!(l1_spec.rpc, "https://l1rpc.internal.taiko.xyz");
         assert_eq!(
             l1_spec.beacon_rpc.as_deref(),
-            Some("https://beacon.example.com")
+            Some("https://l1beacon.internal.taiko.xyz")
         );
-        assert_eq!(l1_spec.genesis_time, 1_782_220_308);
+        assert_eq!(l1_spec.genesis_time, 1_782_879_840);
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
-        assert_eq!(l2_spec.rpc, "https://example.com");
+        assert_eq!(l2_spec.rpc, "https://rpc.internal.taiko.xyz");
         assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))
@@ -1527,11 +1527,15 @@ mod tests {
         );
         assert_eq!(
             l2_spec.get_fork_l1_contract_address_at(0, 0)?,
-            address!("b432bbe475e569B2ADef4830Ae43D587932F139C")
+            address!("83e383dec6E3C2CD167E3bF6aA8c36F0e55Ad910")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::Sgx)?,
+            address!("936d8dCd9B731D3fe146BF3E1520e9d790A3a67d")
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,
-            address!("FCA057AB211Dfaeb01FB8a36F4231Fb4021a6641")
+            address!("118CB49c7e184D502AFaB1FA1E70b5fBc71Bb998")
         );
         Ok(())
     }

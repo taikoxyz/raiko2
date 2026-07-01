@@ -131,17 +131,17 @@ pub(crate) struct ApiData<T> {
     pub(crate) data: T,
 }
 
-#[derive(Serialize)]
-pub(crate) struct V4ApiErrorBody {
-    pub(crate) status: &'static str,
-    pub(crate) error: &'static str,
-    pub(crate) message: String,
-}
-
 pub(crate) mod v4 {
     use alloy_primitives::Address;
     use raiko2_primitives::{Proof, ShastaCheckpoint};
     use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize)]
+    pub(crate) struct ApiErrorBody {
+        pub(crate) status: &'static str,
+        pub(crate) error: &'static str,
+        pub(crate) message: String,
+    }
 
     #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]

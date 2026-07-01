@@ -40,7 +40,7 @@ use super::proof_types::{
     CanonicalProposal, ClearProverStatus, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
     LegacyTaskStatus, ProposalStatus, ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus,
     ProverTaskStatusCounts, PruneStatus, PublicProverArgs, RootRuntime, RootTaskState,
-    ShastaProposal, TaskData, TaskRuntime, V4ApiErrorBody, v4,
+    ShastaProposal, TaskData, TaskRuntime, v4,
 };
 use crate::config::{ResolvedNetworkPair, ServerAclFeature};
 use crate::server::proof_artifact::{ProofArtifactMaterial, load_proof_artifact_material};
@@ -163,6 +163,7 @@ fn v4_collect_inclusive_range(
     Ok((start..=end).collect())
 }
 
+// Handler-level error plumbing stays here; only the v4 wire payload lives in proof_types::v4.
 #[derive(Debug)]
 pub(crate) struct V4ApiError {
     status: StatusCode,
@@ -250,7 +251,7 @@ impl IntoResponse for V4ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(V4ApiErrorBody {
+            Json(v4::ApiErrorBody {
                 status: "error",
                 error: self.error,
                 message: self.message,

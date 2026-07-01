@@ -163,6 +163,8 @@ Proof submission validation:
 Proof submission response shape:
 
 - `proof_type` echoes the requested concrete proof type.
+- `proposal_id_start` and `proposal_id_end` echo the proposal range used as the client request
+  key.
 - Submission responses return one root task status. They do not embed the other proof endpoint's
   result; use `GET /v4/tasks/{id}` for the detailed task view.
 
@@ -177,7 +179,8 @@ Request:
 
 ```json
 {
-  "proposal_id": 12345,
+  "proposal_id_start": 12345,
+  "proposal_id_end": 12345,
   "l1_inclusion_block_number": 100,
   "l2_block_number_start": 200,
   "l2_block_number_end": 201,
@@ -192,7 +195,8 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proposal_id` | number | yes | Taiko proposal ID to prove. |
+| `proposal_id_start` | number | yes | Taiko proposal ID to prove. Must equal `proposal_id_end`. |
+| `proposal_id_end` | number | yes | Taiko proposal ID to prove. Must equal `proposal_id_start`. |
 | `l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
 | `l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
 | `l2_block_number_end` | number | yes | Last L2 block number covered by the proposal. |
@@ -207,6 +211,8 @@ Response:
 {
   "status": "ok",
   "proof_type": "risc0",
+  "proposal_id_start": 12345,
+  "proposal_id_end": 12345,
   "data": {
     "task_id": "task_0x1234",
     "status": "registered",
@@ -220,6 +226,8 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
+| `proposal_id_start` | number | First proposal ID in the unique request key. |
+| `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final proposal proof hex string when `data.status=completed`; null only before completion. |
@@ -227,19 +235,21 @@ Response fields:
 Polling and idempotency:
 
 - Clients may repeat the same `POST /v4/proof/proposal` request to poll progress.
-- Repeated requests for the same `(proposal_id, proof_type)` return the existing root task and
-  current status instead of registering duplicate work.
+- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
+  existing root task and current status instead of registering duplicate work.
 - Repeated requests whose proof-input fields conflict with the existing root task return
   `409 request_conflict`.
 
 Validation:
 
+- `proposal_id_start` must equal `proposal_id_end` for proposal proof requests.
 - `l2_block_number_start` and `l2_block_number_end` define an inclusive range and must satisfy
   `l2_block_number_start <= l2_block_number_end`.
+- `proposal_id` is not accepted by the v4 proposal request.
 - `proposals` is not accepted by the v4 proposal request.
 - `l2_block_numbers` is not accepted by the v4 proposal request.
-- `network`, `l1_network`, `blob_proof_type`, `aggregate`, `proposal_id_start`, `proposal_id_end`,
-  `aggregation_ids`, and `proofs` are not accepted by the v4 proposal request.
+- `network`, `l1_network`, `blob_proof_type`, `aggregate`, `aggregation_ids`, and `proofs` are not
+  accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
 - Unsupported proposal fork returns `400 unsupported_fork`.
 
@@ -274,6 +284,8 @@ Response:
 {
   "status": "ok",
   "proof_type": "sp1",
+  "proposal_id_start": 12345,
+  "proposal_id_end": 12346,
   "data": {
     "task_id": "task_0x5678",
     "status": "registered",
@@ -287,6 +299,8 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
+| `proposal_id_start` | number | First proposal ID in the unique request key. |
+| `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final aggregation proof hex string when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |

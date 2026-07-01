@@ -398,18 +398,22 @@ async fn request_aggregation_proof_inner(
 pub async fn v4_request_proposal_proof(
     State(state): State<AppState>,
     req: Result<Json<v4::ProposalRequest>, JsonRejection>,
-) -> Result<Json<ApiOk<v4::ProofTaskData>>, V4ApiError> {
+) -> Result<Json<v4::TaskResponse<v4::ProofTaskData>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
+    let proposal_id_start = req.proposal_id_start;
+    let proposal_id_end = req.proposal_id_end;
     let submission = v4_proposal_submission(&state, &req)?;
     let request_fingerprint = v4_proposal_request_fingerprint(&submission)?;
     submit_v4_submission(&state, &submission, &request_fingerprint).await?;
     let data = load_task_data(&state, &submission.public_task_id)
         .await
         .map_err(V4ApiError::from_api_error)?;
-    Ok(Json(ApiOk {
+    Ok(Json(v4::TaskResponse {
         status: "ok",
         proof_type: proof_type.as_str().to_string(),
+        proposal_id_start,
+        proposal_id_end,
         data: v4_proposal_task_data(&state, data).await?,
     }))
 }
@@ -417,17 +421,21 @@ pub async fn v4_request_proposal_proof(
 pub async fn v4_request_aggregation_proof(
     State(state): State<AppState>,
     req: Result<Json<v4::AggregationRequest>, JsonRejection>,
-) -> Result<Json<ApiOk<v4::AggregationTaskData>>, V4ApiError> {
+) -> Result<Json<v4::TaskResponse<v4::AggregationTaskData>>, V4ApiError> {
     let Json(req) = req.map_err(|err| V4ApiError::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
+    let proposal_id_start = req.proposal_id_start;
+    let proposal_id_end = req.proposal_id_end;
     let submission = v4_aggregation_submission(&state, req).await?;
     submit_v4_external_aggregation(&state, &submission).await?;
     let data = load_task_data(&state, &submission.public_task_id)
         .await
         .map_err(V4ApiError::from_api_error)?;
-    Ok(Json(ApiOk {
+    Ok(Json(v4::TaskResponse {
         status: "ok",
         proof_type: proof_type.as_str().to_string(),
+        proposal_id_start,
+        proposal_id_end,
         data: v4_aggregation_task_data(&state, data).await?,
     }))
 }
@@ -3101,8 +3109,15 @@ const fn v4_batch_proof_type(proof_type: v4::ProofType) -> BatchProofType {
     }
 }
 
-fn v4_proposal_task_id(proof_type: v4::ProofType, proposal_id: u64) -> String {
-    format!("v4:proposal:{}:{proposal_id}", proof_type.as_str())
+fn v4_proposal_task_id(
+    proof_type: v4::ProofType,
+    proposal_id_start: u64,
+    proposal_id_end: u64,
+) -> String {
+    format!(
+        "v4:proposal:{}:{proposal_id_start}:{proposal_id_end}",
+        proof_type.as_str()
+    )
 }
 
 fn v4_aggregation_task_id(
@@ -3123,7 +3138,12 @@ fn v4_proposal_submission(
     // Translate v4 proposal requests into the canonical batch path so routing and
     // metadata stay single-sourced.
     let proof_type = req.proof_type;
-    let proposal_id = req.proposal_id;
+    if req.proposal_id_end != req.proposal_id_start {
+        return Err(V4ApiError::invalid_request(
+            "proposal_id_end must equal proposal_id_start for proposal proofs",
+        ));
+    }
+    let proposal_id = req.proposal_id_start;
     let l2_block_numbers = v4_collect_inclusive_range(
         req.l2_block_number_start,
         req.l2_block_number_end,
@@ -3151,7 +3171,8 @@ fn v4_proposal_submission(
     let mut submission = build_canonical_batch_submission(state, batch_req)
         .map_err(V4ApiError::from_api_error)?
         .ok_or_else(|| V4ApiError::unsupported_proof_type("proof type was not selected"))?;
-    submission.public_task_id = v4_proposal_task_id(proof_type, proposal_id);
+    submission.public_task_id =
+        v4_proposal_task_id(proof_type, req.proposal_id_start, req.proposal_id_end);
     Ok(submission)
 }
 

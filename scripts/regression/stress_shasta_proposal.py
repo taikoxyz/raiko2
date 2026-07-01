@@ -282,7 +282,10 @@ class BatchMonitor:
         return None
 
     def __init_contract_event(self, l1_rpc, abi_file, evt_address):
-        print(f"l1_rpc = {l1_rpc}, abi_file = {abi_file}, evt_address = {evt_address}")
+        self.logger.info(
+            "Initializing L1 event contract: "
+            f"l1_rpc={l1_rpc}, abi_file={Path(abi_file).name}, event_contract={evt_address}"
+        )
         with open(abi_file) as f:
             abi = json.load(f)
         l1_w3 = Web3(Web3.HTTPProvider(l1_rpc, {"timeout": 10}))
@@ -299,13 +302,15 @@ class BatchMonitor:
         
         # Load anchor ABI if provided, otherwise try to use the event ABI
         if self.anchor_abi_file:
-            self.logger.info(f"Loading anchor ABI from {self.anchor_abi_file}")
+            self.logger.info(f"Loading anchor ABI from {Path(self.anchor_abi_file).name}")
             try:
                 with open(self.anchor_abi_file) as f:
                     anchor_abi_data = json.load(f)
                     self.l2_abi = anchor_abi_data.get("abi", anchor_abi_data if isinstance(anchor_abi_data, list) else [])
             except Exception as e:
-                self.logger.warning(f"Could not load anchor ABI file {self.anchor_abi_file}: {e}")
+                self.logger.warning(
+                    f"Could not load anchor ABI file {Path(self.anchor_abi_file).name}: {e}"
+                )
                 self.l2_abi = abi.get("abi", [])
         else:
             # Fallback to event ABI (might not have anchorV4 function)
@@ -1175,6 +1180,8 @@ class BatchMonitor:
     ) -> Dict[str, Any]:
         """generate post data"""
         payload = {
+            "network": self.network,
+            "l1_network": self.l1_network,
             "proposals": proposals,
             "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
@@ -1206,7 +1213,11 @@ class BatchMonitor:
             }
             
             payload = self.generate_post_data([proposal_data], aggregate=False)
-            print(f"payload = {payload}")
+            self.logger.info(
+                "Submitting Raiko proposal request: "
+                f"proposal_id={proposal_id}, network={self.network}/{self.l1_network}, "
+                f"proof_type={self.prove_type}, l2_block_count={len(l2_block_numbers)}"
+            )
 
             response = requests.post(
                 f"{self.raiko_rpc}/v3/proof/batch/shasta",
@@ -1219,7 +1230,8 @@ class BatchMonitor:
                 result["data"] = {}  # avoid big print
             if result.get("status") == "ok":
                 self.logger.info(
-                    f"Proposal {proposal_id} (L2 blocks {l2_block_numbers}) in L1 block {l1_inclusion_block} submitted to Raiko with response: {result}"
+                    f"Proposal {proposal_id} (L2 {self.format_l2_block_range(l2_block_numbers)}) "
+                    f"in L1 block {l1_inclusion_block} submitted to Raiko with response: {result}"
                 )
             else:
                 self.logger.error(
@@ -1247,7 +1259,11 @@ class BatchMonitor:
             self.logger.info(
                 f"Submitting aggregate request for {len(proposals_to_aggregate)} proposals: {proposal_ids}"
             )
-            print(f"aggregate payload = {payload}")
+            self.logger.info(
+                "Submitting Raiko aggregate request: "
+                f"network={self.network}/{self.l1_network}, proof_type={self.prove_type}, "
+                f"proposal_count={len(proposals_to_aggregate)}"
+            )
 
             response = requests.post(
                 f"{self.raiko_rpc}/v3/proof/batch/shasta",
@@ -1344,7 +1360,8 @@ class BatchMonitor:
             start_time = datetime.now()
 
             self.append_log(
-                f"\nproposal {group.proposal_id} (L2 blocks {group.l2_block_numbers}) in L1 block {l1_inclusion_block} processing started at {start_time}\n"
+                f"\nproposal {group.proposal_id} (L2 {self.format_l2_block_range(group.l2_block_numbers)}) "
+                f"in L1 block {l1_inclusion_block} processing started at {start_time}\n"
             )
 
             self.logger.info(

@@ -162,7 +162,15 @@ class TestBatchMonitorPayload(unittest.TestCase):
     def make_monitor(self, prove_type):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = prove_type
+        monitor.network = "taiko_hoodi"
+        monitor.l1_network = "hoodi"
         return monitor
+
+    def test_payload_includes_network_pair(self):
+        payload = self.make_monitor("sgx").generate_post_data([], aggregate=False)
+
+        self.assertEqual(payload["network"], "taiko_hoodi")
+        self.assertEqual(payload["l1_network"], "hoodi")
 
     def test_native_payload_omits_legacy_prover_args(self):
         payload = self.make_monitor("native").generate_post_data([], aggregate=False)
@@ -378,6 +386,8 @@ class TestBatchMonitorRequestPayload(unittest.TestCase):
     def test_generate_post_data_omits_legacy_public_prover_args_for_sgx(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = "sgx"
+        monitor.network = "taiko_hoodi"
+        monitor.l1_network = "hoodi"
 
         payload = monitor.generate_post_data(
             [
@@ -402,6 +412,8 @@ class TestBatchMonitorRequestPayload(unittest.TestCase):
     def test_generate_post_data_keeps_sp1_public_prover_args_for_sp1(self):
         monitor = BatchMonitor.__new__(BatchMonitor)
         monitor.prove_type = "sp1"
+        monitor.network = "taiko_hoodi"
+        monitor.l1_network = "hoodi"
 
         payload = monitor.generate_post_data(
             [

@@ -12,8 +12,7 @@ use raiko2_prover::{
     Prover,
     gaiko2::{Gaiko2Config, Gaiko2Prover},
     remote_prover::protocol::{
-        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
-        RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ProofError,
+        RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofError,
     },
 };
 use serde_json::json;
@@ -51,7 +50,7 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
-            .body_contains(RAIKO2_SHASTA_REQUEST_V2_SCHEMA)
+            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA)
             .body_contains("\"guest_input\"");
         then.status(200)
             .header("content-type", "application/json")
@@ -85,11 +84,15 @@ async fn gaiko2_prover_posts_shasta_packet_and_maps_success_response() {
     assert_eq!(proof.input, Some(expected_input_hash));
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
-        extra["gaiko2"]["schema"].as_str(),
+        extra["sgxgeth"]["schema"].as_str(),
         Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
-    assert_eq!(extra["gaiko2"]["public_key"].as_str(), Some("0xpub"));
-    assert_eq!(extra["gaiko2"]["instance_address"].as_str(), Some("0xaddr"));
+    assert!(extra.get("gaiko2").is_none());
+    assert_eq!(extra["sgxgeth"]["public_key"].as_str(), Some("0xpub"));
+    assert_eq!(
+        extra["sgxgeth"]["instance_address"].as_str(),
+        Some("0xaddr")
+    );
 }
 
 #[tokio::test]
@@ -115,7 +118,7 @@ async fn gaiko2_prover_can_post_full_guest_input_for_raiko2_sgx_runtime() {
             }));
     });
 
-    let prover = Gaiko2Prover::new_for_guest_input(&Gaiko2Config {
+    let prover = Gaiko2Prover::new(&Gaiko2Config {
         base_url: server.base_url(),
         timeout_ms: 5_000,
     })
@@ -137,7 +140,7 @@ async fn gaiko2_prover_rejects_response_input_mismatch() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/prove/shasta")
-            .body_contains(RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
+            .body_contains(RAIKO2_SHASTA_REQUEST_SCHEMA);
         then.status(200)
             .header("content-type", "application/json")
             .json_body(json!({

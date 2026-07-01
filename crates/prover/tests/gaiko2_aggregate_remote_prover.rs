@@ -130,9 +130,10 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
     assert_eq!(proof.input, Some(expected_input_hash));
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
-        extra["gaiko2"]["schema"].as_str(),
+        extra["sgxgeth"]["schema"].as_str(),
         Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
+    assert!(extra.get("gaiko2").is_none());
 }
 
 #[tokio::test]

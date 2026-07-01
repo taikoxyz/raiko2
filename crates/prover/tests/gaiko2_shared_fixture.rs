@@ -4,17 +4,17 @@ use std::{fs, path::PathBuf};
 
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
-    adapter::build_shasta_packet, protocol::RAIKO2_SHASTA_REQUEST_V2_SCHEMA,
+    adapter::build_shasta_packet, protocol::RAIKO2_SHASTA_REQUEST_SCHEMA,
 };
 
 #[test]
-fn shared_shasta_fixture_adapts_into_stable_remote_prover_v2_packet() {
+fn shared_shasta_fixture_adapts_into_stable_remote_prover_v1_packet() {
     let raw = fs::read_to_string(shared_fixture_path()).expect("read shared shasta guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared fixture");
     let packet = build_shasta_packet(&guest_input).expect("build remote prover packet");
     let payload = &packet.payload.guest_input;
 
-    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(payload.proof_carry_data.chain_id, 167_000);
     assert_eq!(payload.witnesses.len(), 192);
     assert_eq!(payload.proof_carry_data.transition_input.proposal_id, 2_222);

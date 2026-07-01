@@ -9,17 +9,17 @@ use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
 use raiko2_prover::remote_prover::{
     adapter::{build_shasta_aggregate_request, build_shasta_packet},
-    protocol::RAIKO2_SHASTA_REQUEST_V2_SCHEMA,
+    protocol::RAIKO2_SHASTA_REQUEST_SCHEMA,
 };
 
 #[test]
-fn proposal_request_adapter_outputs_v2_guest_input_packet() {
+fn proposal_request_adapter_outputs_v1_guest_input_packet() {
     let raw =
         fs::read_to_string(shared_guest_input_path()).expect("read shared shasta guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared fixture");
     let packet = build_shasta_packet(&guest_input).expect("build remote prover packet");
 
-    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(packet.payload.guest_input.witnesses.len(), 192);
     assert_eq!(
         packet

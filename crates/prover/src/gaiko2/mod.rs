@@ -18,13 +18,11 @@ use crate::{
 };
 
 use crate::remote_prover::{
-    adapter::{
-        build_shasta_aggregate_request, build_shasta_packet, build_shasta_packet_with_guest_input,
-    },
+    adapter::{build_shasta_aggregate_request, build_shasta_packet},
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA,
-        RAIKO2_SHASTA_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ProofResponse,
-        Raiko2ProofResult, Raiko2ProofStatus, Raiko2ShastaRequest, Raiko2ShastaRequestV2,
+        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ProofResponse, Raiko2ProofResult, Raiko2ProofStatus,
+        Raiko2ShastaRequest,
     },
 };
 
@@ -33,6 +31,7 @@ pub mod protocol;
 
 const SHASTA_PROPOSAL_PATH: &str = "/prove/shasta";
 const SHASTA_AGGREGATE_PATH: &str = "/prove/shasta-aggregate";
+const SGXGETH_LABEL: &str = "sgxgeth";
 
 #[derive(Debug, Clone, Default)]
 pub struct Gaiko2Config {
@@ -52,13 +51,6 @@ pub struct Gaiko2Prover {
     client: Client,
     prove_url: Url,
     aggregate_url: Url,
-    request_encoding: ShastaRequestEncoding,
-}
-
-#[derive(Clone, Copy)]
-enum ShastaRequestEncoding {
-    ReplayPacket,
-    GuestInput,
 }
 
 impl Gaiko2Prover {
@@ -67,21 +59,6 @@ impl Gaiko2Prover {
     /// Returns an error when the gaiko2 base URL is empty, malformed, or the HTTP client
     /// cannot be constructed.
     pub fn new(config: &Gaiko2Config) -> RaikoResult<Self> {
-        Self::new_with_encoding(config, ShastaRequestEncoding::ReplayPacket)
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error when the remote SGX base URL is empty, malformed, or the HTTP client
-    /// cannot be constructed.
-    pub fn new_for_guest_input(config: &Gaiko2Config) -> RaikoResult<Self> {
-        Self::new_with_encoding(config, ShastaRequestEncoding::GuestInput)
-    }
-
-    fn new_with_encoding(
-        config: &Gaiko2Config,
-        request_encoding: ShastaRequestEncoding,
-    ) -> RaikoResult<Self> {
         if config.base_url.trim().is_empty() {
             return Err(RaikoError::InvalidRequestConfig(
                 "gaiko2.base_url must not be empty".to_string(),
@@ -108,20 +85,15 @@ impl Gaiko2Prover {
             client,
             prove_url,
             aggregate_url,
-            request_encoding,
         })
     }
 }
 
 impl GuestInputCodec<GuestInput> for Gaiko2Prover {
     fn encode(&self, input: &GuestInput, _config: &ProverConfig) -> RaikoResult<Bytes> {
-        let payload = match self.request_encoding {
-            ShastaRequestEncoding::ReplayPacket => serde_json::to_vec(&build_shasta_packet(input)?),
-            ShastaRequestEncoding::GuestInput => {
-                serde_json::to_vec(&build_shasta_packet_with_guest_input(input)?)
-            }
-        }
-        .map_err(|err| RaikoError::Guest(format!("failed to encode gaiko2 packet: {err}")))?;
+        let payload = serde_json::to_vec(&build_shasta_packet(input)?).map_err(|err| {
+            RaikoError::Guest(format!("failed to encode {SGXGETH_LABEL} packet: {err}"))
+        })?;
         Ok(Bytes::from(payload))
     }
 }
@@ -150,15 +122,15 @@ where
             .await?;
         let input_hash = B256::from_str(&result.input).map_err(|err| {
             RaikoError::Guest(format!(
-                "invalid gaiko2 input hash '{}': {err}",
+                "invalid {SGXGETH_LABEL} input hash '{}': {err}",
                 result.input
             ))
         })?;
-        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, "gaiko2")?;
+        ensure_shasta_proposal_input_matches_carry(input_hash, &proof_carry_data, SGXGETH_LABEL)?;
 
         let extra_data = with_shasta_extra_data(
             &proof_carry_data,
-            "gaiko2",
+            SGXGETH_LABEL,
             Some(gaiko2_metadata(&envelope.schema, &result)),
         )?;
 
@@ -186,14 +158,16 @@ where
         }
 
         let payload = serde_json::to_vec(&packet).map_err(|err| {
-            RaikoError::Guest(format!("failed to encode gaiko2 aggregate packet: {err}"))
+            RaikoError::Guest(format!(
+                "failed to encode {SGXGETH_LABEL} aggregate packet: {err}"
+            ))
         })?;
         let (envelope, result) = self
             .post_request(self.aggregate_url.clone(), payload)
             .await?;
         let input_hash = B256::from_str(&result.input).map_err(|err| {
             RaikoError::Guest(format!(
-                "invalid gaiko2 input hash '{}': {err}",
+                "invalid {SGXGETH_LABEL} input hash '{}': {err}",
                 result.input
             ))
         })?;
@@ -208,7 +182,7 @@ where
             input_hash,
             &carries,
             instance_address,
-            "gaiko2",
+            SGXGETH_LABEL,
         )?;
         let metadata = gaiko2_metadata(&envelope.schema, &result);
 
@@ -217,7 +191,7 @@ where
             input: Some(input_hash),
             quote: result.quote,
             extra_data: Some(serde_json::json!({
-                "gaiko2": metadata,
+                "sgxgeth": metadata,
             })),
             ..Default::default()
         })
@@ -226,34 +200,17 @@ where
 
 impl Gaiko2Prover {
     fn proposal_carry_data_from_encoded(&self, input: &Bytes) -> RaikoResult<ProofCarryData> {
-        match self.request_encoding {
-            ShastaRequestEncoding::ReplayPacket => {
-                let packet: Raiko2ShastaRequestV2 = serde_json::from_slice(input.as_ref())
-                    .map_err(|err| {
-                        RaikoError::Guest(format!("failed to decode gaiko2 v2 packet: {err}"))
-                    })?;
-                if packet.schema != RAIKO2_SHASTA_REQUEST_V2_SCHEMA {
-                    return Err(RaikoError::Guest(format!(
-                        "unsupported remote prover request schema: {}",
-                        packet.schema
-                    )));
-                }
-                Ok(packet.payload.guest_input.proof_carry_data)
-            }
-            ShastaRequestEncoding::GuestInput => {
-                let packet: Raiko2ShastaRequest =
-                    serde_json::from_slice(input.as_ref()).map_err(|err| {
-                        RaikoError::Guest(format!("failed to decode gaiko2 packet: {err}"))
-                    })?;
-                if packet.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
-                    return Err(RaikoError::Guest(format!(
-                        "unsupported remote prover request schema: {}",
-                        packet.schema
-                    )));
-                }
-                Ok(packet.payload.proof_carry_data)
-            }
+        let packet: Raiko2ShastaRequest =
+            serde_json::from_slice(input.as_ref()).map_err(|err| {
+                RaikoError::Guest(format!("failed to decode {SGXGETH_LABEL} packet: {err}"))
+            })?;
+        if packet.schema != RAIKO2_SHASTA_REQUEST_SCHEMA {
+            return Err(RaikoError::Guest(format!(
+                "unsupported remote prover request schema: {}",
+                packet.schema
+            )));
         }
+        Ok(packet.payload.guest_input.proof_carry_data)
     }
 
     async fn post_request(
@@ -268,15 +225,15 @@ impl Gaiko2Prover {
             .body(body)
             .send()
             .await
-            .map_err(|err| RaikoError::Guest(format!("gaiko2 request failed: {err}")))?;
+            .map_err(|err| RaikoError::Guest(format!("{SGXGETH_LABEL} request failed: {err}")))?;
         let status = response.status();
         let body = response
             .bytes()
             .await
-            .map_err(|err| RaikoError::Guest(format!("gaiko2 read failed: {err}")))?;
+            .map_err(|err| RaikoError::Guest(format!("{SGXGETH_LABEL} read failed: {err}")))?;
         let envelope: Raiko2ProofResponse = serde_json::from_slice(&body).map_err(|err| {
             RaikoError::Guest(format!(
-                "gaiko2 response decode failed (status {status}): {err}"
+                "{SGXGETH_LABEL} response decode failed (status {status}): {err}"
             ))
         })?;
 
@@ -290,17 +247,17 @@ impl Gaiko2Prover {
         if !status.is_success() || envelope.status == Raiko2ProofStatus::Error {
             let error = envelope.error.as_ref().ok_or_else(|| {
                 RaikoError::Guest(format!(
-                    "gaiko2 request failed with status {status} and no error payload"
+                    "{SGXGETH_LABEL} request failed with status {status} and no error payload"
                 ))
             })?;
             return Err(RaikoError::Guest(format!(
-                "gaiko2 {}: {}",
+                "{SGXGETH_LABEL} {}: {}",
                 error.code, error.message
             )));
         }
 
         let result = envelope.result.clone().ok_or_else(|| {
-            RaikoError::Guest("gaiko2 response missing result payload".to_string())
+            RaikoError::Guest(format!("{SGXGETH_LABEL} response missing result payload"))
         })?;
 
         Ok((envelope, result))
@@ -309,12 +266,14 @@ impl Gaiko2Prover {
 
 fn parse_aggregate_instance_address(result: &Raiko2ProofResult) -> RaikoResult<Address> {
     let raw = result.instance_address.as_deref().ok_or_else(|| {
-        RaikoError::Guest("gaiko2 aggregate response missing instance_address".to_string())
+        RaikoError::Guest(format!(
+            "{SGXGETH_LABEL} aggregate response missing instance_address"
+        ))
     })?;
 
     Address::from_str(raw).map_err(|err| {
         RaikoError::Guest(format!(
-            "invalid gaiko2 aggregate instance_address '{raw}': {err}"
+            "invalid {SGXGETH_LABEL} aggregate instance_address '{raw}': {err}"
         ))
     })
 }

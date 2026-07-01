@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 pub const RAIKO2_SHASTA_REQUEST_SCHEMA: &str = "raiko2-shasta-request-v1";
-pub const RAIKO2_SHASTA_REQUEST_V2_SCHEMA: &str = "raiko2-shasta-request-v2";
 pub const RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA: &str = "raiko2-shasta-aggregate-request-v1";
 pub const RAIKO2_PROOF_RESPONSE_SCHEMA: &str = "raiko2-proof-v1";
 
@@ -23,21 +22,6 @@ pub struct Raiko2ShastaRequest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Raiko2ShastaPayload {
-    pub chain_id: u64,
-    pub blocks: Vec<Raiko2ReplayBlock>,
-    pub proof_carry_data: ProofCarryData,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest_input: Option<GuestInput>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaRequestV2 {
-    pub schema: String,
-    pub payload: Raiko2ShastaPayloadV2,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Raiko2ShastaPayloadV2 {
     pub guest_input: Raiko2ShastaGuestInput,
 }
 
@@ -78,6 +62,29 @@ impl From<StatelessInput> for Raiko2ReplayBlock {
             chain_spec: value.chain_spec,
             witness: value.witness,
             accounts: value.accounts,
+        }
+    }
+}
+
+impl From<Raiko2ReplayBlock> for StatelessInput {
+    fn from(value: Raiko2ReplayBlock) -> Self {
+        Self {
+            block: value.block,
+            chain_spec: value.chain_spec,
+            witness: value.witness,
+            accounts: value.accounts,
+        }
+    }
+}
+
+impl From<Raiko2ShastaGuestInput> for GuestInput {
+    fn from(value: Raiko2ShastaGuestInput) -> Self {
+        Self {
+            witnesses: value.witnesses.into_iter().map(Into::into).collect(),
+            taiko: value.taiko,
+            proposal_ancestor_headers: value.proposal_ancestor_headers,
+            proposal_state_nodes: value.proposal_state_nodes,
+            proof_carry_data: value.proof_carry_data,
         }
     }
 }

@@ -11,17 +11,16 @@ It replaces the old untracked repo-root `test.json` workflow.
 
 `tests/fixtures/remote_prover/` contains remote prover protocol fixtures owned by `raiko2`:
 
-- `shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
 - `shasta_aggregate_request_v1_single_fixture_proof.json`
 
 The aggregate fixture defines the strict `raiko2`-owned request contract for:
 
 - `raiko2-shasta-aggregate-request-v1`
 
-The v1 proposal fixture is a legacy replay-packet compatibility reference. Current gaiko2 proposal
-requests are generated from the shared `GuestInput` fixture as `raiko2-shasta-request-v2` packets
-with `payload.guest_input`. Provider-specific repositories may keep their own copies, but `raiko2`
-owns the adapter behavior and validates it in `crates/prover/tests/remote_prover_fixture.rs`.
+Current gaiko2 proposal requests are generated from the shared `GuestInput` fixture as
+`raiko2-shasta-request-v1` packets with `payload.guest_input`. Provider-specific repositories may
+keep their own copies, but `raiko2` owns the adapter behavior and validates it in
+`crates/prover/tests/remote_prover_fixture.rs`.
 
 ## Provenance
 

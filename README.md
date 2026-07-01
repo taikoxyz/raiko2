@@ -105,12 +105,10 @@ flowchart LR
 
 `raiko2` owns the canonical remote prover request fixtures under:
 
-- `tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
 - `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
 
-The proposal and aggregate request fixtures are strict protocol goldens for:
+The aggregate request fixture is the strict protocol golden for:
 
-- `raiko2-shasta-request-v1`
 - `raiko2-shasta-aggregate-request-v1`
 
 Run the ignored black-box conformance harness against a provider endpoint with:
@@ -125,11 +123,9 @@ The harness builds the proposal request from the shared Shasta `GuestInput` fixt
 
 - `POST /prove/shasta`
 
-This harness targets providers whose `/prove/shasta` input is the gaiko2 v2
-`raiko2-shasta-request-v2` packet with `payload.guest_input`. It is not a `raiko2-sgx-prover`
-smoke test. `raiko2-sgx-prover` requires the legacy v1 wrapper with a complete
-`raiko2_primitives_shasta::GuestInput` envelope and runs the Shasta guest validation path before
-signing.
+This harness targets providers whose `/prove/shasta` input is the v1
+`raiko2-shasta-request-v1` packet with `payload.guest_input`. `raiko2-sgx-prover` consumes the
+same request shape and runs the Shasta guest validation path before signing.
 
 It then builds a live aggregate request from the returned proposal proof and posts that derived
 request to:

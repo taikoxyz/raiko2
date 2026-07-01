@@ -2,17 +2,16 @@ use raiko2_primitives::{Proof, RaikoError, RaikoResult, StatelessInput, WitnessH
 use raiko2_primitives_shasta::{GuestInput, roll_proposal_ancestor_headers_in_place};
 
 use crate::remote_prover::protocol::{
-    RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
-    RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2AggregateProof, Raiko2ReplayBlock,
-    Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaGuestInput,
-    Raiko2ShastaPayload, Raiko2ShastaPayloadV2, Raiko2ShastaRequest, Raiko2ShastaRequestV2,
+    RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2AggregateProof,
+    Raiko2ReplayBlock, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
+    Raiko2ShastaGuestInput, Raiko2ShastaPayload, Raiko2ShastaRequest,
 };
 
 /// # Errors
 ///
 /// Returns an error when the guest input has no witnesses or the replay packet cannot be
 /// assembled from the witness state.
-pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaRequestV2> {
+pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaRequest> {
     shasta_packet_chain_id(input)?;
 
     let shared_state_nodes = input.proposal_state_nodes();
@@ -34,9 +33,9 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaReques
         );
     }
 
-    Ok(Raiko2ShastaRequestV2 {
-        schema: RAIKO2_SHASTA_REQUEST_V2_SCHEMA.to_string(),
-        payload: Raiko2ShastaPayloadV2 {
+    Ok(Raiko2ShastaRequest {
+        schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
+        payload: Raiko2ShastaPayload {
             guest_input: Raiko2ShastaGuestInput {
                 witnesses,
                 taiko: input.taiko.clone(),
@@ -44,25 +43,6 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaReques
                 proposal_state_nodes: input.proposal_state_nodes.clone(),
                 proof_carry_data: input.proof_carry_data.clone(),
             },
-        },
-    })
-}
-
-/// # Errors
-///
-/// Returns an error when the guest input has no witnesses.
-pub fn build_shasta_packet_with_guest_input(
-    input: &GuestInput,
-) -> RaikoResult<Raiko2ShastaRequest> {
-    let chain_id = shasta_packet_chain_id(input)?;
-
-    Ok(Raiko2ShastaRequest {
-        schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaPayload {
-            chain_id,
-            blocks: Vec::new(),
-            proof_carry_data: input.proof_carry_data.clone(),
-            guest_input: Some(input.clone()),
         },
     })
 }

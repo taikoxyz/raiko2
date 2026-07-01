@@ -90,9 +90,12 @@
     {
         "name": "taiko_dev",
         "chain_id": 167001,
-        "max_spec_id": "SHASTA",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
             "SHASTA": {
+                "Timestamp": 0
+            },
+            "UNZEN": {
                 "Timestamp": 0
             }
         },

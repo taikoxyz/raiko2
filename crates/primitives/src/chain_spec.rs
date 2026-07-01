@@ -1515,15 +1515,15 @@ mod tests {
         assert_eq!(l1_spec.seconds_per_slot, 12);
         assert!(!l1_spec.is_taiko);
         assert_eq!(l2_spec.chain_id, 167_001);
+        assert_eq!(l2_spec.max_spec_id, SpecId::OSAKA);
         assert_eq!(l2_spec.rpc, "https://rpc.internal.taiko.xyz");
         assert_eq!(
             l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
             Some(&ForkCondition::Timestamp(0))
         );
-        assert!(
-            !l2_spec
-                .hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        assert_eq!(
+            l2_spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
         assert_eq!(
             l2_spec.get_fork_l1_contract_address_at(0, 0)?,
@@ -1571,9 +1571,10 @@ mod tests {
             shasta.active_at_timestamp(0),
             "Shasta must be active at genesis on internal devnet"
         );
-        assert!(
-            unzen.active_at_timestamp(u64::MAX),
-            "Devnet must not force inherited Unzen to Never"
+        assert_eq!(
+            unzen,
+            AlethiaForkCondition::Timestamp(0),
+            "Unzen must be active at genesis on internal devnet"
         );
         Ok(())
     }

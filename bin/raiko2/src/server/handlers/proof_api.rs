@@ -59,6 +59,7 @@ use crate::server::task_metadata::{
 };
 use crate::server::telemetry::{self, MetricContext};
 
+// Bound client-supplied inclusive ranges before materializing them into Vecs.
 const V4_MAX_RANGE_LEN: u64 = 100_000;
 
 #[derive(Clone)]
@@ -135,6 +136,7 @@ impl ProverTaskScope {
         match self {
             Self::ZkAny => is_zk_any_metadata(metadata),
             Self::ProofType(proof_type) => {
+                // V4 filters by the requested concrete backend, not by any fallback that may run.
                 metadata.requested_proof_type.as_deref() == Some(proof_type.as_str())
             }
         }
@@ -147,6 +149,7 @@ fn v4_collect_inclusive_range(
     start_field: &'static str,
     end_field: &'static str,
 ) -> Result<Vec<u64>, V4ApiError> {
+    // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
     if end < start {
         return Err(V4ApiError::invalid_request(format!(
             "{end_field} must be greater than or equal to {start_field}"
@@ -1361,7 +1364,8 @@ async fn register_external_aggregate_task(
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
-            // Runtime metadata is persisted as strings, but the request path keeps proof type typed.
+            // Runtime metadata is persisted as strings, but the request path keeps
+            // proof type typed.
             requested_proof_type: Some(&requested_proof_type),
             prover_type: submission.prover_type,
             execution_mode: None,
@@ -3118,6 +3122,8 @@ fn v4_proposal_submission(
     state: &AppState,
     req: &v4::ProposalRequest,
 ) -> Result<CanonicalBatchSubmission, V4ApiError> {
+    // Translate v4 proposal requests into the canonical batch path so routing and
+    // metadata stay single-sourced.
     let proof_type = req.proof_type;
     let proposal_id = req.proposal_id;
     let l2_block_numbers = v4_collect_inclusive_range(
@@ -3155,6 +3161,8 @@ async fn v4_aggregation_submission(
     state: &AppState,
     req: v4::AggregationRequest,
 ) -> Result<ExternalAggregateSubmission, V4ApiError> {
+    // V4 aggregation is local-first: it aggregates proposal proof artifacts already
+    // known to this runtime.
     let proof_type = req.proof_type;
     let aggregation_ids = v4_collect_inclusive_range(
         req.proposal_id_start,
@@ -3195,6 +3203,8 @@ async fn v4_local_proposal_proof(
     proof_type: v4::ProofType,
     proposal_id: u64,
 ) -> Result<ProofArtifactMaterial, V4ApiError> {
+    // Match the original proposal task, then load its persisted artifact instead of
+    // a lossy status view.
     let records = state
         .runtime
         .list_tasks()
@@ -3242,6 +3252,7 @@ async fn v4_local_proposal_proof(
 fn v4_proposal_request_fingerprint(
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, V4ApiError> {
+    // Use normalized submission data as the idempotency key, not the caller's raw JSON shape.
     let payload = serde_json::json!({
         "api": "v4/proof/proposal",
         "network_pair": submission.pair.key,
@@ -3263,6 +3274,7 @@ async fn submit_v4_submission(
     submission: &CanonicalBatchSubmission,
     request_fingerprint: &str,
 ) -> Result<(), V4ApiError> {
+    // Deterministic v4 task IDs are reusable only when the normalized request fingerprint matches.
     if let Some(existing) = state
         .runtime
         .get_task(&submission.public_task_id)
@@ -3296,6 +3308,7 @@ async fn submit_v4_external_aggregation(
     state: &AppState,
     submission: &ExternalAggregateSubmission,
 ) -> Result<(), V4ApiError> {
+    // Aggregation has the same idempotency rule as proposal proving: same key, same inputs.
     if let Some(existing) = state
         .runtime
         .get_task(&submission.public_task_id)

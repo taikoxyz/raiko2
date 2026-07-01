@@ -131,11 +131,13 @@ pub(crate) struct ApiData<T> {
     pub(crate) data: T,
 }
 
+/// Client-facing v4 HTTP wire types.
 pub(crate) mod v4 {
     use alloy_primitives::Address;
     use raiko2_primitives::{Proof, ShastaCheckpoint};
     use serde::{Deserialize, Serialize};
 
+    /// Error payload returned by v4 endpoints.
     #[derive(Serialize)]
     pub(crate) struct ApiErrorBody {
         pub(crate) status: &'static str,
@@ -143,6 +145,7 @@ pub(crate) mod v4 {
         pub(crate) message: String,
     }
 
+    /// Concrete proof backends accepted by v4 endpoints.
     #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(rename_all = "snake_case")]
     pub(crate) enum ProofType {
@@ -159,6 +162,7 @@ pub(crate) mod v4 {
         }
     }
 
+    /// Request body for one proposal proof.
     #[derive(Debug, Clone, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     pub(crate) struct ProposalRequest {
@@ -174,6 +178,7 @@ pub(crate) mod v4 {
         pub(crate) prover: Option<Address>,
     }
 
+    /// Request body for aggregating a contiguous range of completed proposal proofs.
     #[derive(Debug, Clone, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     pub(crate) struct AggregationRequest {
@@ -182,18 +187,21 @@ pub(crate) mod v4 {
         pub(crate) proposal_id_end: u64,
     }
 
+    /// Query string accepted by the v4 prover-status endpoint.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(crate) struct ProverStatusQuery {
         pub(crate) proof_type: ProofType,
     }
 
+    /// Request body accepted by the v4 prover-clear endpoint.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub(crate) struct ProverClearRequest {
         pub(crate) proof_type: ProofType,
     }
 
+    /// Response data for a v4 proposal task.
     #[derive(Debug, Serialize)]
     pub(crate) struct ProofTaskData {
         pub(crate) task_id: String,
@@ -203,6 +211,7 @@ pub(crate) mod v4 {
         pub(crate) proof: Option<Proof>,
     }
 
+    /// Response data for a v4 aggregation task.
     #[derive(Debug, Serialize)]
     pub(crate) struct AggregationTaskData {
         pub(crate) task_id: String,

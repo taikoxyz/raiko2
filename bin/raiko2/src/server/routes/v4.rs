@@ -6,6 +6,7 @@ use axum::{
 use super::super::{handlers, state::AppState};
 
 pub fn routes() -> Router<AppState> {
+    // Keep the v4 surface isolated so path shape changes do not leak into legacy proof routes.
     Router::new()
         .route(
             "/v4/proof/proposal",

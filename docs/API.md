@@ -248,11 +248,16 @@ Response fields:
 
 Polling and idempotency:
 
-- Clients may repeat the same `POST /v4/proof/proposal` request to poll progress.
+- Clients may repeat the same `POST /v4/proof/proposal` request to poll progress. The idempotency
+  key is derived only from client-supplied request data, so a server-side prover-config change (for
+  example mock vs. real, or local vs. network routing) does not turn a repeated identical request
+  into a conflict.
 - Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
   existing root task and current status instead of registering duplicate work.
-- Repeated requests whose proof-input fields conflict with the existing root task return
-  `409 request_conflict`.
+- If the existing task for that key has terminally failed or was cancelled, a request with corrected
+  proof-input fields replaces it (for example after an L1 reorg changes `l1_inclusion_block_number`).
+- Otherwise, a repeated request whose proof-input fields conflict with a still-active or completed
+  root task returns `409 request_conflict`.
 
 Validation:
 

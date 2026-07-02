@@ -480,6 +480,7 @@ fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiE
 async fn build_external_aggregate_submission(
     state: &AppState,
     req: AggregateProofRequest,
+    api: Option<&str>,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
     validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
@@ -500,8 +501,14 @@ async fn build_external_aggregate_submission(
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let request_fingerprint =
-        external_aggregate_request_fingerprint(&pair, route, prover_type, &req, &prover_config)?;
+    let request_fingerprint = external_aggregate_request_fingerprint(
+        &pair,
+        route,
+        prover_type,
+        &req,
+        &prover_config,
+        api,
+    )?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
@@ -1028,7 +1035,7 @@ async fn handle_existing_batch_task(
                 submission,
                 &existing,
                 &existing_metadata,
-                None,
+                replacement_request_fingerprint,
             )
             .await;
         }
@@ -2510,8 +2517,9 @@ fn external_aggregate_request_fingerprint(
     prover_type: Option<ProverType>,
     req: &AggregateProofRequest,
     prover_config: &ProverTaskConfig,
+    api: Option<&str>,
 ) -> Result<String, ApiError> {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
         "prover_type": prover_type.map(ProverType::as_str),
@@ -2523,6 +2531,15 @@ fn external_aggregate_request_fingerprint(
         "prover": req.prover.as_deref(),
         "blob_proof_type": req.blob_proof_type.as_deref(),
     });
+    // Domain-separate per API version when requested. Omitting the key entirely (v3) keeps the
+    // legacy fingerprint byte-identical; v4 tags its key so a v3 aggregation of the same range can
+    // never own the v4 task's fingerprint (which would otherwise block the v4 row from registering).
+    if let (Some(api), Some(map)) = (api, payload.as_object_mut()) {
+        map.insert(
+            "api".to_string(),
+            serde_json::Value::String(api.to_string()),
+        );
+    }
     let encoded = serde_json::to_vec(&payload).map_err(|err| {
         ApiError::internal(format!(
             "failed to serialize aggregate request fingerprint: {err}"
@@ -4280,6 +4297,49 @@ mod tests {
         assert_ne!(sgx_fingerprint, sgxgeth_fingerprint);
     }
 
+    #[test]
+    fn v4_aggregate_fingerprint_is_domain_separated_from_v3() {
+        // A v3 aggregation and a v4 aggregation of the same range/proofs must not share a request
+        // fingerprint: the fingerprint is the runtime idempotency key, and a v3 task owning it would
+        // block the deterministic v4 row from ever registering, wedging /v4 with a permanent 404 (F1).
+        let route = native_local_route();
+        let pair = resolved_pair();
+        let config = ProverTaskConfig::default();
+        let req = AggregateProofRequest {
+            aggregation_ids: vec![7],
+            proofs: vec![valid_native_proof()],
+            proof_type: BatchProofType::Native,
+            network: None,
+            l1_network: None,
+            graffiti: None,
+            prover: None,
+            blob_proof_type: None,
+            prover_args: PublicProverArgs::default(),
+        };
+
+        let v3 = external_aggregate_request_fingerprint(&pair, route, None, &req, &config, None)
+            .expect("v3 fingerprint");
+        let v4 = external_aggregate_request_fingerprint(
+            &pair,
+            route,
+            None,
+            &req,
+            &config,
+            Some("v4/proof/aggregation"),
+        )
+        .expect("v4 fingerprint");
+        assert_ne!(
+            v3, v4,
+            "v4 aggregation fingerprint must be domain-separated from v3"
+        );
+
+        // The untagged (v3) fingerprint stays deterministic and unchanged by the new parameter.
+        let v3_again =
+            external_aggregate_request_fingerprint(&pair, route, None, &req, &config, None)
+                .expect("v3 fingerprint again");
+        assert_eq!(v3, v3_again);
+    }
+
     #[tokio::test]
     async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals()
     -> Result<()> {
@@ -4582,6 +4642,36 @@ mod tests {
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "invalid_request");
+    }
+
+    #[test]
+    fn v4_proposal_fingerprint_ignores_server_derived_fields() {
+        // route and prover_type are both derived from server prover config. A benign config change
+        // (mock->real, local->network) must not change the v4 idempotency key, or the documented
+        // poll-by-re-POST would return 409 request_conflict forever for that proposal slot (F3a).
+        let mut local = canonical_submission(native_local_route(), false);
+        local.prover_type = Some(ProverType::Mock);
+        let mut remote = canonical_submission(sgx_remote_route(), false);
+        remote.prover_type = Some(ProverType::Network);
+
+        let base = v4::proposal_request_fingerprint_for_test(&local).expect("fingerprint");
+        let after_config_change =
+            v4::proposal_request_fingerprint_for_test(&remote).expect("fingerprint");
+        assert_eq!(
+            base, after_config_change,
+            "route/prover_type must not affect the v4 proposal fingerprint"
+        );
+
+        // Sanity: client-visible request data still discriminates the fingerprint.
+        let mut different_proposal = canonical_submission(native_local_route(), false);
+        different_proposal.prover_type = Some(ProverType::Mock);
+        different_proposal.proposals[0].proposal_id = 999;
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_proposal).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "client request data must still change the v4 proposal fingerprint"
+        );
     }
 
     #[tokio::test]

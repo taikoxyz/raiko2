@@ -116,7 +116,7 @@ async fn request_aggregation_proof_inner(
     let requested_proof_type = req.proof_type;
     let proof_count = req.proofs.len();
     let aggregation_ids = req.aggregation_ids.clone();
-    let submission = build_external_aggregate_submission(&state, req).await?;
+    let submission = build_external_aggregate_submission(&state, req, None).await?;
     let engine = resolve_engine(
         &state,
         &submission.pair.key,

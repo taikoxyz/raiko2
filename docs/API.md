@@ -35,6 +35,7 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `POST /v3/prover/clear` requires `prover.clear`
 - `POST /v4/proof/proposal` requires `prover.submit`
 - `POST /v4/proof/aggregation` requires `prover.submit`
+- `POST /v4/prover/clear` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
@@ -140,13 +141,16 @@ V4 error codes:
 | Error | HTTP | Description |
 | --- | --- | --- |
 | `missing_proof_type` | 400 | `proof_type` is required. |
-| `invalid_proof_type` | 400 | `zk_any` or another policy proof type was requested. |
-| `unsupported_proof_type` | 400 | The concrete proof type is not supported by v4. |
+| `invalid_proof_type` | 400 | `proof_type` is syntactically invalid or a policy/fallback type such as `zk_any`. |
+| `unsupported_proof_type` | 400 | The requested concrete proof type is valid v4 input but unavailable in this server configuration. |
 | `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
 | `unsupported_fork` | 400 | The selected proposal or aggregation fork is not supported. |
 | `task_not_found` | 404 | The task ID does not exist. |
+| `unauthorized` | 401 | The required API key is missing or invalid. |
+| `forbidden` | 403 | The API key is valid but is not allowed to use the required ACL feature. |
 | `request_conflict` | 409 | A repeated submission conflicts with the existing root task. |
 | `dependency_not_ready` | 409 | Aggregation dependencies are missing or not completed. |
+| `rate_limited` | 429 | The API key exceeded its per-minute request limit. |
 
 Common proof submission fields:
 
@@ -158,7 +162,9 @@ Common proof-type validation:
 
 - Missing `proof_type` returns `400 missing_proof_type`.
 - `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Any concrete `proof_type` that the configured server route cannot serve returns `400 unsupported_proof_type`.
+- Unknown proof type strings return `400 invalid_proof_type`.
+- Any valid concrete `proof_type` that the configured server route cannot serve returns
+  `400 unsupported_proof_type`.
 
 Proof submission validation:
 
@@ -222,7 +228,7 @@ Response:
   "proposal_id_end": 12345,
   "data": {
     "task_id": "task_0x1234",
-    "status": "registered",
+    "status": "pending",
     "proof": null
   }
 }
@@ -236,7 +242,7 @@ Response fields:
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
-| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final proposal proof hex string when `data.status=completed`; null only before completion. |
 
 Polling and idempotency:
@@ -296,7 +302,7 @@ Response:
   "proposal_id_end": 12346,
   "data": {
     "task_id": "task_0x5678",
-    "status": "registered",
+    "status": "pending",
     "proof": null
   }
 }
@@ -310,7 +316,7 @@ Response fields:
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
-| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
+| `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final aggregation proof hex string when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
 
 Polling and idempotency:
@@ -357,13 +363,14 @@ Response:
 ```json
 {
   "status": "ok",
-  "proof_type": "risc0",
   "data": {
     "task_id": "task_0x1234",
     "route": "risc0/network",
     "prover_type": "network",
     "execution_mode": "prove",
     "status": "completed",
+    "network": "taiko_mainnet",
+    "l1_network": "ethereum",
     "runtime": {
       "runner_status": "completed",
       "active_stage": "proposal",
@@ -400,12 +407,13 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `proof_type` | string | Concrete proof backend selected for the task. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.route` | string | Resolved route, such as `sp1/network` or `risc0/network`. |
 | `data.prover_type` | string/null | Effective prover mode: `mock`, `local`, or `network`. |
 | `data.execution_mode` | string/null | SP1 execution mode: `prove` or `execute`. |
 | `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
+| `data.network` | string | Server-configured L2 network. |
+| `data.l1_network` | string | Server-configured L1 network. |
 | `data.runtime` | object/null | Persisted runtime snapshot. |
 | `data.current_index` | number/null | Current proposal index for multi-proposal roots. |
 | `data.proposals` | array | Proposal task views. |
@@ -419,8 +427,8 @@ Response fields:
 Validation:
 
 - Unknown task ID returns `404 task_not_found`.
-- Unknown query parameters return `400 invalid_request`.
-- `l2_block_numbers` is not returned by the v4 task response.
+- The v4 task response does not include a top-level `proof_type`; inspect `data.route` for the
+  resolved route.
 - `aggregation_ids` is not returned by the v4 task response.
 
 ### Query V4 Prover Status
@@ -440,9 +448,29 @@ Response:
 ```json
 {
   "status": "ok",
+  "proof_type": "risc0",
   "data": {
-    "proof_type": "risc0",
-    "clean": false
+    "clean": false,
+    "tasks": {
+      "pending": 1,
+      "ready": 0,
+      "retrying": 0,
+      "running": 1,
+      "orphaned": 0
+    },
+    "network": {
+      "risc0": {
+        "inflight_orders": 0
+      },
+      "sp1": {
+        "inflight_orders": 0
+      }
+    },
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 0,
+      "remote_progress": 0
+    }
   }
 }
 ```
@@ -451,8 +479,11 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `data.proof_type` | string | Concrete proof backend being reported. |
+| `proof_type` | string | Concrete proof backend being reported. |
 | `data.clean` | boolean | True when the selected proof type has no non-terminal backlog. |
+| `data.tasks` | object | Local runtime and queue backlog counts for the selected proof type. |
+| `data.network` | object | Remote prover-network inflight-order counts by backend. |
+| `data.skipped` | object | Records skipped while collecting status because they are invalid, unavailable, or already have remote progress. |
 
 Validation:
 
@@ -485,9 +516,16 @@ Response:
 ```json
 {
   "status": "ok",
+  "proof_type": "risc0",
   "data": {
-    "proof_type": "risc0",
-    "cancelled": 2
+    "status": "ok",
+    "cancelled": 2,
+    "skipped": {
+      "invalid_metadata": 0,
+      "unavailable_pipeline": 0,
+      "remote_progress": 0
+    },
+    "failed": 0
   }
 }
 ```
@@ -496,8 +534,11 @@ Response fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `data.proof_type` | string | Concrete proof backend targeted by the clear operation. |
+| `proof_type` | string | Concrete proof backend targeted by the clear operation. |
+| `data.status` | string | Clear operation status. Currently `ok` on success. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
+| `data.skipped` | object | Records skipped because they are invalid, unavailable, or already have remote progress. |
+| `data.failed` | number | Runtime tasks marked cancelled but not fully cancelled in the engine queue. |
 
 Idempotency:
 

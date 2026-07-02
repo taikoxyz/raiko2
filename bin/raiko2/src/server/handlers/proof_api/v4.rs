@@ -1,10 +1,15 @@
 use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
-    extract::{Path, Query, State, rejection::JsonRejection, rejection::QueryRejection},
-    http::{HeaderMap, StatusCode},
+    body::Body,
+    extract::{
+        FromRequest, Path, Query, State, rejection::JsonRejection, rejection::QueryRejection,
+    },
+    http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use raiko2_runtime::RuntimeTaskRecord;
+use std::collections::HashMap;
 
 use super::super::proof_types::v4 as wire;
 use super::{
@@ -114,11 +119,13 @@ pub(crate) async fn get_prover_status(
 pub(crate) async fn clear_prover(
     State(state): State<AppState>,
     headers: HeaderMap,
-    req: Result<Json<wire::ProverClearRequest>, JsonRejection>,
+    req: Request<Body>,
 ) -> Result<Json<ApiOk<ClearProverStatus>>, Error> {
-    let Json(req) = req.map_err(|err| Error::from_json_rejection(&err))?;
     authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)
         .map_err(Error::from_api_error)?;
+    let Json(req) = Json::<wire::ProverClearRequest>::from_request(req, &state)
+        .await
+        .map_err(|err| Error::from_json_rejection(&err))?;
     let data = clear_prover_tasks(
         &state,
         ProverTaskScope::ProofType(batch_proof_type(req.proof_type)),
@@ -346,10 +353,16 @@ async fn aggregation_submission(
         "proposal_id_start",
         "proposal_id_end",
     )?;
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?;
+    let proposal_proofs = local_proposal_proof_index(&records, proof_type);
     let mut proofs = Vec::with_capacity(aggregation_ids.len());
     for proposal_id in &aggregation_ids {
         proofs.push(
-            local_proposal_proof(state, proof_type, *proposal_id)
+            local_proposal_proof(state, &proposal_proofs, proof_type, *proposal_id)
                 .await?
                 .proof,
         );
@@ -374,21 +387,19 @@ async fn aggregation_submission(
     Ok(submission)
 }
 
-async fn local_proposal_proof(
-    state: &AppState,
-    proof_type: wire::ProofType,
-    proposal_id: u64,
-) -> Result<ProofArtifactMaterial, Error> {
-    // Match the original proposal task, then load its persisted artifact instead of
-    // a lossy status view.
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?;
+#[derive(Debug)]
+struct LocalProposalProofRef {
+    network_pair: String,
+    proof_ref: String,
+}
 
+fn local_proposal_proof_index(
+    records: &[RuntimeTaskRecord],
+    proof_type: wire::ProofType,
+) -> HashMap<u64, Vec<LocalProposalProofRef>> {
+    let mut index: HashMap<u64, Vec<LocalProposalProofRef>> = HashMap::new();
     for record in records {
-        let Ok(metadata) = parse_task_metadata(&record) else {
+        let Ok(metadata) = parse_task_metadata(record) else {
             continue;
         };
         if metadata.requested_proof_type.as_deref() != Some(proof_type.as_str()) {
@@ -399,13 +410,30 @@ async fn local_proposal_proof(
             let Some(request) = proposal.request.as_ref() else {
                 continue;
             };
-            if request.proposal_id != proposal_id {
-                continue;
-            }
+            index
+                .entry(request.proposal_id)
+                .or_default()
+                .push(LocalProposalProofRef {
+                    network_pair: metadata.network_pair.clone(),
+                    proof_ref: proposal.task_id.clone(),
+                });
+        }
+    }
+    index
+}
+
+async fn local_proposal_proof(
+    state: &AppState,
+    proposals: &HashMap<u64, Vec<LocalProposalProofRef>>,
+    proof_type: wire::ProofType,
+    proposal_id: u64,
+) -> Result<ProofArtifactMaterial, Error> {
+    if let Some(candidates) = proposals.get(&proposal_id) {
+        for candidate in candidates {
             let material = load_proof_artifact_material(
                 &state.runtime,
-                &metadata.network_pair,
-                &proposal.task_id,
+                &candidate.network_pair,
+                &candidate.proof_ref,
             )
             .await
             .map_err(|err| {

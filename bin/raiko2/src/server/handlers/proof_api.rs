@@ -2904,7 +2904,11 @@ mod tests {
     use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
-    use axum::{extract::State, http::HeaderMap};
+    use axum::{
+        body::Body,
+        extract::State,
+        http::{HeaderMap, Request},
+    };
     use http_body_util::BodyExt;
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
@@ -4604,6 +4608,26 @@ mod tests {
         .expect("completed proof");
 
         assert_eq!(returned, expected);
+    }
+
+    #[tokio::test]
+    async fn v4_clear_prover_authorizes_before_parsing_body() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "v4-clear-auth-before-body",
+        ))?);
+        let state = test_state_with_acl(Arc::clone(&runtime), []);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v4/prover/clear")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))?;
+
+        let Err(err) = v4::clear_prover(State(state), HeaderMap::new(), request).await else {
+            panic!("missing API key should fail before body parsing");
+        };
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.code, "unauthorized");
+        Ok(())
     }
 
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {

@@ -1015,13 +1015,15 @@ class BatchMonitor:
         event_factories = [self.evt_contract.events.Proposed]
         try:
             event_factories.append(self.evt_contract.events.Proposed())
-        except TypeError:
+        except (AttributeError, TypeError):
             pass
         for params in (kwargs, converted):
             for event in event_factories:
                 try:
                     return event.get_logs(**params)
                 except TypeError as e:
+                    if "unexpected keyword argument" not in str(e):
+                        raise
                     last_error = e
                     continue
         if last_error is not None:

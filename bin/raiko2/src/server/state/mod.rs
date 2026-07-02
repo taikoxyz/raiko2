@@ -25,9 +25,9 @@ use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::warn;
 
@@ -69,6 +69,32 @@ use super::task_metadata::{
     root_proof_artifact_refs,
 };
 
+/// In-memory sliding-window limiter for ACL-protected endpoints.
+/// Buckets use config indexes so duplicate key IDs do not share quota.
+#[derive(Default)]
+pub(crate) struct AclRateLimiter {
+    requests: Mutex<HashMap<usize, VecDeque<Instant>>>,
+}
+
+impl AclRateLimiter {
+    pub(crate) fn allow_request(
+        &self,
+        key_index: usize,
+        limit: u32,
+        window: Duration,
+    ) -> Result<bool, ()> {
+        let now = Instant::now();
+        let mut requests = self.requests.lock().map_err(|_| ())?;
+        let key_requests = requests.entry(key_index).or_default();
+        key_requests.retain(|requested_at| now.duration_since(*requested_at) < window);
+        if key_requests.len() >= limit as usize {
+            return Ok(false);
+        }
+        key_requests.push_back(now);
+        Ok(true)
+    }
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -76,6 +102,7 @@ pub struct AppState {
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
+    pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
 }
 
 impl AppState {
@@ -144,19 +171,29 @@ impl AppState {
 
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-        let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        let state = Self::from_parts(config, pipelines, runtime);
         spawn_runtime_cleanup_loop(
-            Arc::clone(&config),
-            Arc::clone(&runtime),
-            Arc::clone(&pipelines),
+            Arc::clone(&state.config),
+            Arc::clone(&state.runtime),
+            Arc::clone(&state.pipelines),
         );
 
-        Ok(Self {
+        Ok(state)
+    }
+
+    pub(crate) fn from_parts(
+        config: Arc<Config>,
+        pipelines: Arc<dyn PipelineFactory>,
+        runtime: Arc<RuntimeManager>,
+    ) -> Self {
+        let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        Self {
             config,
             pipelines,
             runtime,
             zk_any_sampler,
-        })
+            acl_rate_limiter: Arc::new(AclRateLimiter::default()),
+        }
     }
 }
 

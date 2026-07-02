@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless_config::{
-    BatchQuoteStrategy, BoundlessOfferParams, validate_offer_spec,
+    BatchQuoteStrategy, BoundlessOfferParams, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
 };
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
 use url::Url;
+
+const REBID_TIMEOUT_MIN_MS: u64 = 1_000;
 
 const fn default_rpc_timeout_ms() -> u64 {
     DEFAULT_RPC_TIMEOUT_MS
@@ -113,6 +115,11 @@ pub struct BoundlessPairConfig {
     pub batch_quoted_mcycles: Option<u32>,
     pub aggregation_quoted_mcycles: Option<u32>,
     pub aggregation_quote_strategy: Option<BatchQuoteStrategy>,
+    pub poll_interval_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub rebid_timeout_ms: Option<u64>,
+    pub rebid_price_multiplier: Option<u32>,
+    pub rebid_max_attempts: Option<u32>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
 
@@ -124,6 +131,23 @@ impl BoundlessPairConfig {
         }
         if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("{pair_key}: boundless.aggregation_quoted_mcycles must be > 0");
+        }
+        if matches!(self.poll_interval_ms, Some(0)) {
+            bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
+        }
+        if matches!(self.timeout_ms, Some(0)) {
+            bail!("{pair_key}: boundless.timeout_ms must be > 0");
+        }
+        if matches!(self.rebid_timeout_ms, Some(value) if value < REBID_TIMEOUT_MIN_MS) {
+            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {REBID_TIMEOUT_MIN_MS}");
+        }
+        if matches!(self.rebid_price_multiplier, Some(0)) {
+            bail!("{pair_key}: boundless.rebid_price_multiplier must be > 0");
+        }
+        if let Some(rebid_max_attempts) = self.rebid_max_attempts
+            && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
+        {
+            bail!("{pair_key}: boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
         }
         if let Some(batch) = &self.offer_params.batch {
             validate_offer_spec(batch)
@@ -420,6 +444,70 @@ mod tests {
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
                 .contains("aggregation_quoted_mcycles")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_zero_rebid_timeout() {
+        let config = BoundlessPairConfig {
+            rebid_timeout_ms: Some(0),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("zero rebid timeout should fail")
+                .to_string()
+                .contains("rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_subsecond_rebid_timeout() {
+        let config = BoundlessPairConfig {
+            rebid_timeout_ms: Some(999),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("subsecond rebid timeout should fail")
+                .to_string()
+                .contains("rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_zero_rebid_price_multiplier() {
+        let config = BoundlessPairConfig {
+            rebid_price_multiplier: Some(0),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("zero rebid price multiplier should fail")
+                .to_string()
+                .contains("rebid_price_multiplier")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_excessive_rebid_max_attempts() {
+        let config = BoundlessPairConfig {
+            rebid_max_attempts: Some(REBID_MAX_ATTEMPTS_LIMIT + 1),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("excessive rebid attempts should fail")
+                .to_string()
+                .contains("rebid_max_attempts")
         );
     }
 

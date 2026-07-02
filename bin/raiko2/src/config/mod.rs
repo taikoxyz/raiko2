@@ -273,6 +273,7 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: "secret-clear-key".to_string(),
                     allow: vec![ServerAclFeature::ProverClear],
+                    rate_limit_per_minute: None,
                 }],
             },
         };
@@ -292,6 +293,7 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: String::new(),
                     allow: vec![ServerAclFeature::ProverClear],
+                    rate_limit_per_minute: None,
                 }],
             },
         };
@@ -308,6 +310,24 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: "secret-clear-key".to_string(),
                     allow: vec![],
+                    rate_limit_per_minute: None,
+                }],
+            },
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_invalid_zero_acl_rate_limit() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![ServerAclKey {
+                    id: "submit".to_string(),
+                    key: "secret-submit-key".to_string(),
+                    allow: vec![ServerAclFeature::ProverSubmit],
+                    rate_limit_per_minute: Some(0),
                 }],
             },
         };

@@ -7,12 +7,12 @@ Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
-validates them, runs local or remote proving routes, and exposes an asynchronous,
-Hoodi-compatible v3 API.
+validates them, runs local or remote proving routes, and exposes an asynchronous
+Hoodi-compatible v3 API plus typed v4 proposal and aggregation endpoints.
 
 ## At a Glance
 
-- Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
+- Asynchronous Hoodi-compatible v3 API plus typed v4 proposal and aggregation endpoints
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers

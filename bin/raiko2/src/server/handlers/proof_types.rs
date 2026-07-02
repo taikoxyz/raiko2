@@ -1,122 +1,17 @@
+#[path = "proof_types/v3.rs"]
+pub(crate) mod v3;
+#[path = "proof_types/v4.rs"]
+pub(crate) mod v4;
+
+pub(crate) use v3::{AggregateProofRequest, BatchShastaRequest};
+pub(super) use v3::{BatchProofType, PublicProverArgs, ShastaProposal};
+
 use raiko2_primitives::{Proof, ShastaCheckpoint};
-use raiko2_prover::sp1_config::Sp1ConfigOverrides;
 use raiko2_runtime::RunnerStatus as RuntimeRunnerStatus;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::server::state::ProofStatus;
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum BatchProofType {
-    Native,
-    Sp1,
-    Risc0,
-    #[serde(rename = "boundless", alias = "BOUNDLESS")]
-    Boundless,
-    Sgx,
-    #[serde(rename = "sgxgeth", alias = "SGXGETH", alias = "sgx_geth")]
-    SgxGeth,
-    ZkAny,
-}
-
-impl BatchProofType {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::Sp1 => "sp1",
-            Self::Risc0 => "risc0",
-            Self::Boundless => "boundless",
-            Self::Sgx => "sgx",
-            Self::SgxGeth => "sgxgeth",
-            Self::ZkAny => "zk_any",
-        }
-    }
-
-    pub(super) const fn is_public_batch_request_type(self) -> bool {
-        matches!(
-            self,
-            Self::Native | Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth | Self::ZkAny
-        )
-    }
-
-    pub(super) const fn is_concrete_public_proof_type(self) -> bool {
-        matches!(self, Self::Sp1 | Self::Risc0 | Self::Sgx | Self::SgxGeth)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BatchShastaRequest {
-    pub(super) proposals: Vec<ShastaProposal>,
-    #[serde(default)]
-    pub(super) aggregate: bool,
-    pub(super) proof_type: BatchProofType,
-    #[serde(default)]
-    pub(super) network: Option<String>,
-    #[serde(default)]
-    pub(super) l1_network: Option<String>,
-    #[serde(default)]
-    pub(super) graffiti: Option<String>,
-    #[serde(default)]
-    pub(super) prover: Option<String>,
-    #[serde(default)]
-    pub(super) blob_proof_type: Option<String>,
-    #[serde(flatten)]
-    pub(super) prover_args: PublicProverArgs,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AggregateProofRequest {
-    #[serde(default)]
-    pub(super) aggregation_ids: Vec<u64>,
-    pub(super) proofs: Vec<Proof>,
-    pub(super) proof_type: BatchProofType,
-    #[serde(default)]
-    pub(super) network: Option<String>,
-    #[serde(default)]
-    pub(super) l1_network: Option<String>,
-    #[serde(default)]
-    pub(super) graffiti: Option<String>,
-    #[serde(default)]
-    pub(super) prover: Option<String>,
-    #[serde(default)]
-    pub(super) blob_proof_type: Option<String>,
-    #[serde(flatten)]
-    pub(super) prover_args: PublicProverArgs,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ShastaProposal {
-    pub(super) proposal_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) checkpoint: Option<ShastaCheckpoint>,
-    pub(super) l1_inclusion_block_number: u64,
-    pub(super) l2_block_numbers: Vec<u64>,
-    pub(super) last_anchor_block_number: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub(super) struct PublicProverArgs {
-    pub(super) native: Option<Value>,
-    pub(super) sgx: Option<Value>,
-    pub(super) sgxgeth: Option<Value>,
-    pub(super) sp1: Option<Sp1ConfigOverrides>,
-    pub(super) risc0: Option<Value>,
-}
-
-impl PublicProverArgs {
-    pub(super) const fn is_empty(&self) -> bool {
-        self.native.is_none()
-            && self.sgx.is_none()
-            && self.sgxgeth.is_none()
-            && self.sp1.is_none()
-            && self.risc0.is_none()
-    }
-}
 
 #[derive(Serialize)]
 pub(crate) struct ApiOk<T> {
@@ -373,7 +268,7 @@ mod tests {
     use super::{
         ApiData, BatchProofType, BatchShastaRequest, ClearProverStatus, ProverNetworkBackendStatus,
         ProverNetworkStatus, ProverSkippedStatusCounts, ProverStatus, ProverTaskStatusCounts,
-        PruneStatus,
+        PruneStatus, v4,
     };
 
     #[test]
@@ -444,6 +339,7 @@ mod tests {
                 "cancelled": 2,
                 "skipped": {
                     "invalid_metadata": 1,
+                    "remote_progress": 0,
                     "unavailable_pipeline": 3
                 },
                 "failed": 4
@@ -452,5 +348,98 @@ mod tests {
 
         let prune = serde_json::to_value(PruneStatus { status: "ok" }).expect("serialize prune");
         assert_eq!(prune, serde_json::json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn v4_proposal_request_rejects_legacy_proposal_id_field() {
+        let err = serde_json::from_value::<v4::ProposalRequest>(serde_json::json!({
+            "proof_type": "risc0",
+            "proposal_id": 1,
+            "proposal_id_start": 1,
+            "proposal_id_end": 1,
+            "last_anchor_block_number": 10,
+            "l1_inclusion_block_number": 11,
+            "l2_block_number_start": 20,
+            "l2_block_number_end": 21
+        }))
+        .expect_err("legacy proposal_id field must be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn v4_task_response_envelope_carries_proposal_range_key() {
+        let proposal = serde_json::to_value(v4::TaskResponse {
+            status: "ok",
+            proof_type: "risc0".to_string(),
+            proposal_id_start: 10,
+            proposal_id_end: 10,
+            data: v4::ProofTaskData {
+                task_id: "v4:proposal:risc0:10:10".to_string(),
+                status: "registered".to_string(),
+                proof: None,
+            },
+        })
+        .expect("serialize v4 proposal task data");
+        assert_eq!(proposal["proposal_id_start"], 10);
+        assert_eq!(proposal["proposal_id_end"], 10);
+        assert!(proposal["data"].get("proposal_id_start").is_none());
+        assert!(proposal["data"].get("proposal_id_end").is_none());
+
+        let aggregation = serde_json::to_value(v4::TaskResponse {
+            status: "ok",
+            proof_type: "sp1".to_string(),
+            proposal_id_start: 10,
+            proposal_id_end: 12,
+            data: v4::AggregationTaskData {
+                task_id: "v4:aggregation:sp1:10:12".to_string(),
+                status: "completed".to_string(),
+                proof: Some("0xproof".to_string()),
+            },
+        })
+        .expect("serialize v4 aggregation task data");
+        assert_eq!(aggregation["proposal_id_start"], 10);
+        assert_eq!(aggregation["proposal_id_end"], 12);
+        assert!(aggregation["data"].get("proposal_id_start").is_none());
+        assert!(aggregation["data"].get("proposal_id_end").is_none());
+    }
+
+    #[test]
+    fn v4_aggregation_request_accepts_only_explicit_proof_types() {
+        let req = serde_json::from_value::<v4::AggregationRequest>(serde_json::json!({
+            "proof_type": "sp1",
+            "proposal_id_start": 10,
+            "proposal_id_end": 12
+        }))
+        .expect("deserialize v4 aggregation request");
+        assert!(matches!(req.proof_type, v4::ProofType::Sp1));
+
+        let err = serde_json::from_value::<v4::AggregationRequest>(serde_json::json!({
+            "proof_type": "zk_any",
+            "proposal_id_start": 10,
+            "proposal_id_end": 12
+        }))
+        .expect_err("zk_any is not a v4 proof type");
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn v4_proposal_request_accepts_sgx_proof_types() {
+        for (proof_type, expected) in [
+            ("sgx", v4::ProofType::Sgx),
+            ("sgxgeth", v4::ProofType::SgxGeth),
+        ] {
+            let req = serde_json::from_value::<v4::ProposalRequest>(serde_json::json!({
+                "proof_type": proof_type,
+                "proposal_id_start": 1,
+                "proposal_id_end": 1,
+                "l1_inclusion_block_number": 2,
+                "l2_block_number_start": 3,
+                "l2_block_number_end": 3,
+                "last_anchor_block_number": 1
+            }))
+            .expect("deserialize v4 proposal request");
+
+            assert_eq!(req.proof_type, expected);
+        }
     }
 }

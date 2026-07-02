@@ -47,6 +47,13 @@ impl ApiError {
         }
     }
 
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -67,6 +74,7 @@ const fn error_code(status: StatusCode) -> &'static str {
         StatusCode::NOT_FOUND => "not_found",
         StatusCode::UNAUTHORIZED => "unauthorized",
         StatusCode::FORBIDDEN => "forbidden",
+        StatusCode::TOO_MANY_REQUESTS => "too_many_requests",
         StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
         _ => "internal_error",
     }

@@ -3,7 +3,9 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DeploymentConfig, OfferParamsConfig, validate_offer_spec,
+        BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_MULTIPLIER,
+        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, OfferParamsConfig, REBID_MAX_ATTEMPTS_LIMIT,
+        validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -11,6 +13,8 @@ use raiko2_prover::{
 use serde::{Deserialize, Serialize};
 
 use super::BoundlessPairConfig;
+
+const REBID_TIMEOUT_MIN_MS: u64 = 1_000;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -272,6 +276,12 @@ pub struct BoundlessConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_boundless_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_boundless_rebid_timeout_ms")]
+    pub rebid_timeout_ms: u64,
+    #[serde(default = "default_boundless_rebid_price_multiplier")]
+    pub rebid_price_multiplier: u32,
+    #[serde(default = "default_boundless_rebid_max_attempts")]
+    pub rebid_max_attempts: u32,
 }
 
 impl Default for BoundlessConfig {
@@ -292,6 +302,9 @@ impl Default for BoundlessConfig {
             offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
+            rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
+            rebid_price_multiplier: default_boundless_rebid_price_multiplier(),
+            rebid_max_attempts: default_boundless_rebid_max_attempts(),
         }
     }
 }
@@ -304,6 +317,15 @@ impl BoundlessConfig {
         }
         if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
+        }
+        if self.rebid_timeout_ms < REBID_TIMEOUT_MIN_MS {
+            bail!("prover.boundless.rebid_timeout_ms must be >= {REBID_TIMEOUT_MIN_MS}");
+        }
+        if self.rebid_price_multiplier == 0 {
+            bail!("prover.boundless.rebid_price_multiplier must be > 0");
+        }
+        if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
+            bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
         }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
@@ -325,6 +347,21 @@ impl BoundlessConfig {
         }
         if let Some(aggregation_quote_strategy) = pair.aggregation_quote_strategy.clone() {
             merged.aggregation_quote_strategy = aggregation_quote_strategy;
+        }
+        if let Some(poll_interval_ms) = pair.poll_interval_ms {
+            merged.poll_interval_ms = poll_interval_ms;
+        }
+        if let Some(timeout_ms) = pair.timeout_ms {
+            merged.timeout_ms = timeout_ms;
+        }
+        if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
+            merged.rebid_timeout_ms = rebid_timeout_ms;
+        }
+        if let Some(rebid_price_multiplier) = pair.rebid_price_multiplier {
+            merged.rebid_price_multiplier = rebid_price_multiplier;
+        }
+        if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
+            merged.rebid_max_attempts = rebid_max_attempts;
         }
         if let Some(batch) = &pair.offer_params.batch {
             merged.offer_params.batch = batch.clone();
@@ -349,9 +386,23 @@ const fn default_boundless_timeout_ms() -> u64 {
     3_600_000
 }
 
+const fn default_boundless_rebid_timeout_ms() -> u64 {
+    DEFAULT_REBID_TIMEOUT_MS
+}
+
+const fn default_boundless_rebid_price_multiplier() -> u32 {
+    DEFAULT_REBID_PRICE_MULTIPLIER
+}
+
+const fn default_boundless_rebid_max_attempts() -> u32 {
+    DEFAULT_REBID_MAX_ATTEMPTS
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ProverConfig, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig};
+    use super::{
+        ProverConfig, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
+    };
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {
@@ -424,6 +475,62 @@ mod tests {
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
                 .contains("aggregation_quoted_mcycles")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_zero_boundless_rebid_price_multiplier() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_price_multiplier = 0;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("zero rebid price multiplier should fail")
+                .to_string()
+                .contains("rebid_price_multiplier")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_excessive_boundless_rebid_max_attempts() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("excessive rebid attempts should fail")
+                .to_string()
+                .contains("rebid_max_attempts")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_zero_boundless_rebid_timeout() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_timeout_ms = 0;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("zero rebid timeout should fail")
+                .to_string()
+                .contains("prover.boundless.rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_subsecond_boundless_rebid_timeout() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_timeout_ms = 999;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("subsecond rebid timeout should fail")
+                .to_string()
+                .contains("prover.boundless.rebid_timeout_ms")
         );
     }
 

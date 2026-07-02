@@ -686,6 +686,9 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+rebid_timeout_ms = 300000
+rebid_price_multiplier = 2
+rebid_max_attempts = 4
 
 [prover.boundless.deployment]
 deployment_type = "base"
@@ -704,18 +707,26 @@ Operator notes:
   `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
+  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
+  minimum is `1000` ms.
+- `prover.boundless.rebid_price_multiplier` controls the manual max-price multiplier applied on
+  each no-lock rebid. The default is `2`.
+- `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is
+  `31`, and the default allows a final manual max price of `16x` with the default multiplier.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
-  each resubmission doubles the offer's max price, capped at `4x` the configured
-  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
-  the SDK price provider.
+  each resubmission multiplies the offer's max price by
+  `prover.boundless.rebid_price_multiplier` up to `prover.boundless.rebid_max_attempts`; the min
+  price is unchanged. `market`
+  resubmissions are re-priced by the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
-  `aggregation_quoted_mcycles`, and either offer param block for a specific
-  `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
+  `aggregation_quoted_mcycles`, runtime timeout/rebid fields, and either offer param block for a
+  specific `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
 Optional `zk_any` request sampling is configured at the server level:

@@ -1551,11 +1551,11 @@ mod tests {
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::Sgx)?,
-            address!("936d8dCd9B731D3fe146BF3E1520e9d790A3a67d")
+            address!("63Ec87f54cCed71B0DC879ce6cEDfA6f3D582670")
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,
-            address!("118CB49c7e184D502AFaB1FA1E70b5fBc71Bb998")
+            address!("429B4115e773a0Cf0e49c0443685dd290aE426ef")
         );
         Ok(())
     }

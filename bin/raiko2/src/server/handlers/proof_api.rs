@@ -999,9 +999,14 @@ async fn handle_existing_batch_task(
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+    let missing_completed_artifact =
+        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+            .await?;
+    if missing_completed_artifact
+        || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
+    {
         let response = compatibility_response_for_task(state, &existing.task_id).await?;
-        if response_is_completed(&response) {
+        if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
         if existing.pipeline_key != submission.route.pipeline_key() {
@@ -1260,9 +1265,14 @@ async fn handle_existing_external_aggregate_task(
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+    let missing_completed_artifact =
+        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+            .await?;
+    if missing_completed_artifact
+        || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
+    {
         let response = compatibility_response_for_task(state, &existing.task_id).await?;
-        if response_is_completed(&response) {
+        if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
         recover_existing_task(state, &existing, || {
@@ -2791,6 +2801,35 @@ fn proposal_failed_before_remote_submission(metadata: &TaskMetadata) -> bool {
             .all(|runtime| !runtime.has_remote_submission_progress())
 }
 
+async fn completed_root_artifact_missing(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<bool, ApiError> {
+    if record.runner_status != RuntimeRunnerStatus::Completed {
+        return Ok(false);
+    }
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
+        return Ok(false);
+    };
+    for proof_ref in &root_refs.refs {
+        if load_proof_artifact_material(runtime, &metadata.network_pair, proof_ref)
+            .await
+            .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    warn!(
+        task_id = record.task_id,
+        artifact_kind = ?root_refs.kind,
+        proof_refs = ?root_refs.refs,
+        "completed runtime task is missing proof artifact; treating it as stale"
+    );
+    Ok(true)
+}
+
 fn response_is_completed(response: &Response) -> bool {
     response
         .extensions()
@@ -4019,6 +4058,42 @@ mod tests {
             .expect("runtime task");
         assert_eq!(stored.runner_status, RuntimeRunnerStatus::Running);
         assert_eq!(stored.error.as_deref(), Some("stale running"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_duplicate_with_missing_artifact_is_reenqueued() -> Result<()> {
+        let route = native_local_route();
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-missing-artifact-reenqueue",
+        ))?);
+        let mut submission = canonical_submission(route, false);
+        let mut metadata = task_metadata_with_stage(None);
+        metadata.proof_type = ProofType::Native;
+        metadata.aggregate_requested = false;
+        metadata.proposals[0].task_id = "proposal-task".to_string();
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaNative;
+        record.route = "native/local".parse().expect("parse route");
+        record.request_fingerprint = Some(batch_request_fingerprint_for_test(&submission)?);
+        runtime.upsert_task(&record).await?;
+        submission.public_task_id.clone_from(&record.task_id);
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let state = test_state(Arc::clone(&runtime), recorder.clone());
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert_eq!(proposals.len(), 1);
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Allocated);
         Ok(())
     }
 

@@ -930,11 +930,7 @@ async fn build_remote_sgx_engine(
 ) -> Result<Engine<Gaiko2Spec>> {
     let gaiko2_config =
         setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
-    let gaiko2_prover = match proof_type {
-        ProofType::Sgx => Gaiko2Prover::new(&gaiko2_config)?,
-        ProofType::SgxGeth => Gaiko2Prover::new(&gaiko2_config)?,
-        _ => anyhow::bail!("remote SGX engine does not support proof type {proof_type:?}"),
-    };
+    let gaiko2_prover = Gaiko2Prover::new_for_proof_type(&gaiko2_config, proof_type)?;
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

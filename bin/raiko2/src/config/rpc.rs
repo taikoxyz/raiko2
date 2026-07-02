@@ -2,7 +2,8 @@ use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless_config::{
-    BatchQuoteStrategy, BoundlessOfferParams, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
+    BatchQuoteStrategy, BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, REBID_MAX_ATTEMPTS_LIMIT,
+    validate_offer_spec,
 };
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
@@ -12,8 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
 use url::Url;
-
-const REBID_TIMEOUT_MIN_MS: u64 = 1_000;
 
 const fn default_rpc_timeout_ms() -> u64 {
     DEFAULT_RPC_TIMEOUT_MS
@@ -138,8 +137,8 @@ impl BoundlessPairConfig {
         if matches!(self.timeout_ms, Some(0)) {
             bail!("{pair_key}: boundless.timeout_ms must be > 0");
         }
-        if matches!(self.rebid_timeout_ms, Some(value) if value < REBID_TIMEOUT_MIN_MS) {
-            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {REBID_TIMEOUT_MIN_MS}");
+        if matches!(self.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
+            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
         }
         if matches!(self.rebid_price_multiplier, Some(0)) {
             bail!("{pair_key}: boundless.rebid_price_multiplier must be > 0");

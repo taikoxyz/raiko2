@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 const STAKE_TOKEN_DECIMALS: u8 = 18;
 const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
 pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
+/// Minimum accepted rebid timeout. Config validation rejects anything lower, and the runtime clamps
+/// the effective no-lock delay to this floor, so this is the single source of truth for both.
+pub const MIN_REBID_TIMEOUT_MS: u64 = 1_000;
 pub const DEFAULT_REBID_PRICE_MULTIPLIER: u32 = 2;
 pub const DEFAULT_REBID_MAX_ATTEMPTS: u32 = 4;
 pub const REBID_MAX_ATTEMPTS_LIMIT: u32 = 31;

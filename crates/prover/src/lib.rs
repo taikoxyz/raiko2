@@ -84,6 +84,11 @@ pub struct BoundlessSubmissionProgress {
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
     pub max_price_multiplier: u32,
+    /// Rebid attempt number that produced this submission (1-based). Persisted so a resume after
+    /// restart restores the attempt count even when rebids reuse the same price
+    /// (`rebid_price_multiplier == 1`), which cannot be recovered from `max_price_multiplier` alone.
+    #[serde(default)]
+    pub rebid_attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +98,8 @@ pub struct BoundlessSubmissionResume {
     pub expires_at: u64,
     pub submitted_at: u64,
     pub max_price_multiplier: u32,
+    #[serde(default)]
+    pub rebid_attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

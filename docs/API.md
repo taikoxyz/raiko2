@@ -329,8 +329,8 @@ Validation:
 
 - `proposal_id_start` and `proposal_id_end` define an inclusive contiguous range and must satisfy
   `proposal_id_start <= proposal_id_end`.
-- Proposal proofs for every proposal in the range must already exist in raiko2 local state for the
-  selected `proof_type`.
+- Proposal proofs for every proposal in the range must already exist as local v4 proposal tasks for
+  the selected `proof_type`.
 - Each dependency is looked up by `(proposal_id, proof_type)`.
 - All proposal proofs consumed by one aggregation request must use the requested `proof_type`.
 - Mixed-proof-type aggregation is not supported.

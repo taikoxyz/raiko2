@@ -9,8 +9,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_prover::sp1_config::Sp1RequestContext;
-use raiko2_runtime::RuntimeTaskRecord;
-use std::collections::HashMap;
 
 use super::super::proof_types::v4 as wire;
 use super::{
@@ -406,16 +404,10 @@ async fn aggregation_submission(
         "proposal_id_end",
     )?;
     let target = resolve_aggregation_target(state, proof_type)?;
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?;
-    let proposal_proofs = local_proposal_proof_index(&records, proof_type, &target);
     let mut proofs = Vec::with_capacity(aggregation_ids.len());
     for proposal_id in &aggregation_ids {
         proofs.push(
-            local_proposal_proof(state, &proposal_proofs, proof_type, *proposal_id)
+            local_proposal_proof(state, proof_type, &target, *proposal_id)
                 .await?
                 .proof,
         );
@@ -441,11 +433,6 @@ async fn aggregation_submission(
 }
 
 #[derive(Debug)]
-struct LocalProposalProofRef {
-    network_pair: String,
-    proof_ref: String,
-}
-
 struct AggregationTarget {
     pair: ResolvedNetworkPair,
     route: CanonicalProofRoute,
@@ -474,71 +461,58 @@ fn resolve_aggregation_target(
     Ok(AggregationTarget { pair, route })
 }
 
-fn local_proposal_proof_index(
-    records: &[RuntimeTaskRecord],
-    proof_type: wire::ProofType,
-    target: &AggregationTarget,
-) -> HashMap<u64, Vec<LocalProposalProofRef>> {
-    let mut index: HashMap<u64, Vec<LocalProposalProofRef>> = HashMap::new();
-    for record in records {
-        let Ok(metadata) = parse_task_metadata(record) else {
-            continue;
-        };
-        if metadata.network_pair != target.pair.key
-            || record.pipeline_key != target.route.pipeline_key()
-            || record.route != target.route.route
-        {
-            continue;
-        }
-        if metadata.requested_proof_type.as_deref() != Some(proof_type.as_str()) {
-            continue;
-        }
-
-        for proposal in &metadata.proposals {
-            let Some(request) = proposal.request.as_ref() else {
-                continue;
-            };
-            index
-                .entry(request.proposal_id)
-                .or_default()
-                .push(LocalProposalProofRef {
-                    network_pair: metadata.network_pair.clone(),
-                    proof_ref: proposal.task_id.clone(),
-                });
-        }
-    }
-    index
-}
-
 async fn local_proposal_proof(
     state: &AppState,
-    proposals: &HashMap<u64, Vec<LocalProposalProofRef>>,
     proof_type: wire::ProofType,
+    target: &AggregationTarget,
     proposal_id: u64,
 ) -> Result<ProofArtifactMaterial, Error> {
-    if let Some(candidates) = proposals.get(&proposal_id) {
-        for candidate in candidates {
-            let material = load_proof_artifact_material(
-                &state.runtime,
-                &candidate.network_pair,
-                &candidate.proof_ref,
-            )
+    let task_id = proposal_task_id(proof_type, proposal_id, proposal_id);
+    let Some(record) = state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
+    else {
+        return Err(missing_local_proposal_proof(proof_type, proposal_id));
+    };
+    let metadata = parse_task_metadata(&record).map_err(Error::from_api_error)?;
+    if metadata.network_pair != target.pair.key
+        || record.pipeline_key != target.route.pipeline_key()
+        || record.route != target.route.route
+        || metadata.requested_proof_type.as_deref() != Some(proof_type.as_str())
+    {
+        return Err(missing_local_proposal_proof(proof_type, proposal_id));
+    }
+
+    let Some(proposal) = metadata
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_id == proposal_id)
+    else {
+        return Err(missing_local_proposal_proof(proof_type, proposal_id));
+    };
+
+    if let Some(material) =
+        load_proof_artifact_material(&state.runtime, &metadata.network_pair, &proposal.task_id)
             .await
             .map_err(|err| {
                 Error::from_api_error(ApiError::internal(format!(
                     "failed to load proposal proof artifact: {err}"
                 )))
-            })?;
-            if let Some(material) = material {
-                return Ok(material);
-            }
-        }
+            })?
+    {
+        return Ok(material);
     }
 
-    Err(Error::dependency_not_ready(format!(
+    Err(missing_local_proposal_proof(proof_type, proposal_id))
+}
+
+fn missing_local_proposal_proof(proof_type: wire::ProofType, proposal_id: u64) -> Error {
+    Error::dependency_not_ready(format!(
         "proposal proof {proposal_id} for proof_type={} is not completed in local state",
         proof_type.as_str()
-    )))
+    ))
 }
 
 fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, Error> {

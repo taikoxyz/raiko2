@@ -5,8 +5,8 @@ use alloy_primitives::B256;
 use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
-    adapter::{build_shasta_packet, build_shasta_packet_with_guest_input},
-    protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_V2_SCHEMA, Raiko2ReplayBlock},
+    adapter::build_shasta_packet,
+    protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
 };
 
 fn fixture_guest_input() -> GuestInput {
@@ -39,7 +39,7 @@ fn adapter_projects_guest_input_into_execution_packet() {
     let input = fixture_guest_input();
     let packet = build_shasta_packet(&input).expect("build packet");
 
-    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_V2_SCHEMA);
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
     assert_eq!(
         packet.payload.guest_input.witnesses.len(),
         input.witnesses.len()
@@ -75,19 +75,6 @@ fn adapter_projects_guest_input_into_execution_packet() {
             .len(),
         1
     );
-}
-
-#[test]
-fn adapter_can_embed_full_guest_input_for_sgx_runtime() {
-    let input = fixture_guest_input();
-    let packet = build_shasta_packet_with_guest_input(&input).expect("build packet");
-
-    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
-    assert!(packet.payload.blocks.is_empty());
-    let guest_input = packet.payload.guest_input.expect("guest input payload");
-    assert_eq!(guest_input.witnesses.len(), input.witnesses.len());
-    assert_eq!(guest_input.proof_carry_data, input.proof_carry_data);
-    assert_eq!(guest_input.taiko.proposal_id, input.taiko.proposal_id);
 }
 
 #[test]
@@ -137,10 +124,6 @@ fn adapter_rejects_unset_proof_carry_chain_id() {
     input.proof_carry_data.chain_id = 0;
 
     let err = build_shasta_packet(&input).expect_err("reject unset carry chain id");
-    assert!(err.to_string().contains("proof_carry_data.chain_id"));
-
-    let err = build_shasta_packet_with_guest_input(&input)
-        .expect_err("reject unset carry chain id with guest input");
     assert!(err.to_string().contains("proof_carry_data.chain_id"));
 }
 

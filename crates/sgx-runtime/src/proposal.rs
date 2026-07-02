@@ -18,15 +18,14 @@ pub(crate) fn prove_request<P: TeeProvider>(
     request: &Raiko2ShastaRequest,
 ) -> Result<Raiko2ProofResponse, RequestFailure> {
     validate_schema(request)?;
-    let guest_input = request.payload.guest_input.as_ref().ok_or_else(|| {
-        RequestFailure::invalid_request("raiko2-sgx request must include GuestInput")
-    })?;
-    validate_request(request, guest_input)?;
+    let guest_input: raiko2_primitives_shasta::GuestInput =
+        request.payload.guest_input.clone().into();
+    validate_request(&guest_input)?;
     let input_hash =
-        prove_shasta_proposal_for_proof_type(guest_input, ProofType::Sgx).map_err(|err| {
+        prove_shasta_proposal_for_proof_type(&guest_input, ProofType::Sgx).map_err(|err| {
             RequestFailure::invalid_request(format!("invalid raiko2-sgx GuestInput: {err}"))
         })?;
-    let expected_input = hash_shasta_subproof_input(&request.payload.proof_carry_data);
+    let expected_input = hash_shasta_subproof_input(&guest_input.proof_carry_data);
     if input_hash != expected_input {
         return Err(RequestFailure::invalid_request(format!(
             "GuestInput output hash mismatch: got {input_hash:#x} expected {expected_input:#x}"
@@ -48,28 +47,16 @@ fn validate_schema(request: &Raiko2ShastaRequest) -> Result<(), RequestFailure> 
 }
 
 fn validate_request(
-    request: &Raiko2ShastaRequest,
     guest_input: &raiko2_primitives_shasta::GuestInput,
 ) -> Result<(), RequestFailure> {
-    let carry = &request.payload.proof_carry_data;
-    if carry.chain_id != request.payload.chain_id {
-        return Err(RequestFailure::invalid_request(format!(
-            "chain_id mismatch: payload={} proof_carry_data={}",
-            request.payload.chain_id, carry.chain_id
-        )));
-    }
-    if guest_input.proof_carry_data != *carry {
-        return Err(RequestFailure::invalid_request(
-            "GuestInput proof_carry_data mismatch",
-        ));
-    }
+    let carry = &guest_input.proof_carry_data;
     let first_witness = guest_input.witnesses.first().ok_or_else(|| {
         RequestFailure::invalid_request("GuestInput must include at least one witness")
     })?;
-    if first_witness.chain_spec.chain_id != request.payload.chain_id {
+    if first_witness.chain_spec.chain_id != carry.chain_id {
         return Err(RequestFailure::invalid_request(format!(
-            "GuestInput chain_id mismatch: payload={} witness={}",
-            request.payload.chain_id, first_witness.chain_spec.chain_id
+            "GuestInput chain_id mismatch: proof_carry_data={} witness={}",
+            carry.chain_id, first_witness.chain_spec.chain_id
         )));
     }
 
@@ -79,10 +66,10 @@ fn validate_request(
 #[cfg(test)]
 mod tests {
     use alloy_primitives::Address;
-    use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
-        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ShastaPayload, Raiko2ShastaRequest,
+        RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock, Raiko2ShastaGuestInput,
+        Raiko2ShastaPayload, Raiko2ShastaRequest,
     };
     use secp256k1::SecretKey;
 
@@ -119,25 +106,12 @@ mod tests {
         Raiko2ShastaRequest {
             schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
             payload: Raiko2ShastaPayload {
-                chain_id: 167_013,
-                blocks: Vec::new(),
-                proof_carry_data: carry,
-                guest_input: None,
+                guest_input: Raiko2ShastaGuestInput {
+                    proof_carry_data: carry,
+                    ..Default::default()
+                },
             },
         }
-    }
-
-    #[test]
-    fn prove_request_rejects_missing_guest_input() {
-        let provider = FakeProvider {
-            secret_key: SecretKey::from_slice(&[8u8; 32]).expect("secret key"),
-            quote: vec![0xAA, 0xBB],
-        };
-        let request = request_fixture();
-
-        let err = prove_request(&provider, 9, &request).expect_err("missing guest input");
-
-        assert!(err.to_string().contains("GuestInput"));
     }
 
     #[test]
@@ -147,30 +121,17 @@ mod tests {
             quote: vec![],
         };
         let mut request = request_fixture();
-        request.payload.guest_input = Some(GuestInput {
-            proof_carry_data: request.payload.proof_carry_data.clone(),
-            ..GuestInput::default()
-        });
-        request.payload.chain_id = 1;
+        request.payload.guest_input.proof_carry_data.chain_id = 1;
+        request.payload.guest_input.witnesses = vec![Raiko2ReplayBlock {
+            chain_spec: raiko2_primitives::ChainSpec {
+                chain_id: 167_013,
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
 
         let err = prove_request(&provider, 9, &request).expect_err("chain id mismatch");
         assert!(err.to_string().contains("chain_id mismatch"));
-    }
-
-    #[test]
-    fn prove_request_rejects_legacy_replay_packet_without_guest_input() {
-        let provider = FakeProvider {
-            secret_key: SecretKey::from_slice(&[6u8; 32]).expect("secret key"),
-            quote: vec![],
-        };
-        let request = request_fixture();
-
-        let err = prove_request(&provider, 9, &request).expect_err("legacy replay packet");
-
-        assert!(
-            err.to_string()
-                .contains("raiko2-sgx request must include GuestInput")
-        );
     }
 
     #[test]
@@ -179,11 +140,7 @@ mod tests {
             secret_key: SecretKey::from_slice(&[5u8; 32]).expect("secret key"),
             quote: vec![],
         };
-        let mut request = request_fixture();
-        request.payload.guest_input = Some(GuestInput {
-            proof_carry_data: request.payload.proof_carry_data.clone(),
-            ..GuestInput::default()
-        });
+        let request = request_fixture();
 
         let err = prove_request(&provider, 9, &request).expect_err("invalid guest input");
 

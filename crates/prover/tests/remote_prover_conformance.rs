@@ -12,7 +12,7 @@ use raiko2_prover::remote_prover::{
     adapter::build_shasta_packet,
     protocol::{
         RAIKO2_PROOF_RESPONSE_SCHEMA, Raiko2ProofResponse, Raiko2ShastaAggregateRequest,
-        Raiko2ShastaRequestV2,
+        Raiko2ShastaRequest,
     },
 };
 use reqwest::{Client, Url};
@@ -161,7 +161,7 @@ fn shared_guest_input_path() -> PathBuf {
     )
 }
 
-fn proposal_request() -> (Raiko2ShastaRequestV2, String) {
+fn proposal_request() -> (Raiko2ShastaRequest, String) {
     let raw = fs::read_to_string(shared_guest_input_path()).expect("read shared guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared guest input");
     let request = build_shasta_packet(&guest_input).expect("build proposal request");
@@ -170,7 +170,7 @@ fn proposal_request() -> (Raiko2ShastaRequestV2, String) {
 }
 
 fn build_live_aggregate_request(
-    proposal_request: &Raiko2ShastaRequestV2,
+    proposal_request: &Raiko2ShastaRequest,
     proposal_response: &Raiko2ProofResponse,
 ) -> Raiko2ShastaAggregateRequest {
     let result = proposal_response

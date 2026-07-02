@@ -1007,6 +1007,9 @@ fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
             chain_id: ctx.request.l2_chain_id,
             ..Default::default()
         });
+    let chain_spec = chain_spec.align_taiko_runtime_forks().map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("failed to align Taiko runtime chain spec: {err}"))
+    })?;
     Ok(chain_spec.project_for_guest_input_abi(guest_input_abi))
 }
 
@@ -2579,14 +2582,13 @@ mod tests {
 
         ctx.request.l2_chain_id = 167_001;
         let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        assert!(
-            !devnet
-                .hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        assert_eq!(
+            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, u64::MAX),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_011;

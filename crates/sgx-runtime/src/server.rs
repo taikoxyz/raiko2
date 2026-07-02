@@ -78,6 +78,7 @@ const fn proposal_id_from_request(
 ) -> u64 {
     request
         .payload
+        .guest_input
         .proof_carry_data
         .transition_input
         .proposal_id
@@ -86,10 +87,13 @@ const fn proposal_id_from_request(
 fn shasta_request_block_count(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
 ) -> usize {
-    request.payload.guest_input.as_ref().map_or_else(
-        || request.payload.blocks.len(),
-        |input| input.witnesses.len(),
-    )
+    request.payload.guest_input.witnesses.len()
+}
+
+const fn shasta_request_chain_id(
+    request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
+) -> u64 {
+    request.payload.guest_input.proof_carry_data.chain_id
 }
 
 fn aggregate_proposal_id_summary(
@@ -135,9 +139,9 @@ where
                         info!(
                             schema = %request.schema,
                             proposal_id = proposal_id_from_request(&request),
-                            chain_id = request.payload.chain_id,
+                            chain_id = shasta_request_chain_id(&request),
                             block_count = shasta_request_block_count(&request),
-                            replay_block_count = request.payload.blocks.len(),
+                            replay_block_count = shasta_request_block_count(&request),
                             instance_id = state.service_config.instance_id,
                             "completed sgx shasta prove request"
                         );
@@ -147,9 +151,9 @@ where
                 Err(err) => {
                     warn!(
                         schema = %request.schema,
-                        chain_id = request.payload.chain_id,
+                        chain_id = shasta_request_chain_id(&request),
                         block_count = shasta_request_block_count(&request),
-                        replay_block_count = request.payload.blocks.len(),
+                        replay_block_count = shasta_request_block_count(&request),
                         instance_id = state.service_config.instance_id,
                         code = err.code,
                         message = %err.message,
@@ -233,9 +237,9 @@ mod tests {
     };
     use raiko2_protocol_shasta::shasta::ProofCarryData;
     use raiko2_prover::remote_prover::protocol::{
-        RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA,
-        Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaPayload,
-        Raiko2ShastaRequest,
+        RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock,
+        Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest, Raiko2ShastaGuestInput,
+        Raiko2ShastaPayload, Raiko2ShastaRequest,
     };
     use secp256k1::SecretKey;
     use tower::util::ServiceExt;
@@ -274,10 +278,10 @@ mod tests {
         Raiko2ShastaRequest {
             schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
             payload: Raiko2ShastaPayload {
-                chain_id: 167_013,
-                blocks: Vec::new(),
-                proof_carry_data: carry,
-                guest_input: None,
+                guest_input: Raiko2ShastaGuestInput {
+                    proof_carry_data: carry,
+                    ..Default::default()
+                },
             },
         }
     }
@@ -285,13 +289,8 @@ mod tests {
     #[test]
     fn shasta_request_block_count_uses_guest_input_witnesses() {
         let mut request = request_fixture();
-        request.payload.guest_input = Some(raiko2_primitives_shasta::GuestInput {
-            witnesses: vec![
-                raiko2_primitives::StatelessInput::default(),
-                raiko2_primitives::StatelessInput::default(),
-            ],
-            ..raiko2_primitives_shasta::GuestInput::default()
-        });
+        request.payload.guest_input.witnesses =
+            vec![Raiko2ReplayBlock::default(), Raiko2ReplayBlock::default()];
 
         assert_eq!(shasta_request_block_count(&request), 2);
     }
@@ -330,7 +329,11 @@ mod tests {
                 instance_id: 99,
             },
         });
-        let body = serde_json::to_vec(&request_fixture()).expect("request body");
+        let body = serde_json::json!({
+            "schema": RAIKO2_SHASTA_REQUEST_SCHEMA,
+            "payload": {}
+        })
+        .to_string();
 
         let response = app
             .oneshot(
@@ -411,6 +414,7 @@ mod tests {
         let mut request = request_fixture();
         request
             .payload
+            .guest_input
             .proof_carry_data
             .transition_input
             .proposal_id = 2_222;
@@ -420,7 +424,7 @@ mod tests {
 
     #[test]
     fn aggregate_log_summary_summarizes_proposal_ids() {
-        let mut first = request_fixture().payload.proof_carry_data;
+        let mut first = request_fixture().payload.guest_input.proof_carry_data;
         first.transition_input.proposal_id = 2_222;
         let aggregate = Raiko2ShastaAggregateRequest {
             schema: RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA.to_string(),
@@ -450,10 +454,10 @@ mod tests {
 
     #[test]
     fn aggregate_log_summary_summarizes_proposal_id_range() {
-        let mut first = request_fixture().payload.proof_carry_data;
+        let mut first = request_fixture().payload.guest_input.proof_carry_data;
         first.transition_input.proposal_id = 2_222;
 
-        let mut last = request_fixture().payload.proof_carry_data;
+        let mut last = request_fixture().payload.guest_input.proof_carry_data;
         last.transition_input.proposal_id = 2_333;
 
         let aggregate = Raiko2ShastaAggregateRequest {

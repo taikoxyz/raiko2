@@ -43,9 +43,9 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
-ACL keys may set `rate_limit_per_minute`, which defaults to `200` requests per minute when omitted.
-Rate-limited endpoints return `429 rate_limited` after the key exceeds its 60-second request
-window.
+ACL key `id` and `key` values must be unique. ACL keys may set `rate_limit_per_minute`,
+which defaults to `200` requests per minute when omitted. ACL-protected endpoints return
+`429 rate_limited` after the key exceeds its 60-second request window.
 When no ACL key allows `prover.submit`, the v4 submit and task lookup endpoints are public and
 not rate-limited. Configure a `prover.submit` or `admin` key to protect that surface.
 

@@ -335,6 +335,58 @@ mod tests {
     }
 
     #[test]
+    fn test_server_config_rejects_duplicate_acl_ids() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![
+                    ServerAclKey {
+                        id: "ops".to_string(),
+                        key: "secret-clear-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverClear],
+                        rate_limit_per_minute: None,
+                    },
+                    ServerAclKey {
+                        id: "ops".to_string(),
+                        key: "secret-submit-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverSubmit],
+                        rate_limit_per_minute: None,
+                    },
+                ],
+            },
+        };
+        let err = config.validate().expect_err("duplicate ACL id");
+        assert!(err.to_string().contains("id must be unique"));
+    }
+
+    #[test]
+    fn test_server_config_rejects_duplicate_acl_keys() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![
+                    ServerAclKey {
+                        id: "ops-clear".to_string(),
+                        key: "shared-secret-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverClear],
+                        rate_limit_per_minute: None,
+                    },
+                    ServerAclKey {
+                        id: "ops-submit".to_string(),
+                        key: "shared-secret-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverSubmit],
+                        rate_limit_per_minute: None,
+                    },
+                ],
+            },
+        };
+        let err = config.validate().expect_err("duplicate ACL key");
+        assert!(err.to_string().contains("key must be unique"));
+    }
+
+    #[test]
     fn test_server_config_invalid_host() {
         let config = ServerConfig {
             host: String::new(),

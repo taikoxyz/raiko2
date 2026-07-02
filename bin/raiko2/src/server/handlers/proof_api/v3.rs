@@ -11,9 +11,10 @@ use tracing::{debug, info};
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchShastaRequest,
     ClearProverStatus, ProofStatus, ProverStatus, ProverTaskScope, PruneStatus, ServerAclFeature,
-    TaskData, TaskLookup, TaskMetadata, authorize_acl_feature, batch_request_fingerprint,
-    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
-    cancel_registered_tasks, clear_prover_tasks, collect_prover_status, handle_created_batch_task,
+    TaskData, TaskLookup, TaskMetadata, authorize_acl_feature_with_rate_limit,
+    batch_request_fingerprint, build_canonical_batch_submission,
+    build_external_aggregate_submission, build_submission_plan, cancel_registered_tasks,
+    clear_prover_tasks, collect_prover_status, handle_created_batch_task,
     handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, legacy_api_error_response, load_all_task_data,
     load_task_data, load_task_lookup, planned_external_aggregate_task, prover_type_label,
@@ -165,7 +166,7 @@ pub(crate) async fn cancel_task(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ApiOk<TaskData>>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
 
     let TaskLookup {
         record,
@@ -214,7 +215,7 @@ pub(crate) async fn clear_prover(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ClearProverStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)?;
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverClear)?;
     Ok(Json(
         clear_prover_tasks(&state, ProverTaskScope::ZkAny).await?,
     ))
@@ -242,7 +243,7 @@ pub(crate) async fn prune_proofs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<PruneStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::Admin)?;
 
     let records = state
         .runtime

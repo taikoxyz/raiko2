@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use super::validation;
 
@@ -86,6 +86,9 @@ impl ServerConfig {
 
 impl ServerAclConfig {
     fn validate(&self) -> Result<()> {
+        let mut ids = HashSet::new();
+        let mut keys = HashSet::new();
+
         for acl_key in &self.keys {
             if acl_key.id.is_empty() {
                 bail!("server.acl.keys[].id must not be empty");
@@ -98,6 +101,12 @@ impl ServerAclConfig {
             }
             if acl_key.rate_limit_per_minute == Some(0) {
                 bail!("server.acl.keys[].rate_limit_per_minute must be > 0 when set");
+            }
+            if !ids.insert(acl_key.id.as_str()) {
+                bail!("server.acl.keys[].id must be unique");
+            }
+            if !keys.insert(acl_key.key.as_str()) {
+                bail!("server.acl.keys[].key must be unique");
             }
         }
         Ok(())

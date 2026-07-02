@@ -2041,6 +2041,26 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
 }
 
 #[tokio::test]
+async fn e2e_admin_ballot_rate_limits_acl_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "ops-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::AdminBallotRead],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-admin-key").await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-admin-key").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
+}
+
+#[tokio::test]
 async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
     let mut config = base_config();
     config.server.acl.keys = vec![acl_key(
@@ -2119,6 +2139,28 @@ async fn e2e_prover_clear_requires_clear_api_key() {
         post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "ok");
+}
+
+#[tokio::test]
+async fn e2e_v3_clear_rate_limits_acl_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "ops-clear",
+        "secret-clear-key",
+        vec![ServerAclFeature::ProverClear],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
 }
 
 #[tokio::test]
@@ -2952,6 +2994,28 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
     let (status, task) = get_json(&app, &format!("/v3/tasks/{id}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(task["status"], "error");
+}
+
+#[tokio::test]
+async fn e2e_prune_rate_limits_admin_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "root-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::Admin],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/proof/prune", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/proof/prune", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
 }
 
 #[tokio::test]

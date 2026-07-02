@@ -320,14 +320,9 @@ where
     panic!("engine did not drain after 32 steps");
 }
 
-fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
+fn v4_acl_app(keys: Vec<ServerAclKey>) -> Router {
     let mut config = base_config();
-    config.server.acl.keys = vec![acl_key_with_rate_limit(
-        "submit",
-        "submit-secret",
-        vec![ServerAclFeature::ProverSubmit],
-        rate_limit_per_minute,
-    )];
+    config.server.acl.keys = keys;
     let state = AppState::from_parts(
         Arc::new(config),
         Arc::new(StaticPipelineFactory::default()),
@@ -337,6 +332,15 @@ fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
         ),
     );
     app::build_router(state)
+}
+
+fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
+    v4_acl_app(vec![acl_key_with_rate_limit(
+        "submit",
+        "submit-secret",
+        vec![ServerAclFeature::ProverSubmit],
+        rate_limit_per_minute,
+    )])
 }
 
 fn v4_proposal_request() -> Value {
@@ -538,6 +542,27 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
 }
 
 #[tokio::test]
+async fn e2e_v4_submit_returns_not_found_when_acl_feature_is_disabled() {
+    let app = v4_acl_app(vec![acl_key(
+        "clear",
+        "clear-secret",
+        vec![ServerAclFeature::ProverClear],
+    )]);
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "clear-secret",
+        v4_proposal_request(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "not_found");
+}
+
+#[tokio::test]
 async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
     let app = v4_submit_acl_app(None);
 
@@ -669,6 +694,9 @@ async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
     assert_eq!(status, StatusCode::OK, "{clear_body}");
     assert_eq!(clear_body["status"], "ok");
     assert_eq!(clear_body["proof_type"], "sp1");
+    assert!(clear_body["data"].get("status").is_none());
+    assert_eq!(clear_body["data"]["cancelled"], 0);
+    assert_eq!(clear_body["data"]["failed"], 0);
 }
 
 #[tokio::test]

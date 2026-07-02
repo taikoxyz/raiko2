@@ -155,18 +155,28 @@ pub(crate) async fn clear_prover(
     State(state): State<AppState>,
     headers: HeaderMap,
     req: Request<Body>,
-) -> Result<Json<ApiOk<ClearProverStatus>>, Error> {
+) -> Result<Json<ApiOk<wire::ClearProverData>>, Error> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverClear)
         .map_err(Error::from_api_error)?;
     let Json(req) = Json::<wire::ProverClearRequest>::from_request(req, &state)
         .await
         .map_err(|err| Error::from_json_rejection(&err))?;
-    let data = clear_prover_tasks(
+    let ClearProverStatus {
+        status: _,
+        cancelled,
+        skipped,
+        failed,
+    } = clear_prover_tasks(
         &state,
         ProverTaskScope::ProofType(batch_proof_type(req.proof_type)),
     )
     .await
     .map_err(Error::from_api_error)?;
+    let data = wire::ClearProverData {
+        cancelled,
+        skipped,
+        failed,
+    };
     Ok(Json(ApiOk {
         status: "ok",
         proof_type: req.proof_type.as_str().to_string(),

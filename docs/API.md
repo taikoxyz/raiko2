@@ -145,6 +145,7 @@ V4 error codes:
 | `invalid_proof_type` | 400 | `proof_type` is syntactically invalid or a policy/fallback type such as `zk_any`. |
 | `unsupported_proof_type` | 400 | The requested concrete proof type is valid v4 input but unavailable in this server configuration. |
 | `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
+| `not_found` | 404 | The route exists, but the requested server feature is not enabled. |
 | `task_not_found` | 404 | The task ID does not exist. |
 | `unauthorized` | 401 | The required API key is missing or invalid. |
 | `forbidden` | 403 | The API key is valid but is not allowed to use the required ACL feature. |
@@ -517,7 +518,6 @@ Response:
   "status": "ok",
   "proof_type": "risc0",
   "data": {
-    "status": "ok",
     "cancelled": 2,
     "skipped": {
       "invalid_metadata": 0,
@@ -534,7 +534,6 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend targeted by the clear operation. |
-| `data.status` | string | Clear operation status. Currently `ok` on success. |
 | `data.cancelled` | number | Non-terminal root tasks cancelled. |
 | `data.skipped` | object | Records skipped because they are invalid, unavailable, or already have remote progress. |
 | `data.failed` | number | Runtime tasks marked cancelled but not fully cancelled in the engine queue. |

@@ -2,6 +2,8 @@ use alloy_primitives::Address;
 use raiko2_primitives::ShastaCheckpoint;
 use serde::{Deserialize, Serialize};
 
+use super::ProverSkippedStatusCounts;
+
 /// Error payload returned by v4 endpoints.
 #[derive(Serialize)]
 pub(crate) struct ApiErrorBody {
@@ -96,4 +98,12 @@ pub(crate) struct AggregationTaskData {
     pub(crate) task_id: String,
     pub(crate) status: String,
     pub(crate) proof: Option<String>,
+}
+
+/// Response data for a v4 prover-clear request.
+#[derive(Serialize)]
+pub(crate) struct ClearProverData {
+    pub(crate) cancelled: usize,
+    pub(crate) skipped: ProverSkippedStatusCounts,
+    pub(crate) failed: usize,
 }

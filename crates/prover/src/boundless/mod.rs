@@ -153,6 +153,8 @@ enum NoLockTimeoutAction {
     Abort,
 }
 
+const MIN_REBID_TIMEOUT_MS: u64 = 1_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NoLockTimeout {
     delay: Duration,
@@ -170,7 +172,7 @@ fn no_lock_timeout_for_attempt(
         NoLockTimeoutAction::Abort
     };
     NoLockTimeout {
-        delay: Duration::from_millis(rebid_timeout_ms.max(1)),
+        delay: Duration::from_millis(rebid_timeout_ms.max(MIN_REBID_TIMEOUT_MS)),
         action,
     }
 }
@@ -1511,7 +1513,7 @@ fn validate_offer_params(
 mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
-        DeploymentConfig, DeploymentType, ElfType, NoLockTimeoutAction,
+        DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
         attempt_for_price_multiplier, enforce_market_max_price_cap, no_lock_deadline_elapsed,
         no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
         retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
@@ -1814,6 +1816,16 @@ mod tests {
 
         assert_eq!(timeout.delay, Duration::from_millis(900_000));
         assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
+    }
+
+    #[test]
+    fn no_lock_timeout_clamps_invalid_rebid_delay_to_minimum() {
+        for rebid_timeout_ms in [0, 999] {
+            let timeout = no_lock_timeout_for_attempt(1, rebid_timeout_ms, TEST_REBID_MAX_ATTEMPTS);
+
+            assert_eq!(timeout.delay, Duration::from_millis(MIN_REBID_TIMEOUT_MS));
+            assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
+        }
     }
 
     #[test]

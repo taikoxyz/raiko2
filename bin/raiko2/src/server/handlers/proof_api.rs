@@ -28,7 +28,10 @@ use std::{
 use tokio::fs;
 use tracing::{info, warn};
 
-use super::super::auth::{authorize_acl_feature, authorize_acl_feature_with_rate_limit};
+use super::super::auth::{
+    authorize_acl_feature, authorize_acl_feature_with_rate_limit,
+    authorize_optional_acl_feature_with_rate_limit,
+};
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
@@ -2906,7 +2909,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use axum::{
         body::Body,
-        extract::State,
+        extract::{Path, State},
         http::{HeaderMap, Request},
     };
     use http_body_util::BodyExt;
@@ -4641,6 +4644,51 @@ mod tests {
         };
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(err.code, "unauthorized");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn v4_submit_is_open_when_submit_acl_feature_is_disabled() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "v4-submit-open-without-submit-acl",
+        ))?);
+        let state = test_state_with_acl(Arc::clone(&runtime), []);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v4/proof/proposal")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "proof_type": "risc0",
+                    "proposal_id_start": 1,
+                    "proposal_id_end": 1,
+                    "last_anchor_block_number": 10,
+                    "l1_inclusion_block_number": 11,
+                    "l2_block_number_start": 20,
+                    "l2_block_number_end": 21
+                })
+                .to_string(),
+            ))?;
+
+        let Err(err) =
+            v4::request_proposal_proof(State(state.clone()), HeaderMap::new(), request).await
+        else {
+            panic!("unavailable backend should reject after optional ACL");
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "unsupported_proof_type");
+
+        let Err(err) = v4::get_task(
+            State(state),
+            HeaderMap::new(),
+            Path("missing-task".to_string()),
+        )
+        .await
+        else {
+            panic!("missing task should reject after optional ACL");
+        };
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.code, "task_not_found");
         Ok(())
     }
 

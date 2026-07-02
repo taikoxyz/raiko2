@@ -26,19 +26,23 @@ pub(crate) fn authorize_acl_feature_with_rate_limit(
     enforce_rate_limit(state, key_index, rate_limit_per_minute)
 }
 
+pub(crate) fn authorize_optional_acl_feature_with_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    feature: ServerAclFeature,
+) -> Result<(), ApiError> {
+    if !acl_feature_enabled(state, feature) {
+        return Ok(());
+    }
+    authorize_acl_feature_with_rate_limit(state, headers, feature)
+}
+
 fn authorize_acl_key(
     state: &AppState,
     headers: &HeaderMap,
     feature: ServerAclFeature,
 ) -> Result<(usize, Option<u32>), ApiError> {
-    let feature_enabled = state
-        .config
-        .server
-        .acl
-        .keys
-        .iter()
-        .any(|key| acl_allows_feature(&key.allow, feature));
-    if !feature_enabled {
+    if !acl_feature_enabled(state, feature) {
         return Err(ApiError::not_found("ACL feature is not enabled"));
     }
 
@@ -82,6 +86,16 @@ fn authorize_acl_key(
     }
 
     Err(ApiError::unauthorized("invalid API key"))
+}
+
+fn acl_feature_enabled(state: &AppState, feature: ServerAclFeature) -> bool {
+    state
+        .config
+        .server
+        .acl
+        .keys
+        .iter()
+        .any(|key| acl_allows_feature(&key.allow, feature))
 }
 
 fn enforce_rate_limit(

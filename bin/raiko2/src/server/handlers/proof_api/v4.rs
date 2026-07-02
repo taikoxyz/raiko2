@@ -17,13 +17,13 @@ use super::{
     PlannedAggregateTask, ProofArtifactMaterial, ProofStatus, ProverStatus, ProverTaskScope,
     ProverType, PublicProverArgs, ResolvedNetworkPair, ServerAclFeature, ShastaProposal, TaskData,
     aggregate_task_ref, augment_system_prover_config, authorize_acl_feature_with_rate_limit,
-    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
-    clear_prover_tasks, collect_prover_status, handle_created_batch_task,
-    handle_created_external_aggregate_task, handle_existing_batch_task,
-    handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
-    parse_task_metadata, prover_type_for_proof_type, register_batch_task,
-    register_external_aggregate_task, resolve_engine, resolved_pair, route_for_proof_type,
-    validate_aggregate_route_specific_request, validate_public_prover_args,
+    authorize_optional_acl_feature_with_rate_limit, build_canonical_batch_submission,
+    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
+    collect_prover_status, handle_created_batch_task, handle_created_external_aggregate_task,
+    handle_existing_batch_task, handle_existing_external_aggregate_task,
+    load_proof_artifact_material, load_task_data, parse_task_metadata, prover_type_for_proof_type,
+    register_batch_task, register_external_aggregate_task, resolve_engine, resolved_pair,
+    route_for_proof_type, validate_aggregate_route_specific_request, validate_public_prover_args,
 };
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
@@ -34,8 +34,12 @@ pub(crate) async fn request_proposal_proof(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Json<wire::TaskResponse<wire::ProofTaskData>>, Error> {
-    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
-        .map_err(Error::from_api_error)?;
+    authorize_optional_acl_feature_with_rate_limit(
+        &state,
+        &headers,
+        ServerAclFeature::ProverSubmit,
+    )
+    .map_err(Error::from_api_error)?;
     let Json(req) = Json::<wire::ProposalRequest>::from_request(req, &state)
         .await
         .map_err(|err| Error::from_json_rejection(&err))?;
@@ -62,8 +66,12 @@ pub(crate) async fn request_aggregation_proof(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, Error> {
-    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
-        .map_err(Error::from_api_error)?;
+    authorize_optional_acl_feature_with_rate_limit(
+        &state,
+        &headers,
+        ServerAclFeature::ProverSubmit,
+    )
+    .map_err(Error::from_api_error)?;
     let Json(req) = Json::<wire::AggregationRequest>::from_request(req, &state)
         .await
         .map_err(|err| Error::from_json_rejection(&err))?;
@@ -114,8 +122,12 @@ pub(crate) async fn get_task(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ApiData<TaskData>>, Error> {
-    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
-        .map_err(Error::from_api_error)?;
+    authorize_optional_acl_feature_with_rate_limit(
+        &state,
+        &headers,
+        ServerAclFeature::ProverSubmit,
+    )
+    .map_err(Error::from_api_error)?;
     let data = load_task_data(&state, &id)
         .await
         .map_err(|err| match err.status {

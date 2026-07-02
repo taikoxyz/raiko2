@@ -802,7 +802,7 @@ class BatchMonitor:
 
         try:
             # Get events in the range
-            logs = self.evt_contract.events.Proposed.get_logs(
+            logs = self._get_proposed_logs(
                 fromBlock=search_start, toBlock=search_end
             )
 
@@ -845,7 +845,7 @@ class BatchMonitor:
             return self.proposal_block_cache[proposal_id]
 
         try:
-            logs = self.evt_contract.events.Proposed.get_logs(
+            logs = self._get_proposed_logs(
                 fromBlock=0,
                 toBlock="latest",
                 argument_filters={"id": proposal_id},
@@ -918,7 +918,7 @@ class BatchMonitor:
         )
         
         try:
-            logs = self.evt_contract.events.Proposed.get_logs(
+            logs = self._get_proposed_logs(
                 fromBlock=search_start, toBlock=search_end
             )
             
@@ -1003,9 +1003,34 @@ class BatchMonitor:
         except Exception as e:
             return None
 
+    def _get_proposed_logs(self, **kwargs):
+        """Fetch Proposed logs across web3.py camelCase/snake_case API variants."""
+        converted = dict(kwargs)
+        if "fromBlock" in converted:
+            converted["from_block"] = converted.pop("fromBlock")
+        if "toBlock" in converted:
+            converted["to_block"] = converted.pop("toBlock")
+
+        last_error = None
+        event_factories = [self.evt_contract.events.Proposed]
+        try:
+            event_factories.append(self.evt_contract.events.Proposed())
+        except TypeError:
+            pass
+        for params in (kwargs, converted):
+            for event in event_factories:
+                try:
+                    return event.get_logs(**params)
+                except TypeError as e:
+                    last_error = e
+                    continue
+        if last_error is not None:
+            raise last_error
+        return self.evt_contract.events.Proposed.get_logs(**kwargs)
+
     def get_batch_events_in_block(self, block_number) -> list[int]:
         try:
-            logs = self.evt_contract.events.Proposed.get_logs(
+            logs = self._get_proposed_logs(
                 fromBlock=block_number, toBlock=block_number
             )
 
@@ -1152,7 +1177,7 @@ class BatchMonitor:
 
     async def get_latest_block_batchs(self) -> Optional[tuple[int, list[int]]]:
         """get latest block number"""
-        logs = self.evt_contract.events.Proposed().get_logs(
+        logs = self._get_proposed_logs(
             fromBlock="latest", toBlock="latest"
         )
         if len(logs) == 0:

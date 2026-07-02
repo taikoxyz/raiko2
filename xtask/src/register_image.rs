@@ -323,13 +323,6 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
 }
 
 fn resolve_profile(args: &RegisterImageArgs) -> Result<ResolvedProfile> {
-    if matches!(args.profile, RegisterImageProfile::DevnetShasta)
-        && backend_includes_risc0(args.backend)
-        && args.risc0_verifier.is_none()
-    {
-        bail!("devnet-shasta requires --risc0-verifier for risc0/all backend");
-    }
-
     let (rpc_url, risc0_verifier, sp1_verifier) = match args.profile {
         RegisterImageProfile::HoodiShasta => (
             DEFAULT_RPC_URL_HOODI_SHASTA.to_string(),
@@ -338,7 +331,7 @@ fn resolve_profile(args: &RegisterImageArgs) -> Result<ResolvedProfile> {
         ),
         RegisterImageProfile::DevnetShasta => (
             DEFAULT_RPC_URL_DEVNET_SHASTA.to_string(),
-            Address::ZERO,
+            address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6"),
             address!("C51aaC3cfF330586435cf2168FAd9E5F3c1a8654"),
         ),
         RegisterImageProfile::MainnetShasta => (
@@ -362,10 +355,6 @@ fn resolve_profile(args: &RegisterImageArgs) -> Result<ResolvedProfile> {
         risc0_verifier: args.risc0_verifier.unwrap_or(risc0_verifier),
         sp1_verifier: args.sp1_verifier.unwrap_or(sp1_verifier),
     })
-}
-
-const fn backend_includes_risc0(backend: Backend) -> bool {
-    matches!(backend, Backend::Risc0 | Backend::All)
 }
 
 fn resolve_output_dir(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
@@ -824,7 +813,7 @@ mod tests {
     fn devnet_profile_uses_l1_sp1_verifier_by_default() {
         let args = RegisterImageArgs {
             profile: RegisterImageProfile::DevnetShasta,
-            backend: Backend::Sp1,
+            backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,
             sp1_verifier: None,
@@ -838,29 +827,12 @@ mod tests {
         assert_eq!(resolved.expected_chain_id, DEVNET_CHAIN_ID);
         assert_eq!(resolved.rpc_url, "https://l1rpc.internal.taiko.xyz");
         assert_eq!(
+            resolved.risc0_verifier,
+            address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6")
+        );
+        assert_eq!(
             resolved.sp1_verifier,
             address!("C51aaC3cfF330586435cf2168FAd9E5F3c1a8654")
-        );
-    }
-
-    #[test]
-    fn devnet_profile_requires_risc0_override_for_risc0_backend() {
-        let args = RegisterImageArgs {
-            profile: RegisterImageProfile::DevnetShasta,
-            backend: Backend::All,
-            rpc_url: None,
-            risc0_verifier: None,
-            sp1_verifier: None,
-            private_key_env: "PRIVATE_KEY".to_string(),
-            output_dir: None,
-            apply: false,
-        };
-
-        let err =
-            resolve_profile(&args).expect_err("devnet all backend should need RISC0 override");
-        assert!(
-            err.to_string()
-                .contains("devnet-shasta requires --risc0-verifier")
         );
     }
 

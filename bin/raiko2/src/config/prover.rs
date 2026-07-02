@@ -3,8 +3,9 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DEFAULT_REBID_MAX_PRICE_DOUBLINGS, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, OfferParamsConfig, REBID_MAX_PRICE_DOUBLINGS_LIMIT, validate_offer_spec,
+        BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_MULTIPLIER,
+        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, OfferParamsConfig, REBID_MAX_ATTEMPTS_LIMIT,
+        validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -275,8 +276,10 @@ pub struct BoundlessConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_boundless_rebid_timeout_ms")]
     pub rebid_timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_max_price_doublings")]
-    pub rebid_max_price_doublings: u32,
+    #[serde(default = "default_boundless_rebid_price_multiplier")]
+    pub rebid_price_multiplier: u32,
+    #[serde(default = "default_boundless_rebid_max_attempts")]
+    pub rebid_max_attempts: u32,
 }
 
 impl Default for BoundlessConfig {
@@ -298,7 +301,8 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
             rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
-            rebid_max_price_doublings: default_boundless_rebid_max_price_doublings(),
+            rebid_price_multiplier: default_boundless_rebid_price_multiplier(),
+            rebid_max_attempts: default_boundless_rebid_max_attempts(),
         }
     }
 }
@@ -315,10 +319,11 @@ impl BoundlessConfig {
         if self.rebid_timeout_ms == 0 {
             bail!("prover.boundless.rebid_timeout_ms must be > 0");
         }
-        if self.rebid_max_price_doublings > REBID_MAX_PRICE_DOUBLINGS_LIMIT {
-            bail!(
-                "prover.boundless.rebid_max_price_doublings must be <= {REBID_MAX_PRICE_DOUBLINGS_LIMIT}"
-            );
+        if self.rebid_price_multiplier == 0 {
+            bail!("prover.boundless.rebid_price_multiplier must be > 0");
+        }
+        if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
+            bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
         }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
@@ -350,8 +355,11 @@ impl BoundlessConfig {
         if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
             merged.rebid_timeout_ms = rebid_timeout_ms;
         }
-        if let Some(rebid_max_price_doublings) = pair.rebid_max_price_doublings {
-            merged.rebid_max_price_doublings = rebid_max_price_doublings;
+        if let Some(rebid_price_multiplier) = pair.rebid_price_multiplier {
+            merged.rebid_price_multiplier = rebid_price_multiplier;
+        }
+        if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
+            merged.rebid_max_attempts = rebid_max_attempts;
         }
         if let Some(batch) = &pair.offer_params.batch {
             merged.offer_params.batch = batch.clone();
@@ -380,15 +388,18 @@ const fn default_boundless_rebid_timeout_ms() -> u64 {
     DEFAULT_REBID_TIMEOUT_MS
 }
 
-const fn default_boundless_rebid_max_price_doublings() -> u32 {
-    DEFAULT_REBID_MAX_PRICE_DOUBLINGS
+const fn default_boundless_rebid_price_multiplier() -> u32 {
+    DEFAULT_REBID_PRICE_MULTIPLIER
+}
+
+const fn default_boundless_rebid_max_attempts() -> u32 {
+    DEFAULT_REBID_MAX_ATTEMPTS
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ProverConfig, REBID_MAX_PRICE_DOUBLINGS_LIMIT, Sp1ExecutionMode, ZkAnyConfig,
-        ZkAnyTargetConfig,
+        ProverConfig, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
 
     #[test]
@@ -466,16 +477,30 @@ mod tests {
     }
 
     #[test]
-    fn prover_config_rejects_excessive_boundless_rebid_doublings() {
+    fn prover_config_rejects_zero_boundless_rebid_price_multiplier() {
         let mut config = ProverConfig::default();
-        config.boundless.rebid_max_price_doublings = REBID_MAX_PRICE_DOUBLINGS_LIMIT + 1;
+        config.boundless.rebid_price_multiplier = 0;
 
         assert!(
             config
                 .validate()
-                .expect_err("excessive rebid doublings should fail")
+                .expect_err("zero rebid price multiplier should fail")
                 .to_string()
-                .contains("rebid_max_price_doublings")
+                .contains("rebid_price_multiplier")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_excessive_boundless_rebid_max_attempts() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_max_attempts = REBID_MAX_ATTEMPTS_LIMIT + 1;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("excessive rebid attempts should fail")
+                .to_string()
+                .contains("rebid_max_attempts")
         );
     }
 

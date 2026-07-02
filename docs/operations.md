@@ -687,7 +687,8 @@ signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 rebid_timeout_ms = 300000
-rebid_max_price_doublings = 4
+rebid_price_multiplier = 2
+rebid_max_attempts = 4
 
 [prover.boundless.deployment]
 deployment_type = "base"
@@ -708,14 +709,17 @@ Operator notes:
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms.
-- `prover.boundless.rebid_max_price_doublings` caps no-lock rebid price escalation. The default
-  is `4`, which allows a final manual max price of `16x`.
+- `prover.boundless.rebid_price_multiplier` controls the manual max-price multiplier applied on
+  each no-lock rebid. The default is `2`.
+- `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is
+  `31`, and the default allows a final manual max price of `16x` with the default multiplier.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
-  each resubmission doubles the offer's max price up to
-  `prover.boundless.rebid_max_price_doublings`; the min price is unchanged. `market`
+  each resubmission multiplies the offer's max price by
+  `prover.boundless.rebid_price_multiplier` up to `prover.boundless.rebid_max_attempts`; the min
+  price is unchanged. `market`
   resubmissions are re-priced by the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.

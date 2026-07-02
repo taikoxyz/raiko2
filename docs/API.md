@@ -35,6 +35,7 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `POST /v3/prover/clear` requires `prover.clear`
 - `POST /v4/proof/proposal` requires `prover.submit`
 - `POST /v4/proof/aggregation` requires `prover.submit`
+- `GET /v4/tasks/{id}` requires `prover.submit`
 - `POST /v4/prover/clear` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
@@ -144,7 +145,6 @@ V4 error codes:
 | `invalid_proof_type` | 400 | `proof_type` is syntactically invalid or a policy/fallback type such as `zk_any`. |
 | `unsupported_proof_type` | 400 | The requested concrete proof type is valid v4 input but unavailable in this server configuration. |
 | `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
-| `unsupported_fork` | 400 | The selected proposal or aggregation fork is not supported. |
 | `task_not_found` | 404 | The task ID does not exist. |
 | `unauthorized` | 401 | The required API key is missing or invalid. |
 | `forbidden` | 403 | The API key is valid but is not allowed to use the required ACL feature. |
@@ -264,7 +264,6 @@ Validation:
 - `network`, `l1_network`, `blob_proof_type`, `aggregate`, `aggregation_ids`, and `proofs` are not
   accepted by the v4 proposal request.
 - Invalid or unavailable proposal context returns `400 invalid_request`.
-- Unsupported proposal fork returns `400 unsupported_fork`.
 
 ### Submit Aggregation Proof
 
@@ -336,7 +335,6 @@ Validation:
 - Mixed-proof-type aggregation is not supported.
 - Missing or incomplete proposal proofs in the range return `409 dependency_not_ready`; the
   aggregation endpoint does not register proposal proof work.
-- Unsupported aggregation fork returns `400 unsupported_fork`.
 - `aggregation_ids` is not accepted by the v4 aggregation request.
 - `proofs` is not accepted by the v4 aggregation request.
 - `network`, `l1_network`, `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`,
@@ -350,6 +348,7 @@ aggregation progress by repeating proof submission requests, not by calling this
 
 ```http
 GET /v4/tasks/{id}
+x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Path fields:
@@ -1049,7 +1048,8 @@ All API errors use the Hoodi-style envelope:
   `rpc.pairs[*].boundless` can override either value for one `(network, l1_network)` pair.
 - `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
-  It is separate from the overall `prover.boundless.timeout_ms` fulfillment deadline.
+  It must be at least `1000` ms and is separate from the overall
+  `prover.boundless.timeout_ms` fulfillment deadline.
 - `prover.boundless.rebid_price_multiplier` defaults to `2` and controls the manual max-price
   multiplier applied on each no-lock rebid.
 - `prover.boundless.rebid_max_attempts` defaults to `4` and caps no-lock rebids. It must be no

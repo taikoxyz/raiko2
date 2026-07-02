@@ -4570,6 +4570,20 @@ mod tests {
         assert_eq!(err.code, "invalid_request");
     }
 
+    #[test]
+    fn v4_collect_inclusive_range_rejects_overflowing_ranges() {
+        let err = v4::collect_inclusive_range_for_test(
+            0,
+            u64::MAX,
+            "l2_block_number_start",
+            "l2_block_number_end",
+        )
+        .expect_err("overflowing range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+    }
+
     #[tokio::test]
     async fn v4_completed_proof_response_returns_proof_hex() {
         let runtime = Arc::new(

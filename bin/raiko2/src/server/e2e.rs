@@ -372,6 +372,12 @@ fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> V
 }
 
 fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
+    v4_sp1_acl_app_with_clear_rate_limit(None)
+}
+
+fn v4_sp1_acl_app_with_clear_rate_limit(
+    clear_rate_limit_per_minute: Option<u32>,
+) -> (Router, Sp1FixtureEngine) {
     let mut config = base_config();
     config.prover.guest_system = GuestSystem::Sp1;
     config.prover.runner = RunnerKind::Local;
@@ -382,7 +388,13 @@ fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
             "submit-secret",
             vec![ServerAclFeature::ProverSubmit],
         ),
-        acl_key("clear", "clear-secret", vec![ServerAclFeature::ProverClear]),
+        acl_key_with_rate_limit(
+            "clear",
+            "clear-secret",
+            vec![ServerAclFeature::ProverClear],
+            clear_rate_limit_per_minute,
+        ),
+        acl_key("admin", "admin-secret", vec![ServerAclFeature::Admin]),
     ];
 
     app_with_observed_sp1_fixture_engine(config)
@@ -501,6 +513,12 @@ async fn e2e_ready_ok_with_matching_chain_id() {
 async fn e2e_v4_submit_requires_submit_acl_key() {
     let app = v4_submit_acl_app(None);
 
+    let (status, body) =
+        post_raw_json_text_with_optional_api_key(&app, "/v4/proof/proposal", None, "{not-json")
+            .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.contains("\"error\":\"unauthorized\""), "{body}");
+
     let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -517,6 +535,28 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
+    let app = v4_submit_acl_app(None);
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unsupported_proof_type");
+
+    let (status, task) =
+        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:risc0:1:1", "submit-secret").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{task}");
+    assert_eq!(task["error"], "task_not_found");
 }
 
 #[tokio::test]
@@ -563,10 +603,25 @@ async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
     complete_v4_sp1_proposal(&app, &engine, 3).await;
 
     let (status, task) = get_json(&app, "/v4/tasks/v4:proposal:sp1:3:3").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{task}");
+    assert_eq!(task["error"], "unauthorized");
+
+    let (status, task) =
+        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "clear-secret").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{task}");
+    assert_eq!(task["error"], "forbidden");
+
+    let (status, task) =
+        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "submit-secret").await;
     assert_eq!(status, StatusCode::OK, "{task}");
     assert_eq!(task["status"], "ok");
     assert_eq!(task["data"]["task_id"], "v4:proposal:sp1:3:3");
     assert_eq!(task["data"]["status"], "completed");
+    assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
+
+    let (status, task) =
+        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "admin-secret").await;
+    assert_eq!(status, StatusCode::OK, "{task}");
     assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
 }
 
@@ -614,6 +669,21 @@ async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
     assert_eq!(status, StatusCode::OK, "{clear_body}");
     assert_eq!(clear_body["status"], "ok");
     assert_eq!(clear_body["proof_type"], "sp1");
+}
+
+#[tokio::test]
+async fn e2e_v4_clear_rate_limits_acl_key() {
+    let (app, _engine) = v4_sp1_acl_app_with_clear_rate_limit(Some(1));
+
+    let payload = json!({ "proof_type": "sp1" });
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/prover/clear", "clear-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/prover/clear", "clear-secret", payload).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "rate_limited");
 }
 
 #[tokio::test]

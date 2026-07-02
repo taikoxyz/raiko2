@@ -8,21 +8,24 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use raiko2_prover::sp1_config::Sp1RequestContext;
 use raiko2_runtime::RuntimeTaskRecord;
 use std::collections::HashMap;
 
 use super::super::proof_types::v4 as wire;
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
-    CanonicalBatchSubmission, ClearProverStatus, ExternalAggregateSubmission, PlannedAggregateTask,
-    ProofArtifactMaterial, ProofStatus, ProverStatus, ProverTaskScope, ProverType,
-    PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref,
-    authorize_acl_feature, authorize_acl_feature_with_rate_limit, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, handle_created_batch_task, handle_created_external_aggregate_task,
-    handle_existing_batch_task, handle_existing_external_aggregate_task,
-    load_proof_artifact_material, load_task_data, parse_task_metadata, register_batch_task,
-    register_external_aggregate_task, resolve_engine,
+    CanonicalBatchSubmission, CanonicalProofRoute, ClearProverStatus, ExternalAggregateSubmission,
+    PlannedAggregateTask, ProofArtifactMaterial, ProofStatus, ProverStatus, ProverTaskScope,
+    ProverType, PublicProverArgs, ResolvedNetworkPair, ServerAclFeature, ShastaProposal, TaskData,
+    aggregate_task_ref, augment_system_prover_config, authorize_acl_feature_with_rate_limit,
+    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
+    clear_prover_tasks, collect_prover_status, handle_created_batch_task,
+    handle_created_external_aggregate_task, handle_existing_batch_task,
+    handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
+    parse_task_metadata, prover_type_for_proof_type, register_batch_task,
+    register_external_aggregate_task, resolve_engine, resolved_pair, route_for_proof_type,
+    validate_aggregate_route_specific_request, validate_public_prover_args,
 };
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
@@ -31,11 +34,13 @@ pub(super) const MAX_RANGE_LEN: u64 = 100_000;
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
     headers: HeaderMap,
-    req: Result<Json<wire::ProposalRequest>, JsonRejection>,
+    req: Request<Body>,
 ) -> Result<Json<wire::TaskResponse<wire::ProofTaskData>>, Error> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
         .map_err(Error::from_api_error)?;
-    let Json(req) = req.map_err(|err| Error::from_json_rejection(&err))?;
+    let Json(req) = Json::<wire::ProposalRequest>::from_request(req, &state)
+        .await
+        .map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let proposal_id_start = req.proposal_id_start;
     let proposal_id_end = req.proposal_id_end;
@@ -57,14 +62,41 @@ pub(crate) async fn request_proposal_proof(
 pub(crate) async fn request_aggregation_proof(
     State(state): State<AppState>,
     headers: HeaderMap,
-    req: Result<Json<wire::AggregationRequest>, JsonRejection>,
+    req: Request<Body>,
 ) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, Error> {
     authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
         .map_err(Error::from_api_error)?;
-    let Json(req) = req.map_err(|err| Error::from_json_rejection(&err))?;
+    let Json(req) = Json::<wire::AggregationRequest>::from_request(req, &state)
+        .await
+        .map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
     let proposal_id_start = req.proposal_id_start;
     let proposal_id_end = req.proposal_id_end;
+    let task_id = aggregation_task_id(proof_type, proposal_id_start, proposal_id_end);
+    collect_inclusive_range(
+        proposal_id_start,
+        proposal_id_end,
+        "proposal_id_start",
+        "proposal_id_end",
+    )?;
+    if state
+        .runtime
+        .get_task(&task_id)
+        .await
+        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
+        .is_some()
+    {
+        let data = load_task_data(&state, &task_id)
+            .await
+            .map_err(Error::from_api_error)?;
+        return Ok(Json(wire::TaskResponse {
+            status: "ok",
+            proof_type: proof_type.as_str().to_string(),
+            proposal_id_start,
+            proposal_id_end,
+            data: aggregation_task_data(&state, data).await?,
+        }));
+    }
     let submission = aggregation_submission(&state, req).await?;
     submit_external_aggregation(&state, &submission).await?;
     let data = load_task_data(&state, &submission.public_task_id)
@@ -81,8 +113,11 @@ pub(crate) async fn request_aggregation_proof(
 
 pub(crate) async fn get_task(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ApiData<TaskData>>, Error> {
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverSubmit)
+        .map_err(Error::from_api_error)?;
     let data = load_task_data(&state, &id)
         .await
         .map_err(|err| match err.status {
@@ -121,7 +156,7 @@ pub(crate) async fn clear_prover(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Result<Json<ApiOk<ClearProverStatus>>, Error> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverClear)
         .map_err(Error::from_api_error)?;
     let Json(req) = Json::<wire::ProverClearRequest>::from_request(req, &state)
         .await
@@ -152,7 +187,14 @@ fn collect_inclusive_range(
         )));
     }
 
-    let len = end - start + 1;
+    let len = end
+        .checked_sub(start)
+        .and_then(|delta| delta.checked_add(1))
+        .ok_or_else(|| {
+            Error::invalid_request(format!(
+                "{start_field}..={end_field} range length overflows u64"
+            ))
+        })?;
     if len > MAX_RANGE_LEN {
         return Err(Error::invalid_request(format!(
             "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
@@ -353,12 +395,13 @@ async fn aggregation_submission(
         "proposal_id_start",
         "proposal_id_end",
     )?;
+    let target = resolve_aggregation_target(state, proof_type)?;
     let records = state
         .runtime
         .list_tasks()
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?;
-    let proposal_proofs = local_proposal_proof_index(&records, proof_type);
+    let proposal_proofs = local_proposal_proof_index(&records, proof_type, &target);
     let mut proofs = Vec::with_capacity(aggregation_ids.len());
     for proposal_id in &aggregation_ids {
         proofs.push(
@@ -393,15 +436,50 @@ struct LocalProposalProofRef {
     proof_ref: String,
 }
 
+struct AggregationTarget {
+    pair: ResolvedNetworkPair,
+    route: CanonicalProofRoute,
+}
+
+fn resolve_aggregation_target(
+    state: &AppState,
+    proof_type: wire::ProofType,
+) -> Result<AggregationTarget, Error> {
+    let proof_type = batch_proof_type(proof_type);
+    let pair = resolved_pair(state, None, None).map_err(Error::from_api_error)?;
+    let prover_config = augment_system_prover_config(
+        &pair,
+        validate_public_prover_args(proof_type, &PublicProverArgs::default())
+            .map_err(Error::from_api_error)?,
+    );
+    let sp1_context = Sp1RequestContext::Aggregation;
+    let route = route_for_proof_type(state, proof_type, &prover_config, sp1_context)
+        .map_err(Error::from_api_error)?;
+    let _prover_type: Option<ProverType> =
+        prover_type_for_proof_type(state, proof_type, route.route, &prover_config, sp1_context)
+            .map_err(Error::from_api_error)?;
+    validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)
+        .map_err(Error::from_api_error)?;
+
+    Ok(AggregationTarget { pair, route })
+}
+
 fn local_proposal_proof_index(
     records: &[RuntimeTaskRecord],
     proof_type: wire::ProofType,
+    target: &AggregationTarget,
 ) -> HashMap<u64, Vec<LocalProposalProofRef>> {
     let mut index: HashMap<u64, Vec<LocalProposalProofRef>> = HashMap::new();
     for record in records {
         let Ok(metadata) = parse_task_metadata(record) else {
             continue;
         };
+        if metadata.network_pair != target.pair.key
+            || record.pipeline_key != target.route.pipeline_key()
+            || record.route != target.route.route
+        {
+            continue;
+        }
         if metadata.requested_proof_type.as_deref() != Some(proof_type.as_str()) {
             continue;
         }
@@ -493,15 +571,35 @@ async fn submit_submission(
         return Ok(());
     }
 
+    ensure_engine_available(
+        state,
+        &submission.pair.key,
+        submission.route.pipeline_key(),
+        submission.requested_proof_type,
+    )?;
     let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
         .await
         .map_err(Error::from_api_error)?;
-    register_batch_task(state, submission, &plan, request_fingerprint)
+    match register_batch_task(state, submission, &plan, request_fingerprint)
         .await
-        .map_err(Error::from_api_error)?;
-    handle_created_batch_task(state, submission, &plan)
-        .await
-        .map_err(Error::from_api_error)?;
+        .map_err(Error::from_api_error)?
+    {
+        raiko2_runtime::TaskRegistrationOutcome::Created(_) => {
+            handle_created_batch_task(state, submission, &plan)
+                .await
+                .map_err(Error::from_api_error)?;
+        }
+        raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
+            if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+                return Err(Error::request_conflict(
+                    "same proof task key was submitted with different proof input",
+                ));
+            }
+            handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
+                .await
+                .map_err(Error::from_api_error)?;
+        }
+    }
     Ok(())
 }
 
@@ -544,6 +642,23 @@ async fn submit_external_aggregation(
         .await
         .map_err(Error::from_api_error)?;
     Ok(())
+}
+
+fn ensure_engine_available(
+    state: &AppState,
+    pair_key: &str,
+    pipeline_key: raiko2_pipeline::PipelineKey,
+    proof_type: BatchProofType,
+) -> Result<(), Error> {
+    resolve_engine(state, pair_key, pipeline_key)
+        .map(|_| ())
+        .map_err(|err| match err.status {
+            StatusCode::NOT_FOUND => Error::unsupported_proof_type(format!(
+                "proof_type={} is not supported by this server route",
+                proof_type.as_str()
+            )),
+            _ => Error::from_api_error(err),
+        })
 }
 
 async fn proposal_task_data(

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use super::BoundlessPairConfig;
 
+const REBID_TIMEOUT_MIN_MS: u64 = 1_000;
+
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -316,8 +318,8 @@ impl BoundlessConfig {
         if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
         }
-        if self.rebid_timeout_ms == 0 {
-            bail!("prover.boundless.rebid_timeout_ms must be > 0");
+        if self.rebid_timeout_ms < REBID_TIMEOUT_MIN_MS {
+            bail!("prover.boundless.rebid_timeout_ms must be >= {REBID_TIMEOUT_MIN_MS}");
         }
         if self.rebid_price_multiplier == 0 {
             bail!("prover.boundless.rebid_price_multiplier must be > 0");
@@ -513,6 +515,20 @@ mod tests {
             config
                 .validate()
                 .expect_err("zero rebid timeout should fail")
+                .to_string()
+                .contains("prover.boundless.rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_subsecond_boundless_rebid_timeout() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_timeout_ms = 999;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("subsecond rebid timeout should fail")
                 .to_string()
                 .contains("prover.boundless.rebid_timeout_ms")
         );

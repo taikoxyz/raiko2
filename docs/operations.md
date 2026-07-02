@@ -708,7 +708,8 @@ Operator notes:
   mcycles with a `2000` mcycle floor.
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
-  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms.
+  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
+  minimum is `1000` ms.
 - `prover.boundless.rebid_price_multiplier` controls the manual max-price multiplier applied on
   each no-lock rebid. The default is `2`.
 - `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is

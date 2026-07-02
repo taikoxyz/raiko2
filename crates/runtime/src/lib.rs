@@ -186,7 +186,7 @@ impl RuntimeManager {
     ) -> Result<TaskRegistrationOutcome> {
         let request_fingerprint = registration
             .request_fingerprint
-            .clone()
+            .as_ref()
             .context("request_fingerprint is required for idempotent registration")?;
         let record = self.build_task_record(&registration)?;
         if self.insert_task_if_absent(&record).await? {
@@ -198,10 +198,13 @@ impl RuntimeManager {
             return Ok(TaskRegistrationOutcome::Created(record));
         }
 
-        let existing = self
-            .find_task_by_request_fingerprint(&request_fingerprint)
-            .await?
-            .context("request fingerprint conflict without a matching runtime task")?;
+        let existing = match self.get_task(&record.task_id).await? {
+            Some(existing) => existing,
+            None => self
+                .find_task_by_request_fingerprint(request_fingerprint)
+                .await?
+                .context("request fingerprint conflict without a matching runtime task")?,
+        };
         Ok(TaskRegistrationOutcome::Existing(existing))
     }
 
@@ -1759,6 +1762,62 @@ mod tests {
         };
 
         assert_eq!(existing.task_id, created.task_id);
+        assert_eq!(runtime.list_tasks().await?.len(), 1);
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_manager_register_task_if_absent_returns_existing_task_id_conflict()
+    -> anyhow::Result<()> {
+        let root = unique_root("raiko2-runtime-task-id-conflict");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        let runtime = RuntimeManager::new(root.clone())?;
+
+        let created = runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "task-shared".to_string(),
+                pipeline_key: None,
+                route: "risc0/network"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(7),
+                proof_ids: vec!["proposal-proof-task".to_string()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: Some("0xfingerprint-a".to_string()),
+            })
+            .await?;
+        let TaskRegistrationOutcome::Created(created) = created else {
+            panic!("first registration should create a task");
+        };
+
+        let existing = runtime
+            .register_task_if_absent(TaskRegistration {
+                task_id: "task-shared".to_string(),
+                pipeline_key: None,
+                route: "risc0/network"
+                    .parse::<PipelineRoute>()
+                    .expect("parse route"),
+                task_kind: "hoodi_batch".to_string(),
+                proposal_id: Some(8),
+                proof_ids: vec!["other-proposal-proof-task".to_string()],
+                metadata: serde_json::json!({}),
+                request_fingerprint: Some("0xfingerprint-b".to_string()),
+            })
+            .await?;
+        let TaskRegistrationOutcome::Existing(existing) = existing else {
+            panic!("task id conflict should return the existing task");
+        };
+
+        assert_eq!(existing.task_id, created.task_id);
+        assert_eq!(
+            existing.request_fingerprint.as_deref(),
+            Some("0xfingerprint-a")
+        );
         assert_eq!(runtime.list_tasks().await?.len(), 1);
 
         std::fs::remove_dir_all(root)?;

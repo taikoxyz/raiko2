@@ -229,7 +229,7 @@ Response:
   "proposal_id_end": 12345,
   "data": {
     "task_id": "task_0x1234",
-    "status": "pending",
+    "status": "registered",
     "proof": null
   }
 }
@@ -243,7 +243,7 @@ Response fields:
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
-| `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
+| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final proposal proof hex string when `data.status=completed`; null only before completion. |
 
 Polling and idempotency:
@@ -302,7 +302,7 @@ Response:
   "proposal_id_end": 12346,
   "data": {
     "task_id": "task_0x5678",
-    "status": "pending",
+    "status": "registered",
     "proof": null
   }
 }
@@ -316,7 +316,7 @@ Response fields:
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
-| `data.status` | string | `pending`, `proving`, `completed`, `failed`, or `cancelled`. |
+| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final aggregation proof hex string when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
 
 Polling and idempotency:

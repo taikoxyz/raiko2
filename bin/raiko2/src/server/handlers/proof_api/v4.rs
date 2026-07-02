@@ -770,10 +770,14 @@ pub(super) async fn proof_from_status(
 }
 
 fn proof_status_string(status: &ProofStatus) -> String {
-    serde_json::to_value(status)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("{status:?}"))
+    match status {
+        ProofStatus::Pending => "registered",
+        ProofStatus::Proving => "work_in_progress",
+        ProofStatus::Completed => "completed",
+        ProofStatus::Failed => "failed",
+        ProofStatus::Cancelled => "cancelled",
+    }
+    .to_string()
 }
 
 #[cfg(test)]

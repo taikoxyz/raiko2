@@ -423,7 +423,7 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
         first["data"]["task_id"],
         format!("v4:proposal:sp1:{proposal_id}:{proposal_id}")
     );
-    assert_eq!(first["data"]["status"], "pending");
+    assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
     Box::pin(drive_engine_to_idle(engine)).await;
@@ -459,7 +459,7 @@ async fn complete_v4_sp1_aggregation(
         first["data"]["task_id"],
         format!("v4:aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
     );
-    assert_eq!(first["data"]["status"], "pending");
+    assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
     Box::pin(drive_engine_to_idle(engine)).await;

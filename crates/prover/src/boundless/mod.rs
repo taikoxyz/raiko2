@@ -4,7 +4,7 @@ pub mod aggregation;
 
 pub use crate::boundless_config::{
     BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
-    DeploymentConfig, DeploymentType, OfferParamsConfig, validate_offer_spec,
+    DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -143,6 +143,23 @@ fn attempt_for_price_multiplier(multiplier: u32, price_multiplier: u32, max_atte
     attempt
 }
 
+/// Attempt number to resume at for a stored submission. Submissions written after this field was
+/// added carry the real attempt; legacy records (`attempt == 0`) fall back to inferring it from the
+/// escalated price, which is only recoverable when the price actually escalates
+/// (`price_multiplier > 1`). Persisting the attempt is what keeps a flat-price (`== 1`) rebid budget
+/// bounded across restarts instead of resetting to 1 every time.
+fn resume_attempt(submission: &Submission, price_multiplier: u32, max_attempts: u32) -> u64 {
+    if submission.attempt > 0 {
+        submission.attempt
+    } else {
+        attempt_for_price_multiplier(
+            submission.max_price_multiplier,
+            price_multiplier,
+            max_attempts,
+        )
+    }
+}
+
 const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool {
     attempt > 0 && attempt <= max_attempts as u64
 }
@@ -152,8 +169,6 @@ enum NoLockTimeoutAction {
     Rebid,
     Abort,
 }
-
-const MIN_REBID_TIMEOUT_MS: u64 = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NoLockTimeout {
@@ -281,6 +296,9 @@ struct Submission {
     expires_at: u64,
     submitted_at: u64,
     max_price_multiplier: u32,
+    // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
+    // rebid budget when the price is flat (`rebid_price_multiplier == 1`).
+    attempt: u64,
 }
 
 struct FreshSubmissionContext<'a> {
@@ -296,6 +314,7 @@ struct FreshSubmissionContext<'a> {
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
     max_price_multiplier: u32,
+    attempt: u64,
 }
 
 enum BoundlessAttemptError {
@@ -334,6 +353,7 @@ async fn publish_boundless_progress(
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     submitted_at: submission.submitted_at,
                     max_price_multiplier,
+                    rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
             .await;
@@ -373,6 +393,7 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             expires_at: value.expires_at,
             submitted_at: value.submitted_at,
             max_price_multiplier: value.max_price_multiplier.max(1),
+            attempt: u64::from(value.rebid_attempt),
         })
     }
 }
@@ -670,6 +691,7 @@ impl BoundlessProver {
         client: &Client,
         request: &ProofRequest,
         max_price_multiplier: u32,
+        attempt: u64,
     ) -> RaikoResult<Submission> {
         let market_request_id = retry_external("submit boundless offchain request", || async {
             client
@@ -686,6 +708,7 @@ impl BoundlessProver {
             expires_at: request.expires_at(),
             submitted_at: now_secs(),
             max_price_multiplier,
+            attempt,
         })
     }
 
@@ -700,6 +723,7 @@ impl BoundlessProver {
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
         max_price_multiplier: u32,
+        attempt: u64,
     ) -> RaikoResult<Submission> {
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
@@ -738,6 +762,7 @@ impl BoundlessProver {
             expires_at: request.expires_at(),
             submitted_at: now_secs(),
             max_price_multiplier,
+            attempt,
         };
         publish_boundless_progress(
             observer,
@@ -798,7 +823,12 @@ impl BoundlessProver {
 
         if self.config.offchain {
             let submission = self
-                .submit_request_offchain(context.client, &request, context.max_price_multiplier)
+                .submit_request_offchain(
+                    context.client,
+                    &request,
+                    context.max_price_multiplier,
+                    context.attempt,
+                )
                 .await?;
             publish_boundless_progress(
                 context.observer,
@@ -823,6 +853,7 @@ impl BoundlessProver {
             context.quoted_mcycles_count,
             context.evaluated_mcycles_count,
             context.max_price_multiplier,
+            context.attempt,
         )
         .await
     }
@@ -1070,8 +1101,8 @@ impl BoundlessProver {
 
         loop {
             let submission = if let Some(submission) = resume_submission.take() {
-                attempt = attempt.max(attempt_for_price_multiplier(
-                    submission.max_price_multiplier,
+                attempt = attempt.max(resume_attempt(
+                    &submission,
                     self.config.rebid_price_multiplier,
                     self.config.rebid_max_attempts,
                 ));
@@ -1113,6 +1144,7 @@ impl BoundlessProver {
                         self.config.rebid_price_multiplier,
                         self.config.rebid_max_attempts,
                     ),
+                    attempt,
                 }))
                 .await?
             };
@@ -1798,6 +1830,56 @@ mod tests {
             attempt_for_price_multiplier(32, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
             5
         );
+    }
+
+    fn test_submission(max_price_multiplier: u32, attempt: u64) -> super::Submission {
+        super::Submission {
+            market_request_id: U256::from(1u64),
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            expires_at: 1,
+            submitted_at: 1,
+            max_price_multiplier,
+            attempt,
+        }
+    }
+
+    #[test]
+    fn resume_attempt_prefers_persisted_attempt() {
+        // A persisted attempt is restored verbatim, even for flat-price rebids
+        // (rebid_price_multiplier == 1) where the price cannot encode the attempt.
+        let submission = test_submission(1, 3);
+        assert_eq!(
+            super::resume_attempt(&submission, 1, TEST_REBID_MAX_ATTEMPTS),
+            3
+        );
+        assert_eq!(
+            super::resume_attempt(
+                &submission,
+                TEST_REBID_PRICE_MULTIPLIER,
+                TEST_REBID_MAX_ATTEMPTS
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn resume_attempt_falls_back_to_price_for_legacy_records() {
+        // Legacy records predate the attempt field (attempt == 0): recover it from the escalated
+        // price when the price actually escalates...
+        let escalated = test_submission(4, 0);
+        assert_eq!(
+            super::resume_attempt(
+                &escalated,
+                TEST_REBID_PRICE_MULTIPLIER,
+                TEST_REBID_MAX_ATTEMPTS
+            ),
+            attempt_for_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS)
+        );
+        // ...but a flat-price legacy record is unrecoverable and falls back to 1 (known limitation
+        // that only affects records written before this field existed).
+        let flat = test_submission(1, 0);
+        assert_eq!(super::resume_attempt(&flat, 1, TEST_REBID_MAX_ATTEMPTS), 1);
     }
 
     #[test]

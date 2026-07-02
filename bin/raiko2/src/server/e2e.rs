@@ -3569,6 +3569,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
             max_price_multiplier: 4,
+            rebid_attempt: 2,
         },
         updated_at,
     );

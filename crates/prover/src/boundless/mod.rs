@@ -51,9 +51,6 @@ const AGGREGATION_QUOTED_MCYCLES_STEP: u32 = 100;
 const EXTERNAL_RETRY_ATTEMPTS: u32 = 5;
 const EXTERNAL_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const EXTERNAL_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-// Cap manual max-price escalation at four doublings (16x). This gives an
-// initial quote plus four higher-price submissions.
-const RETRY_PRICE_MAX_DOUBLINGS: u64 = 4;
 const TAIKO_MAINNET_INDEXER_URL: &str = "https://d29nqt0gudcxhl.cloudfront.net/";
 
 async fn retry_external<T, F, Fut>(operation: &str, mut run: F) -> RaikoResult<T>
@@ -122,29 +119,27 @@ fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
-const fn retry_price_multiplier(attempt: u64) -> u32 {
+fn retry_price_multiplier(attempt: u64, max_price_doublings: u32) -> u32 {
     let doublings = attempt.saturating_sub(1);
-    let doublings = if doublings > RETRY_PRICE_MAX_DOUBLINGS {
-        RETRY_PRICE_MAX_DOUBLINGS
-    } else {
-        doublings
-    };
-    1_u32 << doublings
+    let doublings = doublings.min(u64::from(max_price_doublings));
+    1_u32
+        .checked_shl(u32::try_from(doublings).unwrap_or(u32::MAX))
+        .unwrap_or(u32::MAX)
 }
 
-fn attempt_for_price_multiplier(multiplier: u32) -> u64 {
+fn attempt_for_price_multiplier(multiplier: u32, max_price_doublings: u32) -> u64 {
     let multiplier = multiplier.max(1);
     let mut attempt = 1_u64;
-    while retry_price_multiplier(attempt) < multiplier
-        && attempt < RETRY_PRICE_MAX_DOUBLINGS.saturating_add(1)
+    while retry_price_multiplier(attempt, max_price_doublings) < multiplier
+        && attempt < u64::from(max_price_doublings).saturating_add(1)
     {
         attempt = attempt.saturating_add(1);
     }
     attempt
 }
 
-const fn should_rebid_unlocked_request(attempt: u64) -> bool {
-    attempt > 0 && attempt <= RETRY_PRICE_MAX_DOUBLINGS
+const fn should_rebid_unlocked_request(attempt: u64, max_price_doublings: u32) -> bool {
+    attempt > 0 && attempt <= max_price_doublings as u64
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,8 +154,12 @@ struct NoLockTimeout {
     action: NoLockTimeoutAction,
 }
 
-fn no_lock_timeout_for_attempt(attempt: u64, rebid_timeout_ms: u64) -> NoLockTimeout {
-    let action = if should_rebid_unlocked_request(attempt) {
+fn no_lock_timeout_for_attempt(
+    attempt: u64,
+    rebid_timeout_ms: u64,
+    max_price_doublings: u32,
+) -> NoLockTimeout {
+    let action = if should_rebid_unlocked_request(attempt, max_price_doublings) {
         NoLockTimeoutAction::Rebid
     } else {
         NoLockTimeoutAction::Abort
@@ -1066,6 +1065,7 @@ impl BoundlessProver {
             let submission = if let Some(submission) = resume_submission.take() {
                 attempt = attempt.max(attempt_for_price_multiplier(
                     submission.max_price_multiplier,
+                    self.config.rebid_max_price_doublings,
                 ));
                 if submission.expires_at <= now_secs() {
                     tracing::warn!(
@@ -1100,12 +1100,16 @@ impl BoundlessProver {
                     observer: observer.as_ref(),
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                    max_price_multiplier: retry_price_multiplier(attempt),
+                    max_price_multiplier: retry_price_multiplier(
+                        attempt,
+                        self.config.rebid_max_price_doublings,
+                    ),
                 }))
                 .await?
             };
             attempt = attempt.max(attempt_for_price_multiplier(
                 submission.max_price_multiplier,
+                self.config.rebid_max_price_doublings,
             ));
 
             tracing::info!(
@@ -1115,8 +1119,11 @@ impl BoundlessProver {
                 max_price_multiplier = submission.max_price_multiplier,
                 "Using Boundless market submission"
             );
-            let no_lock_timeout =
-                no_lock_timeout_for_attempt(attempt, self.config.rebid_timeout_ms);
+            let no_lock_timeout = no_lock_timeout_for_attempt(
+                attempt,
+                self.config.rebid_timeout_ms,
+                self.config.rebid_max_price_doublings,
+            );
 
             match self
                 .poll_until_fulfilled(
@@ -1517,6 +1524,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
+    const TEST_REBID_MAX_PRICE_DOUBLINGS: u32 = 4;
 
     const STORAGE_ENV_VARS: &[&str] = &[
         "BOUNDLESS_STORAGE_UPLOADER",
@@ -1711,29 +1719,65 @@ mod tests {
 
     #[test]
     fn retry_price_multiplier_allows_four_rebid_doublings() {
-        assert_eq!(retry_price_multiplier(0), 1);
-        assert_eq!(retry_price_multiplier(1), 1);
-        assert_eq!(retry_price_multiplier(2), 2);
-        assert_eq!(retry_price_multiplier(3), 4);
-        assert_eq!(retry_price_multiplier(4), 8);
-        assert_eq!(retry_price_multiplier(5), 16);
-        assert_eq!(retry_price_multiplier(6), 16);
+        assert_eq!(retry_price_multiplier(0, TEST_REBID_MAX_PRICE_DOUBLINGS), 1);
+        assert_eq!(retry_price_multiplier(1, TEST_REBID_MAX_PRICE_DOUBLINGS), 1);
+        assert_eq!(retry_price_multiplier(2, TEST_REBID_MAX_PRICE_DOUBLINGS), 2);
+        assert_eq!(retry_price_multiplier(3, TEST_REBID_MAX_PRICE_DOUBLINGS), 4);
+        assert_eq!(retry_price_multiplier(4, TEST_REBID_MAX_PRICE_DOUBLINGS), 8);
+        assert_eq!(
+            retry_price_multiplier(5, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            16
+        );
+        assert_eq!(
+            retry_price_multiplier(6, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            16
+        );
+    }
+
+    #[test]
+    fn retry_price_multiplier_uses_configured_doubling_cap() {
+        assert_eq!(retry_price_multiplier(1, 2), 1);
+        assert_eq!(retry_price_multiplier(2, 2), 2);
+        assert_eq!(retry_price_multiplier(3, 2), 4);
+        assert_eq!(retry_price_multiplier(4, 2), 4);
     }
 
     #[test]
     fn attempt_for_price_multiplier_restores_rebid_state() {
-        assert_eq!(attempt_for_price_multiplier(0), 1);
-        assert_eq!(attempt_for_price_multiplier(1), 1);
-        assert_eq!(attempt_for_price_multiplier(2), 2);
-        assert_eq!(attempt_for_price_multiplier(4), 3);
-        assert_eq!(attempt_for_price_multiplier(8), 4);
-        assert_eq!(attempt_for_price_multiplier(16), 5);
-        assert_eq!(attempt_for_price_multiplier(32), 5);
+        assert_eq!(
+            attempt_for_price_multiplier(0, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            1
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(1, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            1
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(2, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            2
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(4, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            3
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(8, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            4
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(16, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            5
+        );
+        assert_eq!(
+            attempt_for_price_multiplier(32, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            5
+        );
     }
 
     #[test]
     fn no_lock_deadline_uses_submission_wall_clock() {
-        let timeout = no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS);
+        let timeout =
+            no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_PRICE_DOUBLINGS);
 
         assert!(!no_lock_deadline_elapsed(1_000, timeout, 1_299));
         assert!(no_lock_deadline_elapsed(1_000, timeout, 1_300));
@@ -1742,7 +1786,7 @@ mod tests {
 
     #[test]
     fn no_lock_timeout_uses_configured_rebid_delay() {
-        let timeout = no_lock_timeout_for_attempt(1, 900_000);
+        let timeout = no_lock_timeout_for_attempt(1, 900_000, TEST_REBID_MAX_PRICE_DOUBLINGS);
 
         assert_eq!(timeout.delay, Duration::from_millis(900_000));
         assert_eq!(timeout.action, NoLockTimeoutAction::Rebid);
@@ -1750,30 +1794,59 @@ mod tests {
 
     #[test]
     fn no_lock_rebid_stops_after_four_higher_price_requests() {
-        assert!(!should_rebid_unlocked_request(0));
-        assert!(should_rebid_unlocked_request(1));
-        assert!(should_rebid_unlocked_request(2));
-        assert!(should_rebid_unlocked_request(3));
-        assert!(should_rebid_unlocked_request(4));
-        assert!(!should_rebid_unlocked_request(5));
+        assert!(!should_rebid_unlocked_request(
+            0,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+        assert!(should_rebid_unlocked_request(
+            1,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+        assert!(should_rebid_unlocked_request(
+            2,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+        assert!(should_rebid_unlocked_request(
+            3,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+        assert!(should_rebid_unlocked_request(
+            4,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+        assert!(!should_rebid_unlocked_request(
+            5,
+            TEST_REBID_MAX_PRICE_DOUBLINGS
+        ));
+    }
+
+    #[test]
+    fn no_lock_rebid_uses_configured_doubling_cap() {
+        assert!(should_rebid_unlocked_request(1, 2));
+        assert!(should_rebid_unlocked_request(2, 2));
+        assert!(!should_rebid_unlocked_request(3, 2));
     }
 
     #[test]
     fn no_lock_timeout_aborts_after_final_rebid_attempt() {
         assert_eq!(
-            no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS).action,
+            no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_PRICE_DOUBLINGS)
+                .action,
             NoLockTimeoutAction::Rebid
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(4, TEST_REBID_TIMEOUT_MS).action,
+            no_lock_timeout_for_attempt(4, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_PRICE_DOUBLINGS)
+                .action,
             NoLockTimeoutAction::Rebid
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS).action,
+            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_PRICE_DOUBLINGS)
+                .action,
             NoLockTimeoutAction::Abort
         );
         assert_eq!(
-            no_lock_timeout_for_attempt(6, TEST_REBID_TIMEOUT_MS).action,
+            no_lock_timeout_for_attempt(6, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_PRICE_DOUBLINGS)
+                .action,
             NoLockTimeoutAction::Abort
         );
     }
@@ -1824,12 +1897,30 @@ mod tests {
 
     #[test]
     fn retry_price_multiplier_doubles_per_attempt_with_cap() {
-        assert_eq!(super::retry_price_multiplier(1), 1);
-        assert_eq!(super::retry_price_multiplier(2), 2);
-        assert_eq!(super::retry_price_multiplier(3), 4);
-        assert_eq!(super::retry_price_multiplier(4), 8);
-        assert_eq!(super::retry_price_multiplier(5), 16);
-        assert_eq!(super::retry_price_multiplier(100), 16);
+        assert_eq!(
+            super::retry_price_multiplier(1, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            1
+        );
+        assert_eq!(
+            super::retry_price_multiplier(2, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            2
+        );
+        assert_eq!(
+            super::retry_price_multiplier(3, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            4
+        );
+        assert_eq!(
+            super::retry_price_multiplier(4, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            8
+        );
+        assert_eq!(
+            super::retry_price_multiplier(5, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            16
+        );
+        assert_eq!(
+            super::retry_price_multiplier(100, TEST_REBID_MAX_PRICE_DOUBLINGS),
+            16
+        );
     }
 
     #[test]

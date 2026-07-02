@@ -38,8 +38,9 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
-ACL keys may set `rate_limit_per_minute`; rate-limited endpoints return `429 rate_limited` after
-the key exceeds its configured 60-second request window.
+ACL keys may set `rate_limit_per_minute`, which defaults to `200` requests per minute when omitted.
+Rate-limited endpoints return `429 rate_limited` after the key exceeds its 60-second request
+window.
 
 `/v1/...` routes are removed.
 
@@ -1008,6 +1009,9 @@ All API errors use the Hoodi-style envelope:
 - `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It is separate from the overall `prover.boundless.timeout_ms` fulfillment deadline.
+- `prover.boundless.rebid_max_price_doublings` defaults to `4` and caps no-lock rebid price
+  escalation. `rpc.pairs[*].boundless` can override `poll_interval_ms`, `timeout_ms`,
+  `rebid_timeout_ms`, and `rebid_max_price_doublings` per `(network, l1_network)` pair.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` delegates price selection to the Boundless SDK price provider, may set
@@ -1016,8 +1020,9 @@ All API errors use the Hoodi-style envelope:
   is multiplied by the quoted mcycle count; SDK autoprice offers whose resulting `maxPrice` exceeds
   that total cap fail before submission. `market` must omit `min_price_per_mcycle`.
 - Expired Boundless requests are resubmitted automatically. `manual` pricing doubles the
-  offer's max price on each resubmission, capped at `4x` configured `max_price_per_mcycle`;
-  min price is unchanged. `market` resubmissions are re-priced by the SDK price provider.
+  offer's max price on each resubmission up to
+  `prover.boundless.rebid_max_price_doublings`; min price is unchanged. `market` resubmissions are
+  re-priced by the SDK price provider.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

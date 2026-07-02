@@ -3,8 +3,8 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, OfferParamsConfig,
-        validate_offer_spec,
+        BatchQuoteStrategy, DEFAULT_REBID_MAX_PRICE_DOUBLINGS, DEFAULT_REBID_TIMEOUT_MS,
+        DeploymentConfig, OfferParamsConfig, REBID_MAX_PRICE_DOUBLINGS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -275,6 +275,8 @@ pub struct BoundlessConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_boundless_rebid_timeout_ms")]
     pub rebid_timeout_ms: u64,
+    #[serde(default = "default_boundless_rebid_max_price_doublings")]
+    pub rebid_max_price_doublings: u32,
 }
 
 impl Default for BoundlessConfig {
@@ -296,6 +298,7 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
             rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
+            rebid_max_price_doublings: default_boundless_rebid_max_price_doublings(),
         }
     }
 }
@@ -311,6 +314,11 @@ impl BoundlessConfig {
         }
         if self.rebid_timeout_ms == 0 {
             bail!("prover.boundless.rebid_timeout_ms must be > 0");
+        }
+        if self.rebid_max_price_doublings > REBID_MAX_PRICE_DOUBLINGS_LIMIT {
+            bail!(
+                "prover.boundless.rebid_max_price_doublings must be <= {REBID_MAX_PRICE_DOUBLINGS_LIMIT}"
+            );
         }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
@@ -332,6 +340,18 @@ impl BoundlessConfig {
         }
         if let Some(aggregation_quote_strategy) = pair.aggregation_quote_strategy.clone() {
             merged.aggregation_quote_strategy = aggregation_quote_strategy;
+        }
+        if let Some(poll_interval_ms) = pair.poll_interval_ms {
+            merged.poll_interval_ms = poll_interval_ms;
+        }
+        if let Some(timeout_ms) = pair.timeout_ms {
+            merged.timeout_ms = timeout_ms;
+        }
+        if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
+            merged.rebid_timeout_ms = rebid_timeout_ms;
+        }
+        if let Some(rebid_max_price_doublings) = pair.rebid_max_price_doublings {
+            merged.rebid_max_price_doublings = rebid_max_price_doublings;
         }
         if let Some(batch) = &pair.offer_params.batch {
             merged.offer_params.batch = batch.clone();
@@ -360,9 +380,16 @@ const fn default_boundless_rebid_timeout_ms() -> u64 {
     DEFAULT_REBID_TIMEOUT_MS
 }
 
+const fn default_boundless_rebid_max_price_doublings() -> u32 {
+    DEFAULT_REBID_MAX_PRICE_DOUBLINGS
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ProverConfig, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig};
+    use super::{
+        ProverConfig, REBID_MAX_PRICE_DOUBLINGS_LIMIT, Sp1ExecutionMode, ZkAnyConfig,
+        ZkAnyTargetConfig,
+    };
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {
@@ -435,6 +462,20 @@ mod tests {
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
                 .contains("aggregation_quoted_mcycles")
+        );
+    }
+
+    #[test]
+    fn prover_config_rejects_excessive_boundless_rebid_doublings() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_max_price_doublings = REBID_MAX_PRICE_DOUBLINGS_LIMIT + 1;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("excessive rebid doublings should fail")
+                .to_string()
+                .contains("rebid_max_price_doublings")
         );
     }
 

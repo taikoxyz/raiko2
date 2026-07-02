@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 const STAKE_TOKEN_DECIMALS: u8 = 18;
 const DEFAULT_RISC0_EXECUTION_PO2: u32 = 20;
 pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_REBID_MAX_PRICE_DOUBLINGS: u32 = 4;
+pub const REBID_MAX_PRICE_DOUBLINGS_LIMIT: u32 = 31;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -110,6 +112,8 @@ pub struct BoundlessConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_rebid_timeout_ms")]
     pub rebid_timeout_ms: u64,
+    #[serde(default = "default_rebid_max_price_doublings")]
+    pub rebid_max_price_doublings: u32,
 }
 
 impl Default for BoundlessConfig {
@@ -136,6 +140,7 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_poll_interval_ms(),
             timeout_ms: default_timeout_ms(),
             rebid_timeout_ms: default_rebid_timeout_ms(),
+            rebid_max_price_doublings: default_rebid_max_price_doublings(),
         }
     }
 }
@@ -154,6 +159,10 @@ const fn default_timeout_ms() -> u64 {
 
 const fn default_rebid_timeout_ms() -> u64 {
     DEFAULT_REBID_TIMEOUT_MS
+}
+
+const fn default_rebid_max_price_doublings() -> u32 {
+    DEFAULT_REBID_MAX_PRICE_DOUBLINGS
 }
 
 // Default offer prices are calibrated against observed Taiko-market clearing data
@@ -304,8 +313,9 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, DeploymentType, validate_offer_spec,
+        BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
+        DEFAULT_REBID_MAX_PRICE_DOUBLINGS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig,
+        DeploymentType, validate_offer_spec,
     };
 
     #[test]
@@ -314,6 +324,10 @@ mod tests {
         assert_eq!(config.get_deployment_type(), DeploymentType::Base);
         assert!(!config.offchain);
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
+        assert_eq!(
+            config.rebid_max_price_doublings,
+            DEFAULT_REBID_MAX_PRICE_DOUBLINGS
+        );
     }
 
     #[test]

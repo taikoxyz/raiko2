@@ -6,6 +6,7 @@ use crate::config::ServerAclFeature;
 use crate::server::state::AppState;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
+pub(crate) const DEFAULT_ACL_RATE_LIMIT_PER_MINUTE: u32 = 200;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 pub(crate) fn authorize_acl_feature(
@@ -88,9 +89,7 @@ fn enforce_rate_limit(
     key_index: usize,
     limit_per_minute: Option<u32>,
 ) -> Result<(), ApiError> {
-    let Some(limit_per_minute) = limit_per_minute else {
-        return Ok(());
-    };
+    let limit_per_minute = rate_limit_or_default(limit_per_minute);
 
     let allowed = state
         .acl_rate_limiter
@@ -100,6 +99,10 @@ fn enforce_rate_limit(
         return Err(ApiError::too_many_requests("rate limit exceeded"));
     }
     Ok(())
+}
+
+fn rate_limit_or_default(limit_per_minute: Option<u32>) -> u32 {
+    limit_per_minute.unwrap_or(DEFAULT_ACL_RATE_LIMIT_PER_MINUTE)
 }
 
 fn acl_allows_feature(allow: &[ServerAclFeature], feature: ServerAclFeature) -> bool {
@@ -122,12 +125,19 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{DEFAULT_ACL_RATE_LIMIT_PER_MINUTE, constant_time_eq, rate_limit_or_default};
 
     #[test]
     fn constant_time_eq_matches_string_equality() {
         assert!(constant_time_eq("secret-api-key", "secret-api-key"));
         assert!(!constant_time_eq("secret-api-key", "secret-api-kex"));
         assert!(!constant_time_eq("secret-api-key", "secret-api-key-extra"));
+    }
+
+    #[test]
+    fn rate_limit_defaults_to_200_per_minute() {
+        assert_eq!(DEFAULT_ACL_RATE_LIMIT_PER_MINUTE, 200);
+        assert_eq!(rate_limit_or_default(None), 200);
+        assert_eq!(rate_limit_or_default(Some(600)), 600);
     }
 }

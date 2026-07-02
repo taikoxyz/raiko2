@@ -687,6 +687,7 @@ signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 rebid_timeout_ms = 300000
+rebid_max_price_doublings = 4
 
 [prover.boundless.deployment]
 deployment_type = "base"
@@ -707,18 +708,20 @@ Operator notes:
 - Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms.
+- `prover.boundless.rebid_max_price_doublings` caps no-lock rebid price escalation. The default
+  is `4`, which allows a final manual max price of `16x`.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
-  each resubmission doubles the offer's max price, capped at `4x` the configured
-  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
-  the SDK price provider.
+  each resubmission doubles the offer's max price up to
+  `prover.boundless.rebid_max_price_doublings`; the min price is unchanged. `market`
+  resubmissions are re-priced by the SDK price provider.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
-  `aggregation_quoted_mcycles`, and either offer param block for a specific
-  `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
+  `aggregation_quoted_mcycles`, runtime timeout/rebid fields, and either offer param block for a
+  specific `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
 Optional `zk_any` request sampling is configured at the server level:

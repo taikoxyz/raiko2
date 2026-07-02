@@ -14,6 +14,7 @@ port = 8080
 # [server.acl]
 # keys = [
 #   { id = "admin", key = "change-me", allow = ["admin"] },
+#   # rate_limit_per_minute defaults to 200 when omitted.
 #   { id = "submit", key = "submit-key", allow = ["prover.submit"], rate_limit_per_minute = 600 },
 # ]
 
@@ -32,11 +33,11 @@ pairs = [
   # sp1_verifier_address is the Succinct SP1 PLONK gateway on L1, not the Taiko Shasta verifier.
   # Leave these fields unset to keep that line closed.
   # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://rpc.mainnet.taiko.xyz", l2_witness_rpc = "https://rpc.mainnet.taiko.xyz", sp1_verifier_rpc_url = "https://ethereum-rpc.publicnode.com", sp1_verifier_address = "0x3B6041173B80E77f038f3F2C0f9744f04837185e" },
-  # Optional: override Boundless quote and offer params per pair.
+  # Optional: override Boundless quote, offer, and runtime params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
 # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote_strategy = "evaluated" } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", rebid_timeout_ms = 600000, rebid_max_price_doublings = 2, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
@@ -93,8 +94,8 @@ timeout_secs = 7200
 
 [prover.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
-# can replace fixed quote overrides, `aggregation_quote_strategy`, and either offer param block
-# for selected pairs.
+# can replace fixed quote overrides, `aggregation_quote_strategy`, runtime timeout/rebid fields,
+# and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
@@ -111,6 +112,8 @@ poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
 rebid_timeout_ms = 300000
+# Cap no-lock rebids to this many max-price doublings. The default 4 allows a final 16x max price.
+rebid_max_price_doublings = 4
 
 # Optional request sampling policy for proof_type=zk_any.
 # When disabled or not drawn, the server returns data.status = "zk_any_not_drawn"

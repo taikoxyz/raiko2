@@ -70,7 +70,7 @@ use super::task_metadata::{
 };
 
 /// In-memory sliding-window limiter for ACL-protected endpoints.
-/// Buckets use config indexes so duplicate key IDs do not share quota.
+/// Buckets use config indexes so each configured ACL entry gets an independent quota.
 #[derive(Default)]
 pub(crate) struct AclRateLimiter {
     requests: Mutex<HashMap<usize, VecDeque<Instant>>>,

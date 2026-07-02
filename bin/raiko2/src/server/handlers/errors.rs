@@ -74,7 +74,7 @@ const fn error_code(status: StatusCode) -> &'static str {
         StatusCode::NOT_FOUND => "not_found",
         StatusCode::UNAUTHORIZED => "unauthorized",
         StatusCode::FORBIDDEN => "forbidden",
-        StatusCode::TOO_MANY_REQUESTS => "too_many_requests",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
         StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
         _ => "internal_error",
     }

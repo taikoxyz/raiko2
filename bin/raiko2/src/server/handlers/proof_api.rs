@@ -29,8 +29,7 @@ use tokio::fs;
 use tracing::{info, warn};
 
 use super::super::auth::{
-    authorize_acl_feature, authorize_acl_feature_with_rate_limit,
-    authorize_optional_acl_feature_with_rate_limit,
+    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
 };
 use super::super::errors::ApiError;
 use super::proof_route::{

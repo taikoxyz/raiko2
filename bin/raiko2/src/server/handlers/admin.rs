@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::future::Future;
 use tracing::info;
 
-use super::auth::authorize_acl_feature;
+use super::auth::authorize_acl_feature_with_rate_limit;
 use super::errors::ApiError;
 use crate::config::ServerAclFeature;
 use crate::server::sampling::{BallotConfig, ZkAnySampler};
@@ -60,9 +60,12 @@ impl FromRequestParts<AppState> for AdminBallotReadAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let result =
-            authorize_acl_feature(state, &parts.headers, ServerAclFeature::AdminBallotRead)
-                .map(|()| Self);
+        let result = authorize_acl_feature_with_rate_limit(
+            state,
+            &parts.headers,
+            ServerAclFeature::AdminBallotRead,
+        )
+        .map(|()| Self);
         async move { result }
     }
 }
@@ -74,9 +77,12 @@ impl FromRequestParts<AppState> for AdminBallotWriteAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        let result =
-            authorize_acl_feature(state, &parts.headers, ServerAclFeature::AdminBallotWrite)
-                .map(|()| Self);
+        let result = authorize_acl_feature_with_rate_limit(
+            state,
+            &parts.headers,
+            ServerAclFeature::AdminBallotWrite,
+        )
+        .map(|()| Self);
         async move { result }
     }
 }

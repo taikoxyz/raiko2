@@ -33,9 +33,12 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `POST /proof/prune` requires `admin`
 - `POST /v3/tasks/{id}/cancel` requires `admin`
 - `POST /v3/prover/clear` requires `prover.clear`
-- `POST /v4/proof/proposal` requires `prover.submit`
-- `POST /v4/proof/aggregation` requires `prover.submit`
-- `GET /v4/tasks/{id}` requires `prover.submit`
+- `POST /v4/proof/proposal` requires `prover.submit` when a `prover.submit` or `admin`
+  ACL key is configured
+- `POST /v4/proof/aggregation` requires `prover.submit` when a `prover.submit` or
+  `admin` ACL key is configured
+- `GET /v4/tasks/{id}` requires `prover.submit` when a `prover.submit` or `admin` ACL
+  key is configured
 - `POST /v4/prover/clear` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
@@ -43,6 +46,8 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 ACL keys may set `rate_limit_per_minute`, which defaults to `200` requests per minute when omitted.
 Rate-limited endpoints return `429 rate_limited` after the key exceeds its 60-second request
 window.
+When no ACL key allows `prover.submit`, the v4 submit and task lookup endpoints are public and
+not rate-limited. Configure a `prover.submit` or `admin` key to protect that surface.
 
 `/v1/...` routes are removed.
 
@@ -186,7 +191,7 @@ Proof submission response shape:
 ```http
 POST /v4/proof/proposal
 Content-Type: application/json
-x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
+x-api-key: <required only when server.acl has allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Request:
@@ -271,7 +276,7 @@ Validation:
 ```http
 POST /v4/proof/aggregation
 Content-Type: application/json
-x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
+x-api-key: <required only when server.acl has allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Request:
@@ -349,7 +354,7 @@ aggregation progress by repeating proof submission requests, not by calling this
 
 ```http
 GET /v4/tasks/{id}
-x-api-key: <server.acl.keys[].key with allow=["prover.submit"] or allow=["admin"]>
+x-api-key: <required only when server.acl has allow=["prover.submit"] or allow=["admin"]>
 ```
 
 Path fields:

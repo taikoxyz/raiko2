@@ -542,24 +542,22 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
 }
 
 #[tokio::test]
-async fn e2e_v4_submit_returns_not_found_when_acl_feature_is_disabled() {
+async fn e2e_v4_submit_is_open_when_acl_feature_is_disabled() {
     let app = v4_acl_app(vec![acl_key(
         "clear",
         "clear-secret",
         vec![ServerAclFeature::ProverClear],
     )]);
 
-    let (status, body) = post_json_with_api_key(
-        &app,
-        "/v4/proof/proposal",
-        "clear-secret",
-        v4_proposal_request(),
-    )
-    .await;
+    let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
 
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["status"], "error");
-    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["error"], "unsupported_proof_type");
+
+    let (status, task) = get_json(&app, "/v4/tasks/v4:proposal:risc0:1:1").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{task}");
+    assert_eq!(task["error"], "task_not_found");
 }
 
 #[tokio::test]

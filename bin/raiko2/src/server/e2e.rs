@@ -697,6 +697,32 @@ async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
 }
 
 #[tokio::test]
+async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
+    // #5 narrow early-return safety: a healthy/completed aggregation row still fast-returns its status
+    // on re-POST (needs_recovery == false), WITHOUT re-deriving the submission (which reloads every
+    // sub-proof). This is the property that makes narrowing the early return safe rather than removing
+    // it — a completed aggregation whose sub-proofs later aged out must not regress to
+    // dependency_not_ready. Only rows that need recovery fall through to submit_external_aggregation.
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_proposal(&app, &engine, 5).await;
+    complete_v4_sp1_aggregation(&app, &engine, 5, 5).await;
+
+    let (status, again) = post_json_with_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        v4_sp1_aggregation_request(5, 5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["data"]["status"], "completed", "{again}");
+    assert_eq!(
+        again["data"]["proof"], "0xfixture-sp1-aggregation",
+        "{again}"
+    );
+}
+
+#[tokio::test]
 async fn e2e_v4_submit_rate_limits_acl_key() {
     let app = v4_submit_acl_app(Some(1));
 

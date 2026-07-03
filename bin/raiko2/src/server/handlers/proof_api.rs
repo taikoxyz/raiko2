@@ -120,6 +120,9 @@ struct ExternalAggregateSubmission {
     inputs: Vec<AggregateProofInput>,
     input_artifacts: Vec<AggregateInputProofArtifact>,
     request_fingerprint: String,
+    // Untagged (pre-domain-tag) fingerprint of the same request, so a v4 aggregation row registered
+    // before the `api` tag was added is still recognized as the same request instead of conflicting.
+    legacy_request_fingerprint: String,
 }
 
 struct TaskLookup {
@@ -511,6 +514,16 @@ async fn build_external_aggregate_submission(
         &prover_config,
         api,
     )?;
+    // Untagged variant of the same request, matching what pre-domain-tag v4 rows stored. Equal to
+    // `request_fingerprint` for v3 (`api = None`); differs only for v4 (`api = Some`).
+    let legacy_request_fingerprint = external_aggregate_request_fingerprint(
+        &pair,
+        route,
+        prover_type,
+        &req,
+        &prover_config,
+        None,
+    )?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
@@ -541,6 +554,7 @@ async fn build_external_aggregate_submission(
         inputs,
         input_artifacts,
         request_fingerprint,
+        legacy_request_fingerprint,
     })
 }
 

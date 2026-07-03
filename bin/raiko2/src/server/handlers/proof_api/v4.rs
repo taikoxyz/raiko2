@@ -90,23 +90,37 @@ pub(crate) async fn request_aggregation_proof(
         "proposal_id_start",
         "proposal_id_end",
     )?;
-    if state
+    if let Some(existing) = state
         .runtime
         .get_task(&task_id)
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
-        .is_some()
     {
-        let data = load_task_data(&state, &task_id)
-            .await
-            .map_err(Error::from_api_error)?;
-        return Ok(Json(wire::TaskResponse {
-            status: "ok",
-            proof_type: proof_type.as_str().to_string(),
-            proposal_id_start,
-            proposal_id_end,
-            data: aggregation_task_data(&state, data).await?,
-        }));
+        // Fast path: a healthy existing row returns its status without re-deriving the submission
+        // (which reloads every sub-proof and would fail if any aged out). Only when the row actually
+        // needs recovery — completed-but-missing-artifact, or stale/failed/orphaned — fall through to
+        // submit_external_aggregation so handle_existing_external_aggregate_task can re-enqueue it,
+        // mirroring the proposal path (which has no early return).
+        let existing_metadata = parse_task_metadata(&existing).map_err(Error::from_api_error)?;
+        let needs_recovery =
+            completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+                .await
+                .map_err(Error::from_api_error)?
+                || should_reenqueue_existing_submission(&state, &existing, &existing_metadata)
+                    .await
+                    .map_err(Error::from_api_error)?;
+        if !needs_recovery {
+            let data = load_task_data(&state, &task_id)
+                .await
+                .map_err(Error::from_api_error)?;
+            return Ok(Json(wire::TaskResponse {
+                status: "ok",
+                proof_type: proof_type.as_str().to_string(),
+                proposal_id_start,
+                proposal_id_end,
+                data: aggregation_task_data(&state, data).await?,
+            }));
+        }
     }
     let submission = aggregation_submission(&state, req).await?;
     submit_external_aggregation(&state, &submission).await?;
@@ -667,6 +681,27 @@ fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result
     Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
 }
 
+fn legacy_proposal_request_fingerprint(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, Error> {
+    // Pre-F3 fingerprint shape: it also included the server-derived `route` and `prover_type`. Kept so
+    // a v4 proposal row registered before F3 is still recognized as the same request on re-POST across
+    // a rolling upgrade (when the prover config is unchanged), instead of 409-ing on the new shape.
+    let payload = serde_json::json!({
+        "api": "v4/proof/proposal",
+        "network_pair": submission.pair.key,
+        "route": submission.route.route.to_string(),
+        "requested_proof_type": submission.requested_proof_type.as_str(),
+        "prover_type": submission.prover_type.map(ProverType::as_str),
+        "prover": submission.prover.as_deref(),
+        "proposals": submission.proposals,
+        "aggregate_requested": submission.aggregate_requested,
+    });
+    let encoded = serde_json::to_vec(&payload)
+        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
+    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+}
+
 async fn submit_submission(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
@@ -679,7 +714,12 @@ async fn submit_submission(
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+        let legacy_fingerprint = legacy_proposal_request_fingerprint(submission)?;
+        if existing.request_fingerprint.as_deref() != Some(request_fingerprint)
+            && existing.request_fingerprint.as_deref() != Some(legacy_fingerprint.as_str())
+        {
+            // A stored legacy (pre-F3) fingerprint for the same request is treated as a match above,
+            // so an in-flight/completed row registered before this deploy still polls by re-POST.
             // The v4 task id pins (proof_type, proposal range). If the previous attempt for that
             // slot terminally failed or was cancelled, let a corrected resubmission replace it
             // (e.g. an L1 reorg changed l1_inclusion_block_number) instead of wedging the slot with
@@ -766,6 +806,8 @@ async fn submit_external_aggregation(
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
         if existing.request_fingerprint.as_deref() != Some(submission.request_fingerprint.as_str())
+            && existing.request_fingerprint.as_deref()
+                != Some(submission.legacy_request_fingerprint.as_str())
         {
             return Err(Error::request_conflict(
                 "same aggregation task key was submitted with different proof input",
@@ -809,6 +851,8 @@ async fn submit_external_aggregation(
         raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
             if existing.request_fingerprint.as_deref()
                 != Some(submission.request_fingerprint.as_str())
+                && existing.request_fingerprint.as_deref()
+                    != Some(submission.legacy_request_fingerprint.as_str())
             {
                 return Err(Error::request_conflict(
                     "same aggregation task key was submitted with different proof input",

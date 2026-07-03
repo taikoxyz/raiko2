@@ -84,9 +84,12 @@ pub struct BoundlessSubmissionProgress {
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
     pub max_price_multiplier: u32,
-    /// Rebid attempt number that produced this submission (1-based). Persisted so a resume after
-    /// restart restores the attempt count even when rebids reuse the same price
-    /// (`rebid_price_multiplier == 1`), which cannot be recovered from `max_price_multiplier` alone.
+    /// Rebid attempt number that produced this submission: `1`-based, or `0` when not recorded.
+    /// `#[serde(default)]` supplies `0` for legacy records written before this field existed; the
+    /// resume path treats `0` as "unknown" and falls back to inferring the attempt from the price.
+    /// Persisted so a resume after restart restores the attempt count even when rebids reuse the same
+    /// price (`rebid_price_multiplier == 1`), which cannot be recovered from `max_price_multiplier`
+    /// alone.
     #[serde(default)]
     pub rebid_attempt: u32,
 }

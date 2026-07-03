@@ -583,6 +583,99 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
 }
 
 #[tokio::test]
+async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
+    // F3 regression: once a proposal task for a (proof_type, range) slot is terminal (cancelled via
+    // clear), a corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
+    // l1_inclusion_block_number) must be accepted and replace the terminal task, not wedge the slot
+    // with a permanent request_conflict. The fixture engine stays quiescent until driven, so the
+    // task stays `registered` until `clear` cancels it — do NOT drive the engine before clearing, or
+    // the task could complete and become non-cancellable.
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let original = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 1,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+
+    // 1) Register the proposal task.
+    let (status, first) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        original.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert_eq!(first["data"]["status"], "registered");
+
+    // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
+    let (status, cleared) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "clear-secret",
+        json!({ "proof_type": "sp1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    // Exactly one runtime root row exists for this slot (v4:proposal:sp1:1:1); engine child tasks
+    // are not runtime_tasks rows, so the sp1-scoped clear cancels exactly one task.
+    assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
+
+    // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
+    //    different fingerprint. Pre-fix this conflicted forever; post-fix the terminal task is
+    //    replaced and the slot re-registers.
+    let corrected = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 2,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+    let (status, replaced) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert_eq!(replaced["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert_eq!(replaced["data"]["status"], "registered");
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
+    // F3 boundary: the terminal-escape applies ONLY to Failed/Cancelled tasks. A *completed*
+    // proposal must still reject a resubmission whose fingerprint differs — a corrected payload
+    // cannot silently overwrite a proof that already exists. Under the v4 recovery contract a source
+    // 409 is returned as HTTP 200 with error `request_conflict` (it does not replace).
+    let (app, engine) = v4_sp1_acl_app();
+
+    // Drive proposal (1,1) to completion (l1_inclusion_block_number = 1 in v4_sp1_proposal_request).
+    complete_v4_sp1_proposal(&app, &engine, 1).await;
+
+    // Resubmit the same slot with a different l1_inclusion_block_number -> different fingerprint.
+    // The existing task is Completed (not Failed/Cancelled), so submit must conflict, not replace.
+    let mismatched = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 999,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", mismatched).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error", "{body}");
+    assert_eq!(body["error"], "request_conflict", "{body}");
+}
+
+#[tokio::test]
 async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
     let (app, _engine) = v4_sp1_acl_app();
 
@@ -600,6 +693,32 @@ async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
     assert_eq!(
         body["message"],
         "proposal proof 7 for proof_type=sp1 is not completed in local state"
+    );
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
+    // #5 narrow early-return safety: a healthy/completed aggregation row still fast-returns its status
+    // on re-POST (needs_recovery == false), WITHOUT re-deriving the submission (which reloads every
+    // sub-proof). This is the property that makes narrowing the early return safe rather than removing
+    // it — a completed aggregation whose sub-proofs later aged out must not regress to
+    // dependency_not_ready. Only rows that need recovery fall through to submit_external_aggregation.
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_proposal(&app, &engine, 5).await;
+    complete_v4_sp1_aggregation(&app, &engine, 5, 5).await;
+
+    let (status, again) = post_json_with_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        v4_sp1_aggregation_request(5, 5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["data"]["status"], "completed", "{again}");
+    assert_eq!(
+        again["data"]["proof"], "0xfixture-sp1-aggregation",
+        "{again}"
     );
 }
 
@@ -3528,6 +3647,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
             max_price_multiplier: 4,
+            rebid_attempt: 2,
         },
         updated_at,
     );

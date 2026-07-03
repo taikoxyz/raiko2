@@ -9,23 +9,26 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_prover::sp1_config::Sp1RequestContext;
+use std::sync::Arc;
 
 use super::super::proof_types::v4 as wire;
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
-    CanonicalBatchSubmission, CanonicalProofRoute, ClearProverStatus, ExternalAggregateSubmission,
-    L2BlockRange, PlannedAggregateTask, ProofArtifactMaterial, ProofStatus, ProposalTask,
-    ProverStatus, ProverTaskScope, ProverType, PublicProverArgs, ResolvedNetworkPair,
-    ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref, augment_system_prover_config,
-    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
-    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
-    clear_prover_tasks, collect_prover_status, completed_root_artifact_missing,
-    handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
+    CanonicalBatchSubmission, CanonicalProofRoute, ClearProverStatus, EngineHandle,
+    ExternalAggregateSubmission, L2BlockRange, PlannedAggregateTask, ProofArtifactMaterial,
+    ProofStatus, ProposalTask, ProverStatus, ProverTaskScope, ProverType, PublicProverArgs,
+    ResolvedNetworkPair, ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref,
+    augment_system_prover_config, authorize_acl_feature_with_rate_limit,
+    authorize_optional_acl_feature_with_rate_limit, build_canonical_batch_submission,
+    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
+    collect_prover_status, completed_root_artifact_missing, handle_created_batch_task,
+    handle_created_external_aggregate_task, handle_existing_batch_task,
     handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
     parse_task_metadata, prover_type_for_proof_type, recover_existing_task,
     reenqueue_existing_batch_task, register_batch_task, register_external_aggregate_task,
-    resolve_engine, resolved_pair, route_for_proof_type, should_reenqueue_existing_submission,
-    validate_aggregate_route_specific_request, validate_public_prover_args,
+    replace_existing_batch_task, resolve_engine, resolved_pair, route_for_proof_type,
+    should_reenqueue_existing_submission, validate_aggregate_route_specific_request,
+    validate_public_prover_args,
 };
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
@@ -87,23 +90,37 @@ pub(crate) async fn request_aggregation_proof(
         "proposal_id_start",
         "proposal_id_end",
     )?;
-    if state
+    if let Some(existing) = state
         .runtime
         .get_task(&task_id)
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
-        .is_some()
     {
-        let data = load_task_data(&state, &task_id)
-            .await
-            .map_err(Error::from_api_error)?;
-        return Ok(Json(wire::TaskResponse {
-            status: "ok",
-            proof_type: proof_type.as_str().to_string(),
-            proposal_id_start,
-            proposal_id_end,
-            data: aggregation_task_data(&state, data).await?,
-        }));
+        // Fast path: a healthy existing row returns its status without re-deriving the submission
+        // (which reloads every sub-proof and would fail if any aged out). Only when the row actually
+        // needs recovery — completed-but-missing-artifact, or stale/failed/orphaned — fall through to
+        // submit_external_aggregation so handle_existing_external_aggregate_task can re-enqueue it,
+        // mirroring the proposal path (which has no early return).
+        let existing_metadata = parse_task_metadata(&existing).map_err(Error::from_api_error)?;
+        let needs_recovery =
+            completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+                .await
+                .map_err(Error::from_api_error)?
+                || should_reenqueue_existing_submission(&state, &existing, &existing_metadata)
+                    .await
+                    .map_err(Error::from_api_error)?;
+        if !needs_recovery {
+            let data = load_task_data(&state, &task_id)
+                .await
+                .map_err(Error::from_api_error)?;
+            return Ok(Json(wire::TaskResponse {
+                status: "ok",
+                proof_type: proof_type.as_str().to_string(),
+                proposal_id_start,
+                proposal_id_end,
+                data: aggregation_task_data(&state, data).await?,
+            }));
+        }
     }
     let submission = aggregation_submission(&state, req).await?;
     submit_external_aggregation(&state, &submission).await?;
@@ -474,9 +491,10 @@ async fn aggregation_submission(
         blob_proof_type: None,
         prover_args: PublicProverArgs::default(),
     };
-    let mut submission = build_external_aggregate_submission(state, aggregate_req)
-        .await
-        .map_err(Error::from_api_error)?;
+    let mut submission =
+        build_external_aggregate_submission(state, aggregate_req, Some("v4/proof/aggregation"))
+            .await
+            .map_err(Error::from_api_error)?;
     submission.public_task_id =
         aggregation_task_id(proof_type, req.proposal_id_start, req.proposal_id_end);
     Ok(submission)
@@ -646,7 +664,29 @@ fn missing_local_proposal_proof(proof_type: wire::ProofType, proposal_id: u64) -
 }
 
 fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, Error> {
-    // Use normalized submission data as the idempotency key, not the caller's raw JSON shape.
+    // Only client-supplied request data belongs in the idempotency key, not the caller's raw JSON
+    // shape. `route` and `prover_type` are derived from server prover config; including them made a
+    // benign config change (mock->real, local->network) mint a different fingerprint for a
+    // byte-identical client request, permanently 409-ing the documented poll-by-re-POST.
+    let payload = serde_json::json!({
+        "api": "v4/proof/proposal",
+        "network_pair": submission.pair.key,
+        "requested_proof_type": submission.requested_proof_type.as_str(),
+        "prover": submission.prover.as_deref(),
+        "proposals": submission.proposals,
+        "aggregate_requested": submission.aggregate_requested,
+    });
+    let encoded = serde_json::to_vec(&payload)
+        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
+    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+}
+
+fn legacy_proposal_request_fingerprint(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, Error> {
+    // Pre-F3 fingerprint shape: it also included the server-derived `route` and `prover_type`. Kept so
+    // a v4 proposal row registered before F3 is still recognized as the same request on re-POST across
+    // a rolling upgrade (when the prover config is unchanged), instead of 409-ing on the new shape.
     let payload = serde_json::json!({
         "api": "v4/proof/proposal",
         "network_pair": submission.pair.key,
@@ -674,7 +714,44 @@ async fn submit_submission(
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+        let legacy_fingerprint = legacy_proposal_request_fingerprint(submission)?;
+        if existing.request_fingerprint.as_deref() != Some(request_fingerprint)
+            && existing.request_fingerprint.as_deref() != Some(legacy_fingerprint.as_str())
+        {
+            // A stored legacy (pre-F3) fingerprint for the same request is treated as a match above,
+            // so an in-flight/completed row registered before this deploy still polls by re-POST.
+            // The v4 task id pins (proof_type, proposal range). If the previous attempt for that
+            // slot terminally failed or was cancelled, let a corrected resubmission replace it
+            // (e.g. an L1 reorg changed l1_inclusion_block_number) instead of wedging the slot with
+            // a permanent 409. Completed and in-flight tasks still conflict.
+            if matches!(
+                existing.runner_status,
+                raiko2_runtime::RunnerStatus::Failed | raiko2_runtime::RunnerStatus::Cancelled
+            ) {
+                // Gate on backend availability BEFORE replacing the row: replace_existing_batch_task
+                // mutates runtime state and only resolves the engine late (in
+                // handle_created_batch_task), so without this an unavailable backend would mutate the
+                // terminal slot and return 404 task_not_found instead of 400 unsupported_proof_type —
+                // reopening F5 through the F3 replacement path.
+                ensure_engine_available(
+                    state,
+                    &submission.pair.key,
+                    submission.route.pipeline_key(),
+                    submission.requested_proof_type.as_str(),
+                )?;
+                let existing_metadata =
+                    parse_task_metadata(&existing).map_err(Error::from_api_error)?;
+                replace_existing_batch_task(
+                    state,
+                    submission,
+                    &existing,
+                    &existing_metadata,
+                    Some(request_fingerprint),
+                )
+                .await
+                .map_err(Error::from_api_error)?;
+                return Ok(());
+            }
             return Err(Error::request_conflict(
                 "same proof task key was submitted with different proof input",
             ));
@@ -689,7 +766,7 @@ async fn submit_submission(
         state,
         &submission.pair.key,
         submission.route.pipeline_key(),
-        submission.requested_proof_type,
+        submission.requested_proof_type.as_str(),
     )?;
     let plan = build_submission_plan(&state.runtime, submission, request_fingerprint)
         .await
@@ -729,13 +806,19 @@ async fn submit_external_aggregation(
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
         if existing.request_fingerprint.as_deref() != Some(submission.request_fingerprint.as_str())
+            && existing.request_fingerprint.as_deref()
+                != Some(submission.legacy_request_fingerprint.as_str())
         {
             return Err(Error::request_conflict(
                 "same aggregation task key was submitted with different proof input",
             ));
         }
-        let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())
-            .map_err(Error::from_api_error)?;
+        let engine = ensure_engine_available(
+            state,
+            &submission.pair.key,
+            submission.route.pipeline_key(),
+            submission.route.proof_type(),
+        )?;
         handle_existing_external_aggregate_task(state, &engine, submission, existing)
             .await
             .map_err(Error::from_api_error)?;
@@ -747,14 +830,39 @@ async fn submit_external_aggregation(
         task_id: submission.task_id.clone(),
         request: submission.request.clone(),
     };
-    let engine = resolve_engine(state, &submission.pair.key, submission.route.pipeline_key())
-        .map_err(Error::from_api_error)?;
-    register_external_aggregate_task(state, submission, &aggregate)
+    let engine = ensure_engine_available(
+        state,
+        &submission.pair.key,
+        submission.route.pipeline_key(),
+        submission.route.proof_type(),
+    )?;
+    // Honor the registration outcome instead of assuming Created: a concurrent duplicate (or a
+    // fingerprint that already maps to a task) must reuse the existing task, not re-enqueue the
+    // engine or run the created-path cleanup against a task another request owns.
+    match register_external_aggregate_task(state, submission, &aggregate)
         .await
-        .map_err(Error::from_api_error)?;
-    handle_created_external_aggregate_task(state, &engine, submission, &aggregate)
-        .await
-        .map_err(Error::from_api_error)?;
+        .map_err(Error::from_api_error)?
+    {
+        raiko2_runtime::TaskRegistrationOutcome::Created(_) => {
+            handle_created_external_aggregate_task(state, &engine, submission, &aggregate)
+                .await
+                .map_err(Error::from_api_error)?;
+        }
+        raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
+            if existing.request_fingerprint.as_deref()
+                != Some(submission.request_fingerprint.as_str())
+                && existing.request_fingerprint.as_deref()
+                    != Some(submission.legacy_request_fingerprint.as_str())
+            {
+                return Err(Error::request_conflict(
+                    "same aggregation task key was submitted with different proof input",
+                ));
+            }
+            handle_existing_external_aggregate_task(state, &engine, submission, existing)
+                .await
+                .map_err(Error::from_api_error)?;
+        }
+    }
     Ok(())
 }
 
@@ -762,17 +870,17 @@ fn ensure_engine_available(
     state: &AppState,
     pair_key: &str,
     pipeline_key: raiko2_pipeline::PipelineKey,
-    proof_type: BatchProofType,
-) -> Result<(), Error> {
-    resolve_engine(state, pair_key, pipeline_key)
-        .map(|_| ())
-        .map_err(|err| match err.status {
-            StatusCode::NOT_FOUND => Error::unsupported_proof_type(format!(
-                "proof_type={} is not supported by this server route",
-                proof_type.as_str()
-            )),
-            _ => Error::from_api_error(err),
-        })
+    proof_type: impl std::fmt::Display,
+) -> Result<Arc<dyn EngineHandle>, Error> {
+    // Single source of truth for "backend not served here": callers that need the engine handle
+    // (aggregation) and callers that only gate availability (proposal) share this NOT_FOUND mapping
+    // so an unavailable pipeline is always a 400 unsupported_proof_type, never a 404 task_not_found.
+    resolve_engine(state, pair_key, pipeline_key).map_err(|err| match err.status {
+        StatusCode::NOT_FOUND => Error::unsupported_proof_type(format!(
+            "proof_type={proof_type} is not supported by this server route"
+        )),
+        _ => Error::from_api_error(err),
+    })
 }
 
 async fn proposal_task_data(
@@ -1011,4 +1119,11 @@ pub(super) fn collect_inclusive_range_for_test(
     end_field: &'static str,
 ) -> Result<Vec<u64>, Error> {
     collect_inclusive_range(start, end, start_field, end_field)
+}
+
+#[cfg(test)]
+pub(super) fn proposal_request_fingerprint_for_test(
+    submission: &CanonicalBatchSubmission,
+) -> Result<String, Error> {
+    proposal_request_fingerprint(submission)
 }

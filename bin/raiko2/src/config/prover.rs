@@ -4,8 +4,8 @@ use raiko2_primitives::{GuestInputAbi, ProofType};
 use raiko2_prover::{
     boundless_config::{
         BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_MULTIPLIER,
-        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, OfferParamsConfig, REBID_MAX_ATTEMPTS_LIMIT,
-        validate_offer_spec,
+        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, MIN_REBID_TIMEOUT_MS, OfferParamsConfig,
+        REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -13,8 +13,6 @@ use raiko2_prover::{
 use serde::{Deserialize, Serialize};
 
 use super::BoundlessPairConfig;
-
-const REBID_TIMEOUT_MIN_MS: u64 = 1_000;
 
 /// Prover configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -318,8 +316,8 @@ impl BoundlessConfig {
         if matches!(self.aggregation_quoted_mcycles, Some(0)) {
             bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
         }
-        if self.rebid_timeout_ms < REBID_TIMEOUT_MIN_MS {
-            bail!("prover.boundless.rebid_timeout_ms must be >= {REBID_TIMEOUT_MIN_MS}");
+        if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
+            bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
         }
         if self.rebid_price_multiplier == 0 {
             bail!("prover.boundless.rebid_price_multiplier must be > 0");

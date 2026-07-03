@@ -259,11 +259,16 @@ Response fields:
 
 Polling and idempotency:
 
-- Clients may repeat the same `POST /v4/proof/proposal` request to poll progress.
+- Clients may repeat the same `POST /v4/proof/proposal` request to poll progress. The idempotency
+  key is derived only from client-supplied request data, so a server-side prover-config change (for
+  example mock vs. real, or local vs. network routing) does not turn a repeated identical request
+  into a conflict.
 - Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
   existing root task and current status instead of registering duplicate work.
-- Repeated requests whose proof-input fields conflict with the existing root task return
-  `request_conflict`.
+- If the existing task for that key has terminally failed or was cancelled, a request with corrected
+  proof-input fields replaces it (for example after an L1 reorg changes `l1_inclusion_block_number`).
+- Otherwise, a repeated request whose proof-input fields conflict with a still-active or completed
+  root task returns `request_conflict`.
 
 Validation:
 
@@ -502,6 +507,13 @@ Validation:
 
 - Unknown query parameters return `400 invalid_request`.
 
+Scope:
+
+- `proof_type` selects tasks by their concrete requested backend. This includes tasks submitted through
+  the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that resolved to the same
+  concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this backend, which stay
+  grouped under their original `zk_any` request.
+
 ### Clear V4 Prover Backlog
 
 ```http
@@ -559,6 +571,13 @@ Idempotency:
 Validation:
 
 - Unknown request body fields return `400 invalid_request`.
+
+Scope:
+
+- `proof_type` cancels tasks by their concrete requested backend. This includes non-terminal tasks
+  submitted through the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that
+  resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
+  backend, which are cleared through `POST /v3/prover/clear`.
 
 ## Submit Shasta Batch Proof
 

@@ -133,6 +133,8 @@ pub(crate) struct TaskRuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rebid_attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<Sp1NetworkMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_fulfillment_strategy: Option<Sp1FulfillmentStrategy>,
@@ -536,6 +538,7 @@ impl TaskRuntimeMetadata {
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
         self.max_price_multiplier = Some(progress.max_price_multiplier);
+        self.rebid_attempt = Some(progress.rebid_attempt);
     }
 
     fn apply_sp1_network_submission(

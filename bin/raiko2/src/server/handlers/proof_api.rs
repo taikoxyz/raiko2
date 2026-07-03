@@ -120,9 +120,6 @@ struct ExternalAggregateSubmission {
     inputs: Vec<AggregateProofInput>,
     input_artifacts: Vec<AggregateInputProofArtifact>,
     request_fingerprint: String,
-    // Untagged (pre-domain-tag) fingerprint of the same request, so a v4 aggregation row registered
-    // before the `api` tag was added is still recognized as the same request instead of conflicting.
-    legacy_request_fingerprint: String,
 }
 
 struct TaskLookup {
@@ -485,7 +482,6 @@ fn validate_shasta_proposal_id(field: &str, proposal_id: u64) -> Result<(), ApiE
 async fn build_external_aggregate_submission(
     state: &AppState,
     req: AggregateProofRequest,
-    api: Option<&str>,
 ) -> Result<ExternalAggregateSubmission, ApiError> {
     validate_aggregate_request_shape(&req)?;
     validate_hosted_proof_type(state.config.prover.route(), req.proof_type)?;
@@ -506,24 +502,8 @@ async fn build_external_aggregate_submission(
     validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)?;
     validate_external_aggregate_proofs(route.route, &req.proofs)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let request_fingerprint = external_aggregate_request_fingerprint(
-        &pair,
-        route,
-        prover_type,
-        &req,
-        &prover_config,
-        api,
-    )?;
-    // Untagged variant of the same request, matching what pre-domain-tag v4 rows stored. Equal to
-    // `request_fingerprint` for v3 (`api = None`); differs only for v4 (`api = Some`).
-    let legacy_request_fingerprint = external_aggregate_request_fingerprint(
-        &pair,
-        route,
-        prover_type,
-        &req,
-        &prover_config,
-        None,
-    )?;
+    let request_fingerprint =
+        external_aggregate_request_fingerprint(&pair, route, prover_type, &req, &prover_config)?;
     let public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
     let request = AggregationTaskRequest {
         request_id: aggregate_request_id(&request_fingerprint),
@@ -554,7 +534,6 @@ async fn build_external_aggregate_submission(
         inputs,
         input_artifacts,
         request_fingerprint,
-        legacy_request_fingerprint,
     })
 }
 
@@ -2543,9 +2522,8 @@ fn external_aggregate_request_fingerprint(
     prover_type: Option<ProverType>,
     req: &AggregateProofRequest,
     prover_config: &ProverTaskConfig,
-    api: Option<&str>,
 ) -> Result<String, ApiError> {
-    let mut payload = serde_json::json!({
+    let payload = serde_json::json!({
         "pair_key": pair.key.as_str(),
         "route": route.route.to_string(),
         "prover_type": prover_type.map(ProverType::as_str),
@@ -2557,15 +2535,6 @@ fn external_aggregate_request_fingerprint(
         "prover": req.prover.as_deref(),
         "blob_proof_type": req.blob_proof_type.as_deref(),
     });
-    // Domain-separate per API version when requested. Omitting the key entirely (v3) keeps the
-    // legacy fingerprint byte-identical; v4 tags its key so a v3 aggregation of the same range can
-    // never own the v4 task's fingerprint (which would otherwise block the v4 row from registering).
-    if let (Some(api), Some(map)) = (api, payload.as_object_mut()) {
-        map.insert(
-            "api".to_string(),
-            serde_json::Value::String(api.to_string()),
-        );
-    }
     let encoded = serde_json::to_vec(&payload).map_err(|err| {
         ApiError::internal(format!(
             "failed to serialize aggregate request fingerprint: {err}"
@@ -2973,7 +2942,7 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BoundlessPairConfig, Config, NetworkPairConfig, ServerAclKey};
+    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
     use axum::{
@@ -4388,49 +4357,6 @@ mod tests {
         assert_ne!(sgx_fingerprint, sgxgeth_fingerprint);
     }
 
-    #[test]
-    fn v4_aggregate_fingerprint_is_domain_separated_from_v3() {
-        // A v3 aggregation and a v4 aggregation of the same range/proofs must not share a request
-        // fingerprint: the fingerprint is the runtime idempotency key, and a v3 task owning it would
-        // block the deterministic v4 row from ever registering, wedging /v4 with a permanent 404 (F1).
-        let route = native_local_route();
-        let pair = resolved_pair();
-        let config = ProverTaskConfig::default();
-        let req = AggregateProofRequest {
-            aggregation_ids: vec![7],
-            proofs: vec![valid_native_proof()],
-            proof_type: BatchProofType::Native,
-            network: None,
-            l1_network: None,
-            graffiti: None,
-            prover: None,
-            blob_proof_type: None,
-            prover_args: PublicProverArgs::default(),
-        };
-
-        let v3 = external_aggregate_request_fingerprint(&pair, route, None, &req, &config, None)
-            .expect("v3 fingerprint");
-        let v4 = external_aggregate_request_fingerprint(
-            &pair,
-            route,
-            None,
-            &req,
-            &config,
-            Some("v4/proof/aggregation"),
-        )
-        .expect("v4 fingerprint");
-        assert_ne!(
-            v3, v4,
-            "v4 aggregation fingerprint must be domain-separated from v3"
-        );
-
-        // The untagged (v3) fingerprint stays deterministic and unchanged by the new parameter.
-        let v3_again =
-            external_aggregate_request_fingerprint(&pair, route, None, &req, &config, None)
-                .expect("v3 fingerprint again");
-        assert_eq!(v3, v3_again);
-    }
-
     #[tokio::test]
     async fn aggregate_plan_uses_cached_artifact_refs_and_enqueues_only_missing_proposals()
     -> Result<()> {
@@ -4708,38 +4634,10 @@ mod tests {
     }
 
     #[test]
-    fn v4_collect_inclusive_range_rejects_oversized_ranges() {
-        let err = v4::collect_inclusive_range_for_test(
-            1,
-            v4::MAX_RANGE_LEN + 1,
-            "l2_block_number_start",
-            "l2_block_number_end",
-        )
-        .expect_err("oversized range should be rejected");
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "invalid_request");
-    }
-
-    #[test]
-    fn v4_collect_inclusive_range_rejects_overflowing_ranges() {
-        let err = v4::collect_inclusive_range_for_test(
-            0,
-            u64::MAX,
-            "l2_block_number_start",
-            "l2_block_number_end",
-        )
-        .expect_err("overflowing range should be rejected");
-
-        assert_eq!(err.status, StatusCode::BAD_REQUEST);
-        assert_eq!(err.code, "invalid_request");
-    }
-
-    #[test]
     fn v4_proposal_fingerprint_ignores_server_derived_fields() {
         // route and prover_type are both derived from server prover config. A benign config change
         // (mock->real, local->network) must not change the v4 idempotency key, or the documented
-        // poll-by-re-POST would return 409 request_conflict forever for that proposal slot (F3a).
+        // poll-by-re-POST would register duplicate root work instead of reusing the same task.
         let mut local = canonical_submission(native_local_route(), false);
         local.prover_type = Some(ProverType::Mock);
         let mut remote = canonical_submission(sgx_remote_route(), false);
@@ -4763,139 +4661,28 @@ mod tests {
             base, changed,
             "client request data must still change the v4 proposal fingerprint"
         );
-    }
 
-    #[tokio::test]
-    async fn v4_completed_proof_response_returns_proof_hex() {
-        let runtime = Arc::new(
-            RuntimeManager::new(unique_test_runtime_root("v4-full-proof-artifact"))
-                .expect("runtime manager"),
-        );
-        let state = test_state(
-            runtime.clone(),
-            Arc::new(RecordingEngine::new(PipelineKey::ShastaRisc0)),
-        );
-        let task_id = "v4-completed-proof-task";
-        let proof_ref = "v4-completed-proof-ref";
-        let mut proof = valid_native_proof();
-        proof.quote = Some("0xquote".to_string());
-        proof.uuid = Some("uuid-1".to_string());
-        proof.kzg_proof = Some("0xkzg".to_string());
-        let expected = proof.proof.clone().expect("test proof hex");
-        write_test_proof_artifact(&runtime, "taiko_dev/ethereum", proof_ref, &proof)
-            .await
-            .expect("write proof artifact");
-
-        let metadata = task_metadata_with_stage(Some("proposal"));
-        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
-        record.task_id = task_id.to_string();
-        runtime.upsert_task(&record).await.expect("persist task");
-
-        let returned = v4::proof_from_status(
-            &state,
-            task_id,
-            &ProofStatus::Completed,
-            Some(proof_ref),
-            "proposal",
-        )
-        .await
-        .expect("load v4 proof")
-        .expect("completed proof");
-
-        assert_eq!(returned, expected);
-    }
-
-    #[tokio::test]
-    async fn v4_aggregation_reenqueues_existing_missing_subproof() -> Result<()> {
-        let runtime = Arc::new(
-            RuntimeManager::new(unique_test_runtime_root("v4-agg-reenqueue-subproof"))
-                .expect("runtime manager"),
-        );
-        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaRisc0));
-        let engine: Arc<dyn EngineHandle> = recorder.clone();
-        let pair = resolved_pair();
-        let mut config = Config::default();
-        config.rpc.pairs = vec![NetworkPairConfig {
-            network: pair.network.clone(),
-            l1_network: pair.l1_network.clone(),
-            l1_rpc: Some(pair.l1_rpc.clone()),
-            beacon_rpc: None,
-            l2_rpc: Some(pair.l2_rpc.clone()),
-            l2_provider: pair.l2_provider,
-            l2_witness_rpc: Some(pair.l2_witness_rpc.clone()),
-            sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
-            sp1_verifier_address: pair.sp1_verifier_address.clone(),
-            boundless: pair.boundless.clone(),
-        }];
-        let mut factory = StaticPipelineFactory::default();
-        factory.insert(pair.key.clone(), PipelineKey::ShastaRisc0, engine);
-        let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime.clone());
-
-        let route = CanonicalProofRoute::new(
-            PipelineRoute::new(crate::config::GuestSystem::Risc0, RunnerKind::Local),
-            PipelineKey::ShastaRisc0,
-            ProofType::Risc0,
-        );
-        let mut submission = canonical_submission(route, false);
-        submission.public_task_id = "v4:proposal:risc0:7:7".to_string();
-        let request_fingerprint =
-            batch_request_fingerprint(&submission).expect("proposal fingerprint");
-        let plan = build_submission_plan(runtime.as_ref(), &submission, &request_fingerprint)
-            .await
-            .expect("proposal plan");
-        register_batch_task(&state, &submission, &plan, &request_fingerprint)
-            .await
-            .expect("register proposal task");
-        runtime
-            .sync_status(
-                &submission.public_task_id,
-                RuntimeRunnerStatus::Failed,
-                Some("old failure".to_string()),
-                None,
-            )
-            .await
-            .expect("mark proposal failed");
-        let record = runtime
-            .get_task(&submission.public_task_id)
-            .await
-            .expect("load proposal task")
-            .expect("proposal task exists");
-        let metadata = parse_task_metadata(&record).expect("parse proposal metadata");
-        assert!(
-            should_reenqueue_existing_submission(&state, &record, &metadata)
-                .await
-                .expect("check reenqueue policy"),
-            "failed local proposal should be reenqueueable before remote progress"
+        let mut different_l1 = canonical_submission(native_local_route(), false);
+        different_l1.proposals[0].l1_inclusion_block_number = 999;
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_l1).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "L1 inclusion block must affect the v4 proposal fingerprint"
         );
 
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v4/proof/aggregation")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "proof_type": "risc0",
-                    "proposal_id_start": 7,
-                    "proposal_id_end": 7
-                })
-                .to_string(),
-            ))?;
-
-        let Err(err) =
-            v4::request_aggregation_proof(State(state.clone()), HeaderMap::new(), request).await
-        else {
-            panic!("aggregation without completed subproof should report dependency_not_ready");
-        };
-        assert_eq!(err.code, "dependency_not_ready");
-
-        let proposals = recorder
-            .proposals
-            .lock()
-            .expect("proposal submissions mutex");
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(proposals[0].0.proposal_id, 7);
-        assert!(proposals[0].1.is_empty());
-        Ok(())
+        let mut different_checkpoint = canonical_submission(native_local_route(), false);
+        different_checkpoint.proposals[0].checkpoint = Some(raiko2_primitives::ShastaCheckpoint {
+            block_number: 7,
+            block_hash: alloy_primitives::B256::repeat_byte(0x11),
+            state_root: alloy_primitives::B256::repeat_byte(0x22),
+        });
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_checkpoint).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "checkpoint must affect the v4 proposal fingerprint"
+        );
     }
 
     #[tokio::test]
@@ -4931,12 +4718,15 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({
                     "proof_type": "risc0",
-                    "proposal_id_start": 1,
-                    "proposal_id_end": 1,
-                    "last_anchor_block_number": 10,
-                    "l1_inclusion_block_number": 11,
-                    "l2_block_number_start": 20,
-                    "l2_block_number_end": 21
+                    "proposals": [
+                        {
+                            "proposal_id": 1,
+                            "last_anchor_block_number": 10,
+                            "l1_inclusion_block_number": 11,
+                            "l2_block_number_start": 20,
+                            "l2_block_number_end": 21
+                        }
+                    ]
                 })
                 .to_string(),
             ))?;

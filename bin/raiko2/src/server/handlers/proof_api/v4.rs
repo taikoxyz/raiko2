@@ -1,4 +1,3 @@
-use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
     body::Body,
@@ -8,31 +7,24 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use raiko2_prover::sp1_config::Sp1RequestContext;
 use std::sync::Arc;
 
 use super::super::proof_types::v4 as wire;
 use super::{
-    AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
-    CanonicalBatchSubmission, CanonicalProofRoute, ClearProverStatus, EngineHandle,
-    ExternalAggregateSubmission, L2BlockRange, PlannedAggregateTask, ProofArtifactMaterial,
-    ProofStatus, ProposalTask, ProverStatus, ProverTaskScope, ProverType, PublicProverArgs,
-    ResolvedNetworkPair, ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref,
-    augment_system_prover_config, authorize_acl_feature_with_rate_limit,
-    authorize_optional_acl_feature_with_rate_limit, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, completed_root_artifact_missing, handle_created_batch_task,
-    handle_created_external_aggregate_task, handle_existing_batch_task,
-    handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
-    parse_task_metadata, prover_type_for_proof_type, recover_existing_task,
-    reenqueue_existing_batch_task, register_batch_task, register_external_aggregate_task,
-    replace_existing_batch_task, resolve_engine, resolved_pair, route_for_proof_type,
-    should_reenqueue_existing_submission, validate_aggregate_route_specific_request,
-    validate_public_prover_args,
+    ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
+    CanonicalBatchSubmission, ClearProverStatus, EngineHandle, ProofStatus, ProverStatus,
+    ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData,
+    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
+    build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
+    collect_prover_status, handle_created_batch_task, handle_existing_batch_task, load_task_data,
+    parse_task_metadata, register_batch_task, replace_existing_batch_task, resolve_engine,
 };
+use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
-pub(super) const MAX_RANGE_LEN: u64 = 100_000;
+const MAX_RANGE_LEN: u64 = 100_000;
+const MAX_PROPOSALS_PER_REQUEST: usize = 1_024;
+const MAX_TOTAL_L2_BLOCKS_PER_REQUEST: u64 = MAX_RANGE_LEN;
 
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
@@ -45,15 +37,16 @@ pub(crate) async fn request_proposal_proof(
         ServerAclFeature::ProverSubmit,
     )
     .map_err(Error::from_api_error)?;
-    let Json(req) = Json::<wire::ProposalRequest>::from_request(req, &state)
+    let Json(req) = Json::<wire::ProofRequest>::from_request(req, &state)
         .await
         .map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
-    let proposal_id_start = req.proposal_id_start;
-    let proposal_id_end = req.proposal_id_end;
-    let submission = proposal_submission(&state, &req)?;
-    let request_fingerprint = proposal_request_fingerprint(&submission)?;
-    submit_submission(&state, &submission, &request_fingerprint).await?;
+    validate_proof_request_shape(&req)?;
+    let (proposal_id_start, proposal_id_end) = proposal_id_range(&req.proposals)?;
+    let mut submission = proposal_submission(&state, &req)?;
+    let request_fingerprint = proposal_request_fingerprint(&submission);
+    submission.public_task_id = request_fingerprint.public_task_id();
+    submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
     let data = load_task_data(&state, &submission.public_task_id)
         .await
         .map_err(Error::from_api_error)?;
@@ -62,77 +55,7 @@ pub(crate) async fn request_proposal_proof(
         proof_type: proof_type.as_str().to_string(),
         proposal_id_start,
         proposal_id_end,
-        data: proposal_task_data(&state, data).await?,
-    }))
-}
-
-pub(crate) async fn request_aggregation_proof(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    req: Request<Body>,
-) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, ProofRequestError> {
-    authorize_optional_acl_feature_with_rate_limit(
-        &state,
-        &headers,
-        ServerAclFeature::ProverSubmit,
-    )
-    .map_err(Error::from_api_error)?;
-    let Json(req) = Json::<wire::AggregationRequest>::from_request(req, &state)
-        .await
-        .map_err(|err| Error::from_json_rejection(&err))?;
-    let proof_type = req.proof_type;
-    let proposal_id_start = req.proposal_id_start;
-    let proposal_id_end = req.proposal_id_end;
-    let task_id = aggregation_task_id(proof_type, proposal_id_start, proposal_id_end);
-    collect_inclusive_range(
-        proposal_id_start,
-        proposal_id_end,
-        "proposal_id_start",
-        "proposal_id_end",
-    )?;
-    if let Some(existing) = state
-        .runtime
-        .get_task(&task_id)
-        .await
-        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
-    {
-        // Fast path: a healthy existing row returns its status without re-deriving the submission
-        // (which reloads every sub-proof and would fail if any aged out). Only when the row actually
-        // needs recovery — completed-but-missing-artifact, or stale/failed/orphaned — fall through to
-        // submit_external_aggregation so handle_existing_external_aggregate_task can re-enqueue it,
-        // mirroring the proposal path (which has no early return).
-        let existing_metadata = parse_task_metadata(&existing).map_err(Error::from_api_error)?;
-        let needs_recovery =
-            completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
-                .await
-                .map_err(Error::from_api_error)?
-                || should_reenqueue_existing_submission(&state, &existing, &existing_metadata)
-                    .await
-                    .map_err(Error::from_api_error)?;
-        if !needs_recovery {
-            let data = load_task_data(&state, &task_id)
-                .await
-                .map_err(Error::from_api_error)?;
-            return Ok(Json(wire::TaskResponse {
-                status: "ok",
-                proof_type: proof_type.as_str().to_string(),
-                proposal_id_start,
-                proposal_id_end,
-                data: aggregation_task_data(&state, data).await?,
-            }));
-        }
-    }
-    let submission = aggregation_submission(&state, req).await?;
-    submit_external_aggregation(&state, &submission).await?;
-    let data = load_task_data(&state, &submission.public_task_id)
-        .await
-        .map_err(Error::from_api_error)?;
-    Ok(Json(wire::TaskResponse {
-        status: "ok",
-        proof_type: proof_type.as_str().to_string(),
-        proposal_id_start,
-        proposal_id_end,
-        data: aggregation_task_data(&state, data).await?,
+        data: proof_task_data(data),
     }))
 }
 
@@ -213,36 +136,6 @@ pub(crate) async fn clear_prover(
     }))
 }
 
-fn collect_inclusive_range(
-    start: u64,
-    end: u64,
-    start_field: &'static str,
-    end_field: &'static str,
-) -> Result<Vec<u64>, Error> {
-    // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
-    if end < start {
-        return Err(Error::invalid_request(format!(
-            "{end_field} must be greater than or equal to {start_field}"
-        )));
-    }
-
-    let len = end
-        .checked_sub(start)
-        .and_then(|delta| delta.checked_add(1))
-        .ok_or_else(|| {
-            Error::invalid_request(format!(
-                "{start_field}..={end_field} range length overflows u64"
-            ))
-        })?;
-    if len > MAX_RANGE_LEN {
-        return Err(Error::invalid_request(format!(
-            "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
-        )));
-    }
-
-    Ok((start..=end).collect())
-}
-
 // Handler-level error plumbing stays here; only the v4 wire payload lives in proof_types::v4.
 #[derive(Debug)]
 pub(crate) struct Error {
@@ -270,10 +163,6 @@ impl Error {
 
     fn request_conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "request_conflict", message)
-    }
-
-    fn dependency_not_ready(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, "dependency_not_ready", message)
     }
 
     fn task_not_found(message: impl Into<String>) -> Self {
@@ -330,7 +219,7 @@ impl Error {
         Self::new(err.status, code, err.message)
     }
 
-    fn proof_request_http_status(&self) -> StatusCode {
+    const fn proof_request_http_status(&self) -> StatusCode {
         match self.status {
             StatusCode::BAD_REQUEST | StatusCode::CONFLICT => StatusCode::OK,
             status => status,
@@ -390,57 +279,140 @@ const fn batch_proof_type(proof_type: wire::ProofType) -> BatchProofType {
     }
 }
 
-fn proposal_task_id(
-    proof_type: wire::ProofType,
-    proposal_id_start: u64,
-    proposal_id_end: u64,
-) -> String {
-    format!(
-        "v4:proposal:{}:{proposal_id_start}:{proposal_id_end}",
-        proof_type.as_str()
-    )
+fn proposal_id_range(proposals: &[wire::ProposalRequest]) -> Result<(u64, u64), Error> {
+    let Some(first) = proposals.first() else {
+        return Err(Error::invalid_request("proposals must not be empty"));
+    };
+    let mut expected = first.proposal_id;
+    for proposal in proposals {
+        if proposal.proposal_id != expected {
+            return Err(Error::invalid_request(
+                "proposals[].proposal_id must be strictly increasing and contiguous",
+            ));
+        }
+        expected = expected
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid_request("proposals[].proposal_id range overflows u64"))?;
+    }
+    Ok((first.proposal_id, expected - 1))
 }
 
-fn aggregation_task_id(
-    proof_type: wire::ProofType,
-    proposal_id_start: u64,
-    proposal_id_end: u64,
-) -> String {
-    format!(
-        "v4:aggregation:{}:{proposal_id_start}:{proposal_id_end}",
-        proof_type.as_str()
-    )
+fn validate_proof_request_shape(req: &wire::ProofRequest) -> Result<(), Error> {
+    if req.proposals.is_empty() {
+        return Err(Error::invalid_request("proposals must not be empty"));
+    }
+    if req.proposals.len() > MAX_PROPOSALS_PER_REQUEST {
+        return Err(Error::invalid_request(format!(
+            "proposals length {} exceeds maximum {MAX_PROPOSALS_PER_REQUEST}",
+            req.proposals.len()
+        )));
+    }
+    if !req.aggregate && req.proposals.len() != 1 {
+        return Err(Error::invalid_request(
+            "aggregate=false requires exactly one proposal",
+        ));
+    }
+    let mut total_l2_blocks = 0u64;
+    for proposal in &req.proposals {
+        let len = inclusive_range_len(
+            proposal.l2_block_number_start,
+            proposal.l2_block_number_end,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )?;
+        validate_inclusive_range_len(
+            len,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )?;
+        total_l2_blocks = total_l2_blocks.checked_add(len).ok_or_else(|| {
+            Error::invalid_request("total proposals[].l2 block range length overflows u64")
+        })?;
+        if total_l2_blocks > MAX_TOTAL_L2_BLOCKS_PER_REQUEST {
+            return Err(Error::invalid_request(format!(
+                "total proposals[].l2 block range length {total_l2_blocks} exceeds maximum {MAX_TOTAL_L2_BLOCKS_PER_REQUEST}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn inclusive_range_len(
+    start: u64,
+    end: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<u64, Error> {
+    if end < start {
+        return Err(Error::invalid_request(format!(
+            "{end_field} must be greater than or equal to {start_field}"
+        )));
+    }
+
+    end.checked_sub(start)
+        .and_then(|delta| delta.checked_add(1))
+        .ok_or_else(|| {
+            Error::invalid_request(format!(
+                "{start_field}..={end_field} range length overflows u64"
+            ))
+        })
+}
+
+fn validate_inclusive_range_len(
+    len: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<(), Error> {
+    if len > MAX_RANGE_LEN {
+        return Err(Error::invalid_request(format!(
+            "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
+        )));
+    }
+    Ok(())
+}
+
+fn collect_inclusive_range(
+    start: u64,
+    end: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<Vec<u64>, Error> {
+    // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
+    let len = inclusive_range_len(start, end, start_field, end_field)?;
+    validate_inclusive_range_len(len, start_field, end_field)?;
+
+    Ok((start..=end).collect())
 }
 
 fn proposal_submission(
     state: &AppState,
-    req: &wire::ProposalRequest,
+    req: &wire::ProofRequest,
 ) -> Result<CanonicalBatchSubmission, Error> {
-    // Translate v4 proposal requests into the canonical batch path so routing and
-    // metadata stay single-sourced.
+    // Translate v4 proof requests into the canonical batch path so routing,
+    // metadata, proposal dependencies, and aggregate requeue stay single-sourced.
     let proof_type = req.proof_type;
-    if req.proposal_id_end != req.proposal_id_start {
-        return Err(Error::invalid_request(
-            "proposal_id_end must equal proposal_id_start for proposal proofs",
-        ));
-    }
-    let proposal_id = req.proposal_id_start;
-    let l2_block_numbers = collect_inclusive_range(
-        req.l2_block_number_start,
-        req.l2_block_number_end,
-        "l2_block_number_start",
-        "l2_block_number_end",
-    )?;
     let batch_req = BatchShastaRequest {
-        proposals: vec![ShastaProposal {
-            proposal_id,
-            checkpoint: req.checkpoint,
-            l1_inclusion_block_number: req.l1_inclusion_block_number,
-            l2_block_numbers,
-            last_anchor_block_number: req.last_anchor_block_number,
-        }],
+        proposals: req
+            .proposals
+            .iter()
+            .map(|proposal| {
+                let l2_block_numbers = collect_inclusive_range(
+                    proposal.l2_block_number_start,
+                    proposal.l2_block_number_end,
+                    "proposals[].l2_block_number_start",
+                    "proposals[].l2_block_number_end",
+                )?;
+                Ok(ShastaProposal {
+                    proposal_id: proposal.proposal_id,
+                    checkpoint: proposal.checkpoint,
+                    l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+                    l2_block_numbers,
+                    last_anchor_block_number: proposal.last_anchor_block_number,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?,
         proof_type: batch_proof_type(proof_type),
-        aggregate: false,
+        aggregate: req.aggregate,
         prover: req.prover.map(|addr| addr.to_string()),
         network: None,
         l1_network: None,
@@ -449,257 +421,80 @@ fn proposal_submission(
         prover_args: PublicProverArgs::default(),
     };
 
-    let mut submission = build_canonical_batch_submission(state, batch_req)
+    let submission = build_canonical_batch_submission(state, batch_req)
         .map_err(Error::from_api_error)?
         .ok_or_else(|| Error::unsupported_proof_type("proof type was not selected"))?;
-    submission.public_task_id =
-        proposal_task_id(proof_type, req.proposal_id_start, req.proposal_id_end);
     Ok(submission)
 }
 
-async fn aggregation_submission(
-    state: &AppState,
-    req: wire::AggregationRequest,
-) -> Result<ExternalAggregateSubmission, Error> {
-    // V4 aggregation is local-first: it aggregates proposal proof artifacts already
-    // known to this runtime.
-    let proof_type = req.proof_type;
-    let aggregation_ids = collect_inclusive_range(
-        req.proposal_id_start,
-        req.proposal_id_end,
-        "proposal_id_start",
-        "proposal_id_end",
-    )?;
-    let target = resolve_aggregation_target(state, proof_type)?;
-    let mut proofs = Vec::with_capacity(aggregation_ids.len());
-    for proposal_id in &aggregation_ids {
-        proofs.push(
-            local_proposal_proof(state, proof_type, &target, *proposal_id)
-                .await?
-                .proof,
+struct ProposalIdentity<'a> {
+    submission: &'a CanonicalBatchSubmission,
+}
+
+impl<'a> ProposalIdentity<'a> {
+    const fn new(submission: &'a CanonicalBatchSubmission) -> Self {
+        Self { submission }
+    }
+}
+
+impl RequestIdentity for ProposalIdentity<'_> {
+    const DOMAIN: &'static str = "proof/proposal:v1";
+
+    fn write_identity(&self, sink: &mut FingerprintSink) {
+        let submission = self.submission;
+        // Only client-supplied request data belongs in the idempotency key. `route` and
+        // `prover_type` are server-derived and must not affect poll-by-re-POST behavior.
+        sink.str("network_pair", &submission.pair.key);
+        sink.str(
+            "requested_proof_type",
+            submission.requested_proof_type.as_str(),
         );
+        sink.opt_str("prover", submission.prover.as_deref());
+        sink.bool("aggregate_requested", submission.aggregate_requested);
+        sink.u64("proposals.len", submission.proposals.len() as u64);
+        for (index, proposal) in submission.proposals.iter().enumerate() {
+            let prefix = format!("proposals[{index}]");
+            sink.u64(format!("{prefix}.proposal_id"), proposal.proposal_id);
+            sink.u64(
+                format!("{prefix}.l1_inclusion_block_number"),
+                proposal.l1_inclusion_block_number,
+            );
+            sink.u64(
+                format!("{prefix}.l2_block_number_start"),
+                proposal.l2_block_range.start,
+            );
+            sink.u64(
+                format!("{prefix}.l2_block_number_end"),
+                proposal.l2_block_range.end,
+            );
+            sink.u64(
+                format!("{prefix}.last_anchor_block_number"),
+                proposal.last_anchor_block_number,
+            );
+            sink.bool(
+                format!("{prefix}.checkpoint.present"),
+                proposal.checkpoint.is_some(),
+            );
+            if let Some(checkpoint) = proposal.checkpoint {
+                sink.u64(
+                    format!("{prefix}.checkpoint.block_number"),
+                    checkpoint.block_number,
+                );
+                sink.b256(
+                    format!("{prefix}.checkpoint.block_hash"),
+                    &checkpoint.block_hash,
+                );
+                sink.b256(
+                    format!("{prefix}.checkpoint.state_root"),
+                    &checkpoint.state_root,
+                );
+            }
+        }
     }
-
-    let aggregate_req = AggregateProofRequest {
-        aggregation_ids,
-        proofs,
-        proof_type: batch_proof_type(proof_type),
-        network: None,
-        l1_network: None,
-        graffiti: None,
-        prover: None,
-        blob_proof_type: None,
-        prover_args: PublicProverArgs::default(),
-    };
-    let mut submission =
-        build_external_aggregate_submission(state, aggregate_req, Some("v4/proof/aggregation"))
-            .await
-            .map_err(Error::from_api_error)?;
-    submission.public_task_id =
-        aggregation_task_id(proof_type, req.proposal_id_start, req.proposal_id_end);
-    Ok(submission)
 }
 
-#[derive(Debug)]
-struct AggregationTarget {
-    pair: ResolvedNetworkPair,
-    route: CanonicalProofRoute,
-}
-
-fn resolve_aggregation_target(
-    state: &AppState,
-    proof_type: wire::ProofType,
-) -> Result<AggregationTarget, Error> {
-    let proof_type = batch_proof_type(proof_type);
-    let pair = resolved_pair(state, None, None).map_err(Error::from_api_error)?;
-    let prover_config = augment_system_prover_config(
-        &pair,
-        validate_public_prover_args(proof_type, &PublicProverArgs::default())
-            .map_err(Error::from_api_error)?,
-    );
-    let sp1_context = Sp1RequestContext::Aggregation;
-    let route = route_for_proof_type(state, proof_type, &prover_config, sp1_context)
-        .map_err(Error::from_api_error)?;
-    let _prover_type: Option<ProverType> =
-        prover_type_for_proof_type(state, proof_type, route.route, &prover_config, sp1_context)
-            .map_err(Error::from_api_error)?;
-    validate_aggregate_route_specific_request(state, &pair, route.proof_type(), &prover_config)
-        .map_err(Error::from_api_error)?;
-
-    Ok(AggregationTarget { pair, route })
-}
-
-async fn local_proposal_proof(
-    state: &AppState,
-    proof_type: wire::ProofType,
-    target: &AggregationTarget,
-    proposal_id: u64,
-) -> Result<ProofArtifactMaterial, Error> {
-    let task_id = proposal_task_id(proof_type, proposal_id, proposal_id);
-    let Some(record) = state
-        .runtime
-        .get_task(&task_id)
-        .await
-        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
-    else {
-        return Err(missing_local_proposal_proof(proof_type, proposal_id));
-    };
-    let metadata = parse_task_metadata(&record).map_err(Error::from_api_error)?;
-    if metadata.network_pair != target.pair.key
-        || record.pipeline_key != target.route.pipeline_key()
-        || record.route != target.route.route
-        || metadata.proof_type != target.route.proof_type()
-        || metadata.requested_proof_type.as_deref() != Some(proof_type.as_str())
-    {
-        return Err(missing_local_proposal_proof(proof_type, proposal_id));
-    }
-
-    let Some(proposal) = metadata
-        .proposals
-        .iter()
-        .find(|proposal| proposal.proposal_id == proposal_id)
-    else {
-        return Err(missing_local_proposal_proof(proof_type, proposal_id));
-    };
-
-    if let Some(material) =
-        load_proof_artifact_material(&state.runtime, &metadata.network_pair, &proposal.task_id)
-            .await
-            .map_err(|err| {
-                Error::from_api_error(ApiError::internal(format!(
-                    "failed to load proposal proof artifact: {err}"
-                )))
-            })?
-    {
-        return Ok(material);
-    }
-
-    maybe_reenqueue_existing_local_proposal_proof(
-        state, proof_type, target, &record, &metadata, proposal,
-    )
-    .await?;
-
-    Err(missing_local_proposal_proof(proof_type, proposal_id))
-}
-
-async fn maybe_reenqueue_existing_local_proposal_proof(
-    state: &AppState,
-    proof_type: wire::ProofType,
-    target: &AggregationTarget,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &super::TaskMetadata,
-    proposal: &ProposalTask,
-) -> Result<(), Error> {
-    let missing_completed_artifact =
-        completed_root_artifact_missing(state.runtime.as_ref(), record, metadata)
-            .await
-            .map_err(Error::from_api_error)?;
-    let should_reenqueue = missing_completed_artifact
-        || should_reenqueue_existing_submission(state, record, metadata)
-            .await
-            .map_err(Error::from_api_error)?;
-    if !should_reenqueue {
-        return Ok(());
-    }
-
-    let submission =
-        existing_local_proposal_submission(proof_type, target, record, metadata, proposal)?;
-    recover_existing_task(state, record, || {
-        reenqueue_existing_batch_task(state, &submission, record, metadata)
-    })
-    .await
-    .map_err(Error::from_api_error)
-}
-
-fn existing_local_proposal_submission(
-    proof_type: wire::ProofType,
-    target: &AggregationTarget,
-    record: &raiko2_runtime::RuntimeTaskRecord,
-    metadata: &super::TaskMetadata,
-    proposal: &ProposalTask,
-) -> Result<CanonicalBatchSubmission, Error> {
-    let request = proposal.request.as_ref();
-    let l2_block_range = request
-        .and_then(|request| request.l2_block_range)
-        .or_else(|| {
-            Some(L2BlockRange {
-                start: *proposal.l2_block_numbers.first()?,
-                end: *proposal.l2_block_numbers.last()?,
-            })
-        })
-        .ok_or_else(|| {
-            Error::invalid_request("existing proposal task is missing L2 block range")
-        })?;
-
-    Ok(CanonicalBatchSubmission {
-        public_task_id: record.task_id.clone(),
-        pair: target.pair.clone(),
-        route: target.route,
-        requested_proof_type: batch_proof_type(proof_type),
-        proposals: vec![super::CanonicalProposal {
-            proposal_id: proposal.proposal_id,
-            checkpoint: proposal.checkpoint,
-            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-            l2_block_numbers: proposal.l2_block_numbers.clone(),
-            l2_block_range,
-            last_anchor_block_number: proposal.last_anchor_block_number,
-        }],
-        aggregate_requested: false,
-        prover_config: request
-            .map(|request| request.prover_config.clone())
-            .unwrap_or_default(),
-        prover_type: metadata.prover_type,
-        blob_proof_type: request.and_then(|request| request.blob_proof_type.clone()),
-        prover: request.and_then(|request| request.prover.clone()),
-        graffiti: request.and_then(|request| request.graffiti.clone()),
-        execution_mode: metadata.execution_mode,
-    })
-}
-
-fn missing_local_proposal_proof(proof_type: wire::ProofType, proposal_id: u64) -> Error {
-    Error::dependency_not_ready(format!(
-        "proposal proof {proposal_id} for proof_type={} is not completed in local state",
-        proof_type.as_str()
-    ))
-}
-
-fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, Error> {
-    // Only client-supplied request data belongs in the idempotency key, not the caller's raw JSON
-    // shape. `route` and `prover_type` are derived from server prover config; including them made a
-    // benign config change (mock->real, local->network) mint a different fingerprint for a
-    // byte-identical client request, permanently 409-ing the documented poll-by-re-POST.
-    let payload = serde_json::json!({
-        "api": "v4/proof/proposal",
-        "network_pair": submission.pair.key,
-        "requested_proof_type": submission.requested_proof_type.as_str(),
-        "prover": submission.prover.as_deref(),
-        "proposals": submission.proposals,
-        "aggregate_requested": submission.aggregate_requested,
-    });
-    let encoded = serde_json::to_vec(&payload)
-        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
-    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
-}
-
-fn legacy_proposal_request_fingerprint(
-    submission: &CanonicalBatchSubmission,
-) -> Result<String, Error> {
-    // Pre-F3 fingerprint shape: it also included the server-derived `route` and `prover_type`. Kept so
-    // a v4 proposal row registered before F3 is still recognized as the same request on re-POST across
-    // a rolling upgrade (when the prover config is unchanged), instead of 409-ing on the new shape.
-    let payload = serde_json::json!({
-        "api": "v4/proof/proposal",
-        "network_pair": submission.pair.key,
-        "route": submission.route.route.to_string(),
-        "requested_proof_type": submission.requested_proof_type.as_str(),
-        "prover_type": submission.prover_type.map(ProverType::as_str),
-        "prover": submission.prover.as_deref(),
-        "proposals": submission.proposals,
-        "aggregate_requested": submission.aggregate_requested,
-    });
-    let encoded = serde_json::to_vec(&payload)
-        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
-    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> RequestFingerprint {
+    ProposalIdentity::new(submission).fingerprint()
 }
 
 async fn submit_submission(
@@ -714,16 +509,10 @@ async fn submit_submission(
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
-        let legacy_fingerprint = legacy_proposal_request_fingerprint(submission)?;
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint)
-            && existing.request_fingerprint.as_deref() != Some(legacy_fingerprint.as_str())
-        {
-            // A stored legacy (pre-F3) fingerprint for the same request is treated as a match above,
-            // so an in-flight/completed row registered before this deploy still polls by re-POST.
-            // The v4 task id pins (proof_type, proposal range). If the previous attempt for that
-            // slot terminally failed or was cancelled, let a corrected resubmission replace it
-            // (e.g. an L1 reorg changed l1_inclusion_block_number) instead of wedging the slot with
-            // a permanent 409. Completed and in-flight tasks still conflict.
+        if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+            // New task ids are fingerprint-derived, so this branch should only be reachable for
+            // stale/manual rows or an actual hash collision. Failed/cancelled rows may be replaced;
+            // active/completed rows must not be silently overwritten.
             if matches!(
                 existing.runner_status,
                 raiko2_runtime::RunnerStatus::Failed | raiko2_runtime::RunnerStatus::Cancelled
@@ -753,7 +542,7 @@ async fn submit_submission(
                 return Ok(());
             }
             return Err(Error::request_conflict(
-                "same proof task key was submitted with different proof input",
+                "same proof task id was submitted with different proof input",
             ));
         }
         handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
@@ -783,82 +572,10 @@ async fn submit_submission(
         raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
             if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
                 return Err(Error::request_conflict(
-                    "same proof task key was submitted with different proof input",
+                    "same proof task id was submitted with different proof input",
                 ));
             }
             handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
-                .await
-                .map_err(Error::from_api_error)?;
-        }
-    }
-    Ok(())
-}
-
-async fn submit_external_aggregation(
-    state: &AppState,
-    submission: &ExternalAggregateSubmission,
-) -> Result<(), Error> {
-    // Aggregation has the same idempotency rule as proposal proving: same key, same inputs.
-    if let Some(existing) = state
-        .runtime
-        .get_task(&submission.public_task_id)
-        .await
-        .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
-    {
-        if existing.request_fingerprint.as_deref() != Some(submission.request_fingerprint.as_str())
-            && existing.request_fingerprint.as_deref()
-                != Some(submission.legacy_request_fingerprint.as_str())
-        {
-            return Err(Error::request_conflict(
-                "same aggregation task key was submitted with different proof input",
-            ));
-        }
-        let engine = ensure_engine_available(
-            state,
-            &submission.pair.key,
-            submission.route.pipeline_key(),
-            submission.route.proof_type(),
-        )?;
-        handle_existing_external_aggregate_task(state, &engine, submission, existing)
-            .await
-            .map_err(Error::from_api_error)?;
-        return Ok(());
-    }
-
-    let aggregate = PlannedAggregateTask {
-        task_ref: aggregate_task_ref(submission.route.pipeline_key(), &submission.request),
-        task_id: submission.task_id.clone(),
-        request: submission.request.clone(),
-    };
-    let engine = ensure_engine_available(
-        state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-        submission.route.proof_type(),
-    )?;
-    // Honor the registration outcome instead of assuming Created: a concurrent duplicate (or a
-    // fingerprint that already maps to a task) must reuse the existing task, not re-enqueue the
-    // engine or run the created-path cleanup against a task another request owns.
-    match register_external_aggregate_task(state, submission, &aggregate)
-        .await
-        .map_err(Error::from_api_error)?
-    {
-        raiko2_runtime::TaskRegistrationOutcome::Created(_) => {
-            handle_created_external_aggregate_task(state, &engine, submission, &aggregate)
-                .await
-                .map_err(Error::from_api_error)?;
-        }
-        raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
-            if existing.request_fingerprint.as_deref()
-                != Some(submission.request_fingerprint.as_str())
-                && existing.request_fingerprint.as_deref()
-                    != Some(submission.legacy_request_fingerprint.as_str())
-            {
-                return Err(Error::request_conflict(
-                    "same aggregation task key was submitted with different proof input",
-                ));
-            }
-            handle_existing_external_aggregate_task(state, &engine, submission, existing)
                 .await
                 .map_err(Error::from_api_error)?;
         }
@@ -883,101 +600,12 @@ fn ensure_engine_available(
     })
 }
 
-async fn proposal_task_data(
-    state: &AppState,
-    data: TaskData,
-) -> Result<wire::ProofTaskData, Error> {
-    let proposal = data
-        .proposals
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::invalid_request("proposal task did not contain a proposal"))?;
-    let proof = proof_from_status(
-        state,
-        &data.task_id,
-        &proposal.status,
-        proposal.proof_ref.as_deref(),
-        "proposal",
-    )
-    .await?;
-    Ok(wire::ProofTaskData {
+fn proof_task_data(data: TaskData) -> wire::ProofTaskData {
+    wire::ProofTaskData {
         task_id: data.task_id,
-        status: proof_status_string(&proposal.status),
-        proof,
-    })
-}
-
-async fn aggregation_task_data(
-    state: &AppState,
-    data: TaskData,
-) -> Result<wire::AggregationTaskData, Error> {
-    let aggregate = data
-        .aggregate
-        .ok_or_else(|| Error::invalid_request("aggregation task did not contain aggregate data"))?;
-    let proof = proof_from_status(
-        state,
-        &data.task_id,
-        &aggregate.status,
-        aggregate.proof_ref.as_deref(),
-        "aggregation",
-    )
-    .await?;
-    Ok(wire::AggregationTaskData {
-        task_id: data.task_id,
-        status: proof_status_string(&aggregate.status),
-        proof,
-    })
-}
-
-pub(super) async fn proof_from_status(
-    state: &AppState,
-    task_id: &str,
-    status: &ProofStatus,
-    proof_ref: Option<&str>,
-    task_kind: &'static str,
-) -> Result<Option<String>, Error> {
-    match (matches!(status, ProofStatus::Completed), proof_ref) {
-        (false, _) => Ok(None),
-        (true, None) => Err(Error::from_api_error(ApiError::internal(format!(
-            "completed {task_kind} task is missing proof artifact reference"
-        )))),
-        (true, Some(proof_ref)) => {
-            let record = state
-                .runtime
-                .get_task(task_id)
-                .await
-                .map_err(|err| {
-                    Error::from_api_error(ApiError::internal(format!(
-                        "failed to load task metadata: {err}"
-                    )))
-                })?
-                .ok_or_else(|| {
-                    Error::from_api_error(ApiError::internal(format!(
-                        "completed {task_kind} task was not found: {task_id}"
-                    )))
-                })?;
-            let metadata = parse_task_metadata(&record).map_err(Error::from_api_error)?;
-            // TaskData.proof is only a legacy status string. V4 exposes the
-            // chain-submittable proof hex and leaves artifact details to task inspection.
-            let material =
-                load_proof_artifact_material(&state.runtime, &metadata.network_pair, proof_ref)
-                    .await
-                    .map_err(|err| {
-                        Error::from_api_error(ApiError::internal(format!(
-                            "failed to load completed {task_kind} proof artifact: {err}"
-                        )))
-                    })?
-                    .ok_or_else(|| {
-                        Error::from_api_error(ApiError::internal(format!(
-                            "completed {task_kind} proof artifact not found: {proof_ref}"
-                        )))
-                    })?;
-            material.proof.proof.map(Some).ok_or_else(|| {
-                Error::from_api_error(ApiError::internal(format!(
-                    "completed {task_kind} proof artifact is missing proof hex"
-                )))
-            })
-        }
+        status: proof_status_string(&data.status),
+        proof: data.proof,
+        error: data.error,
     }
 }
 
@@ -994,14 +622,8 @@ fn proof_status_string(status: &ProofStatus) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
-    use crate::config::{BoundlessPairConfig, GuestSystem};
-    use raiko2_engine::{ProposalTaskRequest, ProverTaskConfig};
-    use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
-    use raiko2_primitives::{ProofType, SupportedChainSpecs};
-    use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, RuntimeTaskRecord};
-
-    use crate::server::task_metadata::{RuntimeMetadata, TaskMetadata};
 
     #[test]
     fn proof_request_error_preserves_internal_http_status() {
@@ -1013,117 +635,298 @@ mod tests {
     }
 
     #[test]
-    fn existing_local_proposal_submission_uses_requested_proof_type_for_recovery() {
-        let route = CanonicalProofRoute::new(
-            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
-            PipelineKey::ShastaRisc0,
-            ProofType::Risc0,
+    fn proposal_id_range_requires_contiguous_ids() {
+        let proposals = vec![
+            wire::ProposalRequest {
+                proposal_id: 7,
+                checkpoint: None,
+                l1_inclusion_block_number: 11,
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
+                last_anchor_block_number: 6,
+            },
+            wire::ProposalRequest {
+                proposal_id: 9,
+                checkpoint: None,
+                l1_inclusion_block_number: 12,
+                l2_block_number_start: 8,
+                l2_block_number_end: 8,
+                last_anchor_block_number: 7,
+            },
+        ];
+
+        let err = proposal_id_range(&proposals).expect_err("gap should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            "proposals[].proposal_id must be strictly increasing and contiguous"
         );
-        let target = AggregationTarget {
-            pair: test_pair(),
-            route,
+    }
+
+    #[test]
+    fn v4_non_aggregate_request_requires_single_proposal() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: false,
+            prover: None,
+            proposals: vec![
+                wire::ProposalRequest {
+                    proposal_id: 7,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 11,
+                    l2_block_number_start: 7,
+                    l2_block_number_end: 7,
+                    last_anchor_block_number: 6,
+                },
+                wire::ProposalRequest {
+                    proposal_id: 8,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 12,
+                    l2_block_number_start: 8,
+                    l2_block_number_end: 8,
+                    last_anchor_block_number: 7,
+                },
+            ],
         };
-        let record = RuntimeTaskRecord {
-            task_id: "v4:proposal:risc0:7:7".to_string(),
-            pipeline_key: PipelineKey::ShastaRisc0,
-            route: route.route,
-            task_kind: "hoodi_batch".to_string(),
-            proposal_id: Some(7),
-            proof_ids: Vec::new(),
-            runner_status: RuntimeRunnerStatus::Failed,
-            task_dir: "/tmp/task".to_string(),
-            image_ref: None,
-            provider_request_id: None,
-            remote_tx_hash: None,
-            proof_path: None,
-            error: None,
-            metadata: serde_json::Value::Null,
-            request_fingerprint: None,
-            updated_at: 0,
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("batch proposal should require aggregate=true");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(err.message, "aggregate=false requires exactly one proposal");
+    }
+
+    #[test]
+    fn v4_aggregate_request_rejects_too_many_proposals() {
+        let proposals = (0..=MAX_PROPOSALS_PER_REQUEST as u64)
+            .map(|proposal_id| wire::ProposalRequest {
+                proposal_id,
+                checkpoint: None,
+                l1_inclusion_block_number: proposal_id,
+                l2_block_number_start: proposal_id,
+                l2_block_number_end: proposal_id,
+                last_anchor_block_number: proposal_id.saturating_sub(1),
+            })
+            .collect();
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals,
         };
-        let metadata = TaskMetadata {
-            network_pair: target.pair.key.clone(),
-            network: target.pair.network.clone(),
-            l1_network: target.pair.l1_network.clone(),
-            proof_type: ProofType::Native,
-            requested_proof_type: Some("risc0".to_string()),
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("oversized proposal list should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals length {} exceeds maximum {MAX_PROPOSALS_PER_REQUEST}",
+                MAX_PROPOSALS_PER_REQUEST + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_aggregate_request_rejects_too_many_total_l2_blocks() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals: vec![
+                wire::ProposalRequest {
+                    proposal_id: 1,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 1,
+                    l2_block_number_start: 1,
+                    l2_block_number_end: MAX_TOTAL_L2_BLOCKS_PER_REQUEST,
+                    last_anchor_block_number: 0,
+                },
+                wire::ProposalRequest {
+                    proposal_id: 2,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 2,
+                    l2_block_number_start: MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1,
+                    l2_block_number_end: MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1,
+                    last_anchor_block_number: MAX_TOTAL_L2_BLOCKS_PER_REQUEST,
+                },
+            ],
+        };
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("total expanded L2 blocks should be capped");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "total proposals[].l2 block range length {} exceeds maximum {MAX_TOTAL_L2_BLOCKS_PER_REQUEST}",
+                MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_request_shape_rejects_single_oversized_l2_range_with_range_error() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 1,
+                checkpoint: None,
+                l1_inclusion_block_number: 1,
+                l2_block_number_start: 1,
+                l2_block_number_end: MAX_RANGE_LEN + 1,
+                last_anchor_block_number: 0,
+            }],
+        };
+
+        let err =
+            validate_proof_request_shape(&req).expect_err("oversized L2 range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length {} exceeds maximum {MAX_RANGE_LEN}",
+                MAX_RANGE_LEN + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_descending_bounds() {
+        let err = collect_inclusive_range(
+            22,
+            20,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("descending range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            "proposals[].l2_block_number_end must be greater than or equal to proposals[].l2_block_number_start"
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_oversized_ranges() {
+        let err = collect_inclusive_range(
+            1,
+            MAX_RANGE_LEN + 1,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("oversized range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length {} exceeds maximum {MAX_RANGE_LEN}",
+                MAX_RANGE_LEN + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_overflowing_ranges() {
+        let err = collect_inclusive_range(
+            0,
+            u64::MAX,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("overflowing range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length overflows u64"
+        );
+    }
+
+    #[test]
+    fn v4_proof_task_data_projects_root_status_and_proof() {
+        let data = TaskData {
+            task_id: "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            route: "shasta/sp1".to_string(),
             prover_type: None,
             execution_mode: None,
-            aggregate_requested: false,
-            proposals: Vec::new(),
-            aggregate_task_id: None,
-            aggregate_request: None,
-            aggregate_input_artifacts: Vec::new(),
-            runtime: RuntimeMetadata::default(),
-        };
-        let proposal = ProposalTask {
-            proposal_id: 7,
-            checkpoint: None,
-            l1_inclusion_block_number: 11,
-            l2_block_numbers: vec![7],
-            last_anchor_block_number: 6,
-            task_id: "task_risc0_7".to_string(),
-            request: Some(ProposalTaskRequest {
-                proposal_id: 7,
-                l2_block_range: Some(L2BlockRange { start: 7, end: 7 }),
-                l1_inclusion_block_number: 11,
-                last_anchor_block_number: 6,
-                checkpoint: None,
-                blob_proof_type: None,
-                prover: None,
-                graffiti: None,
-                prover_config: ProverTaskConfig::default(),
-            }),
-        };
-
-        let submission = existing_local_proposal_submission(
-            wire::ProofType::Risc0,
-            &target,
-            &record,
-            &metadata,
-            &proposal,
-        )
-        .expect("rebuild submission from existing proposal metadata");
-
-        assert_eq!(submission.requested_proof_type, BatchProofType::Risc0);
-    }
-
-    fn test_pair() -> ResolvedNetworkPair {
-        let specs = SupportedChainSpecs::default();
-        ResolvedNetworkPair {
-            key: "taiko_dev/ethereum".to_string(),
+            status: ProofStatus::Completed,
             network: "taiko_dev".to_string(),
             l1_network: "ethereum".to_string(),
-            l1_rpc: "http://l1.example".to_string(),
-            l2_rpc: "http://l2.example".to_string(),
-            l2_provider: raiko2_provider::L2ProviderKind::Reth,
-            l2_witness_rpc: "http://l2w.example".to_string(),
-            sp1_verifier_rpc_url: None,
-            sp1_verifier_address: None,
-            boundless: BoundlessPairConfig::default(),
-            l1_spec: specs
-                .get_chain_spec("ethereum")
-                .expect("ethereum chain spec"),
-            l2_spec: specs
-                .get_chain_spec("taiko_dev")
-                .expect("taiko_dev chain spec"),
-        }
-    }
-}
+            runtime: RootRuntime {
+                runner_status: RuntimeRunnerStatus::Completed,
+                active_stage: Some("aggregate".to_string()),
+                last_event: None,
+                updated_at: 1,
+                engine_state_present: false,
+            },
+            current_index: Some(1),
+            proposals: vec![ProposalStatus {
+                index: 0,
+                proposal_id: 10,
+                checkpoint: None,
+                task_id: "proposal-task-10".to_string(),
+                status: ProofStatus::Completed,
+                l1_inclusion_block_number: 100,
+                l2_block_numbers: vec![20, 21],
+                last_anchor_block_number: 19,
+                proof: Some("0xproposal".to_string()),
+                proof_ref: Some("proposal-ref".to_string()),
+                proof_path: Some("proposal-path".to_string()),
+                error: None,
+                runtime: None,
+                extra_data: None,
+            }],
+            aggregate: Some(AggregateStatus {
+                task_id: "aggregate-task".to_string(),
+                status: ProofStatus::Completed,
+                proof: Some("0xaggregate".to_string()),
+                proof_ref: Some("aggregate-ref".to_string()),
+                proof_path: Some("aggregate-path".to_string()),
+                error: None,
+                runtime: None,
+                extra_data: None,
+            }),
+            proof: Some("0xroot".to_string()),
+            proof_ref: Some("root-ref".to_string()),
+            proof_path: Some("root-path".to_string()),
+            error: None,
+        };
 
-#[cfg(test)]
-pub(super) fn collect_inclusive_range_for_test(
-    start: u64,
-    end: u64,
-    start_field: &'static str,
-    end_field: &'static str,
-) -> Result<Vec<u64>, Error> {
-    collect_inclusive_range(start, end, start_field, end_field)
+        let response = proof_task_data(data);
+
+        assert_eq!(response.status, "completed");
+        assert_eq!(
+            response.task_id,
+            "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(response.proof.as_deref(), Some("0xroot"));
+        assert!(response.error.is_none());
+    }
 }
 
 #[cfg(test)]
 pub(super) fn proposal_request_fingerprint_for_test(
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, Error> {
-    proposal_request_fingerprint(submission)
+    Ok(proposal_request_fingerprint(submission)
+        .as_str()
+        .to_string())
 }

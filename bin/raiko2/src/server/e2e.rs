@@ -346,33 +346,59 @@ fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
 fn v4_proposal_request() -> Value {
     json!({
         "proof_type": "risc0",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 10,
-        "l1_inclusion_block_number": 11,
-        "l2_block_number_start": 20,
-        "l2_block_number_end": 21
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 10,
+                "l1_inclusion_block_number": 11,
+                "l2_block_number_start": 20,
+                "l2_block_number_end": 21
+            }
+        ]
     })
 }
 
 fn v4_sp1_proposal_request(proposal_id: u64) -> Value {
+    v4_sp1_batch_request(proposal_id, proposal_id, false)
+}
+
+fn v4_sp1_batch_request(proposal_id_start: u64, proposal_id_end: u64, aggregate: bool) -> Value {
+    let proposals = (proposal_id_start..=proposal_id_end)
+        .map(|proposal_id| {
+            json!({
+                "proposal_id": proposal_id,
+                "last_anchor_block_number": proposal_id.saturating_sub(1),
+                "l1_inclusion_block_number": proposal_id,
+                "l2_block_number_start": proposal_id,
+                "l2_block_number_end": proposal_id
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "proof_type": "sp1",
-        "proposal_id_start": proposal_id,
-        "proposal_id_end": proposal_id,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 1,
-        "l2_block_number_start": proposal_id,
-        "l2_block_number_end": proposal_id
+        "aggregate": aggregate,
+        "proposals": proposals
     })
 }
 
 fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> Value {
-    json!({
-        "proof_type": "sp1",
-        "proposal_id_start": proposal_id_start,
-        "proposal_id_end": proposal_id_end
-    })
+    v4_sp1_batch_request(proposal_id_start, proposal_id_end, true)
+}
+
+fn assert_v4_submit_data_has_root_task_only(body: &Value) -> &str {
+    let task_id = body["data"]["task_id"].as_str().expect("v4 task_id");
+    assert!(task_id.starts_with("task_"), "{body}");
+    assert_eq!(task_id.len(), "task_".len() + 64, "{body}");
+    assert!(
+        task_id["task_".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()),
+        "{body}"
+    );
+    assert!(body["data"].get("current_index").is_none(), "{body}");
+    assert!(body["data"].get("proposals").is_none(), "{body}");
+    assert!(body["data"].get("aggregate").is_none(), "{body}");
+    task_id
 }
 
 fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
@@ -419,10 +445,7 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id);
     assert_eq!(first["proposal_id_end"], proposal_id);
-    assert_eq!(
-        first["data"]["task_id"],
-        format!("v4:proposal:sp1:{proposal_id}:{proposal_id}")
-    );
+    let task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -431,6 +454,10 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
     let (status, completed) =
         post_json_with_api_key(app, "/v4/proof/proposal", "submit-secret", proposal_payload).await;
     assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
+    );
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
 }
@@ -445,7 +472,7 @@ async fn complete_v4_sp1_aggregation(
 
     let (status, first) = post_json_with_api_key(
         app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         aggregation_payload.clone(),
     )
@@ -455,10 +482,7 @@ async fn complete_v4_sp1_aggregation(
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id_start);
     assert_eq!(first["proposal_id_end"], proposal_id_end);
-    assert_eq!(
-        first["data"]["task_id"],
-        format!("v4:aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
-    );
+    let task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -466,12 +490,16 @@ async fn complete_v4_sp1_aggregation(
 
     let (status, completed) = post_json_with_api_key(
         app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         aggregation_payload,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
+    );
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
 }
@@ -529,12 +557,8 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unauthorized");
 
-    let (status, body) = post_json(
-        &app,
-        "/v4/proof/aggregation",
-        v4_sp1_aggregation_request(1, 1),
-    )
-    .await;
+    let (status, body) =
+        post_json(&app, "/v4/proof/proposal", v4_sp1_aggregation_request(1, 1)).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["status"], "error");
@@ -555,9 +579,7 @@ async fn e2e_v4_submit_is_open_when_acl_feature_is_disabled() {
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
-    let (status, task) = get_json(&app, "/v4/tasks/v4:proposal:risc0:1:1").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{task}");
-    assert_eq!(task["error"], "task_not_found");
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -576,30 +598,51 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
-    let (status, task) =
-        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:risc0:1:1", "submit-secret").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{task}");
-    assert_eq!(task["error"], "task_not_found");
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_rejects_multi_proposal_without_aggregation() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_batch_request(1, 2, false),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error", "{body}");
+    assert_eq!(body["error"], "invalid_request", "{body}");
+    assert_eq!(
+        body["message"], "aggregate=false requires exactly one proposal",
+        "{body}"
+    );
+
+    assert!(report_task_ids(&app).await.is_empty());
 }
 
 #[tokio::test]
 async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
-    // F3 regression: once a proposal task for a (proof_type, range) slot is terminal (cancelled via
-    // clear), a corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
-    // l1_inclusion_block_number) must be accepted and replace the terminal task, not wedge the slot
-    // with a permanent request_conflict. The fixture engine stays quiescent until driven, so the
-    // task stays `registered` until `clear` cancels it — do NOT drive the engine before clearing, or
-    // the task could complete and become non-cancellable.
+    // A corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
+    // l1_inclusion_block_number) must get a new root task instead of wedging the proposal range with
+    // a permanent request_conflict. The fixture engine stays quiescent until driven, so the task
+    // stays `registered` until `clear` cancels it.
     let (app, _engine) = v4_sp1_acl_app();
 
     let original = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 1,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 1,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
     });
 
     // 1) Register the proposal task.
@@ -611,7 +654,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(first["data"]["task_id"], "v4:proposal:sp1:1:1");
+    let original_task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
     assert_eq!(first["data"]["status"], "registered");
 
     // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
@@ -623,98 +666,130 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
-    // Exactly one runtime root row exists for this slot (v4:proposal:sp1:1:1); engine child tasks
-    // are not runtime_tasks rows, so the sp1-scoped clear cancels exactly one task.
+    // Engine child tasks are not runtime_tasks rows, so the sp1-scoped clear cancels one root task.
     assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
 
     // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
-    //    different fingerprint. Pre-fix this conflicted forever; post-fix the terminal task is
-    //    replaced and the slot re-registers.
+    //    different fingerprint and therefore a different root task id.
     let corrected = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 2,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 2,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
     });
     let (status, replaced) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
     assert_eq!(status, StatusCode::OK, "{replaced}");
-    assert_eq!(replaced["data"]["task_id"], "v4:proposal:sp1:1:1");
+    let corrected_task_id = assert_v4_submit_data_has_root_task_only(&replaced);
+    assert_ne!(corrected_task_id, original_task_id);
     assert_eq!(replaced["data"]["status"], "registered");
 }
 
 #[tokio::test]
-async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
-    // F3 boundary: the terminal-escape applies ONLY to Failed/Cancelled tasks. A *completed*
-    // proposal must still reject a resubmission whose fingerprint differs — a corrected payload
-    // cannot silently overwrite a proof that already exists. Under the v4 recovery contract a source
-    // 409 is returned as HTTP 200 with error `request_conflict` (it does not replace).
+async fn e2e_v4_proposal_completed_task_accepts_corrected_resubmission_with_new_task_id() {
+    // Corrected proof input must not overwrite a completed proof, but it also must not be blocked by
+    // the old completed row. The fingerprint-derived root task id gives the corrected payload a new
+    // task while keeping the original completed task addressable.
     let (app, engine) = v4_sp1_acl_app();
 
     // Drive proposal (1,1) to completion (l1_inclusion_block_number = 1 in v4_sp1_proposal_request).
     complete_v4_sp1_proposal(&app, &engine, 1).await;
+    let original_task_id = single_report_task_id(&app).await;
 
     // Resubmit the same slot with a different l1_inclusion_block_number -> different fingerprint.
-    // The existing task is Completed (not Failed/Cancelled), so submit must conflict, not replace.
-    let mismatched = json!({
+    let corrected = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 999,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 999,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
     });
     let (status, body) =
-        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", mismatched).await;
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["status"], "error", "{body}");
-    assert_eq!(body["error"], "request_conflict", "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    let corrected_task_id = assert_v4_submit_data_has_root_task_only(&body);
+    assert_ne!(corrected_task_id, original_task_id);
+    assert_eq!(body["data"]["status"], "registered");
 }
 
 #[tokio::test]
-async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
-    let (app, _engine) = v4_sp1_acl_app();
+async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
+    let (app, engine) = v4_sp1_acl_app();
 
     let (status, body) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(7, 7),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["error"], "dependency_not_ready");
+    assert_eq!(body["status"], "ok");
+    let task_id = assert_v4_submit_data_has_root_task_only(&body).to_string();
+    assert_eq!(body["data"]["status"], "registered");
+
+    Box::pin(drive_engine_to_idle(&engine)).await;
+
+    let (status, completed) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
     assert_eq!(
-        body["message"],
-        "proposal proof 7 for proof_type=sp1 is not completed in local state"
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
     );
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_endpoint_is_not_a_submit_route() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, _body) = post_raw_json_text_with_optional_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        Some("submit-secret"),
+        &v4_sp1_aggregation_request(7, 7).to_string(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
-    // #5 narrow early-return safety: a healthy/completed aggregation row still fast-returns its status
-    // on re-POST (needs_recovery == false), WITHOUT re-deriving the submission (which reloads every
-    // sub-proof). This is the property that makes narrowing the early return safe rather than removing
-    // it — a completed aggregation whose sub-proofs later aged out must not regress to
-    // dependency_not_ready. Only rows that need recovery fall through to submit_external_aggregation.
+    // Proposal-side aggregation should poll by repeating the same batch request, matching the
+    // proposal path's idempotency and requeue semantics.
     let (app, engine) = v4_sp1_acl_app();
-    complete_v4_sp1_proposal(&app, &engine, 5).await;
     complete_v4_sp1_aggregation(&app, &engine, 5, 5).await;
 
     let (status, again) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(5, 5),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{again}");
+    assert_v4_submit_data_has_root_task_only(&again);
     assert_eq!(again["data"]["status"], "completed", "{again}");
     assert_eq!(
         again["data"]["proof"], "0xfixture-sp1-aggregation",
@@ -749,7 +824,7 @@ async fn e2e_v4_submit_rate_limits_acl_key() {
 
     let (status, body) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(1, 1),
     )
@@ -764,26 +839,25 @@ async fn e2e_v4_submit_rate_limits_acl_key() {
 async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
     let (app, engine) = v4_sp1_acl_app();
     complete_v4_sp1_proposal(&app, &engine, 3).await;
+    let task_id = single_report_task_id(&app).await;
+    let task_path = format!("/v4/tasks/{task_id}");
 
-    let (status, task) = get_json(&app, "/v4/tasks/v4:proposal:sp1:3:3").await;
+    let (status, task) = get_json(&app, &task_path).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{task}");
     assert_eq!(task["error"], "unauthorized");
 
-    let (status, task) =
-        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "clear-secret").await;
+    let (status, task) = get_json_with_api_key(&app, &task_path, "clear-secret").await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{task}");
     assert_eq!(task["error"], "forbidden");
 
-    let (status, task) =
-        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "submit-secret").await;
+    let (status, task) = get_json_with_api_key(&app, &task_path, "submit-secret").await;
     assert_eq!(status, StatusCode::OK, "{task}");
     assert_eq!(task["status"], "ok");
-    assert_eq!(task["data"]["task_id"], "v4:proposal:sp1:3:3");
+    assert_eq!(task["data"]["task_id"], task_id);
     assert_eq!(task["data"]["status"], "completed");
     assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
 
-    let (status, task) =
-        get_json_with_api_key(&app, "/v4/tasks/v4:proposal:sp1:3:3", "admin-secret").await;
+    let (status, task) = get_json_with_api_key(&app, &task_path, "admin-secret").await;
     assert_eq!(status, StatusCode::OK, "{task}");
     assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
 }
@@ -791,7 +865,6 @@ async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
 #[tokio::test]
 async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
     let (app, engine) = v4_sp1_acl_app();
-    complete_v4_sp1_proposal(&app, &engine, 3).await;
     complete_v4_sp1_aggregation(&app, &engine, 3, 3).await;
 
     let (status, status_body) = get_json(&app, "/v4/prover/status?proof_type=sp1").await;

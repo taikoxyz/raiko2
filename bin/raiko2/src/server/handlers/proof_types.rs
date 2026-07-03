@@ -352,71 +352,100 @@ mod tests {
 
     #[test]
     fn v4_proposal_request_rejects_legacy_proposal_id_field() {
-        let err = serde_json::from_value::<v4::ProposalRequest>(serde_json::json!({
+        let err = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
             "proof_type": "risc0",
             "proposal_id": 1,
-            "proposal_id_start": 1,
-            "proposal_id_end": 1,
-            "last_anchor_block_number": 10,
-            "l1_inclusion_block_number": 11,
-            "l2_block_number_start": 20,
-            "l2_block_number_end": 21
+            "proposals": [
+                {
+                    "proposal_id": 1,
+                    "last_anchor_block_number": 10,
+                    "l1_inclusion_block_number": 11,
+                    "l2_block_number_start": 20,
+                    "l2_block_number_end": 21
+                }
+            ]
         }))
         .expect_err("legacy proposal_id field must be rejected");
         assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]
-    fn v4_task_response_envelope_carries_proposal_range_key() {
-        let proposal = serde_json::to_value(v4::TaskResponse {
-            status: "ok",
-            proof_type: "risc0".to_string(),
-            proposal_id_start: 10,
-            proposal_id_end: 10,
-            data: v4::ProofTaskData {
-                task_id: "v4:proposal:risc0:10:10".to_string(),
-                status: "registered".to_string(),
-                proof: None,
-            },
-        })
-        .expect("serialize v4 proposal task data");
-        assert_eq!(proposal["proposal_id_start"], 10);
-        assert_eq!(proposal["proposal_id_end"], 10);
-        assert!(proposal["data"].get("proposal_id_start").is_none());
-        assert!(proposal["data"].get("proposal_id_end").is_none());
-
-        let aggregation = serde_json::to_value(v4::TaskResponse {
-            status: "ok",
-            proof_type: "sp1".to_string(),
-            proposal_id_start: 10,
-            proposal_id_end: 12,
-            data: v4::AggregationTaskData {
-                task_id: "v4:aggregation:sp1:10:12".to_string(),
-                status: "completed".to_string(),
-                proof: Some("0xproof".to_string()),
-            },
-        })
-        .expect("serialize v4 aggregation task data");
-        assert_eq!(aggregation["proposal_id_start"], 10);
-        assert_eq!(aggregation["proposal_id_end"], 12);
-        assert!(aggregation["data"].get("proposal_id_start").is_none());
-        assert!(aggregation["data"].get("proposal_id_end").is_none());
+    fn v4_proposal_request_rejects_legacy_l2_block_numbers_field() {
+        let err = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
+            "proof_type": "risc0",
+            "proposals": [
+                {
+                    "proposal_id": 1,
+                    "last_anchor_block_number": 10,
+                    "l1_inclusion_block_number": 11,
+                    "l2_block_numbers": [20, 21]
+                }
+            ]
+        }))
+        .expect_err("legacy l2_block_numbers field must be rejected");
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]
-    fn v4_aggregation_request_accepts_only_explicit_proof_types() {
-        let req = serde_json::from_value::<v4::AggregationRequest>(serde_json::json!({
-            "proof_type": "sp1",
-            "proposal_id_start": 10,
-            "proposal_id_end": 12
-        }))
-        .expect("deserialize v4 aggregation request");
-        assert!(matches!(req.proof_type, v4::ProofType::Sp1));
+    fn v4_task_response_envelope_carries_range_key_and_root_data() {
+        let response = serde_json::to_value(v4::TaskResponse {
+            status: "ok",
+            proof_type: "risc0".to_string(),
+            proposal_id_start: 10,
+            proposal_id_end: 11,
+            data: v4::ProofTaskData {
+                task_id: "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                status: "registered".to_string(),
+                proof: None,
+                error: None,
+            },
+        })
+        .expect("serialize v4 task data");
+        assert_eq!(response["proposal_id_start"], 10);
+        assert_eq!(response["proposal_id_end"], 11);
+        assert!(response["data"].get("proposal_id_start").is_none());
+        assert!(response["data"].get("proposal_id_end").is_none());
+        assert_eq!(
+            response["data"]["task_id"],
+            "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(response["data"].get("current_index").is_none());
+        assert!(response["data"].get("proposals").is_none());
+        assert!(response["data"].get("aggregate").is_none());
+        assert_eq!(response["data"]["status"], "registered");
+        assert!(response["data"]["proof"].is_null());
+    }
 
-        let err = serde_json::from_value::<v4::AggregationRequest>(serde_json::json!({
+    #[test]
+    fn v4_proof_request_accepts_only_explicit_proof_types() {
+        let req = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
+            "proof_type": "sp1",
+            "proposals": [
+                {
+                    "proposal_id": 10,
+                    "l1_inclusion_block_number": 12,
+                    "l2_block_number_start": 10,
+                    "l2_block_number_end": 10,
+                    "last_anchor_block_number": 9
+                }
+            ]
+        }))
+        .expect("deserialize v4 proof request");
+        assert!(matches!(req.proof_type, v4::ProofType::Sp1));
+        assert!(!req.aggregate);
+
+        let err = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
             "proof_type": "zk_any",
-            "proposal_id_start": 10,
-            "proposal_id_end": 12
+            "proposals": [
+                {
+                    "proposal_id": 10,
+                    "l1_inclusion_block_number": 12,
+                    "l2_block_number_start": 10,
+                    "l2_block_number_end": 10,
+                    "last_anchor_block_number": 9
+                }
+            ]
         }))
         .expect_err("zk_any is not a v4 proof type");
         assert!(err.to_string().contains("unknown variant"));
@@ -428,18 +457,23 @@ mod tests {
             ("sgx", v4::ProofType::Sgx),
             ("sgxgeth", v4::ProofType::SgxGeth),
         ] {
-            let req = serde_json::from_value::<v4::ProposalRequest>(serde_json::json!({
+            let req = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
                 "proof_type": proof_type,
-                "proposal_id_start": 1,
-                "proposal_id_end": 1,
-                "l1_inclusion_block_number": 2,
-                "l2_block_number_start": 3,
-                "l2_block_number_end": 3,
-                "last_anchor_block_number": 1
+                "aggregate": true,
+                "proposals": [
+                    {
+                        "proposal_id": 1,
+                        "l1_inclusion_block_number": 2,
+                        "l2_block_number_start": 3,
+                        "l2_block_number_end": 3,
+                        "last_anchor_block_number": 1
+                    }
+                ]
             }))
             .expect("deserialize v4 proposal request");
 
             assert_eq!(req.proof_type, expected);
+            assert!(req.aggregate);
         }
     }
 }

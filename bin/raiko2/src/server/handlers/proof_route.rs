@@ -7,6 +7,7 @@ use raiko2_prover::sp1_config::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
 use crate::config::GuestSystem;
+use crate::server::request_identity::RequestFingerprint;
 use crate::server::state::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -44,10 +45,7 @@ pub(super) enum BatchProofDecision {
 }
 
 pub(super) fn public_task_id_from_fingerprint(request_fingerprint: &str) -> String {
-    let fingerprint = request_fingerprint
-        .strip_prefix("0x")
-        .unwrap_or(request_fingerprint);
-    format!("task_{fingerprint}")
+    RequestFingerprint::from_hex(request_fingerprint).public_task_id()
 }
 
 pub(super) fn route_for_proof_type(

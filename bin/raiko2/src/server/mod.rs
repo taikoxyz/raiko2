@@ -7,6 +7,7 @@ mod handlers;
 mod net;
 mod proof_artifact;
 mod ready;
+mod request_identity;
 mod routes;
 mod run;
 mod sampling;

@@ -18,6 +18,24 @@ pub const fn anchor_max_offset_for_chain(chain_id: u64) -> u64 {
     }
 }
 
+/// A contiguous run of L2 blocks derived from one Shasta derivation source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorSourceSpan {
+    pub is_forced_inclusion: bool,
+    pub block_count: usize,
+}
+
+/// Result of source-aware anchor validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceAwareAnchorPlan {
+    /// First anchor checkpoint index that must be proven through `l1_ancestor_headers`.
+    ///
+    /// Checkpoints before this index belong to forced-inclusion sources and must match the parent
+    /// Anchor checkpoint instead.
+    pub l1_header_anchor_start_index: usize,
+    pub requires_parent_checkpoint: bool,
+}
+
 /// Return true when old raiko's stalled-anchor linkage bypass applies.
 #[must_use]
 pub fn should_bypass_stalled_anchor_linkage(
@@ -84,11 +102,94 @@ pub fn validate_anchor_progression(
     Ok(())
 }
 
+/// Validate Shasta anchor linkage while respecting derivation source boundaries.
+///
+/// Forced-inclusion sources inherit the parent anchor and therefore must not advance it. The final
+/// normal source is then checked with the regular anchor progression/window rules.
+///
+/// # Errors
+///
+/// Returns a descriptive error when the source layout is not the canonical forced-prefix plus final
+/// normal source, when source spans do not cover every block, or when an anchor violates the source
+/// rule.
+pub fn validate_source_aware_anchor_progression(
+    anchor_block_numbers: &[u64],
+    source_spans: &[AnchorSourceSpan],
+    last_anchor_block_number: u64,
+    origin_block_number: u64,
+    chain_id: u64,
+) -> Result<SourceAwareAnchorPlan, String> {
+    if anchor_block_numbers.is_empty() {
+        return Err("anchor_block_numbers must not be empty".to_string());
+    }
+    let Some((normal_source, forced_sources)) = source_spans.split_last() else {
+        return Err("source_spans must not be empty".to_string());
+    };
+    if normal_source.is_forced_inclusion {
+        return Err("last Shasta derivation source must be a normal source".to_string());
+    }
+    if normal_source.block_count == 0 {
+        return Err("normal Shasta derivation source must contain at least one block".to_string());
+    }
+
+    let mut cursor = 0usize;
+    for (source_index, span) in forced_sources.iter().enumerate() {
+        if !span.is_forced_inclusion {
+            return Err(format!(
+                "Shasta derivation source {source_index} must be forced inclusion; only the final source may be normal"
+            ));
+        }
+        if span.block_count == 0 {
+            return Err(format!(
+                "forced inclusion source {source_index} must contain at least one block"
+            ));
+        }
+        let end = cursor.checked_add(span.block_count).ok_or_else(|| {
+            format!("forced inclusion source {source_index} block count overflow")
+        })?;
+        let anchors = anchor_block_numbers.get(cursor..end).ok_or_else(|| {
+            format!(
+                "source spans cover more blocks than anchor_block_numbers at source {source_index}"
+            )
+        })?;
+        for &anchor_block_number in anchors {
+            if anchor_block_number != last_anchor_block_number {
+                return Err(format!(
+                    "forced inclusion source {source_index} anchor {anchor_block_number} must equal parent anchor {last_anchor_block_number}"
+                ));
+            }
+        }
+        cursor = end;
+    }
+
+    let end = cursor
+        .checked_add(normal_source.block_count)
+        .ok_or_else(|| "normal Shasta derivation source block count overflow".to_string())?;
+    if end != anchor_block_numbers.len() {
+        return Err(format!(
+            "source spans cover {end} blocks but anchor_block_numbers has {}",
+            anchor_block_numbers.len()
+        ));
+    }
+
+    validate_anchor_progression(
+        &anchor_block_numbers[cursor..end],
+        last_anchor_block_number,
+        origin_block_number,
+        chain_id,
+    )?;
+
+    Ok(SourceAwareAnchorPlan {
+        l1_header_anchor_start_index: cursor,
+        requires_parent_checkpoint: cursor > 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        anchor_max_offset_for_chain, should_bypass_stalled_anchor_linkage,
-        validate_anchor_progression,
+        AnchorSourceSpan, anchor_max_offset_for_chain, should_bypass_stalled_anchor_linkage,
+        validate_anchor_progression, validate_source_aware_anchor_progression,
     };
 
     #[test]
@@ -244,5 +345,64 @@ mod tests {
             1000,
             167_001
         ));
+    }
+
+    #[test]
+    fn source_aware_progression_accepts_forced_prefix_then_normal_catchup() {
+        let plan = validate_source_aware_anchor_progression(
+            &[13_414, 13_414, 13_414, 13_414, 14_188],
+            &[
+                AnchorSourceSpan {
+                    is_forced_inclusion: true,
+                    block_count: 1,
+                },
+                AnchorSourceSpan {
+                    is_forced_inclusion: true,
+                    block_count: 1,
+                },
+                AnchorSourceSpan {
+                    is_forced_inclusion: true,
+                    block_count: 1,
+                },
+                AnchorSourceSpan {
+                    is_forced_inclusion: true,
+                    block_count: 1,
+                },
+                AnchorSourceSpan {
+                    is_forced_inclusion: false,
+                    block_count: 1,
+                },
+            ],
+            13_414,
+            14_190,
+            167_001,
+        )
+        .expect("forced prefix should be accepted");
+
+        assert_eq!(plan.l1_header_anchor_start_index, 4);
+        assert!(plan.requires_parent_checkpoint);
+    }
+
+    #[test]
+    fn source_aware_progression_rejects_forced_segment_that_bumps_anchor() {
+        let err = validate_source_aware_anchor_progression(
+            &[13_414, 13_500, 14_188],
+            &[
+                AnchorSourceSpan {
+                    is_forced_inclusion: true,
+                    block_count: 2,
+                },
+                AnchorSourceSpan {
+                    is_forced_inclusion: false,
+                    block_count: 1,
+                },
+            ],
+            13_414,
+            14_190,
+            167_001,
+        )
+        .expect_err("forced segment must not bump anchor");
+
+        assert!(err.contains("forced inclusion source"));
     }
 }

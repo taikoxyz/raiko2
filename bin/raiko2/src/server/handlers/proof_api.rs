@@ -4637,7 +4637,7 @@ mod tests {
     fn v4_proposal_fingerprint_ignores_server_derived_fields() {
         // route and prover_type are both derived from server prover config. A benign config change
         // (mock->real, local->network) must not change the v4 idempotency key, or the documented
-        // poll-by-re-POST would return 409 request_conflict forever for that proposal slot (F3a).
+        // poll-by-re-POST would register duplicate root work instead of reusing the same task.
         let mut local = canonical_submission(native_local_route(), false);
         local.prover_type = Some(ProverType::Mock);
         let mut remote = canonical_submission(sgx_remote_route(), false);
@@ -4660,6 +4660,28 @@ mod tests {
         assert_ne!(
             base, changed,
             "client request data must still change the v4 proposal fingerprint"
+        );
+
+        let mut different_l1 = canonical_submission(native_local_route(), false);
+        different_l1.proposals[0].l1_inclusion_block_number = 999;
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_l1).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "L1 inclusion block must affect the v4 proposal fingerprint"
+        );
+
+        let mut different_checkpoint = canonical_submission(native_local_route(), false);
+        different_checkpoint.proposals[0].checkpoint = Some(raiko2_primitives::ShastaCheckpoint {
+            block_number: 7,
+            block_hash: alloy_primitives::B256::repeat_byte(0x11),
+            state_root: alloy_primitives::B256::repeat_byte(0x22),
+        });
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_checkpoint).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "checkpoint must affect the v4 proposal fingerprint"
         );
     }
 

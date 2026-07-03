@@ -1,4 +1,3 @@
-use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
     body::Body,
@@ -14,12 +13,13 @@ use super::super::proof_types::v4 as wire;
 use super::{
     ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
     CanonicalBatchSubmission, ClearProverStatus, EngineHandle, ProofStatus, ProverStatus,
-    ProverTaskScope, ProverType, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData,
+    ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData,
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
     collect_prover_status, handle_created_batch_task, handle_existing_batch_task, load_task_data,
     parse_task_metadata, register_batch_task, replace_existing_batch_task, resolve_engine,
 };
+use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
 const MAX_RANGE_LEN: u64 = 100_000;
@@ -41,9 +41,10 @@ pub(crate) async fn request_proposal_proof(
     let proof_type = req.proof_type;
     validate_proof_request_shape(&req)?;
     let (proposal_id_start, proposal_id_end) = proposal_id_range(&req.proposals)?;
-    let submission = proposal_submission(&state, &req, proposal_id_start, proposal_id_end)?;
-    let request_fingerprint = proposal_request_fingerprint(&submission)?;
-    submit_submission(&state, &submission, &request_fingerprint).await?;
+    let mut submission = proposal_submission(&state, &req)?;
+    let request_fingerprint = proposal_request_fingerprint(&submission);
+    submission.public_task_id = request_fingerprint.public_task_id();
+    submit_submission(&state, &submission, request_fingerprint.as_str()).await?;
     let data = load_task_data(&state, &submission.public_task_id)
         .await
         .map_err(Error::from_api_error)?;
@@ -276,23 +277,6 @@ const fn batch_proof_type(proof_type: wire::ProofType) -> BatchProofType {
     }
 }
 
-fn proof_task_id(
-    proof_type: wire::ProofType,
-    aggregate: bool,
-    proposal_id_start: u64,
-    proposal_id_end: u64,
-) -> String {
-    let kind = if aggregate {
-        "proposal_aggregation"
-    } else {
-        "proposal"
-    };
-    format!(
-        "v4:{kind}:{}:{proposal_id_start}:{proposal_id_end}",
-        proof_type.as_str()
-    )
-}
-
 fn proposal_id_range(proposals: &[wire::ProposalRequest]) -> Result<(u64, u64), Error> {
     let Some(first) = proposals.first() else {
         return Err(Error::invalid_request("proposals must not be empty"));
@@ -356,8 +340,6 @@ fn collect_inclusive_range(
 fn proposal_submission(
     state: &AppState,
     req: &wire::ProofRequest,
-    proposal_id_start: u64,
-    proposal_id_end: u64,
 ) -> Result<CanonicalBatchSubmission, Error> {
     // Translate v4 proof requests into the canonical batch path so routing,
     // metadata, proposal dependencies, and aggregate requeue stay single-sourced.
@@ -392,55 +374,80 @@ fn proposal_submission(
         prover_args: PublicProverArgs::default(),
     };
 
-    let mut submission = build_canonical_batch_submission(state, batch_req)
+    let submission = build_canonical_batch_submission(state, batch_req)
         .map_err(Error::from_api_error)?
         .ok_or_else(|| Error::unsupported_proof_type("proof type was not selected"))?;
-    submission.public_task_id = proof_task_id(
-        proof_type,
-        req.aggregate,
-        proposal_id_start,
-        proposal_id_end,
-    );
     Ok(submission)
 }
 
-fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> Result<String, Error> {
-    // Only client-supplied request data belongs in the idempotency key, not the caller's raw JSON
-    // shape. `route` and `prover_type` are derived from server prover config; including them made a
-    // benign config change (mock->real, local->network) mint a different fingerprint for a
-    // byte-identical client request, permanently 409-ing the documented poll-by-re-POST.
-    let payload = serde_json::json!({
-        "api": "v4/proof/proposal",
-        "network_pair": submission.pair.key,
-        "requested_proof_type": submission.requested_proof_type.as_str(),
-        "prover": submission.prover.as_deref(),
-        "proposals": submission.proposals,
-        "aggregate_requested": submission.aggregate_requested,
-    });
-    let encoded = serde_json::to_vec(&payload)
-        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
-    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+struct ProposalIdentity<'a> {
+    submission: &'a CanonicalBatchSubmission,
 }
 
-fn legacy_proposal_request_fingerprint(
-    submission: &CanonicalBatchSubmission,
-) -> Result<String, Error> {
-    // Pre-F3 fingerprint shape: it also included the server-derived `route` and `prover_type`. Kept so
-    // a v4 proposal row registered before F3 is still recognized as the same request on re-POST across
-    // a rolling upgrade (when the prover config is unchanged), instead of 409-ing on the new shape.
-    let payload = serde_json::json!({
-        "api": "v4/proof/proposal",
-        "network_pair": submission.pair.key,
-        "route": submission.route.route.to_string(),
-        "requested_proof_type": submission.requested_proof_type.as_str(),
-        "prover_type": submission.prover_type.map(ProverType::as_str),
-        "prover": submission.prover.as_deref(),
-        "proposals": submission.proposals,
-        "aggregate_requested": submission.aggregate_requested,
-    });
-    let encoded = serde_json::to_vec(&payload)
-        .map_err(|err| Error::invalid_request(format!("failed to serialize request: {err}")))?;
-    Ok(hex::encode_prefixed(keccak256(encoded).as_slice()))
+impl<'a> ProposalIdentity<'a> {
+    const fn new(submission: &'a CanonicalBatchSubmission) -> Self {
+        Self { submission }
+    }
+}
+
+impl RequestIdentity for ProposalIdentity<'_> {
+    const DOMAIN: &'static str = "proof/proposal:v1";
+
+    fn write_identity(&self, sink: &mut FingerprintSink) {
+        let submission = self.submission;
+        // Only client-supplied request data belongs in the idempotency key. `route` and
+        // `prover_type` are server-derived and must not affect poll-by-re-POST behavior.
+        sink.str("network_pair", &submission.pair.key);
+        sink.str(
+            "requested_proof_type",
+            submission.requested_proof_type.as_str(),
+        );
+        sink.opt_str("prover", submission.prover.as_deref());
+        sink.bool("aggregate_requested", submission.aggregate_requested);
+        sink.u64("proposals.len", submission.proposals.len() as u64);
+        for (index, proposal) in submission.proposals.iter().enumerate() {
+            let prefix = format!("proposals[{index}]");
+            sink.u64(format!("{prefix}.proposal_id"), proposal.proposal_id);
+            sink.u64(
+                format!("{prefix}.l1_inclusion_block_number"),
+                proposal.l1_inclusion_block_number,
+            );
+            sink.u64(
+                format!("{prefix}.l2_block_number_start"),
+                proposal.l2_block_range.start,
+            );
+            sink.u64(
+                format!("{prefix}.l2_block_number_end"),
+                proposal.l2_block_range.end,
+            );
+            sink.u64(
+                format!("{prefix}.last_anchor_block_number"),
+                proposal.last_anchor_block_number,
+            );
+            sink.bool(
+                format!("{prefix}.checkpoint.present"),
+                proposal.checkpoint.is_some(),
+            );
+            if let Some(checkpoint) = proposal.checkpoint {
+                sink.u64(
+                    format!("{prefix}.checkpoint.block_number"),
+                    checkpoint.block_number,
+                );
+                sink.b256(
+                    format!("{prefix}.checkpoint.block_hash"),
+                    &checkpoint.block_hash,
+                );
+                sink.b256(
+                    format!("{prefix}.checkpoint.state_root"),
+                    &checkpoint.state_root,
+                );
+            }
+        }
+    }
+}
+
+fn proposal_request_fingerprint(submission: &CanonicalBatchSubmission) -> RequestFingerprint {
+    ProposalIdentity::new(submission).fingerprint()
 }
 
 async fn submit_submission(
@@ -455,16 +462,10 @@ async fn submit_submission(
         .await
         .map_err(|err| Error::from_api_error(ApiError::internal(err.to_string())))?
     {
-        let legacy_fingerprint = legacy_proposal_request_fingerprint(submission)?;
-        if existing.request_fingerprint.as_deref() != Some(request_fingerprint)
-            && existing.request_fingerprint.as_deref() != Some(legacy_fingerprint.as_str())
-        {
-            // A stored legacy (pre-F3) fingerprint for the same request is treated as a match above,
-            // so an in-flight/completed row registered before this deploy still polls by re-POST.
-            // The v4 task id pins (proof_type, proposal range). If the previous attempt for that
-            // slot terminally failed or was cancelled, let a corrected resubmission replace it
-            // (e.g. an L1 reorg changed l1_inclusion_block_number) instead of wedging the slot with
-            // a permanent 409. Completed and in-flight tasks still conflict.
+        if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
+            // New task ids are fingerprint-derived, so this branch should only be reachable for
+            // stale/manual rows or an actual hash collision. Failed/cancelled rows may be replaced;
+            // active/completed rows must not be silently overwritten.
             if matches!(
                 existing.runner_status,
                 raiko2_runtime::RunnerStatus::Failed | raiko2_runtime::RunnerStatus::Cancelled
@@ -494,7 +495,7 @@ async fn submit_submission(
                 return Ok(());
             }
             return Err(Error::request_conflict(
-                "same proof task key was submitted with different proof input",
+                "same proof task id was submitted with different proof input",
             ));
         }
         handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
@@ -524,7 +525,7 @@ async fn submit_submission(
         raiko2_runtime::TaskRegistrationOutcome::Existing(existing) => {
             if existing.request_fingerprint.as_deref() != Some(request_fingerprint) {
                 return Err(Error::request_conflict(
-                    "same proof task key was submitted with different proof input",
+                    "same proof task id was submitted with different proof input",
                 ));
             }
             handle_existing_batch_task(state, submission, existing, Some(request_fingerprint))
@@ -672,7 +673,8 @@ mod tests {
     #[test]
     fn v4_proof_task_data_projects_root_status_and_proof() {
         let data = TaskData {
-            task_id: "v4:proposal_aggregation:sp1:10:10".to_string(),
+            task_id: "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             route: "shasta/sp1".to_string(),
             prover_type: None,
             execution_mode: None,
@@ -722,7 +724,10 @@ mod tests {
         let response = proof_task_data(data);
 
         assert_eq!(response.status, "completed");
-        assert_eq!(response.task_id, "v4:proposal_aggregation:sp1:10:10");
+        assert_eq!(
+            response.task_id,
+            "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(response.proof.as_deref(), Some("0xroot"));
         assert!(response.error.is_none());
     }
@@ -732,5 +737,7 @@ mod tests {
 pub(super) fn proposal_request_fingerprint_for_test(
     submission: &CanonicalBatchSubmission,
 ) -> Result<String, Error> {
-    proposal_request_fingerprint(submission)
+    Ok(proposal_request_fingerprint(submission)
+        .as_str()
+        .to_string())
 }

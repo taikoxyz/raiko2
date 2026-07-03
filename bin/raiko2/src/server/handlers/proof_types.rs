@@ -394,7 +394,8 @@ mod tests {
             proposal_id_start: 10,
             proposal_id_end: 11,
             data: v4::ProofTaskData {
-                task_id: "v4:proposal:risc0:10:11".to_string(),
+                task_id: "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
                 status: "registered".to_string(),
                 proof: None,
                 error: None,
@@ -405,7 +406,10 @@ mod tests {
         assert_eq!(response["proposal_id_end"], 11);
         assert!(response["data"].get("proposal_id_start").is_none());
         assert!(response["data"].get("proposal_id_end").is_none());
-        assert_eq!(response["data"]["task_id"], "v4:proposal:risc0:10:11");
+        assert_eq!(
+            response["data"]["task_id"],
+            "task_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert!(response["data"].get("current_index").is_none());
         assert!(response["data"].get("proposals").is_none());
         assert!(response["data"].get("aggregate").is_none());

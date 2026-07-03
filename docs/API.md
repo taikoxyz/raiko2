@@ -247,7 +247,7 @@ Response:
   "proposal_id_start": 12345,
   "proposal_id_end": 12346,
   "data": {
-    "task_id": "v4:proposal_aggregation:risc0:12345:12346",
+    "task_id": "task_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "status": "registered",
     "proof": null
   }
@@ -259,9 +259,9 @@ Response fields:
 | Field | Type | Description |
 | --- | --- | --- |
 | `proof_type` | string | Concrete proof backend selected by the caller. |
-| `proposal_id_start` | number | First proposal ID in the unique request key. |
-| `proposal_id_end` | number | Last proposal ID in the unique request key. |
-| `data.task_id` | string | Opaque root task ID for task inspection and operational correlation. |
+| `proposal_id_start` | number | First proposal ID covered by this request. |
+| `proposal_id_end` | number | Last proposal ID covered by this request. |
+| `data.task_id` | string | Opaque root task ID derived from the normalized request fingerprint. Use it for task inspection and operational correlation. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
 | `data.error` | string/null | Terminal root error detail when failed. Omitted when no error is present. |
@@ -272,13 +272,11 @@ Polling and idempotency:
   key is derived only from client-supplied request data, so a server-side prover-config change (for
   example mock vs. real, or local vs. network routing) does not turn a repeated identical request
   into a conflict.
-- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type, aggregate)`
-  return the
-  existing root task and current status instead of registering duplicate work.
-- If the existing task for that key has terminally failed or was cancelled, a request with corrected
-  proof-input fields replaces it (for example after an L1 reorg changes `l1_inclusion_block_number`).
-- Otherwise, a repeated request whose proof-input fields conflict with a still-active or completed
-  root task returns `request_conflict`.
+- Repeated requests with the same normalized request fingerprint return the existing root task and
+  current status instead of registering duplicate work.
+- Requests with corrected proof-input fields, for example after an L1 reorg changes
+  `l1_inclusion_block_number` or `checkpoint`, get a different root task ID because the normalized
+  request fingerprint changes.
 - `aggregate=true` uses the same v3-style batch admission model: missing proposal proofs are
   registered as dependencies in the same request, and a recoverable repeated request may re-enqueue
   proposal or aggregation work according to the persisted root state.

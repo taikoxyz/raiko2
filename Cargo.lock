@@ -8554,6 +8554,7 @@ dependencies = [
  "raiko2-provider",
  "raiko2-stateless",
  "reth-ethereum-primitives",
+ "risc0-ethereum-trie",
  "serde",
  "serde_json",
  "tokio",

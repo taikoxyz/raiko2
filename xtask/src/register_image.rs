@@ -803,11 +803,11 @@ impl RegistrationCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckedRegistration, ContractKind, DEVNET_CHAIN_ID, DEVNET_NETWORK, DigestSource,
-        HOODI_CHAIN_ID, HOODI_NETWORK, MAINNET_CHAIN_ID, MAINNET_NETWORK, PlannedAction,
-        RegisterImageArgs, RegisterImageProfile, RegistrationCall, Stage, backend_name,
-        build_risc0_calls, digest_source_suffix, ensure_profile_chain_id, materialize_checked_plan,
-        resolve_profile,
+        CheckedRegistration, ContractKind, DEFAULT_RPC_URL_DEVNET_SHASTA, DEVNET_CHAIN_ID,
+        DEVNET_NETWORK, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK, MAINNET_CHAIN_ID,
+        MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall,
+        Stage, backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
+        materialize_checked_plan, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
     use raiko2_guests::load_risc0_shasta_guest_elves;
@@ -893,7 +893,7 @@ mod tests {
         let resolved = resolve_profile(&repo_root(), &args).expect("resolve devnet profile");
         assert_eq!(resolved.network, DEVNET_NETWORK);
         assert_eq!(resolved.expected_chain_id, DEVNET_CHAIN_ID);
-        assert_eq!(resolved.rpc_url, "https://l1rpc.internal.taiko.xyz");
+        assert_eq!(resolved.rpc_url, DEFAULT_RPC_URL_DEVNET_SHASTA);
         assert_eq!(
             resolved.risc0_verifier,
             address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6")

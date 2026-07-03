@@ -551,7 +551,7 @@ async fn e2e_v4_submit_is_open_when_acl_feature_is_disabled() {
 
     let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
@@ -572,7 +572,7 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
@@ -587,7 +587,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     // F3 regression: once a proposal task for a (proof_type, range) slot is terminal (cancelled via
     // clear), a corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
     // l1_inclusion_block_number) must be accepted and replace the terminal task, not wedge the slot
-    // with a permanent 409 request_conflict. The fixture engine stays quiescent until driven, so the
+    // with a permanent request_conflict. The fixture engine stays quiescent until driven, so the
     // task stays `registered` until `clear` cancels it — do NOT drive the engine before clearing, or
     // the task could complete and become non-cancellable.
     let (app, _engine) = v4_sp1_acl_app();
@@ -628,7 +628,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
 
     // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
-    //    different fingerprint. Pre-fix this returned 409 forever; post-fix the terminal task is
+    //    different fingerprint. Pre-fix this conflicted forever; post-fix the terminal task is
     //    replaced and the slot re-registers.
     let corrected = json!({
         "proof_type": "sp1",
@@ -650,14 +650,15 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
 async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
     // F3 boundary: the terminal-escape applies ONLY to Failed/Cancelled tasks. A *completed*
     // proposal must still reject a resubmission whose fingerprint differs — a corrected payload
-    // cannot silently overwrite a proof that already exists. It 409s; it does not replace.
+    // cannot silently overwrite a proof that already exists. Under the v4 recovery contract a source
+    // 409 is returned as HTTP 200 with error `request_conflict` (it does not replace).
     let (app, engine) = v4_sp1_acl_app();
 
     // Drive proposal (1,1) to completion (l1_inclusion_block_number = 1 in v4_sp1_proposal_request).
     complete_v4_sp1_proposal(&app, &engine, 1).await;
 
     // Resubmit the same slot with a different l1_inclusion_block_number -> different fingerprint.
-    // The existing task is Completed (not Failed/Cancelled), so submit must 409, not replace.
+    // The existing task is Completed (not Failed/Cancelled), so submit must conflict, not replace.
     let mismatched = json!({
         "proof_type": "sp1",
         "proposal_id_start": 1,
@@ -669,8 +670,30 @@ async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
     });
     let (status, body) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", mismatched).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error", "{body}");
     assert_eq!(body["error"], "request_conflict", "{body}");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "dependency_not_ready");
+    assert_eq!(
+        body["message"],
+        "proposal proof 7 for proof_type=sp1 is not completed in local state"
+    );
 }
 
 #[tokio::test]

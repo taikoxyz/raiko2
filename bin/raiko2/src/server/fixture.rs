@@ -1,6 +1,9 @@
 //! Shared fixture-backed local server harness.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Header;
@@ -53,10 +56,13 @@ pub(crate) type Sp1FixtureEngine = Engine<Sp1FixtureSpec>;
 
 const FIXTURE_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
 const FIXTURE_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
+static RUNTIME_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
+    let sequence = RUNTIME_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "{prefix}-{}",
+        "{prefix}-{}-{}-{sequence}",
+        std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")

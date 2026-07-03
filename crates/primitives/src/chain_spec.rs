@@ -1551,11 +1551,19 @@ mod tests {
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::Sgx)?,
-            address!("63Ec87f54cCed71B0DC879ce6cEDfA6f3D582670")
+            address!("936d8dCd9B731D3fe146BF3E1520e9d790A3a67d")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::Sp1)?,
+            address!("2546D7424F23EE0D1260C414DA3f17E295c187C6")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::Risc0)?,
+            address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6")
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,
-            address!("429B4115e773a0Cf0e49c0443685dd290aE426ef")
+            address!("118CB49c7e184D502AFaB1FA1E70b5fBc71Bb998")
         );
         Ok(())
     }

@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_task_response_envelope_carries_proposal_range_key_and_batch_data() {
+    fn v4_task_response_envelope_carries_range_key_and_root_data() {
         let response = serde_json::to_value(v4::TaskResponse {
             status: "ok",
             proof_type: "risc0".to_string(),
@@ -397,25 +397,6 @@ mod tests {
                 status: "registered".to_string(),
                 proof: None,
                 error: None,
-                current_index: Some(0),
-                proposals: vec![v4::ProofProposalData {
-                    index: 0,
-                    proposal_id: 10,
-                    task_id: "task_proposal_10".to_string(),
-                    status: "registered".to_string(),
-                    l1_inclusion_block_number: 100,
-                    l2_block_number_start: 20,
-                    l2_block_number_end: 21,
-                    last_anchor_block_number: 19,
-                    proof: None,
-                    error: None,
-                }],
-                aggregate: Some(v4::ProofAggregateData {
-                    task_id: "task_aggregate".to_string(),
-                    status: "registered".to_string(),
-                    proof: None,
-                    error: None,
-                }),
             },
         })
         .expect("serialize v4 task data");
@@ -424,14 +405,11 @@ mod tests {
         assert!(response["data"].get("proposal_id_start").is_none());
         assert!(response["data"].get("proposal_id_end").is_none());
         assert!(response["data"].get("task_id").is_none());
-        assert_eq!(response["data"]["current_index"], 0);
-        assert_eq!(response["data"]["proposals"][0]["proposal_id"], 10);
-        assert_eq!(
-            response["data"]["proposals"][0]["l2_block_number_start"],
-            20
-        );
-        assert_eq!(response["data"]["proposals"][0]["l2_block_number_end"], 21);
-        assert_eq!(response["data"]["aggregate"]["task_id"], "task_aggregate");
+        assert!(response["data"].get("current_index").is_none());
+        assert!(response["data"].get("proposals").is_none());
+        assert!(response["data"].get("aggregate").is_none());
+        assert_eq!(response["data"]["status"], "registered");
+        assert!(response["data"]["proof"].is_null());
     }
 
     #[test]

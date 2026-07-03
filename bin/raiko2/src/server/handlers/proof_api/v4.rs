@@ -39,6 +39,7 @@ pub(crate) async fn request_proposal_proof(
         .await
         .map_err(|err| Error::from_json_rejection(&err))?;
     let proof_type = req.proof_type;
+    validate_proof_request_shape(&req)?;
     let (proposal_id_start, proposal_id_end) = proposal_id_range(&req.proposals)?;
     let submission = proposal_submission(&state, &req, proposal_id_start, proposal_id_end)?;
     let request_fingerprint = proposal_request_fingerprint(&submission)?;
@@ -310,6 +311,18 @@ fn proposal_id_range(proposals: &[wire::ProposalRequest]) -> Result<(u64, u64), 
     Ok((first.proposal_id, expected - 1))
 }
 
+fn validate_proof_request_shape(req: &wire::ProofRequest) -> Result<(), Error> {
+    if req.proposals.is_empty() {
+        return Err(Error::invalid_request("proposals must not be empty"));
+    }
+    if !req.aggregate && req.proposals.len() != 1 {
+        return Err(Error::invalid_request(
+            "aggregate=false requires exactly one proposal",
+        ));
+    }
+    Ok(())
+}
+
 fn collect_inclusive_range(
     start: u64,
     end: u64,
@@ -540,48 +553,10 @@ fn ensure_engine_available(
 }
 
 fn proof_task_data(data: TaskData) -> wire::ProofTaskData {
-    let proposals = data
-        .proposals
-        .into_iter()
-        .map(|proposal| {
-            let l2_block_number_start = proposal
-                .l2_block_numbers
-                .first()
-                .copied()
-                .unwrap_or_default();
-            let l2_block_number_end = proposal
-                .l2_block_numbers
-                .last()
-                .copied()
-                .unwrap_or(l2_block_number_start);
-            wire::ProofProposalData {
-                index: proposal.index,
-                proposal_id: proposal.proposal_id,
-                task_id: proposal.task_id,
-                status: proof_status_string(&proposal.status),
-                l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-                l2_block_number_start,
-                l2_block_number_end,
-                last_anchor_block_number: proposal.last_anchor_block_number,
-                proof: proposal.proof,
-                error: proposal.error,
-            }
-        })
-        .collect();
-    let aggregate = data.aggregate.map(|aggregate| wire::ProofAggregateData {
-        task_id: aggregate.task_id,
-        status: proof_status_string(&aggregate.status),
-        proof: aggregate.proof,
-        error: aggregate.error,
-    });
-
     wire::ProofTaskData {
         status: proof_status_string(&data.status),
         proof: data.proof,
         error: data.error,
-        current_index: data.current_index,
-        proposals,
-        aggregate,
     }
 }
 
@@ -642,6 +617,40 @@ mod tests {
     }
 
     #[test]
+    fn v4_non_aggregate_request_requires_single_proposal() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: false,
+            prover: None,
+            proposals: vec![
+                wire::ProposalRequest {
+                    proposal_id: 7,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 11,
+                    l2_block_number_start: 7,
+                    l2_block_number_end: 7,
+                    last_anchor_block_number: 6,
+                },
+                wire::ProposalRequest {
+                    proposal_id: 8,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 12,
+                    l2_block_number_start: 8,
+                    l2_block_number_end: 8,
+                    last_anchor_block_number: 7,
+                },
+            ],
+        };
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("batch proposal should require aggregate=true");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(err.message, "aggregate=false requires exactly one proposal");
+    }
+
+    #[test]
     fn v4_l2_block_range_rejects_descending_bounds() {
         let err = collect_inclusive_range(
             22,
@@ -660,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_proof_task_data_projects_stage_statuses_and_proofs() {
+    fn v4_proof_task_data_projects_root_status_and_proof() {
         let data = TaskData {
             task_id: "v4:proposal_aggregation:sp1:10:10".to_string(),
             route: "shasta/sp1".to_string(),
@@ -713,15 +722,7 @@ mod tests {
 
         assert_eq!(response.status, "completed");
         assert_eq!(response.proof.as_deref(), Some("0xroot"));
-        assert_eq!(response.current_index, Some(1));
-        assert_eq!(response.proposals.len(), 1);
-        assert_eq!(response.proposals[0].status, "completed");
-        assert_eq!(response.proposals[0].l2_block_number_start, 20);
-        assert_eq!(response.proposals[0].l2_block_number_end, 21);
-        assert_eq!(response.proposals[0].proof.as_deref(), Some("0xproposal"));
-        let aggregate = response.aggregate.expect("aggregate status");
-        assert_eq!(aggregate.status, "completed");
-        assert_eq!(aggregate.proof.as_deref(), Some("0xaggregate"));
+        assert!(response.error.is_none());
     }
 }
 

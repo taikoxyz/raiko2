@@ -113,9 +113,9 @@ V4 routes:
 
 Endpoint responsibilities:
 
-- `POST /v4/proof/proposal` registers or polls one proposal-side proof task. The request may
-  contain one or more contiguous proposals, and `aggregate=true` registers the aggregation stage
-  for that same proposal batch.
+- `POST /v4/proof/proposal` registers or polls one proof task. `aggregate=false` accepts exactly
+  one proposal. `aggregate=true` accepts one or more contiguous proposals and registers the
+  aggregation stage for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
 
 V4 success envelope:
@@ -185,8 +185,8 @@ Proof submission response shape:
 - `proof_type` echoes the requested concrete proof type.
 - `proposal_id_start` and `proposal_id_end` echo the proposal range used as the client request
   key.
-- Submission responses return one root task status plus proposal stage views and an optional
-  aggregate stage view.
+- Submission responses return only the root task status, root proof, and root error. Use
+  `GET /v4/tasks/{id}` for proposal and aggregate stage inspection.
 
 ### Submit Proof
 
@@ -228,8 +228,8 @@ Request fields:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
-| `aggregate` | boolean | no | Defaults to `false`. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
-| `proposals` | array | yes | Non-empty contiguous proposal list. |
+| `aggregate` | boolean | no | Defaults to `false`. When `false`, `proposals` must contain exactly one item. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
+| `proposals` | array | yes | For `aggregate=false`, exactly one proposal. For `aggregate=true`, one or more contiguous proposals. |
 | `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
 | `proposals[].l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
 | `proposals[].l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
@@ -248,37 +248,7 @@ Response:
   "proposal_id_end": 12346,
   "data": {
     "status": "registered",
-    "proof": null,
-    "current_index": 0,
-    "proposals": [
-      {
-        "index": 0,
-        "proposal_id": 12345,
-        "task_id": "task_...",
-        "status": "registered",
-        "l1_inclusion_block_number": 100,
-        "l2_block_number_start": 200,
-        "l2_block_number_end": 201,
-        "last_anchor_block_number": 199,
-        "proof": null
-      },
-      {
-        "index": 1,
-        "proposal_id": 12346,
-        "task_id": "task_...",
-        "status": "registered",
-        "l1_inclusion_block_number": 101,
-        "l2_block_number_start": 202,
-        "l2_block_number_end": 202,
-        "last_anchor_block_number": 201,
-        "proof": null
-      }
-    ],
-    "aggregate": {
-      "task_id": "task_...",
-      "status": "registered",
-      "proof": null
-    }
+    "proof": null
   }
 }
 ```
@@ -292,11 +262,7 @@ Response fields:
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
-| `data.current_index` | number/null | Current proposal index, or the aggregate stage index when proposals have completed and aggregation is pending. |
-| `data.proposals` | array | Proposal stage views for this root. |
-| `data.proposals[].l2_block_number_start` | number | First L2 block number covered by the proposal. |
-| `data.proposals[].l2_block_number_end` | number | Last L2 block number covered by the proposal. |
-| `data.aggregate` | object/null | Aggregation stage view when `aggregate=true`; null or omitted otherwise. |
+| `data.error` | string/null | Terminal root error detail when failed. Omitted when no error is present. |
 
 Polling and idempotency:
 
@@ -318,6 +284,8 @@ Polling and idempotency:
 Validation:
 
 - `proposals` must not be empty.
+- `aggregate=false` requires exactly one proposal.
+- `aggregate=true` accepts one or more contiguous proposals.
 - `proposals[].proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposals[].proposal_id` values must be strictly increasing and contiguous.
 - `proposals[].l2_block_number_end` must be greater than or equal to

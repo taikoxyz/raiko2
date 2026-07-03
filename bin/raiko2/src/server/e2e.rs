@@ -623,6 +623,8 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
+    // Exactly one runtime root row exists for this slot (v4:proposal:sp1:1:1); engine child tasks
+    // are not runtime_tasks rows, so the sp1-scoped clear cancels exactly one task.
     assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
 
     // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
@@ -642,6 +644,33 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     assert_eq!(status, StatusCode::OK, "{replaced}");
     assert_eq!(replaced["data"]["task_id"], "v4:proposal:sp1:1:1");
     assert_eq!(replaced["data"]["status"], "registered");
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
+    // F3 boundary: the terminal-escape applies ONLY to Failed/Cancelled tasks. A *completed*
+    // proposal must still reject a resubmission whose fingerprint differs — a corrected payload
+    // cannot silently overwrite a proof that already exists. It 409s; it does not replace.
+    let (app, engine) = v4_sp1_acl_app();
+
+    // Drive proposal (1,1) to completion (l1_inclusion_block_number = 1 in v4_sp1_proposal_request).
+    complete_v4_sp1_proposal(&app, &engine, 1).await;
+
+    // Resubmit the same slot with a different l1_inclusion_block_number -> different fingerprint.
+    // The existing task is Completed (not Failed/Cancelled), so submit must 409, not replace.
+    let mismatched = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 999,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", mismatched).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "request_conflict", "{body}");
 }
 
 #[tokio::test]

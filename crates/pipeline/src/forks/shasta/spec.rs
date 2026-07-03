@@ -8,7 +8,7 @@ use alloy_consensus::{
     Header,
     transaction::{SignerRecoverable, Transaction as _},
 };
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
 use futures::{StreamExt, stream};
@@ -33,7 +33,9 @@ use raiko2_protocol_shasta::shasta::{
 use raiko2_provider::{
     AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig, StorageProofTargets,
 };
-use raiko2_stateless::validate_block_with_witness_resources;
+use raiko2_stateless::{
+    read_parent_storage_with_witness_resources, validate_block_with_witness_resources,
+};
 use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -638,25 +640,33 @@ async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
         .prover_data
         .last_anchor_block_number
         .unwrap_or_default();
-    let requires_parent_checkpoint = should_bypass_stalled_anchor_linkage(
+    let bypass_stalled_anchor_linkage = should_bypass_stalled_anchor_linkage(
         &anchor_block_numbers,
         last_anchor_block_number,
         origin_block_number,
         chain_spec.chain_id,
-    ) || source_spans
-        .map(|source_spans| {
-            validate_source_aware_anchor_progression(
-                &anchor_block_numbers,
-                source_spans,
-                last_anchor_block_number,
-                origin_block_number,
-                chain_spec.chain_id,
-            )
-            .map(|plan| plan.requires_parent_checkpoint)
-            .map_err(RaikoError::Preflight)
-        })
-        .transpose()?
-        .unwrap_or(false);
+    );
+    let source_anchor_plan = if bypass_stalled_anchor_linkage {
+        None
+    } else {
+        source_spans
+            .map(|source_spans| {
+                validate_source_aware_anchor_progression(
+                    &anchor_block_numbers,
+                    source_spans,
+                    last_anchor_block_number,
+                    origin_block_number,
+                    chain_spec.chain_id,
+                )
+                .map_err(RaikoError::Preflight)
+            })
+            .transpose()?
+    };
+    let forced_prefix_len = source_anchor_plan
+        .as_ref()
+        .filter(|plan| plan.requires_parent_checkpoint)
+        .map_or(0, |plan| plan.l1_header_anchor_start_index);
+    let requires_parent_checkpoint = bypass_stalled_anchor_linkage || forced_prefix_len > 0;
     if !requires_parent_checkpoint {
         return Ok(());
     }
@@ -708,6 +718,26 @@ async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
     first_witness.witness.state = ExecutionWitness::canonicalize_state_nodes(std::mem::take(
         &mut first_witness.witness.state,
     ));
+    let parent_checkpoint =
+        parent_checkpoint_from_witness(chain_spec, first_witness, last_anchor_block_number)?;
+    if bypass_stalled_anchor_linkage {
+        validate_anchor_checkpoints_match_parent(
+            &anchor_checkpoints,
+            &parent_checkpoint,
+            "anchor checkpoint",
+        )?;
+    } else if forced_prefix_len > 0 {
+        let forced_checkpoints = anchor_checkpoints.get(..forced_prefix_len).ok_or_else(|| {
+            RaikoError::Preflight(format!(
+                "invalid forced inclusion anchor checkpoint range {forced_prefix_len}"
+            ))
+        })?;
+        validate_anchor_checkpoints_match_parent(
+            forced_checkpoints,
+            &parent_checkpoint,
+            "forced inclusion anchor checkpoint",
+        )?;
+    }
     Ok(())
 }
 
@@ -909,6 +939,14 @@ fn derive_preflight_tx_lists(
     let Some(source_data) = source_data else {
         return Ok(None);
     };
+
+    if source_data.manifest_blocks.len() != blocks.len() {
+        return Err(RaikoError::Preflight(format!(
+            "manifest block count ({}) does not match fetched block count ({})",
+            source_data.manifest_blocks.len(),
+            blocks.len()
+        )));
+    }
 
     blocks
         .iter()
@@ -1183,6 +1221,89 @@ fn decode_anchor_checkpoint(
         block_hash: decoded._checkpoint.blockHash,
         state_root: decoded._checkpoint.stateRoot,
     })
+}
+
+fn storage_word_as_b256(word: U256) -> B256 {
+    B256::from(word.to_be_bytes::<32>())
+}
+
+fn parent_checkpoint_from_witness(
+    chain_spec: &ChainSpec,
+    first_witness: &StatelessInput,
+    block_number: u64,
+) -> RaikoResult<AnchorCheckpoint> {
+    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.checkpoint_store_contract required for Shasta parent checkpoint validation"
+                .to_string(),
+        )
+    })?;
+    let (block_hash_slot, state_root_slot) = shasta_checkpoint_storage_slots(block_number);
+    let block_hash = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            block_hash_slot,
+            &first_witness.witness,
+            &first_witness.witness.headers,
+            &[],
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to read parent CheckpointStore blockHash: {err}"
+            ))
+        })?,
+    );
+    let state_root = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            state_root_slot,
+            &first_witness.witness,
+            &first_witness.witness.headers,
+            &[],
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to read parent CheckpointStore stateRoot: {err}"
+            ))
+        })?,
+    );
+    if block_hash == B256::ZERO {
+        return Err(RaikoError::Preflight(
+            "parent CheckpointStore blockHash is zero".to_string(),
+        ));
+    }
+    if state_root == B256::ZERO {
+        return Err(RaikoError::Preflight(
+            "parent CheckpointStore stateRoot is zero".to_string(),
+        ));
+    }
+
+    Ok(AnchorCheckpoint {
+        block_number,
+        block_hash,
+        state_root,
+    })
+}
+
+fn validate_anchor_checkpoints_match_parent(
+    checkpoints: &[AnchorCheckpoint],
+    parent_checkpoint: &AnchorCheckpoint,
+    label: &str,
+) -> RaikoResult<()> {
+    for checkpoint in checkpoints {
+        if checkpoint != parent_checkpoint {
+            return Err(RaikoError::Preflight(format!(
+                "{label} ({}, {:?}, {:?}) does not match parent checkpoint ({}, {:?}, {:?})",
+                checkpoint.block_number,
+                checkpoint.block_hash,
+                checkpoint.state_root,
+                parent_checkpoint.block_number,
+                parent_checkpoint.block_hash,
+                parent_checkpoint.state_root
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn hydrate_stalled_shasta_origin_header<P: Provider>(
@@ -1690,13 +1811,15 @@ mod tests {
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
     use alloy_eips::eip4844::BYTES_PER_BLOB;
     use alloy_hardforks::ForkCondition as AlethiaForkCondition;
-    use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
+    use alloy_primitives::{
+        Address, B256, Bytes, KECCAK256_EMPTY, Signature, TxKind, U256, keccak256, map::AddressMap,
+    };
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
         ChainSpec, ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType,
         ProverConfig, RaikoError, RaikoResult, ShastaRequest, StatelessInput, SupportedChainSpecs,
-        WitnessStateNode,
+        WitnessHeader, WitnessStateNode,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
         shasta_checkpoint_storage_slots, storage_slot_key,
     };
@@ -1706,6 +1829,7 @@ mod tests {
         manifest::{BlockManifest, DerivationSourceManifest},
     };
     use raiko2_provider::{Provider, StorageProofTargets};
+    use risc0_ethereum_trie::Trie;
     use std::{
         collections::BTreeMap,
         sync::{
@@ -1719,10 +1843,12 @@ mod tests {
     #[derive(Clone)]
     struct TestProvider {
         block: reth_ethereum_primitives::Block,
+        blocks: Vec<reth_ethereum_primitives::Block>,
         parent_block: reth_ethereum_primitives::Block,
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        witnesses: Arc<Mutex<Vec<ExecutionWitness>>>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
         tx_list_witness_supported: bool,
@@ -1732,6 +1858,17 @@ mod tests {
         account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
         storage_proof_inputs: Arc<Mutex<StorageProofTargets>>,
         storage_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
+    }
+
+    impl TestProvider {
+        fn configured_witnesses(&self, count: usize) -> Vec<ExecutionWitness> {
+            let witnesses = self.witnesses.lock().expect("witnesses lock").clone();
+            if witnesses.is_empty() {
+                vec![ExecutionWitness::default(); count]
+            } else {
+                witnesses
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -1745,6 +1882,12 @@ mod tests {
                 .map(|block_number| {
                     if *block_number == self.parent_block.header.number {
                         self.parent_block.clone()
+                    } else if let Some(block) = self
+                        .blocks
+                        .iter()
+                        .find(|block| block.header.number == *block_number)
+                    {
+                        block.clone()
                     } else {
                         self.block.clone()
                     }
@@ -1758,7 +1901,7 @@ mod tests {
             accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            Ok(vec![AddressMap::default()])
+            Ok(vec![AddressMap::default(); accounts.len()])
         }
 
         async fn batch_accounts_with_proof_witnesses(
@@ -1767,12 +1910,15 @@ mod tests {
             accounts: &[Vec<Address>],
         ) -> RaikoResult<(Vec<AddressMap<TrieAccount>>, Vec<Vec<WitnessStateNode>>)> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            let nodes = self
+            let mut nodes = self
                 .account_witness_nodes
                 .lock()
                 .expect("account witness nodes lock")
                 .clone();
-            Ok((vec![AddressMap::default()], nodes))
+            if nodes.is_empty() {
+                nodes = vec![Vec::new(); accounts.len()];
+            }
+            Ok((vec![AddressMap::default(); accounts.len()], nodes))
         }
 
         async fn batch_storage_proof_witnesses(
@@ -1802,7 +1948,7 @@ mod tests {
             {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
-            Ok(vec![ExecutionWitness::default()])
+            Ok(self.configured_witnesses(_blocks.len()))
         }
 
         async fn batch_witnesses_with_tx_lists(
@@ -1820,10 +1966,7 @@ mod tests {
                 .tx_list_witness_inputs
                 .lock()
                 .expect("tx list witness inputs lock") = tx_lists.to_vec();
-            Ok(tx_lists
-                .iter()
-                .map(|_| ExecutionWitness::default())
-                .collect())
+            Ok(self.configured_witnesses(tx_lists.len()))
         }
 
         async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -1968,6 +2111,68 @@ mod tests {
         block
     }
 
+    fn parent_checkpoint_state_witness(
+        checkpoint_store: Address,
+        checkpoint: AnchorCheckpoint,
+    ) -> (B256, Vec<WitnessStateNode>) {
+        let (block_hash_slot, state_root_slot) =
+            shasta_checkpoint_storage_slots(checkpoint.block_number);
+        let mut checkpoint_storage_trie = Trie::default();
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(block_hash_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.block_hash.as_slice())),
+        );
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(state_root_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.state_root.as_slice())),
+        );
+
+        let mut state_trie = Trie::default();
+        state_trie.insert(
+            keccak256(checkpoint_store),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: checkpoint_storage_trie.hash_slow(),
+                code_hash: KECCAK256_EMPTY,
+            }),
+        );
+
+        let state_root = state_trie.hash_slow();
+        let state_nodes = state_trie
+            .rlp_nodes()
+            .into_iter()
+            .chain(checkpoint_storage_trie.rlp_nodes())
+            .map(WitnessStateNode::from_bytes)
+            .collect();
+        (
+            state_root,
+            ExecutionWitness::canonicalize_state_nodes(state_nodes),
+        )
+    }
+
+    fn stateless_input_with_parent_checkpoint(
+        chain_spec: &ChainSpec,
+        checkpoint: AnchorCheckpoint,
+    ) -> StatelessInput {
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (parent_state_root, _) = parent_checkpoint_state_witness(checkpoint_store, checkpoint);
+        let parent_header = Header {
+            state_root: parent_state_root,
+            ..Default::default()
+        };
+        StatelessInput {
+            chain_spec: chain_spec.clone(),
+            witness: ExecutionWitness {
+                headers: vec![WitnessHeader::from_header(parent_header)],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     fn sample_context(
         proposal_id: u64,
         l1_inclusion_block_number: u64,
@@ -2091,10 +2296,12 @@ mod tests {
 
         TestProvider {
             block,
+            blocks: Vec::new(),
             parent_block,
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            witnesses: Arc::new(Mutex::new(Vec::new())),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_supported: true,
@@ -2799,6 +3006,23 @@ mod tests {
         provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         provider.l1_headers = l1_headers;
         let ctx = sample_context(42, 201, 10);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: anchor_header.number,
+            block_hash: anchor_header.hash_slow(),
+            state_root: anchor_header.state_root,
+        };
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        *provider.witnesses.lock().expect("witnesses lock") =
+            vec![stateless_input_with_parent_checkpoint(&chain_spec, parent_checkpoint).witness];
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
             (),
@@ -2810,13 +3034,143 @@ mod tests {
 
         assert!(input.taiko.l1_ancestor_headers.is_empty());
         assert_eq!(input.taiko.l1_header.number, origin_header.number);
-        let checkpoint_store = SupportedChainSpecs::default()
-            .get_chain_spec_with_chain_id(input.taiko.chain_spec.chain_id)
-            .expect("supported test chain")
-            .checkpoint_store_contract
-            .expect("checkpoint store");
         let (block_hash_slot, state_root_slot) =
             shasta_checkpoint_storage_slots(anchor_header.number);
+        assert_eq!(
+            *provider
+                .storage_proof_inputs
+                .lock()
+                .expect("storage proof inputs lock"),
+            vec![vec![(
+                checkpoint_store,
+                vec![
+                    storage_slot_key(block_hash_slot),
+                    storage_slot_key(state_root_slot)
+                ]
+            )]]
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_derives_forced_prefix_from_sources_then_normal_anchor_catchup() {
+        let mut provider = sample_provider();
+        let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
+        let l1_headers = sample_l1_header_chain(200, 205);
+        let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        let mut forced_block = sample_block(
+            42,
+            parent_checkpoint.block_number,
+            parent_checkpoint.block_hash,
+            parent_checkpoint.state_root,
+        );
+        forced_block.header.number = 1;
+        forced_block.header.timestamp = 1001;
+        forced_block.header.gas_limit = 30_000_000;
+        let mut normal_block = sample_block(
+            42,
+            normal_anchor_header.number,
+            normal_anchor_header.hash_slow(),
+            normal_anchor_header.state_root,
+        );
+        normal_block.header.number = 2;
+        normal_block.header.timestamp = 1002;
+        normal_block.header.gas_limit = 30_000_000;
+        provider.block = forced_block.clone();
+        provider.blocks = vec![forced_block, normal_block.clone()];
+        provider.parent_block.header.number = 0;
+        provider.parent_block.header.timestamp = 1000;
+        provider.parent_block.header.gas_limit = 30_000_000;
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        provider.proposal_event.proposal.timestamp = 1002u64.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.sources = vec![
+            DerivationSource {
+                isForcedInclusion: true,
+                blobSlice: BlobSlice {
+                    blobHashes: Vec::new(),
+                    offset: 0usize.try_into().expect("fits in uint24"),
+                    timestamp: 0u64.try_into().expect("fits in uint48"),
+                },
+            },
+            DerivationSource {
+                isForcedInclusion: false,
+                blobSlice: BlobSlice {
+                    blobHashes: Vec::new(),
+                    offset: 0usize.try_into().expect("fits in uint24"),
+                    timestamp: 0u64.try_into().expect("fits in uint48"),
+                },
+            },
+        ];
+        let normal_manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: normal_block.header.timestamp,
+                coinbase: normal_block.header.beneficiary,
+                anchor_block_number: normal_anchor_header.number,
+                gas_limit: normal_block.header.gas_limit,
+                transactions: Vec::new(),
+            }],
+        };
+        provider.data_sources = vec![
+            InputDataSource {
+                is_forced_inclusion: true,
+                ..Default::default()
+            },
+            InputDataSource {
+                tx_data_from_calldata: normal_manifest
+                    .encode_and_compress()
+                    .expect("encode normal manifest"),
+                is_forced_inclusion: false,
+                ..Default::default()
+            },
+        ];
+        provider.l1_headers = l1_headers;
+        let ctx = {
+            let mut ctx = sample_context(42, 205, parent_anchor_block_number);
+            ctx.request.l2_block_range = Some(L2BlockRange { start: 1, end: 2 });
+            ctx
+        };
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        *provider.witnesses.lock().expect("witnesses lock") = vec![
+            stateless_input_with_parent_checkpoint(&chain_spec, parent_checkpoint).witness,
+            ExecutionWitness::default(),
+        ];
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.witnesses.len(), 2);
+        assert_eq!(input.taiko.l1_ancestor_headers.len(), 6);
+        assert_eq!(input.taiko.l1_ancestor_headers[0].number, 200);
+        assert_eq!(input.taiko.l1_header.number, origin_header.number);
+        assert_eq!(input.taiko.data_sources.len(), 2);
+        let tx_lists = provider
+            .tx_list_witness_inputs
+            .lock()
+            .expect("tx list witness inputs lock");
+        assert_eq!(tx_lists.len(), 2);
+        let (block_hash_slot, state_root_slot) =
+            shasta_checkpoint_storage_slots(parent_anchor_block_number);
         assert_eq!(
             *provider
                 .storage_proof_inputs
@@ -2836,6 +3190,11 @@ mod tests {
     async fn preflight_accepts_forced_prefix_then_normal_anchor_catchup() {
         let mut provider = sample_provider();
         let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
         let l1_headers = sample_l1_header_chain(200, 205);
         let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
         let origin_header = l1_headers.last().expect("origin header").clone();
@@ -2915,7 +3274,19 @@ mod tests {
 
         let ctx = sample_context(42, 205, parent_anchor_block_number);
         let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-        let mut witnesses = vec![StatelessInput::default()];
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        let mut witnesses = vec![stateless_input_with_parent_checkpoint(
+            &chain_spec,
+            parent_checkpoint,
+        )];
         super::hydrate_shasta_parent_checkpoint_witness(
             &provider,
             &chain_spec,
@@ -2927,9 +3298,6 @@ mod tests {
         .await
         .expect("forced prefix should request parent checkpoint proof");
 
-        let checkpoint_store = chain_spec
-            .checkpoint_store_contract
-            .expect("checkpoint store");
         let (block_hash_slot, state_root_slot) =
             shasta_checkpoint_storage_slots(parent_anchor_block_number);
         assert_eq!(
@@ -2945,6 +3313,107 @@ mod tests {
                 ]
             )]]
         );
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_forced_prefix_parent_checkpoint_mismatch() {
+        let mut provider = sample_provider();
+        let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
+        let wrong_forced_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x99; 32]),
+            state_root: parent_checkpoint.state_root,
+        };
+        let l1_headers = sample_l1_header_chain(200, 205);
+        let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        let mut blocks = vec![sample_block(
+            42,
+            wrong_forced_checkpoint.block_number,
+            wrong_forced_checkpoint.block_hash,
+            wrong_forced_checkpoint.state_root,
+        )];
+        blocks[0].header.number = 1;
+        let mut normal_block = sample_block(
+            42,
+            normal_anchor_header.number,
+            normal_anchor_header.hash_slow(),
+            normal_anchor_header.state_root,
+        );
+        normal_block.header.number = 2;
+        blocks.push(normal_block);
+        let source_spans = [
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: false,
+                block_count: 1,
+            },
+        ];
+        provider.l1_headers = l1_headers;
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        let manifest = raiko2_protocol_shasta::TaikoManifest {
+            proposal_event: provider.proposal_event.clone(),
+            prover_data: raiko2_protocol::TaikoProverData {
+                last_anchor_block_number: Some(parent_anchor_block_number),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = sample_context(42, 205, parent_anchor_block_number);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        let mut witnesses = vec![stateless_input_with_parent_checkpoint(
+            &chain_spec,
+            parent_checkpoint,
+        )];
+
+        let err = super::hydrate_shasta_parent_checkpoint_witness(
+            &provider,
+            &chain_spec,
+            &blocks,
+            &manifest,
+            Some(&source_spans),
+            &mut witnesses,
+        )
+        .await
+        .expect_err("forced prefix checkpoint mismatch should fail in preflight");
+
+        assert!(
+            err.to_string()
+                .contains("forced inclusion anchor checkpoint")
+        );
+    }
+
+    #[test]
+    fn derive_preflight_tx_lists_rejects_manifest_block_count_mismatch() {
+        let provider = sample_provider();
+        let source_data = super::PreflightSourceData {
+            manifest_blocks: Vec::new(),
+            source_spans: Vec::new(),
+        };
+
+        let err = super::derive_preflight_tx_lists(Some(&source_data), &[provider.block])
+            .expect_err("manifest/block count mismatch should fail");
+
+        assert!(err.to_string().contains("manifest block count"));
     }
 
     #[tokio::test]

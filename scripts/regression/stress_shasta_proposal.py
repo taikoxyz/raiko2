@@ -196,6 +196,7 @@ class BatchMonitor:
         proposal_out: Optional[Path] = None,
         api_key: Optional[str] = None,
         proposal_ids: Optional[list[int]] = None,
+        api_version: str = "v3",
     ):
         self.network = network
         self.l1_network = l1_network
@@ -224,6 +225,9 @@ class BatchMonitor:
         self.proposal_out = proposal_out
         self.api_key = api_key
         self.proposal_ids = proposal_ids or []
+        if api_version not in ("v3", "v4"):
+            raise ValueError(f"unsupported api_version: {api_version}")
+        self.api_version = api_version
         self.discovered_proposals: list[Dict[str, Any]] = []
         # Initialize Shasta event decoder
         self.shasta_decoder = ShastaEventDecoder()
@@ -1200,29 +1204,62 @@ class BatchMonitor:
 
         return logs[0].blockNumber, batch_ids
 
+    def proposal_for_request(self, proposal: Dict[str, Any]) -> Dict[str, Any]:
+        if self.api_version == "v4":
+            l2_block_numbers = proposal["l2_block_numbers"]
+            return {
+                "proposal_id": proposal["proposal_id"],
+                "l1_inclusion_block_number": proposal["l1_inclusion_block_number"],
+                "l2_block_number_start": l2_block_numbers[0],
+                "l2_block_number_end": l2_block_numbers[-1],
+                "checkpoint": proposal.get("checkpoint"),
+                "last_anchor_block_number": proposal["last_anchor_block_number"],
+            }
+        return proposal
+
     def generate_post_data(
-        self, 
-        proposals: list[Dict[str, Any]], 
+        self,
+        proposals: list[Dict[str, Any]],
         aggregate: bool = False
     ) -> Dict[str, Any]:
         """generate post data"""
+        normalized_proposals = [self.proposal_for_request(proposal) for proposal in proposals]
         payload = {
-            "network": self.network,
-            "l1_network": self.l1_network,
-            "proposals": proposals,
+            "proposals": normalized_proposals,
             "prover": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-            "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
             "proof_type": self.prove_type,
-            "blob_proof_type": "proof_of_equivalence",
             "aggregate": aggregate,
         }
-        if self.prove_type == "sp1":
-            payload["sp1"] = {
-                "recursion": "plonk",
-                "prover": "network",
-                "verify": True,
-            }
+        if self.api_version == "v3":
+            payload.update({
+                "network": self.network,
+                "l1_network": self.l1_network,
+                "graffiti": "8008500000000000000000000000000000000000000000000000000000000000",
+                "blob_proof_type": "proof_of_equivalence",
+            })
+            if self.prove_type == "sp1":
+                payload["sp1"] = {
+                    "recursion": "plonk",
+                    "prover": "network",
+                    "verify": True,
+                }
         return payload
+
+    def proof_endpoint(self) -> str:
+        if self.api_version == "v4":
+            return f"{self.raiko_rpc}/v4/proof/proposal"
+        return f"{self.raiko_rpc}/v3/proof/batch/shasta"
+
+    @staticmethod
+    def response_proof_hex(data: Dict[str, Any]) -> Optional[str]:
+        proof = data.get("proof")
+        if isinstance(proof, str):
+            return proof
+        if isinstance(proof, dict):
+            nested = proof.get("proof")
+            if isinstance(nested, str):
+                return nested
+        return None
 
     async def submit_to_raiko(
         self, proposal_id: int, l1_inclusion_block: int, l2_block_numbers: list[int], last_anchor_block_number: int
@@ -1247,7 +1284,7 @@ class BatchMonitor:
             )
 
             response = requests.post(
-                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                self.proof_endpoint(),
                 headers=headers,
                 json=payload,
                 timeout=10,
@@ -1293,7 +1330,7 @@ class BatchMonitor:
             )
 
             response = requests.post(
-                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                self.proof_endpoint(),
                 headers=headers,
                 json=payload,
                 timeout=10,
@@ -1330,7 +1367,7 @@ class BatchMonitor:
             }
             payload = self.generate_post_data([proposal_data], aggregate=False)
             response = requests.post(
-                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                self.proof_endpoint(),
                 headers=headers,
                 json=payload,
                 timeout=10,
@@ -1354,7 +1391,7 @@ class BatchMonitor:
             headers = self._request_headers()
             payload = self.generate_post_data(proposals, aggregate=True)
             response = requests.post(
-                f"{self.raiko_rpc}/v3/proof/batch/shasta",
+                self.proof_endpoint(),
                 headers=headers,
                 json=payload,
                 timeout=10,
@@ -1432,9 +1469,9 @@ class BatchMonitor:
                         self.logger.info(
                             f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} in progress"
                         )
-                    elif response.data.get("proof"):
+                    elif proof_hex := self.response_proof_hex(response.data):
                         self.logger.info(
-                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} completed with proof {response.data['proof']['proof']}"
+                            f"Proposal {group.proposal_id} in L1 Block {l1_inclusion_block} completed with proof {proof_hex}"
                         )
                         # If aggregate mode is enabled, add completed proposal to pending list
                         if self.aggregate > 0:
@@ -1470,8 +1507,8 @@ class BatchMonitor:
             )
             if response.message:
                 self.append_log(f"Message: {response.message}\n")
-            if response.data and response.data.get("proof"):
-                self.append_log(f"Proof: {response.data['proof']['proof']}\n")
+            if response.data and (proof_hex := self.response_proof_hex(response.data)):
+                self.append_log(f"Proof: {proof_hex}\n")
         finally:
             self.running_count -= 1
             self.logger.info(
@@ -1789,7 +1826,7 @@ class BatchMonitor:
             completed_requests = []
             for proposals in self.aggregate_requests:
                 response = await self.query_aggregate_status(proposals)
-                if response.data and response.data.get("proof"):
+                if response.data and self.response_proof_hex(response.data):
                     proposal_ids = [p["proposal_id"] for p in proposals]
                     self.logger.info(
                         f"Aggregate request for proposals {proposal_ids} completed"
@@ -1986,6 +2023,7 @@ class BatchMonitor:
             "aggregate": self.aggregate,
             "discover_only": self.discover_only,
             "proposal_ids": self.proposal_ids,
+            "api_version": self.api_version,
         }
         self.logger.info(f"Config:\n{json.dumps(config_dict, indent=2, default=str)}")
         
@@ -2090,6 +2128,13 @@ async def main():
         type=lambda x: parse_none_value(x, str),
         default=os.environ.get("RAIKO2_API_KEY"),
         help='Optional x-api-key header value (defaults to RAIKO2_API_KEY when set)',
+    )
+
+    parser.add_argument(
+        "--api-version",
+        choices=["v3", "v4"],
+        default="v3",
+        help="Raiko proof API version to submit against",
     )
 
     parser.add_argument(
@@ -2257,6 +2302,7 @@ async def main():
         proposal_out=args.proposal_out,
         api_key=args.api_key,
         proposal_ids=proposal_ids,
+        api_version=args.api_version,
     )
 
     await monitor.run()

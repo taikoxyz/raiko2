@@ -351,7 +351,8 @@ fn v4_proposal_request() -> Value {
                 "proposal_id": 1,
                 "last_anchor_block_number": 10,
                 "l1_inclusion_block_number": 11,
-                "l2_block_numbers": [20, 21]
+                "l2_block_number_start": 20,
+                "l2_block_number_end": 21
             }
         ]
     })
@@ -368,7 +369,8 @@ fn v4_sp1_batch_request(proposal_id_start: u64, proposal_id_end: u64, aggregate:
                 "proposal_id": proposal_id,
                 "last_anchor_block_number": proposal_id.saturating_sub(1),
                 "l1_inclusion_block_number": proposal_id,
-                "l2_block_numbers": [proposal_id]
+                "l2_block_number_start": proposal_id,
+                "l2_block_number_end": proposal_id
             })
         })
         .collect::<Vec<_>>();
@@ -603,7 +605,8 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
                 "proposal_id": 1,
                 "last_anchor_block_number": 0,
                 "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [1]
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
             }
         ]
     });
@@ -643,7 +646,8 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
                 "proposal_id": 1,
                 "last_anchor_block_number": 0,
                 "l1_inclusion_block_number": 2,
-                "l2_block_numbers": [1]
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
             }
         ]
     });
@@ -674,7 +678,8 @@ async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
                 "proposal_id": 1,
                 "last_anchor_block_number": 0,
                 "l1_inclusion_block_number": 999,
-                "l2_block_numbers": [1]
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
             }
         ]
     });

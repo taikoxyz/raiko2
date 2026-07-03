@@ -360,11 +360,29 @@ mod tests {
                     "proposal_id": 1,
                     "last_anchor_block_number": 10,
                     "l1_inclusion_block_number": 11,
-                    "l2_block_numbers": [20, 21]
+                    "l2_block_number_start": 20,
+                    "l2_block_number_end": 21
                 }
             ]
         }))
         .expect_err("legacy proposal_id field must be rejected");
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn v4_proposal_request_rejects_legacy_l2_block_numbers_field() {
+        let err = serde_json::from_value::<v4::ProofRequest>(serde_json::json!({
+            "proof_type": "risc0",
+            "proposals": [
+                {
+                    "proposal_id": 1,
+                    "last_anchor_block_number": 10,
+                    "l1_inclusion_block_number": 11,
+                    "l2_block_numbers": [20, 21]
+                }
+            ]
+        }))
+        .expect_err("legacy l2_block_numbers field must be rejected");
         assert!(err.to_string().contains("unknown field"));
     }
 
@@ -387,7 +405,8 @@ mod tests {
                     task_id: "task_proposal_10".to_string(),
                     status: "registered".to_string(),
                     l1_inclusion_block_number: 100,
-                    l2_block_numbers: vec![20, 21],
+                    l2_block_number_start: 20,
+                    l2_block_number_end: 21,
                     last_anchor_block_number: 19,
                     proof: None,
                     error: None,
@@ -407,6 +426,11 @@ mod tests {
         assert!(response["data"].get("proposal_id_end").is_none());
         assert_eq!(response["data"]["current_index"], 0);
         assert_eq!(response["data"]["proposals"][0]["proposal_id"], 10);
+        assert_eq!(
+            response["data"]["proposals"][0]["l2_block_number_start"],
+            20
+        );
+        assert_eq!(response["data"]["proposals"][0]["l2_block_number_end"], 21);
         assert_eq!(response["data"]["aggregate"]["task_id"], "task_aggregate");
     }
 
@@ -418,7 +442,8 @@ mod tests {
                 {
                     "proposal_id": 10,
                     "l1_inclusion_block_number": 12,
-                    "l2_block_numbers": [10],
+                    "l2_block_number_start": 10,
+                    "l2_block_number_end": 10,
                     "last_anchor_block_number": 9
                 }
             ]
@@ -433,7 +458,8 @@ mod tests {
                 {
                     "proposal_id": 10,
                     "l1_inclusion_block_number": 12,
-                    "l2_block_numbers": [10],
+                    "l2_block_number_start": 10,
+                    "l2_block_number_end": 10,
                     "last_anchor_block_number": 9
                 }
             ]
@@ -455,7 +481,8 @@ mod tests {
                     {
                         "proposal_id": 1,
                         "l1_inclusion_block_number": 2,
-                        "l2_block_numbers": [3],
+                        "l2_block_number_start": 3,
+                        "l2_block_number_end": 3,
                         "last_anchor_block_number": 1
                     }
                 ]

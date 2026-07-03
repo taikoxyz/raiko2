@@ -206,14 +206,16 @@ Request:
     {
       "proposal_id": 12345,
       "l1_inclusion_block_number": 100,
-      "l2_block_numbers": [200, 201],
+      "l2_block_number_start": 200,
+      "l2_block_number_end": 201,
       "last_anchor_block_number": 199,
       "checkpoint": null
     },
     {
       "proposal_id": 12346,
       "l1_inclusion_block_number": 101,
-      "l2_block_numbers": [202],
+      "l2_block_number_start": 202,
+      "l2_block_number_end": 202,
       "last_anchor_block_number": 201
     }
   ],
@@ -230,7 +232,8 @@ Request fields:
 | `proposals` | array | yes | Non-empty contiguous proposal list. |
 | `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
 | `proposals[].l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
-| `proposals[].l2_block_numbers` | array | yes | Non-empty, strictly increasing, contiguous L2 block numbers covered by the proposal. |
+| `proposals[].l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
+| `proposals[].l2_block_number_end` | number | yes | Last L2 block number covered by the proposal. Must be greater than or equal to `l2_block_number_start`. |
 | `proposals[].last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
 | `proposals[].checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `prover` | address | no | Designated prover address. |
@@ -255,7 +258,8 @@ Response:
         "task_id": "task_...",
         "status": "registered",
         "l1_inclusion_block_number": 100,
-        "l2_block_numbers": [200, 201],
+        "l2_block_number_start": 200,
+        "l2_block_number_end": 201,
         "last_anchor_block_number": 199,
         "proof": null
       },
@@ -265,7 +269,8 @@ Response:
         "task_id": "task_...",
         "status": "registered",
         "l1_inclusion_block_number": 101,
-        "l2_block_numbers": [202],
+        "l2_block_number_start": 202,
+        "l2_block_number_end": 202,
         "last_anchor_block_number": 201,
         "proof": null
       }
@@ -291,6 +296,8 @@ Response fields:
 | `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
 | `data.current_index` | number/null | Current proposal index, or the aggregate stage index when proposals have completed and aggregation is pending. |
 | `data.proposals` | array | Proposal stage views for this root. |
+| `data.proposals[].l2_block_number_start` | number | First L2 block number covered by the proposal. |
+| `data.proposals[].l2_block_number_end` | number | Last L2 block number covered by the proposal. |
 | `data.aggregate` | object/null | Aggregation stage view when `aggregate=true`; null or omitted otherwise. |
 
 Polling and idempotency:
@@ -315,12 +322,15 @@ Validation:
 - `proposals` must not be empty.
 - `proposals[].proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposals[].proposal_id` values must be strictly increasing and contiguous.
-- `proposals[].l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
+- `proposals[].l2_block_number_end` must be greater than or equal to
+  `proposals[].l2_block_number_start`.
 - Mixed-proof-type aggregation is not supported.
 - `aggregate=true` requires a concrete proof type; `zk_any` is not accepted by v4.
-- `proposal_id_start`, `proposal_id_end`, `proposal_id`, `l2_block_number_start`,
-  `l2_block_number_end`, `network`, `l1_network`, `blob_proof_type`, `aggregation_ids`, `proofs`,
-  `graffiti`, and prover-specific argument objects are not accepted by the v4 proof request.
+- Top-level legacy fields such as `proposal_id_start`, `proposal_id_end`, `proposal_id`,
+  `l2_block_number_start`, `l2_block_number_end`, `network`, `l1_network`, `blob_proof_type`,
+  `aggregation_ids`, `proofs`, `graffiti`, and prover-specific argument objects are not accepted by
+  the v4 proof request.
+- Legacy `proposals[].l2_block_numbers` arrays are not accepted by the v4 proof request.
 - Invalid or unavailable proposal context returns `invalid_request`.
 
 ### Query V4 Task

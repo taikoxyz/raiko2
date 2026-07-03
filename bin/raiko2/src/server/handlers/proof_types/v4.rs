@@ -64,7 +64,8 @@ pub(crate) struct ProposalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checkpoint: Option<ShastaCheckpoint>,
     pub(crate) l1_inclusion_block_number: u64,
-    pub(crate) l2_block_numbers: Vec<u64>,
+    pub(crate) l2_block_number_start: u64,
+    pub(crate) l2_block_number_end: u64,
     pub(crate) last_anchor_block_number: u64,
 }
 
@@ -105,7 +106,8 @@ pub(crate) struct ProofProposalData {
     pub(crate) task_id: String,
     pub(crate) status: String,
     pub(crate) l1_inclusion_block_number: u64,
-    pub(crate) l2_block_numbers: Vec<u64>,
+    pub(crate) l2_block_number_start: u64,
+    pub(crate) l2_block_number_end: u64,
     pub(crate) last_anchor_block_number: u64,
     pub(crate) proof: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

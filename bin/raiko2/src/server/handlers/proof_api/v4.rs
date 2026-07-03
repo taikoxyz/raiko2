@@ -21,6 +21,9 @@ use super::{
     parse_task_metadata, register_batch_task, replace_existing_batch_task, resolve_engine,
 };
 
+// Bound client-supplied inclusive ranges before materializing them into Vecs.
+const MAX_RANGE_LEN: u64 = 100_000;
+
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -307,6 +310,36 @@ fn proposal_id_range(proposals: &[wire::ProposalRequest]) -> Result<(u64, u64), 
     Ok((first.proposal_id, expected - 1))
 }
 
+fn collect_inclusive_range(
+    start: u64,
+    end: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<Vec<u64>, Error> {
+    // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
+    if end < start {
+        return Err(Error::invalid_request(format!(
+            "{end_field} must be greater than or equal to {start_field}"
+        )));
+    }
+
+    let len = end
+        .checked_sub(start)
+        .and_then(|delta| delta.checked_add(1))
+        .ok_or_else(|| {
+            Error::invalid_request(format!(
+                "{start_field}..={end_field} range length overflows u64"
+            ))
+        })?;
+    if len > MAX_RANGE_LEN {
+        return Err(Error::invalid_request(format!(
+            "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
+        )));
+    }
+
+    Ok((start..=end).collect())
+}
+
 fn proposal_submission(
     state: &AppState,
     req: &wire::ProofRequest,
@@ -320,14 +353,22 @@ fn proposal_submission(
         proposals: req
             .proposals
             .iter()
-            .map(|proposal| ShastaProposal {
-                proposal_id: proposal.proposal_id,
-                checkpoint: proposal.checkpoint,
-                l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-                l2_block_numbers: proposal.l2_block_numbers.clone(),
-                last_anchor_block_number: proposal.last_anchor_block_number,
+            .map(|proposal| {
+                let l2_block_numbers = collect_inclusive_range(
+                    proposal.l2_block_number_start,
+                    proposal.l2_block_number_end,
+                    "proposals[].l2_block_number_start",
+                    "proposals[].l2_block_number_end",
+                )?;
+                Ok(ShastaProposal {
+                    proposal_id: proposal.proposal_id,
+                    checkpoint: proposal.checkpoint,
+                    l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+                    l2_block_numbers,
+                    last_anchor_block_number: proposal.last_anchor_block_number,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, Error>>()?,
         proof_type: batch_proof_type(proof_type),
         aggregate: req.aggregate,
         prover: req.prover.map(|addr| addr.to_string()),
@@ -502,16 +543,29 @@ fn proof_task_data(data: TaskData) -> wire::ProofTaskData {
     let proposals = data
         .proposals
         .into_iter()
-        .map(|proposal| wire::ProofProposalData {
-            index: proposal.index,
-            proposal_id: proposal.proposal_id,
-            task_id: proposal.task_id,
-            status: proof_status_string(&proposal.status),
-            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
-            l2_block_numbers: proposal.l2_block_numbers,
-            last_anchor_block_number: proposal.last_anchor_block_number,
-            proof: proposal.proof,
-            error: proposal.error,
+        .map(|proposal| {
+            let l2_block_number_start = proposal
+                .l2_block_numbers
+                .first()
+                .copied()
+                .unwrap_or_default();
+            let l2_block_number_end = proposal
+                .l2_block_numbers
+                .last()
+                .copied()
+                .unwrap_or(l2_block_number_start);
+            wire::ProofProposalData {
+                index: proposal.index,
+                proposal_id: proposal.proposal_id,
+                task_id: proposal.task_id,
+                status: proof_status_string(&proposal.status),
+                l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+                l2_block_number_start,
+                l2_block_number_end,
+                last_anchor_block_number: proposal.last_anchor_block_number,
+                proof: proposal.proof,
+                error: proposal.error,
+            }
         })
         .collect();
     let aggregate = data.aggregate.map(|aggregate| wire::ProofAggregateData {
@@ -564,14 +618,16 @@ mod tests {
                 proposal_id: 7,
                 checkpoint: None,
                 l1_inclusion_block_number: 11,
-                l2_block_numbers: vec![7],
+                l2_block_number_start: 7,
+                l2_block_number_end: 7,
                 last_anchor_block_number: 6,
             },
             wire::ProposalRequest {
                 proposal_id: 9,
                 checkpoint: None,
                 l1_inclusion_block_number: 12,
-                l2_block_numbers: vec![8],
+                l2_block_number_start: 8,
+                l2_block_number_end: 8,
                 last_anchor_block_number: 7,
             },
         ];
@@ -583,6 +639,24 @@ mod tests {
         assert_eq!(
             err.message,
             "proposals[].proposal_id must be strictly increasing and contiguous"
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_descending_bounds() {
+        let err = collect_inclusive_range(
+            22,
+            20,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("descending range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            "proposals[].l2_block_number_end must be greater than or equal to proposals[].l2_block_number_start"
         );
     }
 
@@ -644,6 +718,8 @@ mod tests {
         assert_eq!(response.current_index, Some(1));
         assert_eq!(response.proposals.len(), 1);
         assert_eq!(response.proposals[0].status, "completed");
+        assert_eq!(response.proposals[0].l2_block_number_start, 20);
+        assert_eq!(response.proposals[0].l2_block_number_end, 21);
         assert_eq!(response.proposals[0].proof.as_deref(), Some("0xproposal"));
         let aggregate = response.aggregate.expect("aggregate status");
         assert_eq!(aggregate.status, "completed");

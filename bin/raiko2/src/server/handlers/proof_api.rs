@@ -4701,7 +4701,8 @@ mod tests {
                             "proposal_id": 1,
                             "last_anchor_block_number": 10,
                             "l1_inclusion_block_number": 11,
-                            "l2_block_numbers": [20, 21]
+                            "l2_block_number_start": 20,
+                            "l2_block_number_end": 21
                         }
                     ]
                 })

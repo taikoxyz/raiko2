@@ -569,6 +569,17 @@ async fn submit_submission(
                 existing.runner_status,
                 raiko2_runtime::RunnerStatus::Failed | raiko2_runtime::RunnerStatus::Cancelled
             ) {
+                // Gate on backend availability BEFORE replacing the row: replace_existing_batch_task
+                // mutates runtime state and only resolves the engine late (in
+                // handle_created_batch_task), so without this an unavailable backend would mutate the
+                // terminal slot and return 404 task_not_found instead of 400 unsupported_proof_type —
+                // reopening F5 through the F3 replacement path.
+                ensure_engine_available(
+                    state,
+                    &submission.pair.key,
+                    submission.route.pipeline_key(),
+                    submission.requested_proof_type.as_str(),
+                )?;
                 let existing_metadata =
                     parse_task_metadata(&existing).map_err(Error::from_api_error)?;
                 replace_existing_batch_task(

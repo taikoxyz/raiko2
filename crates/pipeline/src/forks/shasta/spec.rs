@@ -618,73 +618,57 @@ fn merge_account_witness_nodes(
     }
 }
 
-async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
-    provider: &P,
-    chain_spec: &ChainSpec,
-    blocks: &[reth_ethereum_primitives::Block],
-    manifest: &raiko2_protocol_shasta::TaikoManifest,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentCheckpointValidationScope {
+    All,
+    ForcedPrefix(usize),
+}
+
+fn parent_checkpoint_validation_scope(
+    anchor_block_numbers: &[u64],
     source_spans: Option<&[AnchorSourceSpan]>,
-    witnesses: &mut [StatelessInput],
-) -> RaikoResult<()> {
-    let proposal = &manifest.proposal_event.proposal;
-    let origin_block_number = proposal.originBlockNumber.to::<u64>();
-    let anchor_checkpoints = blocks
-        .iter()
-        .map(decode_anchor_checkpoint)
-        .collect::<RaikoResult<Vec<_>>>()?;
-    let anchor_block_numbers = anchor_checkpoints
-        .iter()
-        .map(|checkpoint| checkpoint.block_number)
-        .collect::<Vec<_>>();
-    let last_anchor_block_number = manifest
-        .prover_data
-        .last_anchor_block_number
-        .unwrap_or_default();
-    let bypass_stalled_anchor_linkage = should_bypass_stalled_anchor_linkage(
-        &anchor_block_numbers,
+    last_anchor_block_number: u64,
+    origin_block_number: u64,
+    chain_id: u64,
+) -> RaikoResult<Option<ParentCheckpointValidationScope>> {
+    if should_bypass_stalled_anchor_linkage(
+        anchor_block_numbers,
         last_anchor_block_number,
         origin_block_number,
-        chain_spec.chain_id,
-    );
-    let source_anchor_plan = if bypass_stalled_anchor_linkage {
-        None
-    } else {
-        source_spans
-            .map(|source_spans| {
-                validate_source_aware_anchor_progression(
-                    &anchor_block_numbers,
-                    source_spans,
-                    last_anchor_block_number,
-                    origin_block_number,
-                    chain_spec.chain_id,
-                )
-                .map_err(RaikoError::Preflight)
-            })
-            .transpose()?
-    };
-    let forced_prefix_len = source_anchor_plan
-        .as_ref()
-        .filter(|plan| plan.requires_parent_checkpoint)
-        .map_or(0, |plan| plan.l1_header_anchor_start_index);
-    let requires_parent_checkpoint = bypass_stalled_anchor_linkage || forced_prefix_len > 0;
-    if !requires_parent_checkpoint {
-        return Ok(());
+        chain_id,
+    ) {
+        return Ok(Some(ParentCheckpointValidationScope::All));
     }
 
-    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
-            "chain_spec.checkpoint_store_contract required for stalled Shasta anchor validation"
-                .to_string(),
-        )
-    })?;
-    let first_witness = witnesses.first_mut().ok_or_else(|| {
-        RaikoError::Preflight(
-            "cannot hydrate Shasta checkpoint proof without witnesses".to_string(),
-        )
-    })?;
-    let block_numbers = [first_witness.block.header.number];
+    let Some(source_spans) = source_spans else {
+        return Ok(None);
+    };
+    let plan = validate_source_aware_anchor_progression(
+        anchor_block_numbers,
+        source_spans,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_id,
+    )
+    .map_err(RaikoError::Preflight)?;
+    if plan.requires_parent_checkpoint {
+        Ok(Some(ParentCheckpointValidationScope::ForcedPrefix(
+            plan.l1_header_anchor_start_index,
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn fetch_parent_checkpoint_witness_nodes<P: Provider>(
+    provider: &P,
+    witness_block_number: u64,
+    checkpoint_store: Address,
+    checkpoint_block_number: u64,
+) -> RaikoResult<Vec<WitnessStateNode>> {
+    let block_numbers = [witness_block_number];
     let (block_hash_slot, state_root_slot) =
-        shasta_checkpoint_storage_slots(last_anchor_block_number);
+        shasta_checkpoint_storage_slots(checkpoint_block_number);
     let targets: StorageProofTargets = vec![vec![(
         checkpoint_store,
         vec![
@@ -710,33 +694,91 @@ async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
     let nodes = checkpoint_witness_nodes.remove(0);
     if nodes.is_empty() {
         return Err(RaikoError::Provider(
-            "provider returned no checkpoint proof witness nodes for stalled Shasta anchor"
+            "provider returned no checkpoint proof witness nodes for Shasta parent checkpoint"
                 .to_string(),
         ));
     }
+    Ok(nodes)
+}
+
+async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    source_spans: Option<&[AnchorSourceSpan]>,
+    witnesses: &mut [StatelessInput],
+) -> RaikoResult<()> {
+    let proposal = &manifest.proposal_event.proposal;
+    let origin_block_number = proposal.originBlockNumber.to::<u64>();
+    let anchor_checkpoints = blocks
+        .iter()
+        .map(decode_anchor_checkpoint)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let anchor_block_numbers = anchor_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .collect::<Vec<_>>();
+    let last_anchor_block_number = manifest
+        .prover_data
+        .last_anchor_block_number
+        .unwrap_or_default();
+    let Some(validation_scope) = parent_checkpoint_validation_scope(
+        &anchor_block_numbers,
+        source_spans,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_spec.chain_id,
+    )?
+    else {
+        return Ok(());
+    };
+
+    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.checkpoint_store_contract required for stalled Shasta anchor validation"
+                .to_string(),
+        )
+    })?;
+    let first_witness = witnesses.first_mut().ok_or_else(|| {
+        RaikoError::Preflight(
+            "cannot hydrate Shasta checkpoint proof without witnesses".to_string(),
+        )
+    })?;
+    let nodes = fetch_parent_checkpoint_witness_nodes(
+        provider,
+        first_witness.block.header.number,
+        checkpoint_store,
+        last_anchor_block_number,
+    )
+    .await?;
     first_witness.witness.state.extend(nodes);
     first_witness.witness.state = ExecutionWitness::canonicalize_state_nodes(std::mem::take(
         &mut first_witness.witness.state,
     ));
     let parent_checkpoint =
         parent_checkpoint_from_witness(chain_spec, first_witness, last_anchor_block_number)?;
-    if bypass_stalled_anchor_linkage {
-        validate_anchor_checkpoints_match_parent(
-            &anchor_checkpoints,
-            &parent_checkpoint,
-            "anchor checkpoint",
-        )?;
-    } else if forced_prefix_len > 0 {
-        let forced_checkpoints = anchor_checkpoints.get(..forced_prefix_len).ok_or_else(|| {
-            RaikoError::Preflight(format!(
-                "invalid forced inclusion anchor checkpoint range {forced_prefix_len}"
-            ))
-        })?;
-        validate_anchor_checkpoints_match_parent(
-            forced_checkpoints,
-            &parent_checkpoint,
-            "forced inclusion anchor checkpoint",
-        )?;
+    match validation_scope {
+        ParentCheckpointValidationScope::All => {
+            validate_anchor_checkpoints_match_parent(
+                &anchor_checkpoints,
+                &parent_checkpoint,
+                "anchor checkpoint",
+            )?;
+        }
+        ParentCheckpointValidationScope::ForcedPrefix(forced_prefix_len) => {
+            let forced_checkpoints =
+                anchor_checkpoints.get(..forced_prefix_len).ok_or_else(|| {
+                    RaikoError::Preflight(format!(
+                        "invalid forced inclusion anchor checkpoint range {forced_prefix_len}"
+                    ))
+                })?;
+            validate_anchor_checkpoints_match_parent(
+                forced_checkpoints,
+                &parent_checkpoint,
+                "forced inclusion anchor checkpoint",
+            )?;
+        }
     }
     Ok(())
 }

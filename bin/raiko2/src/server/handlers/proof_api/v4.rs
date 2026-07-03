@@ -320,6 +320,11 @@ fn validate_proof_request_shape(req: &wire::ProofRequest) -> Result<(), Error> {
             "proposals[].l2_block_number_start",
             "proposals[].l2_block_number_end",
         )?;
+        validate_inclusive_range_len(
+            len,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )?;
         total_l2_blocks = total_l2_blocks.checked_add(len).ok_or_else(|| {
             Error::invalid_request("total proposals[].l2 block range length overflows u64")
         })?;
@@ -353,6 +358,19 @@ fn inclusive_range_len(
         })
 }
 
+fn validate_inclusive_range_len(
+    len: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<(), Error> {
+    if len > MAX_RANGE_LEN {
+        return Err(Error::invalid_request(format!(
+            "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
+        )));
+    }
+    Ok(())
+}
+
 fn collect_inclusive_range(
     start: u64,
     end: u64,
@@ -361,11 +379,7 @@ fn collect_inclusive_range(
 ) -> Result<Vec<u64>, Error> {
     // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
     let len = inclusive_range_len(start, end, start_field, end_field)?;
-    if len > MAX_RANGE_LEN {
-        return Err(Error::invalid_request(format!(
-            "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
-        )));
-    }
+    validate_inclusive_range_len(len, start_field, end_field)?;
 
     Ok((start..=end).collect())
 }
@@ -754,6 +768,36 @@ mod tests {
             format!(
                 "total proposals[].l2 block range length {} exceeds maximum {MAX_TOTAL_L2_BLOCKS_PER_REQUEST}",
                 MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_request_shape_rejects_single_oversized_l2_range_with_range_error() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals: vec![wire::ProposalRequest {
+                proposal_id: 1,
+                checkpoint: None,
+                l1_inclusion_block_number: 1,
+                l2_block_number_start: 1,
+                l2_block_number_end: MAX_RANGE_LEN + 1,
+                last_anchor_block_number: 0,
+            }],
+        };
+
+        let err =
+            validate_proof_request_shape(&req).expect_err("oversized L2 range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length {} exceeds maximum {MAX_RANGE_LEN}",
+                MAX_RANGE_LEN + 1
             )
         );
     }

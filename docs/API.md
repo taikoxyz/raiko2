@@ -141,25 +141,28 @@ V4 error envelope:
 
 V4 proof request endpoints (`POST /v4/proof/proposal` and `POST /v4/proof/aggregation`) return
 request and dependency errors with HTTP 200 and this JSON envelope, matching the v3 polling style.
-Authentication, authorization, and rate-limit failures keep their HTTP status codes. Other v4
-inspection/admin endpoints return this envelope with the matching HTTP status code. Clients should
-match the stable snake_case `error`; `message` is diagnostic and not stable.
+Only source HTTP 400 and 409 errors are rewritten to HTTP 200 on these proof request endpoints.
+Authentication, authorization, missing-feature/not-found, rate-limit, and server-side failures keep
+their HTTP status codes. Other v4 inspection/admin endpoints return this envelope with the matching
+source HTTP status code. Clients should match the stable snake_case `error`; `message` is diagnostic
+and not stable.
 
 V4 error codes:
 
-| Error | HTTP | Description |
-| --- | --- | --- |
-| `missing_proof_type` | 400 | `proof_type` is required. |
-| `invalid_proof_type` | 400 | `proof_type` is syntactically invalid or a policy/fallback type such as `zk_any`. |
-| `unsupported_proof_type` | 400 | The requested concrete proof type is valid v4 input but unavailable in this server configuration. |
-| `invalid_request` | 400 | The request body is malformed or contains endpoint-incompatible fields. |
-| `not_found` | 404 | The route exists, but the requested server feature is not enabled. |
-| `task_not_found` | 404 | The task ID does not exist. |
-| `unauthorized` | 401 | The required API key is missing or invalid. |
-| `forbidden` | 403 | The API key is valid but is not allowed to use the required ACL feature. |
-| `request_conflict` | 409 | A repeated submission conflicts with the existing root task. |
-| `dependency_not_ready` | 409 | Aggregation dependencies are missing or not completed. |
-| `rate_limited` | 429 | The API key exceeded its per-minute request limit. |
+| Error | Source HTTP | Proof Request HTTP | Description |
+| --- | --- | --- | --- |
+| `missing_proof_type` | 400 | 200 | `proof_type` is required. |
+| `invalid_proof_type` | 400 | 200 | `proof_type` is syntactically invalid or a policy/fallback type such as `zk_any`. |
+| `unsupported_proof_type` | 400 or 503 | 200 or 503 | The requested concrete proof type is valid v4 input but unavailable in this server configuration, or the configured backend is unavailable. |
+| `invalid_request` | 400 | 200 | The request body is malformed or contains endpoint-incompatible fields. |
+| `not_found` | 404 | 404 | The route exists, but the requested server feature is not enabled. |
+| `task_not_found` | 404 | 404 | The task ID does not exist. |
+| `unauthorized` | 401 | 401 | The required API key is missing or invalid. |
+| `forbidden` | 403 | 403 | The API key is valid but is not allowed to use the required ACL feature. |
+| `request_conflict` | 409 | 200 | A repeated submission conflicts with the existing root task. |
+| `dependency_not_ready` | 409 | 200 | Aggregation dependencies are missing or not completed. |
+| `rate_limited` | 429 | 429 | The API key exceeded its per-minute request limit. |
+| `internal_error` | 5xx | 5xx | The server failed to process the request. |
 
 Common proof submission fields:
 
@@ -169,17 +172,17 @@ Common proof submission fields:
 
 Common proof-type validation:
 
-- Missing `proof_type` returns `400 missing_proof_type`.
-- `proof_type=zk_any` returns `400 invalid_proof_type`.
-- Unknown proof type strings return `400 invalid_proof_type`.
+- Missing `proof_type` returns `missing_proof_type`.
+- `proof_type=zk_any` returns `invalid_proof_type`.
+- Unknown proof type strings return `invalid_proof_type`.
 - Any valid concrete `proof_type` that the configured server route cannot serve returns
-  `400 unsupported_proof_type`.
+  `unsupported_proof_type`.
 
 Proof submission validation:
 
 - Proof submission request bodies are endpoint-specific. Legacy v3 batch fields or fields owned by
-  another v4 proof endpoint return `400 invalid_request`.
-- Unknown request body fields return `400 invalid_request`.
+  another v4 proof endpoint return `invalid_request`.
+- Unknown request body fields return `invalid_request`.
 
 Proof submission response shape:
 

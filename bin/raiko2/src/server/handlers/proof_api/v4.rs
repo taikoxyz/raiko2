@@ -313,8 +313,11 @@ impl Error {
         Self::new(err.status, code, err.message)
     }
 
-    fn preserves_proof_request_http_status(&self) -> bool {
-        matches!(self.code, "unauthorized" | "forbidden" | "rate_limited")
+    fn proof_request_http_status(&self) -> StatusCode {
+        match self.status {
+            StatusCode::BAD_REQUEST | StatusCode::CONFLICT => StatusCode::OK,
+            status => status,
+        }
     }
 
     fn into_response_with_status(self, status: StatusCode) -> Response {
@@ -356,11 +359,7 @@ impl std::ops::Deref for ProofRequestError {
 
 impl IntoResponse for ProofRequestError {
     fn into_response(self) -> Response {
-        let status = if self.0.preserves_proof_request_http_status() {
-            self.0.status
-        } else {
-            StatusCode::OK
-        };
+        let status = self.0.proof_request_http_status();
         self.0.into_response_with_status(status)
     }
 }
@@ -531,6 +530,7 @@ async fn local_proposal_proof(
     if metadata.network_pair != target.pair.key
         || record.pipeline_key != target.route.pipeline_key()
         || record.route != target.route.route
+        || metadata.proof_type != target.route.proof_type()
         || metadata.requested_proof_type.as_deref() != Some(proof_type.as_str())
     {
         return Err(missing_local_proposal_proof(proof_type, proposal_id));
@@ -556,14 +556,17 @@ async fn local_proposal_proof(
         return Ok(material);
     }
 
-    maybe_reenqueue_existing_local_proposal_proof(state, target, &record, &metadata, proposal)
-        .await?;
+    maybe_reenqueue_existing_local_proposal_proof(
+        state, proof_type, target, &record, &metadata, proposal,
+    )
+    .await?;
 
     Err(missing_local_proposal_proof(proof_type, proposal_id))
 }
 
 async fn maybe_reenqueue_existing_local_proposal_proof(
     state: &AppState,
+    proof_type: wire::ProofType,
     target: &AggregationTarget,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &super::TaskMetadata,
@@ -581,7 +584,8 @@ async fn maybe_reenqueue_existing_local_proposal_proof(
         return Ok(());
     }
 
-    let submission = existing_local_proposal_submission(target, record, metadata, proposal)?;
+    let submission =
+        existing_local_proposal_submission(proof_type, target, record, metadata, proposal)?;
     recover_existing_task(state, record, || {
         reenqueue_existing_batch_task(state, &submission, record, metadata)
     })
@@ -590,6 +594,7 @@ async fn maybe_reenqueue_existing_local_proposal_proof(
 }
 
 fn existing_local_proposal_submission(
+    proof_type: wire::ProofType,
     target: &AggregationTarget,
     record: &raiko2_runtime::RuntimeTaskRecord,
     metadata: &super::TaskMetadata,
@@ -612,7 +617,7 @@ fn existing_local_proposal_submission(
         public_task_id: record.task_id.clone(),
         pair: target.pair.clone(),
         route: target.route,
-        requested_proof_type: BatchProofType::from_canonical(metadata.proof_type),
+        requested_proof_type: batch_proof_type(proof_type),
         proposals: vec![super::CanonicalProposal {
             proposal_id: proposal.proposal_id,
             checkpoint: proposal.checkpoint,
@@ -877,6 +882,125 @@ fn proof_status_string(status: &ProofStatus) -> String {
         ProofStatus::Cancelled => "cancelled",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BoundlessPairConfig, GuestSystem};
+    use raiko2_engine::{ProposalTaskRequest, ProverTaskConfig};
+    use raiko2_pipeline::{PipelineKey, PipelineRoute, RunnerKind};
+    use raiko2_primitives::{ProofType, SupportedChainSpecs};
+    use raiko2_runtime::{RunnerStatus as RuntimeRunnerStatus, RuntimeTaskRecord};
+
+    use crate::server::task_metadata::{RuntimeMetadata, TaskMetadata};
+
+    #[test]
+    fn proof_request_error_preserves_internal_http_status() {
+        let err = ProofRequestError(Error::from_api_error(ApiError::internal("db is down")));
+
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn existing_local_proposal_submission_uses_requested_proof_type_for_recovery() {
+        let route = CanonicalProofRoute::new(
+            PipelineRoute::new(GuestSystem::Risc0, RunnerKind::Local),
+            PipelineKey::ShastaRisc0,
+            ProofType::Risc0,
+        );
+        let target = AggregationTarget {
+            pair: test_pair(),
+            route,
+        };
+        let record = RuntimeTaskRecord {
+            task_id: "v4:proposal:risc0:7:7".to_string(),
+            pipeline_key: PipelineKey::ShastaRisc0,
+            route: route.route,
+            task_kind: "hoodi_batch".to_string(),
+            proposal_id: Some(7),
+            proof_ids: Vec::new(),
+            runner_status: RuntimeRunnerStatus::Failed,
+            task_dir: "/tmp/task".to_string(),
+            image_ref: None,
+            provider_request_id: None,
+            remote_tx_hash: None,
+            proof_path: None,
+            error: None,
+            metadata: serde_json::Value::Null,
+            request_fingerprint: None,
+            updated_at: 0,
+        };
+        let metadata = TaskMetadata {
+            network_pair: target.pair.key.clone(),
+            network: target.pair.network.clone(),
+            l1_network: target.pair.l1_network.clone(),
+            proof_type: ProofType::Native,
+            requested_proof_type: Some("risc0".to_string()),
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: false,
+            proposals: Vec::new(),
+            aggregate_task_id: None,
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: RuntimeMetadata::default(),
+        };
+        let proposal = ProposalTask {
+            proposal_id: 7,
+            checkpoint: None,
+            l1_inclusion_block_number: 11,
+            l2_block_numbers: vec![7],
+            last_anchor_block_number: 6,
+            task_id: "task_risc0_7".to_string(),
+            request: Some(ProposalTaskRequest {
+                proposal_id: 7,
+                l2_block_range: Some(L2BlockRange { start: 7, end: 7 }),
+                l1_inclusion_block_number: 11,
+                last_anchor_block_number: 6,
+                checkpoint: None,
+                blob_proof_type: None,
+                prover: None,
+                graffiti: None,
+                prover_config: ProverTaskConfig::default(),
+            }),
+        };
+
+        let submission = existing_local_proposal_submission(
+            wire::ProofType::Risc0,
+            &target,
+            &record,
+            &metadata,
+            &proposal,
+        )
+        .expect("rebuild submission from existing proposal metadata");
+
+        assert_eq!(submission.requested_proof_type, BatchProofType::Risc0);
+    }
+
+    fn test_pair() -> ResolvedNetworkPair {
+        let specs = SupportedChainSpecs::default();
+        ResolvedNetworkPair {
+            key: "taiko_dev/ethereum".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "ethereum".to_string(),
+            l1_rpc: "http://l1.example".to_string(),
+            l2_rpc: "http://l2.example".to_string(),
+            l2_provider: raiko2_provider::L2ProviderKind::Reth,
+            l2_witness_rpc: "http://l2w.example".to_string(),
+            sp1_verifier_rpc_url: None,
+            sp1_verifier_address: None,
+            boundless: BoundlessPairConfig::default(),
+            l1_spec: specs
+                .get_chain_spec("ethereum")
+                .expect("ethereum chain spec"),
+            l2_spec: specs
+                .get_chain_spec("taiko_dev")
+                .expect("taiko_dev chain spec"),
+        }
+    }
 }
 
 #[cfg(test)]

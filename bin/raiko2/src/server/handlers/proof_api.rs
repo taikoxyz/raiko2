@@ -2942,7 +2942,7 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
+    use crate::config::{BoundlessPairConfig, Config, NetworkPairConfig, ServerAclKey};
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
     use axum::{
@@ -4699,6 +4699,99 @@ mod tests {
         .expect("completed proof");
 
         assert_eq!(returned, expected);
+    }
+
+    #[tokio::test]
+    async fn v4_aggregation_reenqueues_existing_missing_subproof() -> Result<()> {
+        let runtime = Arc::new(
+            RuntimeManager::new(unique_test_runtime_root("v4-agg-reenqueue-subproof"))
+                .expect("runtime manager"),
+        );
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaRisc0));
+        let engine: Arc<dyn EngineHandle> = recorder.clone();
+        let pair = resolved_pair();
+        let mut config = Config::default();
+        config.rpc.pairs = vec![NetworkPairConfig {
+            network: pair.network.clone(),
+            l1_network: pair.l1_network.clone(),
+            l1_rpc: Some(pair.l1_rpc.clone()),
+            beacon_rpc: None,
+            l2_rpc: Some(pair.l2_rpc.clone()),
+            l2_provider: pair.l2_provider,
+            l2_witness_rpc: Some(pair.l2_witness_rpc.clone()),
+            sp1_verifier_rpc_url: pair.sp1_verifier_rpc_url.clone(),
+            sp1_verifier_address: pair.sp1_verifier_address.clone(),
+            boundless: pair.boundless.clone(),
+        }];
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(pair.key.clone(), PipelineKey::ShastaRisc0, engine);
+        let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime.clone());
+
+        let route = CanonicalProofRoute::new(
+            PipelineRoute::new(crate::config::GuestSystem::Risc0, RunnerKind::Local),
+            PipelineKey::ShastaRisc0,
+            ProofType::Risc0,
+        );
+        let mut submission = canonical_submission(route, false);
+        submission.public_task_id = "v4:proposal:risc0:7:7".to_string();
+        let request_fingerprint =
+            batch_request_fingerprint(&submission).expect("proposal fingerprint");
+        let plan = build_submission_plan(runtime.as_ref(), &submission, &request_fingerprint)
+            .await
+            .expect("proposal plan");
+        register_batch_task(&state, &submission, &plan, &request_fingerprint)
+            .await
+            .expect("register proposal task");
+        runtime
+            .sync_status(
+                &submission.public_task_id,
+                RuntimeRunnerStatus::Failed,
+                Some("old failure".to_string()),
+                None,
+            )
+            .await
+            .expect("mark proposal failed");
+        let record = runtime
+            .get_task(&submission.public_task_id)
+            .await
+            .expect("load proposal task")
+            .expect("proposal task exists");
+        let metadata = parse_task_metadata(&record).expect("parse proposal metadata");
+        assert!(
+            should_reenqueue_existing_submission(&state, &record, &metadata)
+                .await
+                .expect("check reenqueue policy"),
+            "failed local proposal should be reenqueueable before remote progress"
+        );
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v4/proof/aggregation")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "proof_type": "risc0",
+                    "proposal_id_start": 7,
+                    "proposal_id_end": 7
+                })
+                .to_string(),
+            ))?;
+
+        let Err(err) =
+            v4::request_aggregation_proof(State(state.clone()), HeaderMap::new(), request).await
+        else {
+            panic!("aggregation without completed subproof should report dependency_not_ready");
+        };
+        assert_eq!(err.code, "dependency_not_ready");
+
+        let proposals = recorder
+            .proposals
+            .lock()
+            .expect("proposal submissions mutex");
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].0.proposal_id, 7);
+        assert!(proposals[0].1.is_empty());
+        Ok(())
     }
 
     #[tokio::test]

@@ -551,7 +551,7 @@ async fn e2e_v4_submit_is_open_when_acl_feature_is_disabled() {
 
     let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
@@ -572,7 +572,7 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unsupported_proof_type");
 
@@ -580,6 +580,27 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
         get_json_with_api_key(&app, "/v4/tasks/v4:proposal:risc0:1:1", "submit-secret").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{task}");
     assert_eq!(task["error"], "task_not_found");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "dependency_not_ready");
+    assert_eq!(
+        body["message"],
+        "proposal proof 7 for proof_type=sp1 is not completed in local state"
+    );
 }
 
 #[tokio::test]

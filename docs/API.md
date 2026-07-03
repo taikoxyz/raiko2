@@ -139,8 +139,11 @@ V4 error envelope:
 }
 ```
 
-All v4 errors return this JSON envelope with the matching HTTP status code. Clients should match the
-stable snake_case `error`; `message` is diagnostic and not stable.
+V4 proof request endpoints (`POST /v4/proof/proposal` and `POST /v4/proof/aggregation`) return
+request and dependency errors with HTTP 200 and this JSON envelope, matching the v3 polling style.
+Authentication, authorization, and rate-limit failures keep their HTTP status codes. Other v4
+inspection/admin endpoints return this envelope with the matching HTTP status code. Clients should
+match the stable snake_case `error`; `message` is diagnostic and not stable.
 
 V4 error codes:
 
@@ -257,7 +260,7 @@ Polling and idempotency:
 - Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
   existing root task and current status instead of registering duplicate work.
 - Repeated requests whose proof-input fields conflict with the existing root task return
-  `409 request_conflict`.
+  `request_conflict`.
 
 Validation:
 
@@ -269,7 +272,7 @@ Validation:
 - `l2_block_numbers` is not accepted by the v4 proposal request.
 - `network`, `l1_network`, `blob_proof_type`, `aggregate`, `aggregation_ids`, and `proofs` are not
   accepted by the v4 proposal request.
-- Invalid or unavailable proposal context returns `400 invalid_request`.
+- Invalid or unavailable proposal context returns `invalid_request`.
 
 ### Submit Aggregation Proof
 
@@ -339,8 +342,10 @@ Validation:
 - Each dependency is looked up by `(proposal_id, proof_type)`.
 - All proposal proofs consumed by one aggregation request must use the requested `proof_type`.
 - Mixed-proof-type aggregation is not supported.
-- Missing or incomplete proposal proofs in the range return `409 dependency_not_ready`; the
-  aggregation endpoint does not register proposal proof work.
+- Missing or incomplete proposal proofs in the range return `dependency_not_ready`. If a matching
+  local v4 proposal task already exists and is recoverable, the aggregation endpoint attempts to
+  re-enqueue that proposal proof before returning. If no matching proposal task exists, the
+  aggregation request cannot create one because it does not carry proposal execution inputs.
 - `aggregation_ids` is not accepted by the v4 aggregation request.
 - `proofs` is not accepted by the v4 aggregation request.
 - `network`, `l1_network`, `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`,

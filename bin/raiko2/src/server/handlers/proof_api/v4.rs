@@ -14,16 +14,18 @@ use super::super::proof_types::v4 as wire;
 use super::{
     AggregateProofRequest, ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
     CanonicalBatchSubmission, CanonicalProofRoute, ClearProverStatus, ExternalAggregateSubmission,
-    PlannedAggregateTask, ProofArtifactMaterial, ProofStatus, ProverStatus, ProverTaskScope,
-    ProverType, PublicProverArgs, ResolvedNetworkPair, ServerAclFeature, ShastaProposal, TaskData,
-    aggregate_task_ref, augment_system_prover_config, authorize_acl_feature_with_rate_limit,
-    authorize_optional_acl_feature_with_rate_limit, build_canonical_batch_submission,
-    build_external_aggregate_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, handle_created_batch_task, handle_created_external_aggregate_task,
-    handle_existing_batch_task, handle_existing_external_aggregate_task,
-    load_proof_artifact_material, load_task_data, parse_task_metadata, prover_type_for_proof_type,
-    register_batch_task, register_external_aggregate_task, resolve_engine, resolved_pair,
-    route_for_proof_type, validate_aggregate_route_specific_request, validate_public_prover_args,
+    L2BlockRange, PlannedAggregateTask, ProofArtifactMaterial, ProofStatus, ProposalTask,
+    ProverStatus, ProverTaskScope, ProverType, PublicProverArgs, ResolvedNetworkPair,
+    ServerAclFeature, ShastaProposal, TaskData, aggregate_task_ref, augment_system_prover_config,
+    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
+    build_canonical_batch_submission, build_external_aggregate_submission, build_submission_plan,
+    clear_prover_tasks, collect_prover_status, completed_root_artifact_missing,
+    handle_created_batch_task, handle_created_external_aggregate_task, handle_existing_batch_task,
+    handle_existing_external_aggregate_task, load_proof_artifact_material, load_task_data,
+    parse_task_metadata, prover_type_for_proof_type, recover_existing_task,
+    reenqueue_existing_batch_task, register_batch_task, register_external_aggregate_task,
+    resolve_engine, resolved_pair, route_for_proof_type, should_reenqueue_existing_submission,
+    validate_aggregate_route_specific_request, validate_public_prover_args,
 };
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
@@ -33,7 +35,7 @@ pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
     headers: HeaderMap,
     req: Request<Body>,
-) -> Result<Json<wire::TaskResponse<wire::ProofTaskData>>, Error> {
+) -> Result<Json<wire::TaskResponse<wire::ProofTaskData>>, ProofRequestError> {
     authorize_optional_acl_feature_with_rate_limit(
         &state,
         &headers,
@@ -65,7 +67,7 @@ pub(crate) async fn request_aggregation_proof(
     State(state): State<AppState>,
     headers: HeaderMap,
     req: Request<Body>,
-) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, Error> {
+) -> Result<Json<wire::TaskResponse<wire::AggregationTaskData>>, ProofRequestError> {
     authorize_optional_acl_feature_with_rate_limit(
         &state,
         &headers,
@@ -310,12 +312,14 @@ impl Error {
         };
         Self::new(err.status, code, err.message)
     }
-}
 
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
+    fn preserves_proof_request_http_status(&self) -> bool {
+        matches!(self.code, "unauthorized" | "forbidden" | "rate_limited")
+    }
+
+    fn into_response_with_status(self, status: StatusCode) -> Response {
         (
-            self.status,
+            status,
             Json(wire::ApiErrorBody {
                 status: "error",
                 error: self.code,
@@ -323,6 +327,41 @@ impl IntoResponse for Error {
             }),
         )
             .into_response()
+    }
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let status = self.status;
+        self.into_response_with_status(status)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ProofRequestError(Error);
+
+impl From<Error> for ProofRequestError {
+    fn from(err: Error) -> Self {
+        Self(err)
+    }
+}
+
+impl std::ops::Deref for ProofRequestError {
+    type Target = Error;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoResponse for ProofRequestError {
+    fn into_response(self) -> Response {
+        let status = if self.0.preserves_proof_request_http_status() {
+            self.0.status
+        } else {
+            StatusCode::OK
+        };
+        self.0.into_response_with_status(status)
     }
 }
 
@@ -517,7 +556,81 @@ async fn local_proposal_proof(
         return Ok(material);
     }
 
+    maybe_reenqueue_existing_local_proposal_proof(state, target, &record, &metadata, proposal)
+        .await?;
+
     Err(missing_local_proposal_proof(proof_type, proposal_id))
+}
+
+async fn maybe_reenqueue_existing_local_proposal_proof(
+    state: &AppState,
+    target: &AggregationTarget,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &super::TaskMetadata,
+    proposal: &ProposalTask,
+) -> Result<(), Error> {
+    let missing_completed_artifact =
+        completed_root_artifact_missing(state.runtime.as_ref(), record, metadata)
+            .await
+            .map_err(Error::from_api_error)?;
+    let should_reenqueue = missing_completed_artifact
+        || should_reenqueue_existing_submission(state, record, metadata)
+            .await
+            .map_err(Error::from_api_error)?;
+    if !should_reenqueue {
+        return Ok(());
+    }
+
+    let submission = existing_local_proposal_submission(target, record, metadata, proposal)?;
+    recover_existing_task(state, record, || {
+        reenqueue_existing_batch_task(state, &submission, record, metadata)
+    })
+    .await
+    .map_err(Error::from_api_error)
+}
+
+fn existing_local_proposal_submission(
+    target: &AggregationTarget,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &super::TaskMetadata,
+    proposal: &ProposalTask,
+) -> Result<CanonicalBatchSubmission, Error> {
+    let request = proposal.request.as_ref();
+    let l2_block_range = request
+        .and_then(|request| request.l2_block_range)
+        .or_else(|| {
+            Some(L2BlockRange {
+                start: *proposal.l2_block_numbers.first()?,
+                end: *proposal.l2_block_numbers.last()?,
+            })
+        })
+        .ok_or_else(|| {
+            Error::invalid_request("existing proposal task is missing L2 block range")
+        })?;
+
+    Ok(CanonicalBatchSubmission {
+        public_task_id: record.task_id.clone(),
+        pair: target.pair.clone(),
+        route: target.route,
+        requested_proof_type: BatchProofType::from_canonical(metadata.proof_type),
+        proposals: vec![super::CanonicalProposal {
+            proposal_id: proposal.proposal_id,
+            checkpoint: proposal.checkpoint,
+            l1_inclusion_block_number: proposal.l1_inclusion_block_number,
+            l2_block_numbers: proposal.l2_block_numbers.clone(),
+            l2_block_range,
+            last_anchor_block_number: proposal.last_anchor_block_number,
+        }],
+        aggregate_requested: false,
+        prover_config: request
+            .map(|request| request.prover_config.clone())
+            .unwrap_or_default(),
+        prover_type: metadata.prover_type,
+        blob_proof_type: request.and_then(|request| request.blob_proof_type.clone()),
+        prover: request.and_then(|request| request.prover.clone()),
+        graffiti: request.and_then(|request| request.graffiti.clone()),
+        execution_mode: metadata.execution_mode,
+    })
 }
 
 fn missing_local_proposal_proof(proof_type: wire::ProofType, proposal_id: u64) -> Error {

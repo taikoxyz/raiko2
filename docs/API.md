@@ -499,6 +499,13 @@ Validation:
 
 - Unknown query parameters return `400 invalid_request`.
 
+Scope:
+
+- `proof_type` selects tasks by their concrete requested backend. This includes tasks submitted through
+  the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that resolved to the same
+  concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this backend, which stay
+  grouped under their original `zk_any` request.
+
 ### Clear V4 Prover Backlog
 
 ```http
@@ -556,6 +563,13 @@ Idempotency:
 Validation:
 
 - Unknown request body fields return `400 invalid_request`.
+
+Scope:
+
+- `proof_type` cancels tasks by their concrete requested backend. This includes non-terminal tasks
+  submitted through the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that
+  resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
+  backend, which are cleared through `POST /v3/prover/clear`.
 
 ## Submit Shasta Batch Proof
 

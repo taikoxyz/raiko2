@@ -156,10 +156,6 @@ a GitHub Release when you need released artifacts without rebuilding:
 cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf
 ```
 
-When testing v0.1.0 release guest ELFs with a newer host, set
-`prover.guest_input_abi = "v0_1_0"` in the host config. Leave it as `current`
-for locally built or current release ELFs.
-
 Prerequisites:
 
 - `docker`

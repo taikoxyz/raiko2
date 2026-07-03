@@ -15,7 +15,7 @@ use futures::{StreamExt, stream};
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
-    chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
     shasta_checkpoint_storage_slots, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
@@ -1134,7 +1134,6 @@ fn validate_fetched_block_numbers(
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
-    let guest_input_abi = guest_input_abi_from_context(ctx)?;
     let chain_spec = SupportedChainSpecs::default()
         .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
         .unwrap_or_else(|| ChainSpec {
@@ -1145,19 +1144,7 @@ fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
     let chain_spec = chain_spec.align_taiko_runtime_forks().map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("failed to align Taiko runtime chain spec: {err}"))
     })?;
-    Ok(chain_spec.project_for_guest_input_abi(guest_input_abi))
-}
-
-fn guest_input_abi_from_context(ctx: &ProofContext) -> RaikoResult<GuestInputAbi> {
-    let Some(value) = ctx.config.get("guest_input_abi") else {
-        return Ok(GuestInputAbi::default());
-    };
-    if value.is_null() {
-        return Ok(GuestInputAbi::default());
-    }
-    serde_json::from_value(value.clone()).map_err(|err| {
-        RaikoError::InvalidRequestConfig(format!("invalid prover.guest_input_abi: {err}"))
-    })
+    Ok(chain_spec)
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
@@ -2244,7 +2231,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_spec_from_context_defaults_to_current_guest_input_abi() {
+    fn chain_spec_from_context_uses_current_aligned_chain_spec() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
         let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
@@ -2258,35 +2245,6 @@ mod tests {
                 .values()
                 .any(|verifiers| verifiers.contains_key(&ProofType::SgxGeth))
         );
-    }
-
-    #[test]
-    fn chain_spec_from_context_projects_v0_1_0_guest_input_abi() {
-        let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
-        ctx.config = serde_json::json!({ "guest_input_abi": "v0_1_0" });
-
-        let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
-
-        assert_eq!(
-            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
-        );
-        assert!(
-            spec.verifier_address_forks
-                .values()
-                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
-        );
-    }
-
-    #[test]
-    fn chain_spec_from_context_rejects_invalid_guest_input_abi() {
-        let mut ctx = sample_context(42, 11, 9);
-        ctx.config = serde_json::json!({ "guest_input_abi": "legacy" });
-
-        let err = super::chain_spec_from_context(&ctx).expect_err("invalid abi");
-
-        assert!(err.to_string().contains("invalid prover.guest_input_abi"));
     }
 
     #[test]

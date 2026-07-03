@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
-use raiko2_primitives::{GuestInputAbi, ProofType};
+use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
         BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_MULTIPLIER,
@@ -22,9 +22,15 @@ pub struct ProverConfig {
     pub guest_system: GuestSystem,
     #[serde(default)]
     pub runner: RunnerKind,
-    /// Guest input ABI emitted by host preflight.
-    #[serde(default)]
-    pub guest_input_abi: GuestInputAbi,
+    /// Deprecated. Accepted for config-file upgrade compatibility, but ignored.
+    #[allow(dead_code)]
+    #[serde(
+        default,
+        rename = "guest_input_abi",
+        skip_serializing,
+        deserialize_with = "deserialize_deprecated_guest_input_abi"
+    )]
+    _deprecated_guest_input_abi: (),
     /// RISC0 specific configuration.
     #[serde(default)]
     pub risc0: Risc0Config,
@@ -40,6 +46,20 @@ pub struct ProverConfig {
     /// Remote SGX prover configuration.
     #[serde(default)]
     pub remote_sgx: RemoteSgxConfig,
+}
+
+fn deserialize_deprecated_guest_input_abi<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    match value.as_str() {
+        "current" | "v0_1_0" => Ok(()),
+        _ => Err(serde::de::Error::unknown_variant(
+            &value,
+            &["current", "v0_1_0"],
+        )),
+    }
 }
 
 impl ProverConfig {
@@ -401,6 +421,22 @@ mod tests {
     use super::{
         ProverConfig, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
+
+    #[test]
+    fn prover_config_accepts_deprecated_guest_input_abi() {
+        for guest_input_abi in ["current", "v0_1_0"] {
+            let config: ProverConfig = toml::from_str(&format!(
+                r#"
+guest_system = "risc0"
+runner = "local"
+guest_input_abi = "{guest_input_abi}"
+"#
+            ))
+            .expect("deprecated guest_input_abi should parse");
+
+            config.validate().expect("parsed config should validate");
+        }
+    }
 
     #[test]
     fn zk_any_config_rejects_probability_above_one() {

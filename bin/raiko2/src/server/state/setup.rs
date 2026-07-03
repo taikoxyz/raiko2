@@ -24,9 +24,7 @@ pub(crate) fn build_context(
             prover: None,
             graffiti: None,
         },
-        serde_json::json!({
-            "guest_input_abi": config.prover.guest_input_abi,
-        }),
+        serde_json::json!({}),
     );
     context.preflight.resolved_l1_chain_spec = Some(pair.l1_spec.clone());
     context.l2_chain_spec = pair.l2_spec.to_taiko_chain_spec()?;
@@ -199,7 +197,7 @@ mod tests {
         boundless_prover_config, boundless_scheduler_config, build_context, scheduler_config,
     };
     use crate::config::{BoundlessPairConfig, Config, ResolvedNetworkPair};
-    use raiko2_primitives::{GuestInputAbi, ProofType, SupportedChainSpecs};
+    use raiko2_primitives::{ProofType, SupportedChainSpecs};
     use raiko2_provider::L2ProviderKind;
     use raiko2_queue::RetryPolicy;
     use std::time::Duration;
@@ -232,15 +230,15 @@ mod tests {
     }
 
     #[test]
-    fn build_context_carries_guest_input_abi_without_full_prover_config() {
-        let mut config = Config::default();
-        config.prover.guest_input_abi = GuestInputAbi::V0_1_0;
+    fn build_context_carries_network_pair_without_full_prover_config() {
+        let config = Config::default();
         let pair = resolved_pair("taiko_hoodi", "hoodi");
 
         let context =
             build_context(&config, &pair, ProofType::Risc0).expect("context should build");
 
-        assert_eq!(context.config["guest_input_abi"], "v0_1_0");
+        assert_eq!(context.config["hoodi_network"], "taiko_hoodi");
+        assert_eq!(context.config["hoodi_l1_network"], "hoodi");
         assert!(context.config.get("sp1").is_none());
     }
 

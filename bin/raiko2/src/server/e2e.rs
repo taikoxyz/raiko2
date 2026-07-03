@@ -385,8 +385,8 @@ fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> V
     v4_sp1_batch_request(proposal_id_start, proposal_id_end, true)
 }
 
-fn assert_v4_submit_data_is_root_only(body: &Value) {
-    assert!(body["data"].get("task_id").is_none(), "{body}");
+fn assert_v4_submit_data_has_root_task_only(body: &Value, expected_task_id: &str) {
+    assert_eq!(body["data"]["task_id"], expected_task_id, "{body}");
     assert!(body["data"].get("current_index").is_none(), "{body}");
     assert!(body["data"].get("proposals").is_none(), "{body}");
     assert!(body["data"].get("aggregate").is_none(), "{body}");
@@ -436,7 +436,10 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id);
     assert_eq!(first["proposal_id_end"], proposal_id);
-    assert_v4_submit_data_is_root_only(&first);
+    assert_v4_submit_data_has_root_task_only(
+        &first,
+        &format!("v4:proposal:sp1:{proposal_id}:{proposal_id}"),
+    );
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -445,7 +448,10 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
     let (status, completed) =
         post_json_with_api_key(app, "/v4/proof/proposal", "submit-secret", proposal_payload).await;
     assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_v4_submit_data_is_root_only(&completed);
+    assert_v4_submit_data_has_root_task_only(
+        &completed,
+        &format!("v4:proposal:sp1:{proposal_id}:{proposal_id}"),
+    );
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
 }
@@ -470,7 +476,10 @@ async fn complete_v4_sp1_aggregation(
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id_start);
     assert_eq!(first["proposal_id_end"], proposal_id_end);
-    assert_v4_submit_data_is_root_only(&first);
+    assert_v4_submit_data_has_root_task_only(
+        &first,
+        &format!("v4:proposal_aggregation:sp1:{proposal_id_start}:{proposal_id_end}"),
+    );
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -484,7 +493,10 @@ async fn complete_v4_sp1_aggregation(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_v4_submit_data_is_root_only(&completed);
+    assert_v4_submit_data_has_root_task_only(
+        &completed,
+        &format!("v4:proposal_aggregation:sp1:{proposal_id_start}:{proposal_id_end}"),
+    );
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
 }
@@ -649,7 +661,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_v4_submit_data_is_root_only(&first);
+    assert_v4_submit_data_has_root_task_only(&first, "v4:proposal:sp1:1:1");
     assert_eq!(first["data"]["status"], "registered");
 
     // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
@@ -683,7 +695,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     let (status, replaced) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
     assert_eq!(status, StatusCode::OK, "{replaced}");
-    assert_v4_submit_data_is_root_only(&replaced);
+    assert_v4_submit_data_has_root_task_only(&replaced, "v4:proposal:sp1:1:1");
     assert_eq!(replaced["data"]["status"], "registered");
 }
 
@@ -733,7 +745,7 @@ async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "ok");
-    assert_v4_submit_data_is_root_only(&body);
+    assert_v4_submit_data_has_root_task_only(&body, "v4:proposal_aggregation:sp1:7:7");
     assert_eq!(body["data"]["status"], "registered");
 
     Box::pin(drive_engine_to_idle(&engine)).await;
@@ -746,7 +758,7 @@ async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{completed}");
-    assert_v4_submit_data_is_root_only(&completed);
+    assert_v4_submit_data_has_root_task_only(&completed, "v4:proposal_aggregation:sp1:7:7");
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
 }
@@ -781,7 +793,7 @@ async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{again}");
-    assert_v4_submit_data_is_root_only(&again);
+    assert_v4_submit_data_has_root_task_only(&again, "v4:proposal_aggregation:sp1:5:5");
     assert_eq!(again["data"]["status"], "completed", "{again}");
     assert_eq!(
         again["data"]["proof"], "0xfixture-sp1-aggregation",

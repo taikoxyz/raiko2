@@ -185,7 +185,7 @@ Proof submission response shape:
 - `proof_type` echoes the requested concrete proof type.
 - `proposal_id_start` and `proposal_id_end` echo the proposal range used as the client request
   key.
-- Submission responses return only the root task status, root proof, and root error. Use
+- Submission responses return the root task ID, root task status, root proof, and root error. Use
   `GET /v4/tasks/{id}` for proposal and aggregate stage inspection.
 
 ### Submit Proof
@@ -247,6 +247,7 @@ Response:
   "proposal_id_start": 12345,
   "proposal_id_end": 12346,
   "data": {
+    "task_id": "v4:proposal_aggregation:risc0:12345:12346",
     "status": "registered",
     "proof": null
   }
@@ -260,6 +261,7 @@ Response fields:
 | `proof_type` | string | Concrete proof backend selected by the caller. |
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
+| `data.task_id` | string | Opaque root task ID for task inspection and operational correlation. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
 | `data.error` | string/null | Terminal root error detail when failed. Omitted when no error is present. |

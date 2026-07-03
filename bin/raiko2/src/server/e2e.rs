@@ -429,10 +429,7 @@ async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, propo
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id);
     assert_eq!(first["proposal_id_end"], proposal_id);
-    assert_eq!(
-        first["data"]["task_id"],
-        format!("v4:proposal:sp1:{proposal_id}:{proposal_id}")
-    );
+    assert!(first["data"].get("task_id").is_none(), "{first}");
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -465,10 +462,7 @@ async fn complete_v4_sp1_aggregation(
     assert_eq!(first["proof_type"], "sp1");
     assert_eq!(first["proposal_id_start"], proposal_id_start);
     assert_eq!(first["proposal_id_end"], proposal_id_end);
-    assert_eq!(
-        first["data"]["task_id"],
-        format!("v4:proposal_aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
-    );
+    assert!(first["data"].get("task_id").is_none(), "{first}");
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
 
@@ -620,7 +614,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    assert_eq!(first["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert!(first["data"].get("task_id").is_none(), "{first}");
     assert_eq!(first["data"]["status"], "registered");
 
     // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
@@ -654,7 +648,7 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     let (status, replaced) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
     assert_eq!(status, StatusCode::OK, "{replaced}");
-    assert_eq!(replaced["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert!(replaced["data"].get("task_id").is_none(), "{replaced}");
     assert_eq!(replaced["data"]["status"], "registered");
 }
 
@@ -704,7 +698,7 @@ async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["data"]["task_id"], "v4:proposal_aggregation:sp1:7:7");
+    assert!(body["data"].get("task_id").is_none(), "{body}");
     assert_eq!(body["data"]["status"], "registered");
     assert_eq!(body["data"]["proposals"][0]["proposal_id"], 7);
     assert_eq!(body["data"]["aggregate"]["status"], "registered");

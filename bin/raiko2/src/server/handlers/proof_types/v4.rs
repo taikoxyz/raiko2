@@ -86,7 +86,6 @@ pub(crate) struct ProverClearRequest {
 /// Response data for a v4 proof task.
 #[derive(Debug, Serialize)]
 pub(crate) struct ProofTaskData {
-    pub(crate) task_id: String,
     pub(crate) status: String,
     pub(crate) proof: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

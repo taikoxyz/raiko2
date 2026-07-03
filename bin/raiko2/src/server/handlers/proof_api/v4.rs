@@ -576,7 +576,6 @@ fn proof_task_data(data: TaskData) -> wire::ProofTaskData {
     });
 
     wire::ProofTaskData {
-        task_id: data.task_id,
         status: proof_status_string(&data.status),
         proof: data.proof,
         error: data.error,
@@ -712,7 +711,6 @@ mod tests {
 
         let response = proof_task_data(data);
 
-        assert_eq!(response.task_id, "v4:proposal_aggregation:sp1:10:10");
         assert_eq!(response.status, "completed");
         assert_eq!(response.proof.as_deref(), Some("0xroot"));
         assert_eq!(response.current_index, Some(1));

@@ -247,7 +247,6 @@ Response:
   "proposal_id_start": 12345,
   "proposal_id_end": 12346,
   "data": {
-    "task_id": "v4:proposal_aggregation:risc0:12345:12346",
     "status": "registered",
     "proof": null,
     "current_index": 0,
@@ -291,7 +290,6 @@ Response fields:
 | `proof_type` | string | Concrete proof backend selected by the caller. |
 | `proposal_id_start` | number | First proposal ID in the unique request key. |
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
-| `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
 | `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
 | `data.current_index` | number/null | Current proposal index, or the aggregate stage index when proposals have completed and aggregation is pending. |

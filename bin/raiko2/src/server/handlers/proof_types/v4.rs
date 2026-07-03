@@ -44,30 +44,28 @@ impl ProofType {
     }
 }
 
-/// Request body for one proposal proof; start and end must be equal.
+/// Request body for v4 proposal-side proof admission.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProposalRequest {
+pub(crate) struct ProofRequest {
     pub(crate) proof_type: ProofType,
-    pub(crate) proposal_id_start: u64,
-    pub(crate) proposal_id_end: u64,
-    pub(crate) last_anchor_block_number: u64,
-    pub(crate) l1_inclusion_block_number: u64,
-    pub(crate) l2_block_number_start: u64,
-    pub(crate) l2_block_number_end: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) checkpoint: Option<ShastaCheckpoint>,
+    pub(crate) proposals: Vec<ProposalRequest>,
+    #[serde(default)]
+    pub(crate) aggregate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) prover: Option<Address>,
 }
 
-/// Request body for aggregating a contiguous range of completed proposal proofs.
+/// Proposal inputs carried by the unified v4 proof request.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AggregationRequest {
-    pub(crate) proof_type: ProofType,
-    pub(crate) proposal_id_start: u64,
-    pub(crate) proposal_id_end: u64,
+pub(crate) struct ProposalRequest {
+    pub(crate) proposal_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checkpoint: Option<ShastaCheckpoint>,
+    pub(crate) l1_inclusion_block_number: u64,
+    pub(crate) l2_block_numbers: Vec<u64>,
+    pub(crate) last_anchor_block_number: u64,
 }
 
 /// Query string accepted by the v4 prover-status endpoint.
@@ -84,20 +82,44 @@ pub(crate) struct ProverClearRequest {
     pub(crate) proof_type: ProofType,
 }
 
-/// Response data for a v4 proposal task.
+/// Response data for a v4 proof task.
 #[derive(Debug, Serialize)]
 pub(crate) struct ProofTaskData {
     pub(crate) task_id: String,
     pub(crate) status: String,
     pub(crate) proof: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_index: Option<usize>,
+    pub(crate) proposals: Vec<ProofProposalData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) aggregate: Option<ProofAggregateData>,
 }
 
-/// Response data for a v4 aggregation task.
+/// Proposal stage view returned by the v4 proof task response.
 #[derive(Debug, Serialize)]
-pub(crate) struct AggregationTaskData {
+pub(crate) struct ProofProposalData {
+    pub(crate) index: usize,
+    pub(crate) proposal_id: u64,
+    pub(crate) task_id: String,
+    pub(crate) status: String,
+    pub(crate) l1_inclusion_block_number: u64,
+    pub(crate) l2_block_numbers: Vec<u64>,
+    pub(crate) last_anchor_block_number: u64,
+    pub(crate) proof: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+/// Aggregate stage view returned by the v4 proof task response.
+#[derive(Debug, Serialize)]
+pub(crate) struct ProofAggregateData {
     pub(crate) task_id: String,
     pub(crate) status: String,
     pub(crate) proof: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
 }
 
 /// Response data for a v4 prover-clear request.

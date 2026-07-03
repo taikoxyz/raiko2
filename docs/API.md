@@ -35,8 +35,6 @@ ACL-protected API surface requires an `x-api-key` whose ACL allows the listed fe
 - `POST /v3/prover/clear` requires `prover.clear`
 - `POST /v4/proof/proposal` requires `prover.submit` when a `prover.submit` or `admin`
   ACL key is configured
-- `POST /v4/proof/aggregation` requires `prover.submit` when a `prover.submit` or
-  `admin` ACL key is configured
 - `GET /v4/tasks/{id}` requires `prover.submit` when a `prover.submit` or `admin` ACL
   key is configured
 - `POST /v4/prover/clear` requires `prover.clear`
@@ -109,15 +107,15 @@ concrete proof type for each request.
 V4 routes:
 
 - `POST /v4/proof/proposal`
-- `POST /v4/proof/aggregation`
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
 
 Endpoint responsibilities:
 
-- `POST /v4/proof/proposal` registers or polls one proposal proof task only.
-- `POST /v4/proof/aggregation` registers or polls one aggregation proof task only.
+- `POST /v4/proof/proposal` registers or polls one proposal-side proof task. The request may
+  contain one or more contiguous proposals, and `aggregate=true` registers the aggregation stage
+  for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
 
 V4 success envelope:
@@ -139,9 +137,9 @@ V4 error envelope:
 }
 ```
 
-V4 proof request endpoints (`POST /v4/proof/proposal` and `POST /v4/proof/aggregation`) return
-request and dependency errors with HTTP 200 and this JSON envelope, matching the v3 polling style.
-Only source HTTP 400 and 409 errors are rewritten to HTTP 200 on these proof request endpoints.
+The v4 proof request endpoint (`POST /v4/proof/proposal`) returns request errors with HTTP 200 and
+this JSON envelope, matching the v3 polling style. Only source HTTP 400 and 409 errors are rewritten
+to HTTP 200 on this proof request endpoint.
 Authentication, authorization, missing-feature/not-found, rate-limit, and server-side failures keep
 their HTTP status codes. Other v4 inspection/admin endpoints return this envelope with the matching
 source HTTP status code. Clients should match the stable snake_case `error`; `message` is diagnostic
@@ -160,7 +158,6 @@ V4 error codes:
 | `unauthorized` | 401 | 401 | The required API key is missing or invalid. |
 | `forbidden` | 403 | 403 | The API key is valid but is not allowed to use the required ACL feature. |
 | `request_conflict` | 409 | 200 | A repeated submission conflicts with the existing root task. |
-| `dependency_not_ready` | 409 | 200 | Aggregation dependencies are missing or not completed. |
 | `rate_limited` | 429 | 429 | The API key exceeded its per-minute request limit. |
 | `internal_error` | 5xx | 5xx | The server failed to process the request. |
 
@@ -180,8 +177,7 @@ Common proof-type validation:
 
 Proof submission validation:
 
-- Proof submission request bodies are endpoint-specific. Legacy v3 batch fields or fields owned by
-  another v4 proof endpoint return `invalid_request`.
+- Legacy v3 fields outside the v4 request shape return `invalid_request`.
 - Unknown request body fields return `invalid_request`.
 
 Proof submission response shape:
@@ -189,10 +185,10 @@ Proof submission response shape:
 - `proof_type` echoes the requested concrete proof type.
 - `proposal_id_start` and `proposal_id_end` echo the proposal range used as the client request
   key.
-- Submission responses return one root task status. They do not embed the other proof endpoint's
-  result; use `GET /v4/tasks/{id}` for the detailed task view.
+- Submission responses return one root task status plus proposal stage views and an optional
+  aggregate stage view.
 
-### Submit Proposal Proof
+### Submit Proof
 
 ```http
 POST /v4/proof/proposal
@@ -204,14 +200,23 @@ Request:
 
 ```json
 {
-  "proposal_id_start": 12345,
-  "proposal_id_end": 12345,
-  "l1_inclusion_block_number": 100,
-  "l2_block_number_start": 200,
-  "l2_block_number_end": 201,
-  "last_anchor_block_number": 199,
-  "checkpoint": null,
   "proof_type": "risc0",
+  "aggregate": true,
+  "proposals": [
+    {
+      "proposal_id": 12345,
+      "l1_inclusion_block_number": 100,
+      "l2_block_numbers": [200, 201],
+      "last_anchor_block_number": 199,
+      "checkpoint": null
+    },
+    {
+      "proposal_id": 12346,
+      "l1_inclusion_block_number": 101,
+      "l2_block_numbers": [202],
+      "last_anchor_block_number": 201
+    }
+  ],
   "prover": "0x0000000000000000000000000000000000000000"
 }
 ```
@@ -220,14 +225,14 @@ Request fields:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `proposal_id_start` | number | yes | Taiko proposal ID to prove. Must equal `proposal_id_end`. |
-| `proposal_id_end` | number | yes | Taiko proposal ID to prove. Must equal `proposal_id_start`. |
-| `l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
-| `l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
-| `l2_block_number_end` | number | yes | Last L2 block number covered by the proposal. |
-| `last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
-| `checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `aggregate` | boolean | no | Defaults to `false`. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
+| `proposals` | array | yes | Non-empty contiguous proposal list. |
+| `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
+| `proposals[].l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
+| `proposals[].l2_block_numbers` | array | yes | Non-empty, strictly increasing, contiguous L2 block numbers covered by the proposal. |
+| `proposals[].last_anchor_block_number` | number | yes | Last anchor block number before the proposal range. |
+| `proposals[].checkpoint` | object/null | no | Fork-specific checkpoint data when required. |
 | `prover` | address | no | Designated prover address. |
 
 Response:
@@ -237,11 +242,39 @@ Response:
   "status": "ok",
   "proof_type": "risc0",
   "proposal_id_start": 12345,
-  "proposal_id_end": 12345,
+  "proposal_id_end": 12346,
   "data": {
-    "task_id": "task_0x1234",
+    "task_id": "v4:proposal_aggregation:risc0:12345:12346",
     "status": "registered",
-    "proof": null
+    "proof": null,
+    "current_index": 0,
+    "proposals": [
+      {
+        "index": 0,
+        "proposal_id": 12345,
+        "task_id": "task_...",
+        "status": "registered",
+        "l1_inclusion_block_number": 100,
+        "l2_block_numbers": [200, 201],
+        "last_anchor_block_number": 199,
+        "proof": null
+      },
+      {
+        "index": 1,
+        "proposal_id": 12346,
+        "task_id": "task_...",
+        "status": "registered",
+        "l1_inclusion_block_number": 101,
+        "l2_block_numbers": [202],
+        "last_anchor_block_number": 201,
+        "proof": null
+      }
+    ],
+    "aggregate": {
+      "task_id": "task_...",
+      "status": "registered",
+      "proof": null
+    }
   }
 }
 ```
@@ -255,7 +288,10 @@ Response fields:
 | `proposal_id_end` | number | Last proposal ID in the unique request key. |
 | `data.task_id` | string | Opaque root task ID. |
 | `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | string/null | Final proposal proof hex string when `data.status=completed`; null only before completion. |
+| `data.proof` | string/null | Final root proof hex string when completed. For `aggregate=true`, this is the aggregation proof; for one proposal without aggregation, this is the proposal proof. |
+| `data.current_index` | number/null | Current proposal index, or the aggregate stage index when proposals have completed and aggregation is pending. |
+| `data.proposals` | array | Proposal stage views for this root. |
+| `data.aggregate` | object/null | Aggregation stage view when `aggregate=true`; null or omitted otherwise. |
 
 Polling and idempotency:
 
@@ -263,102 +299,29 @@ Polling and idempotency:
   key is derived only from client-supplied request data, so a server-side prover-config change (for
   example mock vs. real, or local vs. network routing) does not turn a repeated identical request
   into a conflict.
-- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
+- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type, aggregate)`
+  return the
   existing root task and current status instead of registering duplicate work.
 - If the existing task for that key has terminally failed or was cancelled, a request with corrected
   proof-input fields replaces it (for example after an L1 reorg changes `l1_inclusion_block_number`).
 - Otherwise, a repeated request whose proof-input fields conflict with a still-active or completed
   root task returns `request_conflict`.
+- `aggregate=true` uses the same v3-style batch admission model: missing proposal proofs are
+  registered as dependencies in the same request, and a recoverable repeated request may re-enqueue
+  proposal or aggregation work according to the persisted root state.
 
 Validation:
 
-- `proposal_id_start` must equal `proposal_id_end` for proposal proof requests.
-- `l2_block_number_start` and `l2_block_number_end` define an inclusive range and must satisfy
-  `l2_block_number_start <= l2_block_number_end`.
-- `proposal_id` is not accepted by the v4 proposal request.
-- `proposals` is not accepted by the v4 proposal request.
-- `l2_block_numbers` is not accepted by the v4 proposal request.
-- `network`, `l1_network`, `blob_proof_type`, `aggregate`, `aggregation_ids`, and `proofs` are not
-  accepted by the v4 proposal request.
-- Invalid or unavailable proposal context returns `invalid_request`.
-
-### Submit Aggregation Proof
-
-```http
-POST /v4/proof/aggregation
-Content-Type: application/json
-x-api-key: <required only when server.acl has allow=["prover.submit"] or allow=["admin"]>
-```
-
-Request:
-
-```json
-{
-  "proposal_id_start": 12345,
-  "proposal_id_end": 12346,
-  "proof_type": "sp1"
-}
-```
-
-Request fields:
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `proposal_id_start` | number | yes | First proposal ID covered by the aggregation. |
-| `proposal_id_end` | number | yes | Last proposal ID covered by the aggregation. |
-| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
-
-Response:
-
-```json
-{
-  "status": "ok",
-  "proof_type": "sp1",
-  "proposal_id_start": 12345,
-  "proposal_id_end": 12346,
-  "data": {
-    "task_id": "task_0x5678",
-    "status": "registered",
-    "proof": null
-  }
-}
-```
-
-Response fields:
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `proof_type` | string | Concrete proof backend selected by the caller. |
-| `proposal_id_start` | number | First proposal ID in the unique request key. |
-| `proposal_id_end` | number | Last proposal ID in the unique request key. |
-| `data.task_id` | string | Opaque root task ID. |
-| `data.status` | string | `registered`, `work_in_progress`, `completed`, `failed`, or `cancelled`. |
-| `data.proof` | string/null | Final aggregation proof hex string when `data.status=completed`; null only before completion. Proposal proofs are not returned here. |
-
-Polling and idempotency:
-
-- Clients may repeat the same `POST /v4/proof/aggregation` request to poll progress.
-- Repeated requests for the same `(proposal_id_start, proposal_id_end, proof_type)` return the
-  existing root task and current status instead of registering duplicate work.
-
-Validation:
-
-- `proposal_id_start` and `proposal_id_end` define an inclusive contiguous range and must satisfy
-  `proposal_id_start <= proposal_id_end`.
-- Proposal proofs for every proposal in the range must already exist as local v4 proposal tasks for
-  the selected `proof_type`.
-- Each dependency is looked up by `(proposal_id, proof_type)`.
-- All proposal proofs consumed by one aggregation request must use the requested `proof_type`.
+- `proposals` must not be empty.
+- `proposals[].proposal_id` must fit Shasta's `uint48` protocol field.
+- `proposals[].proposal_id` values must be strictly increasing and contiguous.
+- `proposals[].l2_block_numbers` must be non-empty, strictly increasing, and contiguous.
 - Mixed-proof-type aggregation is not supported.
-- Missing or incomplete proposal proofs in the range return `dependency_not_ready`. If a matching
-  local v4 proposal task already exists and is recoverable, the aggregation endpoint attempts to
-  re-enqueue that proposal proof before returning. If no matching proposal task exists, the
-  aggregation request cannot create one because it does not carry proposal execution inputs.
-- `aggregation_ids` is not accepted by the v4 aggregation request.
-- `proofs` is not accepted by the v4 aggregation request.
-- `network`, `l1_network`, `aggregate`, `proposals`, `proposal_id`, `l1_inclusion_block_number`,
-  `l2_block_number_start`, `l2_block_number_end`, `last_anchor_block_number`, `checkpoint`,
-  `prover`, and `blob_proof_type` are not accepted by the v4 aggregation request.
+- `aggregate=true` requires a concrete proof type; `zk_any` is not accepted by v4.
+- `proposal_id_start`, `proposal_id_end`, `proposal_id`, `l2_block_number_start`,
+  `l2_block_number_end`, `network`, `l1_network`, `blob_proof_type`, `aggregation_ids`, `proofs`,
+  `graffiti`, and prover-specific argument objects are not accepted by the v4 proof request.
+- Invalid or unavailable proposal context returns `invalid_request`.
 
 ### Query V4 Task
 

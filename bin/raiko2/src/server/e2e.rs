@@ -346,33 +346,41 @@ fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
 fn v4_proposal_request() -> Value {
     json!({
         "proof_type": "risc0",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 10,
-        "l1_inclusion_block_number": 11,
-        "l2_block_number_start": 20,
-        "l2_block_number_end": 21
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 10,
+                "l1_inclusion_block_number": 11,
+                "l2_block_numbers": [20, 21]
+            }
+        ]
     })
 }
 
 fn v4_sp1_proposal_request(proposal_id: u64) -> Value {
+    v4_sp1_batch_request(proposal_id, proposal_id, false)
+}
+
+fn v4_sp1_batch_request(proposal_id_start: u64, proposal_id_end: u64, aggregate: bool) -> Value {
+    let proposals = (proposal_id_start..=proposal_id_end)
+        .map(|proposal_id| {
+            json!({
+                "proposal_id": proposal_id,
+                "last_anchor_block_number": proposal_id.saturating_sub(1),
+                "l1_inclusion_block_number": proposal_id,
+                "l2_block_numbers": [proposal_id]
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "proof_type": "sp1",
-        "proposal_id_start": proposal_id,
-        "proposal_id_end": proposal_id,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 1,
-        "l2_block_number_start": proposal_id,
-        "l2_block_number_end": proposal_id
+        "aggregate": aggregate,
+        "proposals": proposals
     })
 }
 
 fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> Value {
-    json!({
-        "proof_type": "sp1",
-        "proposal_id_start": proposal_id_start,
-        "proposal_id_end": proposal_id_end
-    })
+    v4_sp1_batch_request(proposal_id_start, proposal_id_end, true)
 }
 
 fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
@@ -445,7 +453,7 @@ async fn complete_v4_sp1_aggregation(
 
     let (status, first) = post_json_with_api_key(
         app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         aggregation_payload.clone(),
     )
@@ -457,7 +465,7 @@ async fn complete_v4_sp1_aggregation(
     assert_eq!(first["proposal_id_end"], proposal_id_end);
     assert_eq!(
         first["data"]["task_id"],
-        format!("v4:aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
+        format!("v4:proposal_aggregation:sp1:{proposal_id_start}:{proposal_id_end}")
     );
     assert_eq!(first["data"]["status"], "registered");
     assert!(first["data"]["proof"].is_null(), "{first}");
@@ -466,7 +474,7 @@ async fn complete_v4_sp1_aggregation(
 
     let (status, completed) = post_json_with_api_key(
         app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         aggregation_payload,
     )
@@ -529,12 +537,8 @@ async fn e2e_v4_submit_requires_submit_acl_key() {
     assert_eq!(body["status"], "error");
     assert_eq!(body["error"], "unauthorized");
 
-    let (status, body) = post_json(
-        &app,
-        "/v4/proof/aggregation",
-        v4_sp1_aggregation_request(1, 1),
-    )
-    .await;
+    let (status, body) =
+        post_json(&app, "/v4/proof/proposal", v4_sp1_aggregation_request(1, 1)).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["status"], "error");
@@ -594,12 +598,14 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
 
     let original = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 1,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 1,
+                "l2_block_numbers": [1]
+            }
+        ]
     });
 
     // 1) Register the proposal task.
@@ -632,12 +638,14 @@ async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
     //    replaced and the slot re-registers.
     let corrected = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 2,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 2,
+                "l2_block_numbers": [1]
+            }
+        ]
     });
     let (status, replaced) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
@@ -661,12 +669,14 @@ async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
     // The existing task is Completed (not Failed/Cancelled), so submit must conflict, not replace.
     let mismatched = json!({
         "proof_type": "sp1",
-        "proposal_id_start": 1,
-        "proposal_id_end": 1,
-        "last_anchor_block_number": 0,
-        "l1_inclusion_block_number": 999,
-        "l2_block_number_start": 1,
-        "l2_block_number_end": 1
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 999,
+                "l2_block_numbers": [1]
+            }
+        ]
     });
     let (status, body) =
         post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", mismatched).await;
@@ -676,40 +686,63 @@ async fn e2e_v4_proposal_completed_task_rejects_mismatched_resubmission() {
 }
 
 #[tokio::test]
-async fn e2e_v4_aggregation_missing_subproof_returns_error_body_with_http_ok() {
-    let (app, _engine) = v4_sp1_acl_app();
+async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
+    let (app, engine) = v4_sp1_acl_app();
 
     let (status, body) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(7, 7),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["error"], "dependency_not_ready");
-    assert_eq!(
-        body["message"],
-        "proposal proof 7 for proof_type=sp1 is not completed in local state"
-    );
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["data"]["task_id"], "v4:proposal_aggregation:sp1:7:7");
+    assert_eq!(body["data"]["status"], "registered");
+    assert_eq!(body["data"]["proposals"][0]["proposal_id"], 7);
+    assert_eq!(body["data"]["aggregate"]["status"], "registered");
+
+    Box::pin(drive_engine_to_idle(&engine)).await;
+
+    let (status, completed) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_endpoint_is_not_a_submit_route() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, _body) = post_raw_json_text_with_optional_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        Some("submit-secret"),
+        &v4_sp1_aggregation_request(7, 7).to_string(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
-    // #5 narrow early-return safety: a healthy/completed aggregation row still fast-returns its status
-    // on re-POST (needs_recovery == false), WITHOUT re-deriving the submission (which reloads every
-    // sub-proof). This is the property that makes narrowing the early return safe rather than removing
-    // it — a completed aggregation whose sub-proofs later aged out must not regress to
-    // dependency_not_ready. Only rows that need recovery fall through to submit_external_aggregation.
+    // Proposal-side aggregation should poll by repeating the same batch request, matching the
+    // proposal path's idempotency and requeue semantics.
     let (app, engine) = v4_sp1_acl_app();
-    complete_v4_sp1_proposal(&app, &engine, 5).await;
     complete_v4_sp1_aggregation(&app, &engine, 5, 5).await;
 
     let (status, again) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(5, 5),
     )
@@ -749,7 +782,7 @@ async fn e2e_v4_submit_rate_limits_acl_key() {
 
     let (status, body) = post_json_with_api_key(
         &app,
-        "/v4/proof/aggregation",
+        "/v4/proof/proposal",
         "submit-secret",
         v4_sp1_aggregation_request(1, 1),
     )
@@ -791,7 +824,6 @@ async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
 #[tokio::test]
 async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
     let (app, engine) = v4_sp1_acl_app();
-    complete_v4_sp1_proposal(&app, &engine, 3).await;
     complete_v4_sp1_aggregation(&app, &engine, 3, 3).await;
 
     let (status, status_body) = get_json(&app, "/v4/prover/status?proof_type=sp1").await;

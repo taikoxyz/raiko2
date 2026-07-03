@@ -23,6 +23,8 @@ use crate::server::request_identity::{FingerprintSink, RequestFingerprint, Reque
 
 // Bound client-supplied inclusive ranges before materializing them into Vecs.
 const MAX_RANGE_LEN: u64 = 100_000;
+const MAX_PROPOSALS_PER_REQUEST: usize = 1_024;
+const MAX_TOTAL_L2_BLOCKS_PER_REQUEST: u64 = MAX_RANGE_LEN;
 
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
@@ -299,12 +301,56 @@ fn validate_proof_request_shape(req: &wire::ProofRequest) -> Result<(), Error> {
     if req.proposals.is_empty() {
         return Err(Error::invalid_request("proposals must not be empty"));
     }
+    if req.proposals.len() > MAX_PROPOSALS_PER_REQUEST {
+        return Err(Error::invalid_request(format!(
+            "proposals length {} exceeds maximum {MAX_PROPOSALS_PER_REQUEST}",
+            req.proposals.len()
+        )));
+    }
     if !req.aggregate && req.proposals.len() != 1 {
         return Err(Error::invalid_request(
             "aggregate=false requires exactly one proposal",
         ));
     }
+    let mut total_l2_blocks = 0u64;
+    for proposal in &req.proposals {
+        let len = inclusive_range_len(
+            proposal.l2_block_number_start,
+            proposal.l2_block_number_end,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )?;
+        total_l2_blocks = total_l2_blocks.checked_add(len).ok_or_else(|| {
+            Error::invalid_request("total proposals[].l2 block range length overflows u64")
+        })?;
+        if total_l2_blocks > MAX_TOTAL_L2_BLOCKS_PER_REQUEST {
+            return Err(Error::invalid_request(format!(
+                "total proposals[].l2 block range length {total_l2_blocks} exceeds maximum {MAX_TOTAL_L2_BLOCKS_PER_REQUEST}"
+            )));
+        }
+    }
     Ok(())
+}
+
+fn inclusive_range_len(
+    start: u64,
+    end: u64,
+    start_field: &'static str,
+    end_field: &'static str,
+) -> Result<u64, Error> {
+    if end < start {
+        return Err(Error::invalid_request(format!(
+            "{end_field} must be greater than or equal to {start_field}"
+        )));
+    }
+
+    end.checked_sub(start)
+        .and_then(|delta| delta.checked_add(1))
+        .ok_or_else(|| {
+            Error::invalid_request(format!(
+                "{start_field}..={end_field} range length overflows u64"
+            ))
+        })
 }
 
 fn collect_inclusive_range(
@@ -314,20 +360,7 @@ fn collect_inclusive_range(
     end_field: &'static str,
 ) -> Result<Vec<u64>, Error> {
     // V4 accepts compact inclusive ranges; internal batch paths consume explicit IDs.
-    if end < start {
-        return Err(Error::invalid_request(format!(
-            "{end_field} must be greater than or equal to {start_field}"
-        )));
-    }
-
-    let len = end
-        .checked_sub(start)
-        .and_then(|delta| delta.checked_add(1))
-        .ok_or_else(|| {
-            Error::invalid_request(format!(
-                "{start_field}..={end_field} range length overflows u64"
-            ))
-        })?;
+    let len = inclusive_range_len(start, end, start_field, end_field)?;
     if len > MAX_RANGE_LEN {
         return Err(Error::invalid_request(format!(
             "{start_field}..={end_field} range length {len} exceeds maximum {MAX_RANGE_LEN}"
@@ -653,6 +686,79 @@ mod tests {
     }
 
     #[test]
+    fn v4_aggregate_request_rejects_too_many_proposals() {
+        let proposals = (0..=MAX_PROPOSALS_PER_REQUEST as u64)
+            .map(|proposal_id| wire::ProposalRequest {
+                proposal_id,
+                checkpoint: None,
+                l1_inclusion_block_number: proposal_id,
+                l2_block_number_start: proposal_id,
+                l2_block_number_end: proposal_id,
+                last_anchor_block_number: proposal_id.saturating_sub(1),
+            })
+            .collect();
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals,
+        };
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("oversized proposal list should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals length {} exceeds maximum {MAX_PROPOSALS_PER_REQUEST}",
+                MAX_PROPOSALS_PER_REQUEST + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_aggregate_request_rejects_too_many_total_l2_blocks() {
+        let req = wire::ProofRequest {
+            proof_type: wire::ProofType::Sp1,
+            aggregate: true,
+            prover: None,
+            proposals: vec![
+                wire::ProposalRequest {
+                    proposal_id: 1,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 1,
+                    l2_block_number_start: 1,
+                    l2_block_number_end: MAX_TOTAL_L2_BLOCKS_PER_REQUEST,
+                    last_anchor_block_number: 0,
+                },
+                wire::ProposalRequest {
+                    proposal_id: 2,
+                    checkpoint: None,
+                    l1_inclusion_block_number: 2,
+                    l2_block_number_start: MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1,
+                    l2_block_number_end: MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1,
+                    last_anchor_block_number: MAX_TOTAL_L2_BLOCKS_PER_REQUEST,
+                },
+            ],
+        };
+
+        let err = validate_proof_request_shape(&req)
+            .expect_err("total expanded L2 blocks should be capped");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "total proposals[].l2 block range length {} exceeds maximum {MAX_TOTAL_L2_BLOCKS_PER_REQUEST}",
+                MAX_TOTAL_L2_BLOCKS_PER_REQUEST + 1
+            )
+        );
+    }
+
+    #[test]
     fn v4_l2_block_range_rejects_descending_bounds() {
         let err = collect_inclusive_range(
             22,
@@ -667,6 +773,45 @@ mod tests {
         assert_eq!(
             err.message,
             "proposals[].l2_block_number_end must be greater than or equal to proposals[].l2_block_number_start"
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_oversized_ranges() {
+        let err = collect_inclusive_range(
+            1,
+            MAX_RANGE_LEN + 1,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("oversized range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            format!(
+                "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length {} exceeds maximum {MAX_RANGE_LEN}",
+                MAX_RANGE_LEN + 1
+            )
+        );
+    }
+
+    #[test]
+    fn v4_l2_block_range_rejects_overflowing_ranges() {
+        let err = collect_inclusive_range(
+            0,
+            u64::MAX,
+            "proposals[].l2_block_number_start",
+            "proposals[].l2_block_number_end",
+        )
+        .expect_err("overflowing range should be rejected");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "invalid_request");
+        assert_eq!(
+            err.message,
+            "proposals[].l2_block_number_start..=proposals[].l2_block_number_end range length overflows u64"
         );
     }
 

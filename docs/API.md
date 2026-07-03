@@ -229,7 +229,7 @@ Request fields:
 | --- | --- | --- | --- |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
 | `aggregate` | boolean | no | Defaults to `false`. When `false`, `proposals` must contain exactly one item. When `true`, the root task includes an aggregation stage for the submitted proposal batch. |
-| `proposals` | array | yes | For `aggregate=false`, exactly one proposal. For `aggregate=true`, one or more contiguous proposals. |
+| `proposals` | array | yes | For `aggregate=false`, exactly one proposal. For `aggregate=true`, one or more contiguous proposals, up to 1,024 items. |
 | `proposals[].proposal_id` | number | yes | Taiko proposal ID. Proposal IDs must be strictly increasing and contiguous. |
 | `proposals[].l1_inclusion_block_number` | number | yes | L1 block where the proposal was included. |
 | `proposals[].l2_block_number_start` | number | yes | First L2 block number covered by the proposal. |
@@ -284,12 +284,16 @@ Polling and idempotency:
 Validation:
 
 - `proposals` must not be empty.
+- `proposals` may contain at most 1,024 items.
 - `aggregate=false` requires exactly one proposal.
 - `aggregate=true` accepts one or more contiguous proposals.
 - `proposals[].proposal_id` must fit Shasta's `uint48` protocol field.
 - `proposals[].proposal_id` values must be strictly increasing and contiguous.
 - `proposals[].l2_block_number_end` must be greater than or equal to
   `proposals[].l2_block_number_start`.
+- Each `proposals[].l2_block_number_start..=proposals[].l2_block_number_end` range may cover at
+  most 100,000 L2 blocks.
+- The total expanded L2 block count across all `proposals[]` entries may not exceed 100,000.
 - Mixed-proof-type aggregation is not supported.
 - `aggregate=true` requires a concrete proof type; `zk_any` is not accepted by v4.
 - Top-level legacy fields such as `proposal_id_start`, `proposal_id_end`, `proposal_id`,

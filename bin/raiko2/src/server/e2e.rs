@@ -583,6 +583,68 @@ async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
 }
 
 #[tokio::test]
+async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
+    // F3 regression: once a proposal task for a (proof_type, range) slot is terminal (cancelled via
+    // clear), a corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
+    // l1_inclusion_block_number) must be accepted and replace the terminal task, not wedge the slot
+    // with a permanent 409 request_conflict. The fixture engine stays quiescent until driven, so the
+    // task stays `registered` until `clear` cancels it — do NOT drive the engine before clearing, or
+    // the task could complete and become non-cancellable.
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let original = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 1,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+
+    // 1) Register the proposal task.
+    let (status, first) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        original.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert_eq!(first["data"]["status"], "registered");
+
+    // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
+    let (status, cleared) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "clear-secret",
+        json!({ "proof_type": "sp1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
+
+    // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
+    //    different fingerprint. Pre-fix this returned 409 forever; post-fix the terminal task is
+    //    replaced and the slot re-registers.
+    let corrected = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 1,
+        "proposal_id_end": 1,
+        "last_anchor_block_number": 0,
+        "l1_inclusion_block_number": 2,
+        "l2_block_number_start": 1,
+        "l2_block_number_end": 1
+    });
+    let (status, replaced) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    assert_eq!(replaced["data"]["task_id"], "v4:proposal:sp1:1:1");
+    assert_eq!(replaced["data"]["status"], "registered");
+}
+
+#[tokio::test]
 async fn e2e_v4_submit_rate_limits_acl_key() {
     let app = v4_submit_acl_app(Some(1));
 

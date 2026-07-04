@@ -1,4 +1,5 @@
 use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
+use super::host_l2_chain_spec_from_context;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
@@ -15,7 +16,7 @@ use futures::{StreamExt, stream};
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
-    chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
     shasta_checkpoint_storage_slots, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
@@ -1134,29 +1135,9 @@ fn validate_fetched_block_numbers(
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
-    let guest_input_abi = guest_input_abi_from_context(ctx)?;
-    let chain_spec = SupportedChainSpecs::default()
-        .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
-        .unwrap_or_else(|| ChainSpec {
-            name: "unknown".to_string(),
-            chain_id: ctx.request.l2_chain_id,
-            ..Default::default()
-        });
-    let chain_spec = chain_spec.align_taiko_runtime_forks().map_err(|err| {
+    let chain_spec = host_l2_chain_spec_from_context(ctx)?;
+    chain_spec.align_taiko_runtime_forks().map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("failed to align Taiko runtime chain spec: {err}"))
-    })?;
-    Ok(chain_spec.project_for_guest_input_abi(guest_input_abi))
-}
-
-fn guest_input_abi_from_context(ctx: &ProofContext) -> RaikoResult<GuestInputAbi> {
-    let Some(value) = ctx.config.get("guest_input_abi") else {
-        return Ok(GuestInputAbi::default());
-    };
-    if value.is_null() {
-        return Ok(GuestInputAbi::default());
-    }
-    serde_json::from_value(value.clone()).map_err(|err| {
-        RaikoError::InvalidRequestConfig(format!("invalid prover.guest_input_abi: {err}"))
     })
 }
 
@@ -2125,7 +2106,8 @@ mod tests {
         let mut parent_hash = None;
         (start..=end)
             .map(|number| {
-                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                let number_byte = u8::try_from(number).expect("fixture header number fits in byte");
+                let mut header = sample_l1_header(number, B256::from([number_byte; 32]));
                 if let Some(hash) = parent_hash {
                     header.parent_hash = hash;
                 }
@@ -2244,7 +2226,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_spec_from_context_defaults_to_current_guest_input_abi() {
+    fn chain_spec_from_context_uses_current_aligned_chain_spec() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
         let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
@@ -2261,32 +2243,45 @@ mod tests {
     }
 
     #[test]
-    fn chain_spec_from_context_projects_v0_1_0_guest_input_abi() {
+    fn chain_spec_from_context_uses_resolved_l2_overlay() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
-        ctx.config = serde_json::json!({ "guest_input_abi": "v0_1_0" });
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        let custom_verifier = Address::repeat_byte(0x42);
+        spec.verifier_address_forks
+            .get_mut(&ForkId::Taiko(TaikoFork::Shasta))
+            .expect("devnet Shasta verifiers")
+            .insert(ProofType::Sgx, Some(custom_verifier));
+        ctx.request.l2_chain_id = spec.chain_id;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
 
-        let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let resolved = super::chain_spec_from_context(&ctx).expect("chain spec");
 
         assert_eq!(
-            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
+            resolved
+                .get_fork_verifier_address(0, 0, ProofType::Sgx)
+                .expect("resolved verifier"),
+            custom_verifier
         );
-        assert!(
-            spec.verifier_address_forks
-                .values()
-                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
+        assert_eq!(
+            resolved.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
     }
 
     #[test]
-    fn chain_spec_from_context_rejects_invalid_guest_input_abi() {
+    fn chain_spec_from_context_rejects_mismatched_l2_overlay() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.config = serde_json::json!({ "guest_input_abi": "legacy" });
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        spec.chain_id += 1;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
 
-        let err = super::chain_spec_from_context(&ctx).expect_err("invalid abi");
+        let err = super::chain_spec_from_context(&ctx).expect_err("chain id mismatch");
 
-        assert!(err.to_string().contains("invalid prover.guest_input_abi"));
+        assert!(matches!(err, RaikoError::InvalidRequestConfig(_)));
     }
 
     #[test]
@@ -2806,7 +2801,8 @@ mod tests {
 
     #[test]
     fn preflight_chunk_operation_includes_proposal_and_block_range() {
-        let operation = super::preflight_chunk_operation(2156, 19, 48, &[10834703, 10834704], true);
+        let operation =
+            super::preflight_chunk_operation(2156, 19, 48, &[10_834_703, 10_834_704], true);
 
         assert_eq!(
             operation,
@@ -3094,6 +3090,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn preflight_derives_forced_prefix_from_sources_then_normal_anchor_catchup() {
         let mut provider = sample_provider();
         let parent_anchor_block_number = 7;
@@ -3229,6 +3226,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn preflight_accepts_forced_prefix_then_normal_anchor_catchup() {
         let mut provider = sample_provider();
         let parent_anchor_block_number = 7;
@@ -3241,7 +3239,7 @@ mod tests {
         let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
         let origin_header = l1_headers.last().expect("origin header").clone();
         let mut blocks = Vec::new();
-        for index in 0..5 {
+        for index in 0_u64..5 {
             let (anchor_number, anchor_hash, anchor_state_root) = if index < 4 {
                 (
                     parent_anchor_block_number,
@@ -3256,7 +3254,7 @@ mod tests {
                 )
             };
             let mut block = sample_block(42, anchor_number, anchor_hash, anchor_state_root);
-            block.header.number = 1 + index as u64;
+            block.header.number = 1 + index;
             blocks.push(block);
         }
         let source_spans = [

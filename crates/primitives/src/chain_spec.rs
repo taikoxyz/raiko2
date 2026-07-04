@@ -5,9 +5,7 @@ use alethia_reth_chainspec::{
     hardfork::TaikoHardfork as AlethiaTaikoHardfork, spec::TaikoDevnetConfigExt,
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
-use alloy_primitives::{
-    Address, B256, BlockNumber, ChainId, U256, address, keccak256, map::HashMap, uint,
-};
+use alloy_primitives::{Address, B256, BlockNumber, ChainId, U256, keccak256, map::HashMap, uint};
 use anyhow::{Result, anyhow, bail};
 use reth_chainspec::{ChainSpec as RethChainSpec, HOODI as RETH_HOODI, MAINNET as RETH_MAINNET};
 use reth_revm::primitives::hardfork::SpecId;
@@ -395,14 +393,6 @@ pub struct ChainSpec {
     pub is_taiko: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GuestInputAbi {
-    #[default]
-    Current,
-    V0_1_0,
-}
-
 type VerifierAddressForks = BTreeMap<ForkId, BTreeMap<ProofType, Option<Address>>>;
 
 #[derive(Deserialize)]
@@ -526,6 +516,7 @@ fn canonical_chain_spec(name: &str) -> Option<CanonicalChainSpec> {
     }
 }
 
+#[cfg(test)]
 fn canonical_taiko_fork_condition(name: &str, fork: TaikoFork) -> Option<ForkCondition> {
     canonical_chain_spec(name)?
         .hard_forks
@@ -654,203 +645,6 @@ where
     serde::de::Error::custom(format!("missing {field} for unknown chain spec {name}"))
 }
 
-fn v0_1_0_guest_input_hard_forks(name: &str) -> Option<(SpecId, BTreeMap<ForkId, ForkCondition>)> {
-    let hard_forks = match name {
-        "ethereum" => BTreeMap::from([
-            (ForkId::Standard(SpecId::FRONTIER), ForkCondition::Block(0)),
-            (
-                ForkId::Standard(SpecId::MERGE),
-                ForkCondition::Block(15_537_394),
-            ),
-            (
-                ForkId::Standard(SpecId::SHANGHAI),
-                ForkCondition::Block(17_034_870),
-            ),
-            (
-                ForkId::Standard(SpecId::CANCUN),
-                ForkCondition::Timestamp(1_710_338_135),
-            ),
-        ]),
-        "hoodi" => BTreeMap::from([
-            (ForkId::Standard(SpecId::FRONTIER), ForkCondition::Block(0)),
-            (
-                ForkId::Standard(SpecId::SHANGHAI),
-                ForkCondition::Timestamp(1_696_000_704),
-            ),
-            (
-                ForkId::Standard(SpecId::CANCUN),
-                ForkCondition::Timestamp(1_707_305_664),
-            ),
-        ]),
-        "taiko_mainnet" => BTreeMap::from([(
-            ForkId::Taiko(TaikoFork::Shasta),
-            canonical_taiko_fork_condition("taiko_mainnet", TaikoFork::Shasta)?,
-        )]),
-        "taiko_dev" => BTreeMap::from([
-            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Timestamp(0)),
-            (
-                ForkId::Standard(SpecId::CANCUN),
-                ForkCondition::Timestamp(0),
-            ),
-        ]),
-        "taiko_masaya" => BTreeMap::from([
-            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
-            (ForkId::Taiko(TaikoFork::Ontake), ForkCondition::Block(0)),
-            (ForkId::Taiko(TaikoFork::Pacaya), ForkCondition::Block(0)),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                ForkCondition::Timestamp(0),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Unzen),
-                ForkCondition::Timestamp(1_778_158_800),
-            ),
-            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
-        ]),
-        "taiko_hoodi" => BTreeMap::from([
-            (ForkId::Taiko(TaikoFork::Hekla), ForkCondition::Block(0)),
-            (ForkId::Taiko(TaikoFork::Ontake), ForkCondition::Block(0)),
-            (ForkId::Taiko(TaikoFork::Pacaya), ForkCondition::Block(0)),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                ForkCondition::Timestamp(1_770_296_400),
-            ),
-            (ForkId::Taiko(TaikoFork::Unzen), ForkCondition::Tbd),
-            (ForkId::Standard(SpecId::CANCUN), ForkCondition::Tbd),
-        ]),
-        _ => return None,
-    };
-
-    let max_spec_id = match name {
-        "taiko_mainnet" => SpecId::CANCUN,
-        _ => max_spec_id(&hard_forks),
-    };
-
-    Some((max_spec_id, hard_forks))
-}
-
-fn v0_1_0_guest_input_l1_contracts(name: &str) -> Option<BTreeMap<ForkId, Address>> {
-    match name {
-        "taiko_mainnet" => Some(BTreeMap::from([(
-            ForkId::Taiko(TaikoFork::Shasta),
-            address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"),
-        )])),
-        "taiko_dev" => Some(BTreeMap::from([(
-            ForkId::Standard(SpecId::CANCUN),
-            address!("83e383dec6E3C2CD167E3bF6aA8c36F0e55Ad910"),
-        )])),
-        "taiko_masaya" => Some(BTreeMap::from([(
-            ForkId::Taiko(TaikoFork::Shasta),
-            address!("3477f9e8a890c2286c5e62150ad6593eef4590b9"),
-        )])),
-        "taiko_hoodi" => Some(BTreeMap::from([
-            (
-                ForkId::Taiko(TaikoFork::Pacaya),
-                address!("f6eA848c7d7aC83de84db45Ae28EAbf377fe0eF9"),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                address!("eF4bB7A442Bd68150A3aa61A6a097B86b91700BF"),
-            ),
-        ])),
-        _ => None,
-    }
-}
-
-fn v0_1_0_guest_input_verifier_address_forks(name: &str) -> Option<VerifierAddressForks> {
-    match name {
-        "taiko_mainnet" => Some(BTreeMap::from([(
-            ForkId::Taiko(TaikoFork::Shasta),
-            verifiers([
-                (
-                    ProofType::Sgx,
-                    Some(address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")),
-                ),
-                (
-                    ProofType::Sp1,
-                    Some(address!("73A0Db393ef87ce781ac7957bE10D6628432100F")),
-                ),
-                (
-                    ProofType::Risc0,
-                    Some(address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")),
-                ),
-            ]),
-        )])),
-        "taiko_dev" => Some(BTreeMap::from([(
-            ForkId::Standard(SpecId::CANCUN),
-            verifiers([
-                (
-                    ProofType::Sgx,
-                    Some(address!("936d8dCd9B731D3fe146BF3E1520e9d790A3a67d")),
-                ),
-                (
-                    ProofType::Sp1,
-                    Some(address!("9d351f6e72e3095f24dd854c9b8ca69f99a2c538")),
-                ),
-                (
-                    ProofType::Risc0,
-                    Some(address!("fe3edf3e778a647c0955f2a5f79565e272e6afdb")),
-                ),
-            ]),
-        )])),
-        "taiko_masaya" => Some(BTreeMap::from([(
-            ForkId::Taiko(TaikoFork::Shasta),
-            same_verifier(address!("2c47Bf9b02B6Cbe6A73244F38271d36c99D9c815")),
-        )])),
-        "taiko_hoodi" => Some(BTreeMap::from([
-            (
-                ForkId::Taiko(TaikoFork::Pacaya),
-                verifiers([
-                    (
-                        ProofType::Sgx,
-                        Some(address!("d46c13B67396cD1e74Bb40e298fbABeA7DC01f11")),
-                    ),
-                    (
-                        ProofType::Sp1,
-                        Some(address!("3B3bb4A1Cb8B1A0D65F96a5A93415375C039Eda3")),
-                    ),
-                    (
-                        ProofType::Risc0,
-                        Some(address!("bf285Dd2FD56BF4893D207Fba4c738D1029edFfd")),
-                    ),
-                ]),
-            ),
-            (
-                ForkId::Taiko(TaikoFork::Shasta),
-                verifiers([
-                    (
-                        ProofType::Sgx,
-                        Some(address!("40CcAFC1C2D14bdD70984b221F2b49af5e7C6114")),
-                    ),
-                    (
-                        ProofType::Risc0,
-                        Some(address!("fa0e7dAFe9785627df034c123A9B87497EB06b41")),
-                    ),
-                    (
-                        ProofType::Sp1,
-                        Some(address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7")),
-                    ),
-                ]),
-            ),
-        ])),
-        _ => None,
-    }
-}
-
-fn verifiers<const N: usize>(
-    entries: [(ProofType, Option<Address>); N],
-) -> BTreeMap<ProofType, Option<Address>> {
-    BTreeMap::from(entries)
-}
-
-fn same_verifier(address: Address) -> BTreeMap<ProofType, Option<Address>> {
-    verifiers([
-        (ProofType::Sgx, Some(address)),
-        (ProofType::Sp1, Some(address)),
-        (ProofType::Risc0, Some(address)),
-    ])
-}
-
 fn parse_proof_type_str(value: &str) -> Result<ProofType, String> {
     match value {
         "NATIVE" | "Native" => Ok(ProofType::Native),
@@ -912,16 +706,6 @@ impl<'de> Deserialize<'de> for ChainSpec {
 }
 
 impl ChainSpec {
-    #[must_use]
-    pub fn project_for_guest_input_abi(&self, abi: GuestInputAbi) -> Self {
-        let mut spec = self.clone();
-        match abi {
-            GuestInputAbi::Current => {}
-            GuestInputAbi::V0_1_0 => spec.apply_v0_1_0_guest_input_compat(),
-        }
-        spec
-    }
-
     /// Aligns this config-level Taiko fork table with the Alethia runtime chainspec used by
     /// execution, while preserving raiko2 overlay fields such as RPCs, contracts, and verifiers.
     ///
@@ -940,22 +724,6 @@ impl ChainSpec {
         spec.max_spec_id = canonical.max_spec_id;
         spec.hard_forks = canonical.hard_forks;
         Ok(spec)
-    }
-
-    fn apply_v0_1_0_guest_input_compat(&mut self) {
-        if let Some((max_spec_id, hard_forks)) = v0_1_0_guest_input_hard_forks(&self.name) {
-            self.max_spec_id = max_spec_id;
-            self.hard_forks = hard_forks;
-        }
-        if let Some(l1_contract) = v0_1_0_guest_input_l1_contracts(&self.name) {
-            self.l1_contract = l1_contract;
-        }
-        if let Some(verifier_address_forks) = v0_1_0_guest_input_verifier_address_forks(&self.name)
-        {
-            self.verifier_address_forks = verifier_address_forks;
-        }
-
-        self.remove_fork_verifier_proof_type(ProofType::SgxGeth);
     }
 
     /// Removes a verifier proof type from every configured fork.
@@ -1404,76 +1172,6 @@ mod tests {
     }
 
     #[test]
-    fn v0_1_0_guest_input_projection_uses_mainnet_branch_shasta_spec() -> Result<()> {
-        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
-        let spec = list
-            .into_iter()
-            .find(|spec| spec.name == "taiko_mainnet")
-            .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
-
-        assert!(
-            spec.verifier_address_forks
-                .values()
-                .any(|verifiers| verifiers.contains_key(&ProofType::SgxGeth))
-        );
-        assert_eq!(
-            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(mainnet_shasta_timestamp()))
-        );
-
-        let projected = spec.project_for_guest_input_abi(GuestInputAbi::V0_1_0);
-
-        assert!(
-            projected
-                .verifier_address_forks
-                .values()
-                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
-        );
-        assert_eq!(projected.max_spec_id, SpecId::CANCUN);
-        assert_eq!(projected.hard_forks.len(), 1);
-        assert_eq!(
-            projected.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(mainnet_shasta_timestamp()))
-        );
-        assert_eq!(projected.l1_contract.len(), 1);
-        assert_eq!(
-            projected.l1_contract.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&address!("6f21C543a4aF5189eBdb0723827577e1EF57ef1f"))
-        );
-        assert_eq!(
-            projected.get_fork_verifier_address(
-                5_412_478,
-                mainnet_shasta_timestamp(),
-                ProofType::Sgx,
-            )?,
-            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
-        );
-        assert_eq!(
-            projected.get_fork_verifier_address(
-                5_412_478,
-                mainnet_shasta_timestamp(),
-                ProofType::Risc0,
-            )?,
-            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
-        );
-        assert_eq!(
-            projected.get_fork_verifier_address(
-                5_412_478,
-                mainnet_shasta_timestamp(),
-                ProofType::Sp1,
-            )?,
-            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
-        );
-
-        let bytes = bincode::serialize(&projected)
-            .map_err(|e| anyhow!("bincode serialize projected ChainSpec: {e}"))?;
-        let decoded: ChainSpec = bincode::deserialize(&bytes)
-            .map_err(|e| anyhow!("bincode deserialize projected ChainSpec: {e}"))?;
-        assert_eq!(decoded, projected);
-        Ok(())
-    }
-
-    #[test]
     fn taiko_masaya_unzen_inherits_shasta_contracts() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
@@ -1552,6 +1250,14 @@ mod tests {
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::Sgx)?,
             address!("63Ec87f54cCed71B0DC879ce6cEDfA6f3D582670")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::Sp1)?,
+            address!("2546D7424F23EE0D1260C414DA3f17E295c187C6")
+        );
+        assert_eq!(
+            l2_spec.get_fork_verifier_address(0, 0, ProofType::Risc0)?,
+            address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6")
         );
         assert_eq!(
             l2_spec.get_fork_verifier_address(0, 0, ProofType::SgxGeth)?,

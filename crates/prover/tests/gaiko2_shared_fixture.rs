@@ -27,10 +27,9 @@ fn shared_shasta_fixture_adapts_into_stable_remote_prover_v1_packet() {
         payload.witnesses[0]
             .witness
             .headers
-            .last()
-            .expect("first block witness should contain a parent header")
-            .full_header()
-            .is_some()
+            .iter()
+            .all(|header| header.full_header().is_some()),
+        "gaiko2 replay witnesses must carry full ancestor headers"
     );
 }
 

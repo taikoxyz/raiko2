@@ -1,0 +1,25 @@
+sp1 request_id: 0x57373fc40e6210f6f026c50e9e62603eba0fac306fb44c4358286742a21108b9
+public_values: 0x73ff9f06f81911b68debf42355a758e09f39d719c9254197bb7accb809d881a9
+	Command being timed: "target/release/guest-launcher --input /tmp/raiko2-devnet-sp1-3137-3140/proposal-3139.json --mode prove --proof-mode compressed --proof-type sp1 --sp1-prover network --sp1-network-mode reserved --sp1-fulfillment-strategy reserved --sp1-skip-simulation --sp1-cycle-limit 10000000000000 --sp1-timeout-secs 14400 --output /tmp/raiko2-succinct-3139-3140-replay-20260704T055210Z/proposal-3139-proof.json --json-out /tmp/raiko2-succinct-3139-3140-replay-20260704T055210Z/proposal-3139-report.json"
+	User time (seconds): 33.67
+	System time (seconds): 0.62
+	Percent of CPU this job got: 64%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:52.93
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 965424
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 299303
+	Voluntary context switches: 1958
+	Involuntary context switches: 5442
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1,0 +1,287 @@
+{
+  "stage": "proposal",
+  "mode": "execute",
+  "proof_mode": "compressed",
+  "input": "/tmp/devnet-3138-guest-input.json",
+  "public_values": "0x",
+  "wall_time_ms": 41592,
+  "primary_workload_metric": {
+    "label": "prover_gas",
+    "count": 180338468
+  },
+  "workload_metrics": [
+    {
+      "label": "prover_gas",
+      "count": 180338468
+    },
+    {
+      "label": "sp1_total_instruction_count",
+      "count": 150379730
+    },
+    {
+      "label": "sp1_total_syscall_count",
+      "count": 444862
+    },
+    {
+      "label": "sp1_touched_memory_addresses",
+      "count": 0
+    }
+  ],
+  "exit_code": 1,
+  "gas": 180338468,
+  "total_instruction_count": 150379730,
+  "total_syscall_count": 444862,
+  "touched_memory_addresses": 0,
+  "risc0_user_cycles": null,
+  "risc0_padded_cycles": null,
+  "risc0_segment_count": null,
+  "risc0_po2_counts": [],
+  "cycle_tracker": [],
+  "invocation_tracker": [],
+  "opcode_counts": [
+    {
+      "label": "ADD",
+      "count": 6866813
+    },
+    {
+      "label": "ADDI",
+      "count": 30225072
+    },
+    {
+      "label": "ADDW",
+      "count": 631997
+    },
+    {
+      "label": "AND",
+      "count": 6626113
+    },
+    {
+      "label": "AUIPC",
+      "count": 2665615
+    },
+    {
+      "label": "BEQ",
+      "count": 5458795
+    },
+    {
+      "label": "BGE",
+      "count": 265052
+    },
+    {
+      "label": "BGEU",
+      "count": 2035344
+    },
+    {
+      "label": "BLT",
+      "count": 44615
+    },
+    {
+      "label": "BLTU",
+      "count": 4107604
+    },
+    {
+      "label": "BNE",
+      "count": 5960348
+    },
+    {
+      "label": "DIVU",
+      "count": 11
+    },
+    {
+      "label": "ECALL",
+      "count": 445120
+    },
+    {
+      "label": "JAL",
+      "count": 902046
+    },
+    {
+      "label": "JALR",
+      "count": 4428747
+    },
+    {
+      "label": "LB",
+      "count": 172854
+    },
+    {
+      "label": "LBU",
+      "count": 14087075
+    },
+    {
+      "label": "LD",
+      "count": 17523856
+    },
+    {
+      "label": "LH",
+      "count": 53410
+    },
+    {
+      "label": "LHU",
+      "count": 107689
+    },
+    {
+      "label": "LUI",
+      "count": 1129168
+    },
+    {
+      "label": "LW",
+      "count": 65183
+    },
+    {
+      "label": "LWU",
+      "count": 28518
+    },
+    {
+      "label": "MUL",
+      "count": 876237
+    },
+    {
+      "label": "MULHU",
+      "count": 751565
+    },
+    {
+      "label": "OR",
+      "count": 7199116
+    },
+    {
+      "label": "SB",
+      "count": 6429445
+    },
+    {
+      "label": "SD",
+      "count": 16870042
+    },
+    {
+      "label": "SH",
+      "count": 132822
+    },
+    {
+      "label": "SLL",
+      "count": 6511363
+    },
+    {
+      "label": "SLT",
+      "count": 571372
+    },
+    {
+      "label": "SLTU",
+      "count": 979969
+    },
+    {
+      "label": "SRA",
+      "count": 35168
+    },
+    {
+      "label": "SRAW",
+      "count": 63
+    },
+    {
+      "label": "SRL",
+      "count": 2360190
+    },
+    {
+      "label": "SRLW",
+      "count": 71051
+    },
+    {
+      "label": "SUB",
+      "count": 1261494
+    },
+    {
+      "label": "SUBW",
+      "count": 451163
+    },
+    {
+      "label": "SW",
+      "count": 115176
+    },
+    {
+      "label": "XOR",
+      "count": 1932449
+    }
+  ],
+  "syscall_counts": [
+    {
+      "label": "BLS12381_ADD",
+      "count": 20
+    },
+    {
+      "label": "BLS12381_DOUBLE",
+      "count": 252
+    },
+    {
+      "label": "BLS12381_FP2_MUL",
+      "count": 57926
+    },
+    {
+      "label": "BLS12381_FP_ADD",
+      "count": 127458
+    },
+    {
+      "label": "BLS12381_FP_MUL",
+      "count": 128906
+    },
+    {
+      "label": "BLS12381_FP_SUB",
+      "count": 37016
+    },
+    {
+      "label": "KECCAK_PERMUTE",
+      "count": 30792
+    },
+    {
+      "label": "SHA_COMPRESS",
+      "count": 2054
+    },
+    {
+      "label": "SHA_EXTEND",
+      "count": 2054
+    },
+    {
+      "label": "UINT256_MUL",
+      "count": 58384
+    }
+  ],
+  "memory_snapshots": [
+    {
+      "label": "proposal:start",
+      "rss_kb": 28276,
+      "hwm_kb": 28276
+    },
+    {
+      "label": "proposal:after_read_input",
+      "rss_kb": 36044,
+      "hwm_kb": 36564
+    },
+    {
+      "label": "proposal:before_stdin_write",
+      "rss_kb": 36108,
+      "hwm_kb": 36564
+    },
+    {
+      "label": "proposal:after_stdin_write",
+      "rss_kb": 38800,
+      "hwm_kb": 38800
+    },
+    {
+      "label": "proposal:after_load_elf",
+      "rss_kb": 47980,
+      "hwm_kb": 54804
+    },
+    {
+      "label": "proposal:before_execute_run",
+      "rss_kb": 47980,
+      "hwm_kb": 54804
+    },
+    {
+      "label": "proposal:after_execute_run",
+      "rss_kb": 189164,
+      "hwm_kb": 1318684
+    },
+    {
+      "label": "proposal:after_apply_execution_metadata",
+      "rss_kb": 189164,
+      "hwm_kb": 1318684
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "stage": "proposal",
+  "mode": "prove",
+  "proof_mode": "compressed",
+  "input": "/tmp/raiko2-succinct-c5a67d-replay/input.proposal-3138.old-request.json",
+  "public_values": "0x4cb88870391cdc620629f87552a38dff218421420a7a515ad39c97162a7b1028",
+  "wall_time_ms": 45522,
+  "primary_workload_metric": null,
+  "workload_metrics": [],
+  "exit_code": null,
+  "gas": null,
+  "total_instruction_count": null,
+  "total_syscall_count": null,
+  "touched_memory_addresses": null,
+  "risc0_user_cycles": null,
+  "risc0_padded_cycles": null,
+  "risc0_segment_count": null,
+  "risc0_po2_counts": [],
+  "cycle_tracker": [],
+  "invocation_tracker": [],
+  "opcode_counts": [],
+  "syscall_counts": [],
+  "memory_snapshots": [
+    {
+      "label": "proposal:start",
+      "rss_kb": 9824,
+      "hwm_kb": 9824
+    },
+    {
+      "label": "proposal:after_read_input",
+      "rss_kb": 13972,
+      "hwm_kb": 14416
+    },
+    {
+      "label": "proposal:before_stdin_write",
+      "rss_kb": 13972,
+      "hwm_kb": 14416
+    },
+    {
+      "label": "proposal:after_stdin_write",
+      "rss_kb": 15072,
+      "hwm_kb": 15072
+    },
+    {
+      "label": "proposal:after_load_elf",
+      "rss_kb": 24192,
+      "hwm_kb": 31048
+    },
+    {
+      "label": "proposal:before_setup",
+      "rss_kb": 57128,
+      "hwm_kb": 57128
+    },
+    {
+      "label": "proposal:after_setup",
+      "rss_kb": 137644,
+      "hwm_kb": 965824
+    },
+    {
+      "label": "proposal:after_network_proof",
+      "rss_kb": 148120,
+      "hwm_kb": 965824
+    }
+  ]
+}

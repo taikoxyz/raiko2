@@ -1,0 +1,65 @@
+{
+  "stage": "proposal",
+  "mode": "prove",
+  "proof_mode": "compressed",
+  "input": "/tmp/raiko2-devnet-sp1-3137-3140/proposal-3137.json",
+  "public_values": "0x20cd07ded43c25605558f46d274ba746d878ad156b21b54a6371d5a20b60d967",
+  "wall_time_ms": 48252,
+  "primary_workload_metric": null,
+  "workload_metrics": [],
+  "exit_code": null,
+  "gas": null,
+  "total_instruction_count": null,
+  "total_syscall_count": null,
+  "touched_memory_addresses": null,
+  "risc0_user_cycles": null,
+  "risc0_padded_cycles": null,
+  "risc0_segment_count": null,
+  "risc0_po2_counts": [],
+  "cycle_tracker": [],
+  "invocation_tracker": [],
+  "opcode_counts": [],
+  "syscall_counts": [],
+  "memory_snapshots": [
+    {
+      "label": "proposal:start",
+      "rss_kb": 9808,
+      "hwm_kb": 9808
+    },
+    {
+      "label": "proposal:after_read_input",
+      "rss_kb": 13944,
+      "hwm_kb": 14528
+    },
+    {
+      "label": "proposal:before_stdin_write",
+      "rss_kb": 13944,
+      "hwm_kb": 14528
+    },
+    {
+      "label": "proposal:after_stdin_write",
+      "rss_kb": 15248,
+      "hwm_kb": 15248
+    },
+    {
+      "label": "proposal:after_load_elf",
+      "rss_kb": 24368,
+      "hwm_kb": 31432
+    },
+    {
+      "label": "proposal:before_setup",
+      "rss_kb": 57080,
+      "hwm_kb": 57080
+    },
+    {
+      "label": "proposal:after_setup",
+      "rss_kb": 137708,
+      "hwm_kb": 965372
+    },
+    {
+      "label": "proposal:after_network_proof",
+      "rss_kb": 148300,
+      "hwm_kb": 965372
+    }
+  ]
+}

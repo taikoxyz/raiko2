@@ -76,15 +76,10 @@ impl ShastaManifestBuilder {
 
     fn build_chain_spec(ctx: &ProofContext) -> RaikoResult<ManifestChainSpec> {
         let chain_spec = host_l2_chain_spec_from_context(ctx)?;
-        let is_taiko = if chain_spec.name == UNKNOWN_L2_CHAIN_SPEC_NAME {
-            true
-        } else {
-            chain_spec.is_taiko
-        };
         Ok(ManifestChainSpec {
             name: chain_spec.name,
             chain_id: chain_spec.chain_id,
-            is_taiko,
+            is_taiko: chain_spec.is_taiko,
         })
     }
 
@@ -409,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_chain_spec_preserves_unknown_chain_taiko_fallback() {
+    fn manifest_chain_spec_preserves_unknown_chain_fallback() {
         let ctx = context_with_request(ProofRequest {
             l2_chain_id: 999_999,
             ..Default::default()

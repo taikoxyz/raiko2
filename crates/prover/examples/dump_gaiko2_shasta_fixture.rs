@@ -19,7 +19,7 @@ fn main() {
     let raw = fs::read_to_string(&input_path).expect("read guest input fixture");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse GuestInput fixture");
     let packet = build_shasta_packet(&guest_input).expect("adapt guest input shasta packet");
-    let serialized = serde_json::to_vec_pretty(&packet).expect("serialize shasta packet");
+    let serialized = serde_json::to_vec(&packet).expect("serialize shasta packet");
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).expect("create output directory");

@@ -92,11 +92,19 @@ fn build_replay_block(
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[raiko2_primitives::WitnessStateNode],
 ) -> RaikoResult<Raiko2ReplayBlock> {
-    if stateless_input.witness.headers.is_empty() && !ancestor_headers.is_empty() {
+    if !ancestor_headers.is_empty() {
         stateless_input.witness.headers = ancestor_headers.to_vec();
     }
-    stateless_input.witness.headers =
-        remote_prover_witness_headers(&stateless_input.witness.headers);
+    if stateless_input
+        .witness
+        .headers
+        .iter()
+        .any(|header| header.full_header().is_none())
+    {
+        return Err(RaikoError::InvalidRequestConfig(
+            "remote prover replay witness requires full ancestor headers".to_string(),
+        ));
+    }
 
     if stateless_input.witness.state.is_empty() && !stateless_input.witness.state_indices.is_empty()
     {
@@ -123,13 +131,4 @@ fn build_replay_block(
     }
 
     Ok(Raiko2ReplayBlock::from(stateless_input))
-}
-
-fn remote_prover_witness_headers(ancestor_headers: &[WitnessHeader]) -> Vec<WitnessHeader> {
-    let mut headers = ancestor_headers.to_vec();
-    let compact_len = headers.len().saturating_sub(1);
-    for header in headers.iter_mut().take(compact_len) {
-        header.compact_in_place();
-    }
-    headers
 }

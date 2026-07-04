@@ -1,4 +1,6 @@
-use super::{UNKNOWN_L2_CHAIN_SPEC_NAME, host_l2_chain_spec_from_context};
+#[cfg(test)]
+use super::UNKNOWN_L2_CHAIN_SPEC_NAME;
+use super::host_l2_chain_spec_from_context;
 use crate::ManifestBuilder;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
 use raiko2_primitives::{ProofContext, ProofType, RaikoError, RaikoResult};

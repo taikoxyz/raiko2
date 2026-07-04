@@ -2106,7 +2106,8 @@ mod tests {
         let mut parent_hash = None;
         (start..=end)
             .map(|number| {
-                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                let number_byte = u8::try_from(number).expect("fixture header number fits in byte");
+                let mut header = sample_l1_header(number, B256::from([number_byte; 32]));
                 if let Some(hash) = parent_hash {
                     header.parent_hash = hash;
                 }
@@ -2800,7 +2801,8 @@ mod tests {
 
     #[test]
     fn preflight_chunk_operation_includes_proposal_and_block_range() {
-        let operation = super::preflight_chunk_operation(2156, 19, 48, &[10834703, 10834704], true);
+        let operation =
+            super::preflight_chunk_operation(2156, 19, 48, &[10_834_703, 10_834_704], true);
 
         assert_eq!(
             operation,
@@ -3088,6 +3090,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn preflight_derives_forced_prefix_from_sources_then_normal_anchor_catchup() {
         let mut provider = sample_provider();
         let parent_anchor_block_number = 7;
@@ -3223,6 +3226,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn preflight_accepts_forced_prefix_then_normal_anchor_catchup() {
         let mut provider = sample_provider();
         let parent_anchor_block_number = 7;
@@ -3235,7 +3239,7 @@ mod tests {
         let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
         let origin_header = l1_headers.last().expect("origin header").clone();
         let mut blocks = Vec::new();
-        for index in 0..5 {
+        for index in 0_u64..5 {
             let (anchor_number, anchor_hash, anchor_state_root) = if index < 4 {
                 (
                     parent_anchor_block_number,
@@ -3250,7 +3254,7 @@ mod tests {
                 )
             };
             let mut block = sample_block(42, anchor_number, anchor_hash, anchor_state_root);
-            block.header.number = 1 + index as u64;
+            block.header.number = 1 + index;
             blocks.push(block);
         }
         let source_spans = [

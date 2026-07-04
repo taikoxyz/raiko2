@@ -360,59 +360,14 @@ impl<'de> Deserialize<'de> for ShastaEventData {
         D: serde::Deserializer<'de>,
     {
         if deserializer.is_human_readable() {
-            // Accept both the old JSON shape:
-            //   { proposal: {..}, derivation: {..} }
-            // and the new shape:
-            //   { proposal: {..all fields..} }
+            // JSON shape: { proposal: {..all fields..} }
             #[derive(Deserialize)]
-            struct Old {
-                proposal: ProposalLegacy,
-                derivation: Derivation,
-            }
-
-            #[derive(Deserialize)]
-            struct New {
+            struct Hr {
                 proposal: Proposal,
             }
 
-            #[derive(Deserialize)]
-            #[serde(untagged)]
-            enum Hr {
-                Old(Old),
-                New(New),
-            }
-
-            // Legacy proposal JSON shape (without derivation fields embedded).
-            #[derive(Deserialize)]
-            #[allow(non_snake_case)]
-            struct ProposalLegacy {
-                id: alloy_primitives::Uint<48, 1>,
-                timestamp: alloy_primitives::Uint<48, 1>,
-                endOfSubmissionWindowTimestamp: alloy_primitives::Uint<48, 1>,
-                proposer: Address,
-                parentProposalHash: B256,
-            }
-
-            let v = Hr::deserialize(deserializer)?;
-            match v {
-                Hr::New(New { proposal }) => Ok(Self { proposal }),
-                Hr::Old(Old {
-                    proposal: p,
-                    derivation: d,
-                }) => Ok(Self {
-                    proposal: Proposal {
-                        id: p.id,
-                        timestamp: p.timestamp,
-                        endOfSubmissionWindowTimestamp: p.endOfSubmissionWindowTimestamp,
-                        proposer: p.proposer,
-                        parentProposalHash: p.parentProposalHash,
-                        originBlockNumber: d.originBlockNumber,
-                        originBlockHash: d.originBlockHash,
-                        basefeeSharingPctg: d.basefeeSharingPctg,
-                        sources: d.sources,
-                    },
-                }),
-            }
+            let Hr { proposal } = Hr::deserialize(deserializer)?;
+            Ok(Self { proposal })
         } else {
             #[derive(Deserialize)]
             struct Bin {

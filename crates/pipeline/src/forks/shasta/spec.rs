@@ -1,4 +1,5 @@
 use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
+use super::host_l2_chain_spec_from_context;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
@@ -1134,17 +1135,10 @@ fn validate_fetched_block_numbers(
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
-    let chain_spec = SupportedChainSpecs::default()
-        .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
-        .unwrap_or_else(|| ChainSpec {
-            name: "unknown".to_string(),
-            chain_id: ctx.request.l2_chain_id,
-            ..Default::default()
-        });
-    let chain_spec = chain_spec.align_taiko_runtime_forks().map_err(|err| {
+    let chain_spec = host_l2_chain_spec_from_context(ctx)?;
+    chain_spec.align_taiko_runtime_forks().map_err(|err| {
         RaikoError::InvalidRequestConfig(format!("failed to align Taiko runtime chain spec: {err}"))
-    })?;
-    Ok(chain_spec)
+    })
 }
 
 fn l1_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
@@ -2245,6 +2239,48 @@ mod tests {
                 .values()
                 .any(|verifiers| verifiers.contains_key(&ProofType::SgxGeth))
         );
+    }
+
+    #[test]
+    fn chain_spec_from_context_uses_resolved_l2_overlay() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        let custom_verifier = Address::repeat_byte(0x42);
+        spec.verifier_address_forks
+            .get_mut(&ForkId::Taiko(TaikoFork::Shasta))
+            .expect("devnet Shasta verifiers")
+            .insert(ProofType::Sgx, Some(custom_verifier));
+        ctx.request.l2_chain_id = spec.chain_id;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
+
+        let resolved = super::chain_spec_from_context(&ctx).expect("chain spec");
+
+        assert_eq!(
+            resolved
+                .get_fork_verifier_address(0, 0, ProofType::Sgx)
+                .expect("resolved verifier"),
+            custom_verifier
+        );
+        assert_eq!(
+            resolved.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
+        );
+    }
+
+    #[test]
+    fn chain_spec_from_context_rejects_mismatched_l2_overlay() {
+        let mut ctx = sample_context(42, 11, 9);
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        spec.chain_id += 1;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
+
+        let err = super::chain_spec_from_context(&ctx).expect_err("chain id mismatch");
+
+        assert!(matches!(err, RaikoError::InvalidRequestConfig(_)));
     }
 
     #[test]

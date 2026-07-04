@@ -3,6 +3,8 @@ mod checkpoint_verify;
 mod manifest;
 mod spec;
 
+use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
+
 pub use backends::{
     ShastaBackends, load_risc0_boundless_shasta_backend, load_risc0_shasta_backend,
     load_shasta_backends, load_sp1_shasta_backend, risc0_boundless_shasta_backend_from_elves,
@@ -15,6 +17,32 @@ pub use manifest::ShastaManifestBuilder;
 pub use spec::{ShastaSpec, validate_shasta_guest_input};
 
 // ELF selection is handled by the backend instance.
+
+const UNKNOWN_L2_CHAIN_SPEC_NAME: &str = "unknown";
+
+/// Host-side L2 chain spec resolution: config/CLI override first, compiled defaults second.
+///
+/// Guest programs do not trust this helper; they validate witness chain specs against their own
+/// compiled default list.
+fn host_l2_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = &ctx.preflight.resolved_l2_chain_spec {
+        if chain_spec.chain_id != ctx.request.l2_chain_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "preflight l2 chain spec chain_id {} does not match request l2_chain_id {}",
+                chain_spec.chain_id, ctx.request.l2_chain_id
+            )));
+        }
+        return Ok(chain_spec.clone());
+    }
+
+    Ok(SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+        .unwrap_or_else(|| ChainSpec {
+            name: UNKNOWN_L2_CHAIN_SPEC_NAME.to_string(),
+            chain_id: ctx.request.l2_chain_id,
+            ..Default::default()
+        }))
+}
 
 #[cfg(test)]
 mod tests {

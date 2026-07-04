@@ -1267,6 +1267,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_known_chain_spec_rejects_tampered_verifiers() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.verifier_address_forks
+            .values_mut()
+            .next()
+            .expect("configured verifier fork")
+            .insert(ProofType::Sgx, Some(Address::ZERO));
+        let err = validate_known_chain_spec(&spec)
+            .expect_err("tampered verifier_address_forks must be rejected");
+        assert!(
+            err.to_string().contains("verifier_address_forks"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn validate_known_chain_spec_rejects_tampered_is_taiko() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.is_taiko = !spec.is_taiko; // diverge from the trusted spec

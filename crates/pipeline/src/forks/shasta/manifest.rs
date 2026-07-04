@@ -1,8 +1,7 @@
+use super::{UNKNOWN_L2_CHAIN_SPEC_NAME, host_l2_chain_spec_from_context};
 use crate::ManifestBuilder;
 use alethia_reth_consensus::validation::ANCHOR_V3_V4_GAS_LIMIT;
-use raiko2_primitives::{
-    ChainSpec, ProofContext, ProofType, RaikoError, RaikoResult, SupportedChainSpecs,
-};
+use raiko2_primitives::{ProofContext, ProofType, RaikoError, RaikoResult};
 use raiko2_protocol::BlobProofType;
 use raiko2_protocol::InputDataSource;
 use raiko2_protocol::ManifestChainSpec;
@@ -75,20 +74,18 @@ impl ShastaManifestBuilder {
         })
     }
 
-    fn build_chain_spec(ctx: &ProofContext) -> ManifestChainSpec {
-        let chain_spec = SupportedChainSpecs::default()
-            .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
-            .unwrap_or_else(|| ChainSpec {
-                name: "unknown".to_string(),
-                chain_id: ctx.request.l2_chain_id,
-                is_taiko: true,
-                ..Default::default()
-            });
-        ManifestChainSpec {
+    fn build_chain_spec(ctx: &ProofContext) -> RaikoResult<ManifestChainSpec> {
+        let chain_spec = host_l2_chain_spec_from_context(ctx)?;
+        let is_taiko = if chain_spec.name == UNKNOWN_L2_CHAIN_SPEC_NAME {
+            true
+        } else {
+            chain_spec.is_taiko
+        };
+        Ok(ManifestChainSpec {
             name: chain_spec.name,
             chain_id: chain_spec.chain_id,
-            is_taiko: chain_spec.is_taiko,
-        }
+            is_taiko,
+        })
     }
 
     fn parse_proposal_event(ctx: &ProofContext) -> RaikoResult<ShastaEventData> {
@@ -317,7 +314,7 @@ impl ShastaManifestBuilder {
 
         // Proposal events are resolved by preflight and may be passed in explicitly by callers.
         let prover_data = Self::parse_prover_data(ctx)?;
-        let chain_spec = Self::build_chain_spec(ctx);
+        let chain_spec = Self::build_chain_spec(ctx)?;
         let blob_proof_type = Self::resolve_blob_proof_type(ctx)?;
 
         let l1_header = Self::parse_config(&ctx.config, "l1_header")?
@@ -382,10 +379,48 @@ impl ShastaManifestBuilder {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
-    use raiko2_primitives::{ProofRequest, ProofType, ProverConfig, ShastaCheckpoint};
+    use raiko2_primitives::{
+        ProofRequest, ProofType, ProverConfig, ShastaCheckpoint, SupportedChainSpecs,
+    };
 
     fn context_with_request(request: ProofRequest) -> ProofContext {
         ProofContext::new(request, ProverConfig::default())
+    }
+
+    #[test]
+    fn manifest_chain_spec_uses_resolved_l2_overlay() {
+        let mut ctx = context_with_request(ProofRequest {
+            l2_chain_id: 167_001,
+            ..Default::default()
+        });
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        spec.name = "taiko_dev_override".to_string();
+        spec.is_taiko = false;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
+
+        let manifest =
+            ShastaManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
+
+        assert_eq!(manifest.chain_spec.name, "taiko_dev_override");
+        assert_eq!(manifest.chain_spec.chain_id, 167_001);
+        assert!(!manifest.chain_spec.is_taiko);
+    }
+
+    #[test]
+    fn manifest_chain_spec_preserves_unknown_chain_taiko_fallback() {
+        let ctx = context_with_request(ProofRequest {
+            l2_chain_id: 999_999,
+            ..Default::default()
+        });
+
+        let manifest =
+            ShastaManifestBuilder::build_taiko_manifest(&ctx, &[], None).expect("manifest");
+
+        assert_eq!(manifest.chain_spec.name, UNKNOWN_L2_CHAIN_SPEC_NAME);
+        assert_eq!(manifest.chain_spec.chain_id, 999_999);
+        assert!(manifest.chain_spec.is_taiko);
     }
 
     #[test]

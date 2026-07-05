@@ -493,6 +493,12 @@ For unreleased testing, build local ELFs with `just build-guest all` before buil
 released artifacts, download guest ELF/VK assets from GitHub Releases with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
 `release-image` refreshes guest ELFs for the selected non-host backend by default.
+Guest builds and refreshes skip unchanged backends by fingerprint unless `--force` or
+`--force-rebuild-guests` is used. Logs include backend elapsed time, and the repo-managed Docker
+toolchain image path uses persistent Cargo and `sccache` volumes by default. RISC0 and SP1
+rebuild logs print `sccache --show-stats`, so release logs expose cache hit/miss counts as well as
+wall time. Use `DOCKER_CARGO_CACHE=none` or `DOCKER_SCCACHE_CACHE=none` only for diagnostics;
+disabling either cache should not be needed for normal releases.
 If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
 provenance still matches the committed repo state.

@@ -137,13 +137,23 @@ just build-guest risc0
 just build-guest sp1
 ```
 
-Direct `xtask` entrypoint:
+Direct `xtask-build-guest` entrypoint:
 
 ```bash
-cargo run -r -p xtask -- build-guest all
+CARGO_PROFILE_RELEASE_LTO=false \
+CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
+CARGO_PROFILE_RELEASE_DEBUG=0 \
+  cargo run -r -p xtask-build-guest --bin xtask-build-guest -- all
 ```
 
-`build-guest` only rebuilds checked-in ELF artifacts under `crates/guests/elf`.
+`build-guest` updates checked-in ELF artifacts under `crates/guests/elf` when guest sources,
+toolchain inputs, or current ELF bytes change. When the fingerprint already matches, it prints a
+backend skip message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
+
+```bash
+just build-guest sp1 --force
+```
+
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
 differs from the source tree. `build-guest` does not register verifier trust-list entries or
@@ -165,6 +175,48 @@ Repo-managed local toolchain images are used by default:
 
 - `RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local`
 - `SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local`
+
+The Docker toolchain-image path uses two persistent cache layers by default:
+
+- `DOCKER_CARGO_CACHE=volume` mounts a backend-specific Cargo home volume such as
+  `raiko2-cargo-risc0`.
+- `DOCKER_SCCACHE_CACHE=volume` mounts a backend-specific `sccache` volume such as
+  `raiko2-sccache-risc0`, sets `RUSTC_WRAPPER=sccache`, fixes `SCCACHE_BASEDIRS=/work`,
+  and wraps supported guest C/C++ target compilers through `sccache`.
+
+Disable them independently when diagnosing cache-sensitive behavior:
+
+```bash
+DOCKER_CARGO_CACHE=none just build-guest risc0
+DOCKER_SCCACHE_CACHE=none just build-guest sp1
+```
+
+Override volume names when sharing or isolating cache state across worktrees:
+
+```bash
+DOCKER_CARGO_CACHE_VOLUME=raiko2-cargo-sp1-dev \
+DOCKER_SCCACHE_CACHE_VOLUME=raiko2-sccache-sp1-dev \
+  just build-guest sp1
+```
+
+To compare guest build speed, capture cold, warm, and fingerprint-hit runs separately:
+
+```bash
+time just build-guest sp1 --force
+time just build-guest sp1 --force
+time just build-guest sp1
+```
+
+The first two commands measure guest rebuild behavior with increasingly warm Docker Cargo and
+`sccache` volumes. The third command exercises the guest fingerprint skip path and prints
+per-backend elapsed time when the checked-in ELFs already match the current sources and build
+inputs.
+RISC0 and SP1 Docker-image rebuilds also print `sccache --show-stats` output so cache hit/miss
+rates are visible in the build log.
+
+The `just build-guest` entrypoint applies those Cargo profile overrides to the host-side
+`xtask-build-guest` launcher so guest refreshes do not spend time on full release LTO before
+entering the zkVM build.
 
 To disable toolchain images and use local toolchains instead:
 

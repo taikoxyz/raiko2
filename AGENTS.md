@@ -12,6 +12,10 @@ workflows, and treat `docs/API.md` as the source of truth for HTTP/API behavior.
 - Use `docs/API.md` for request/response contracts, config keys, and environment variables.
 - Use `config.example.toml` as the canonical config shape.
 - Use `.codex/skills/raiko2-image-release/SKILL.md` for image build-and-publish sequencing.
+- Use `docs/solutions/` for documented solutions to past problems and workflow learnings, organized
+  by category with YAML frontmatter (`module`, `tags`, `problem_type`).
+- Use `CONCEPTS.md` for shared domain vocabulary covering project-specific entities, named processes,
+  and status concepts.
 - Do not copy long command walkthroughs into this file. Add only agent-critical rules and stable entrypoints.
 
 ## Repository Layout

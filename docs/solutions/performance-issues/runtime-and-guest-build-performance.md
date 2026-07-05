@@ -124,7 +124,7 @@ Guest build orchestration now makes cache and skip behavior visible:
 
 - backend fingerprints skip unchanged guest ELF refreshes;
 - forced rebuilds write fingerprints so the next normal run can skip;
-- Docker Cargo and `sccache` cache volumes are deterministic per backend;
+- Docker Cargo and repo-managed-image `sccache` cache volumes are deterministic per backend;
 - RISC0/SP1 toolchain images install pinned `sccache`;
 - guest C/C++ compilers are wrapped through `sccache` when supported, while guest Rust compilation stays on Cargo's normal path because the measured clean-target Rust wrapper path had cache misses that outweighed the native C/C++ cache hits;
 - rebuild logs print elapsed time and `sccache --show-stats`.

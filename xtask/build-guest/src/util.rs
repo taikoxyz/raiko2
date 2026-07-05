@@ -28,15 +28,39 @@ pub(crate) fn docker_cargo_cache_volume(root: &Path, backend: &str) -> Result<Op
     )
 }
 
-pub(crate) fn docker_sccache_cache_volume(root: &Path, backend: &str) -> Result<Option<String>> {
-    docker_cache_volume(
+pub(crate) fn docker_sccache_cache_volume(
+    root: &Path,
+    backend: &str,
+    default_enabled: bool,
+) -> Result<Option<String>> {
+    docker_sccache_cache_volume_for_env(
         root,
         backend,
-        "sccache",
         env::var("DOCKER_SCCACHE_CACHE").ok().and_then(non_empty),
         env::var("DOCKER_SCCACHE_CACHE_VOLUME")
             .ok()
             .and_then(non_empty),
+        default_enabled,
+    )
+}
+
+fn docker_sccache_cache_volume_for_env(
+    root: &Path,
+    backend: &str,
+    mode: Option<String>,
+    explicit: Option<String>,
+    default_enabled: bool,
+) -> Result<Option<String>> {
+    if !default_enabled && mode.is_none() && explicit.is_none() {
+        return Ok(None);
+    }
+
+    docker_cache_volume(
+        root,
+        backend,
+        "sccache",
+        mode,
+        explicit,
         "DOCKER_SCCACHE_CACHE",
         "DOCKER_SCCACHE_CACHE_VOLUME",
     )
@@ -59,7 +83,7 @@ fn docker_cache_volume(
         "volume" | "1" | "true" => {}
         "none" | "0" | "false" | "off" => return Ok(None),
         _ => {
-            bail!("unsupported {mode_env}={mode} (expected: volume|none|true|false|0|1)");
+            bail!("unsupported {mode_env}={mode} (expected: volume|none|off|true|false|0|1)");
         }
     }
 
@@ -311,6 +335,70 @@ mod tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn docker_cache_volume_error_lists_off_as_disable_mode() {
+        let err = super::docker_cache_volume(
+            Path::new("/repo/raiko2"),
+            "sp1",
+            "sccache",
+            Some("bogus".to_string()),
+            None,
+            "MODE",
+            "VOLUME",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("expected: volume|none|off|true|false|0|1")
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_is_off_by_default_when_not_default_enabled() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                None,
+                false
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_explicit_volume_opts_in() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                Some("custom-sccache".to_string()),
+                false
+            )
+            .unwrap(),
+            Some("custom-sccache".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_default_enabled_uses_scoped_volume() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                None,
+                true
+            )
+            .unwrap(),
+            Some("raiko2-sccache-risc0".to_string())
         );
     }
 

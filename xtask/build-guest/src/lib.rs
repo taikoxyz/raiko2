@@ -686,7 +686,12 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
             .arg(format!("CARGO_HOME={}", util::DOCKER_CARGO_HOME));
     }
 
-    let sccache_enabled = configure_docker_sccache(&mut cmd, root, "risc0")?;
+    let sccache_enabled = configure_docker_sccache(
+        &mut cmd,
+        root,
+        "risc0",
+        image == DEFAULT_RISC0_TOOLCHAIN_IMAGE,
+    )?;
 
     if let Some(extra_mount) = &extra_mount {
         cmd.arg("-v")
@@ -1007,7 +1012,8 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
             .arg(format!("CARGO_HOME={}", util::DOCKER_CARGO_HOME));
     }
 
-    let sccache_enabled = configure_docker_sccache(&mut cmd, root, "sp1")?;
+    let sccache_enabled =
+        configure_docker_sccache(&mut cmd, root, "sp1", image == DEFAULT_SP1_TOOLCHAIN_IMAGE)?;
 
     if let Some(extra_mount) = &extra_mount {
         cmd.arg("-v")
@@ -1087,8 +1093,14 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     Ok(())
 }
 
-fn configure_docker_sccache(cmd: &mut Command, root: &Path, backend_key: &str) -> Result<bool> {
-    let Some(volume) = util::docker_sccache_cache_volume(root, backend_key)? else {
+fn configure_docker_sccache(
+    cmd: &mut Command,
+    root: &Path,
+    backend_key: &str,
+    default_enabled: bool,
+) -> Result<bool> {
+    let Some(volume) = util::docker_sccache_cache_volume(root, backend_key, default_enabled)?
+    else {
         println!("[INFO] Docker sccache cache disabled for backend `{backend_key}`");
         return Ok(false);
     };

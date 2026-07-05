@@ -174,7 +174,8 @@ Repo-managed local toolchain images are used by default:
 - `RISC0_TOOLCHAIN_IMAGE=raiko2-risc0-toolchain:local`
 - `SP1_TOOLCHAIN_IMAGE=raiko2-sp1-toolchain:local`
 
-The Docker toolchain-image path uses two persistent cache layers by default:
+The Docker toolchain-image path uses two persistent cache layers by default with the repo-managed
+local toolchain images:
 
 - `DOCKER_CARGO_CACHE=volume` mounts a backend-specific Cargo home volume such as
   `raiko2-cargo-risc0`.
@@ -182,6 +183,10 @@ The Docker toolchain-image path uses two persistent cache layers by default:
   `raiko2-sccache-risc0`, fixes `SCCACHE_BASEDIRS=/work`, and wraps supported guest C/C++
   target compilers through `sccache`. Guest Rust compilation is not wrapped because the measured
   clean-target path had Rust cache misses that outweighed the native C/C++ cache hits.
+
+Custom `RISC0_TOOLCHAIN_IMAGE` or `SP1_TOOLCHAIN_IMAGE` values do not enable `sccache` by default,
+because the image may not contain the `sccache` binary. Set `DOCKER_SCCACHE_CACHE=volume` or
+`DOCKER_SCCACHE_CACHE_VOLUME=<volume>` to opt in for custom images that provide it.
 
 Disable them independently when diagnosing cache-sensitive behavior:
 

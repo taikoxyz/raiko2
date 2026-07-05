@@ -53,7 +53,7 @@ sol! {
 #[derive(Args)]
 pub(crate) struct RegisterImageArgs {
     /// Built-in verifier/rpc profile.
-    #[arg(long, value_enum, default_value_t = RegisterImageProfile::HoodiShasta)]
+    #[arg(long, value_enum, default_value_t = RegisterImageProfile::Hoodi)]
     profile: RegisterImageProfile,
     /// Backend subset to register.
     #[arg(long, value_enum, default_value_t = Backend::All)]
@@ -80,9 +80,12 @@ pub(crate) struct RegisterImageArgs {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RegisterImageProfile {
-    HoodiShasta,
-    DevnetShasta,
-    MainnetShasta,
+    #[value(name = "hoodi-shasta")]
+    Hoodi,
+    #[value(name = "devnet-shasta")]
+    Devnet,
+    #[value(name = "mainnet-shasta")]
+    Mainnet,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -353,19 +356,19 @@ struct ProfileDefaults {
 
 const fn profile_defaults(profile: RegisterImageProfile) -> ProfileDefaults {
     match profile {
-        RegisterImageProfile::HoodiShasta => ProfileDefaults {
+        RegisterImageProfile::Hoodi => ProfileDefaults {
             network: HOODI_NETWORK,
             expected_chain_id: HOODI_CHAIN_ID,
             rpc_url: DEFAULT_RPC_URL_HOODI_SHASTA,
             taiko_chain_spec: HOODI_TAIKO_CHAIN_SPEC,
         },
-        RegisterImageProfile::DevnetShasta => ProfileDefaults {
+        RegisterImageProfile::Devnet => ProfileDefaults {
             network: DEVNET_NETWORK,
             expected_chain_id: DEVNET_CHAIN_ID,
             rpc_url: DEFAULT_RPC_URL_DEVNET_SHASTA,
             taiko_chain_spec: DEVNET_TAIKO_CHAIN_SPEC,
         },
-        RegisterImageProfile::MainnetShasta => ProfileDefaults {
+        RegisterImageProfile::Mainnet => ProfileDefaults {
             network: MAINNET_NETWORK,
             expected_chain_id: MAINNET_CHAIN_ID,
             rpc_url: DEFAULT_RPC_URL_MAINNET_SHASTA,
@@ -769,9 +772,9 @@ fn b256_hex(value: B256) -> String {
 
 fn profile_name(profile: RegisterImageProfile) -> &'static str {
     match profile {
-        RegisterImageProfile::HoodiShasta => "hoodi-shasta",
-        RegisterImageProfile::DevnetShasta => "devnet-shasta",
-        RegisterImageProfile::MainnetShasta => "mainnet-shasta",
+        RegisterImageProfile::Hoodi => "hoodi-shasta",
+        RegisterImageProfile::Devnet => "devnet-shasta",
+        RegisterImageProfile::Mainnet => "mainnet-shasta",
     }
 }
 
@@ -831,7 +834,7 @@ mod tests {
     #[test]
     fn profile_defaults_can_be_overridden() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::HoodiShasta,
+            profile: RegisterImageProfile::Hoodi,
             backend: Backend::All,
             rpc_url: Some("http://127.0.0.1:8545".to_string()),
             risc0_verifier: Some(address!("1111111111111111111111111111111111111111")),
@@ -858,7 +861,7 @@ mod tests {
     #[test]
     fn hoodi_profile_uses_l1_rpc_by_default() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::HoodiShasta,
+            profile: RegisterImageProfile::Hoodi,
             backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,
@@ -880,7 +883,7 @@ mod tests {
     #[test]
     fn devnet_profile_uses_l1_sp1_verifier_by_default() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::DevnetShasta,
+            profile: RegisterImageProfile::Devnet,
             backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,
@@ -907,7 +910,7 @@ mod tests {
     #[test]
     fn mainnet_profile_uses_shasta_verifiers() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::MainnetShasta,
+            profile: RegisterImageProfile::Mainnet,
             backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,
@@ -944,7 +947,7 @@ mod tests {
     #[test]
     fn risc0_plan_includes_two_shasta_registrations() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::HoodiShasta,
+            profile: RegisterImageProfile::Hoodi,
             backend: Backend::Risc0,
             rpc_url: None,
             risc0_verifier: None,
@@ -970,7 +973,7 @@ mod tests {
     #[test]
     fn hoodi_profile_rejects_wrong_chain_id() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::HoodiShasta,
+            profile: RegisterImageProfile::Hoodi,
             backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,
@@ -991,7 +994,7 @@ mod tests {
     #[test]
     fn mainnet_profile_rejects_wrong_chain_id() {
         let args = RegisterImageArgs {
-            profile: RegisterImageProfile::MainnetShasta,
+            profile: RegisterImageProfile::Mainnet,
             backend: Backend::All,
             rpc_url: None,
             risc0_verifier: None,

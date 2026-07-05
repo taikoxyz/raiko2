@@ -179,8 +179,9 @@ The Docker toolchain-image path uses two persistent cache layers by default:
 - `DOCKER_CARGO_CACHE=volume` mounts a backend-specific Cargo home volume such as
   `raiko2-cargo-risc0`.
 - `DOCKER_SCCACHE_CACHE=volume` mounts a backend-specific `sccache` volume such as
-  `raiko2-sccache-risc0`, sets `RUSTC_WRAPPER=sccache`, fixes `SCCACHE_BASEDIRS=/work`,
-  and wraps supported guest C/C++ target compilers through `sccache`.
+  `raiko2-sccache-risc0`, fixes `SCCACHE_BASEDIRS=/work`, and wraps supported guest C/C++
+  target compilers through `sccache`. Guest Rust compilation is not wrapped because the measured
+  clean-target path had Rust cache misses that outweighed the native C/C++ cache hits.
 
 Disable them independently when diagnosing cache-sensitive behavior:
 

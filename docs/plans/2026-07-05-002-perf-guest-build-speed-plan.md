@@ -26,7 +26,7 @@ execution: code
 
 ### Summary
 
-Guest builds already skip unchanged release ELFs through a backend fingerprint and reuse Docker Cargo cache volumes, but repeated builds still pay host-side `xtask-build-guest` release optimization cost, lack visible phase timings, and do not cache Rust or C/C++ compilation through `sccache` inside the repo-managed zkVM toolchain containers.
+Guest builds already skip unchanged release ELFs through a backend fingerprint and reuse Docker Cargo cache volumes, but repeated builds still pay host-side `xtask-build-guest` release optimization cost, lack visible phase timings, and do not cache C/C++ compilation through `sccache` inside the repo-managed zkVM toolchain containers.
 This plan adds measurable guest build timings and default, opt-out `sccache` support for the Docker toolchain image paths without changing which guest binaries are built or where ELFs are exported.
 
 ### Problem Frame
@@ -46,8 +46,8 @@ The optimization must be conservative because guest ELF and SP1 VK artifacts are
 
 **Build cache behavior**
 
-- R4. Repo-managed RISC0 and SP1 Docker toolchain builds should route Rust compilation through `sccache` by default when the toolchain image path is used.
-- R5. Native guest C/C++ compilation should route through `sccache` where the target compiler environment accepts a compiler wrapper.
+- R4. Repo-managed RISC0 and SP1 Docker toolchain builds should route native guest C/C++ compilation through `sccache` where the target compiler environment accepts a compiler wrapper.
+- R5. Guest Rust compilation should stay on Cargo's normal path unless a separate benchmark proves `RUSTC_WRAPPER=sccache` improves wall-clock time for this guest graph.
 - R6. sccache state must persist across Docker toolchain container runs using a deterministic per-repo/per-backend cache volume by default.
 - R7. Users must be able to disable the sccache layer without disabling the existing Docker Cargo cache layer.
 
@@ -71,7 +71,7 @@ The optimization must be conservative because guest ELF and SP1 VK artifacts are
 
 - Pipeline scoping confirmation is unavailable in LFG, so the plan assumes the first optimization pass should favor safe default caching and measurement over higher-risk concurrency.
 - `sccache` is available as a pinned official release binary for the architectures supported by the repo-managed RISC0 and SP1 toolchain images; if either image cannot install it, implementation should keep the cache integration opt-in for that image or stop with evidence.
-- `RUSTC_WRAPPER=sccache` is output-transparent for guest builds; therefore sccache selection should not be included in the guest artifact fingerprint.
+- `sccache` compiler wrapping is output-transparent for guest builds; therefore sccache selection should not be included in the guest artifact fingerprint.
 
 ---
 
@@ -108,7 +108,7 @@ flowchart TB
   G -->|RISC0| H[mount Cargo cache and sccache volumes]
   G -->|SP1| H
   G -->|local host toolchain| I[honor caller env]
-  H --> J[set RUSTC_WRAPPER and target CC/CXX wrappers]
+  H --> J[set target CC/CXX wrappers]
   I --> K[export guest ELFs]
   J --> K
   K --> L[log export/backend total duration]
@@ -173,14 +173,14 @@ flowchart TB
 
 ### U3. Install and Wire sccache in Repo Toolchain Images
 
-- **Goal:** Route Rust and supported native target compilation through sccache for RISC0 and SP1 Docker toolchain image builds.
+- **Goal:** Route supported native target compilation through sccache for RISC0 and SP1 Docker toolchain image builds.
 - **Requirements:** R4, R5, R6, R7, R8.
 - **Dependencies:** U2.
 - **Files:** `docker/risc0-toolchain/Dockerfile`, `docker/sp1-toolchain/Dockerfile`, `xtask/build-guest/src/lib.rs`.
-- **Approach:** Install `sccache` in both repo-managed toolchain images, mount the configured sccache volume into container runs, set `SCCACHE_DIR`, `SCCACHE_BASEDIRS=/work`, and `RUSTC_WRAPPER=sccache`, compose target `CC`/`CXX` values through `sccache` only when sccache mode is enabled, and print sccache stats before the container exits.
+- **Approach:** Install `sccache` in both repo-managed toolchain images, mount the configured sccache volume into container runs, set `SCCACHE_DIR` and `SCCACHE_BASEDIRS=/work`, compose target `CC`/`CXX` values through `sccache` only when sccache mode is enabled, and print sccache stats before the container exits. Do not set `RUSTC_WRAPPER=sccache` by default for guest Rust compilation unless a benchmark shows it helps.
 - **Patterns to follow:** Existing image package-install blocks and existing target compiler env construction in RISC0 and SP1 builder paths.
 - **Test scenarios:** Build or inspect both toolchain image Dockerfiles enough to prove `sccache` is present. Run a single-backend guest build smoke or, if too expensive, a toolchain-container command that checks `sccache --version` and validates env wiring. Run focused Rust tests for the command construction and fingerprint invariants.
-- **Verification:** Toolchain image builds can find `sccache`, the guest build command uses the wrapper by default, and setting the new disable env removes the wrapper and volume mount.
+- **Verification:** Toolchain image builds can find `sccache`, the guest build command uses target C/C++ wrappers by default, and setting the new disable env removes the wrappers and volume mount.
 
 ### U4. Document Measurement and Cache Controls
 
@@ -215,7 +215,7 @@ Full `just build-guest all` is desirable when time and disk allow, but a single-
 ## Definition of Done
 
 - Guest build logs include measurable elapsed time for skip and rebuild paths.
-- Docker toolchain image paths use sccache by default for Rust compilation and supported native C/C++ compilation.
+- Docker toolchain image paths use sccache by default for supported native C/C++ compilation.
 - Cargo cache and sccache cache controls are separately documented and independently disableable.
 - Guest artifact fingerprints do not change solely because cache configuration changes.
 - No generated ELF or VK artifact is hand-edited; any generated drift is either committed intentionally or removed before shipping.

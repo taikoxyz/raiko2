@@ -37,11 +37,13 @@ The solution had to preserve release-image and guest ELF semantics while making 
 
 - The host-side guest launcher previously spent about `6m12s` before reaching guest work. With the launcher profile reduced, the first rebuild dropped to about `2m11s`, and a subsequent launcher hit took about `0.49s`.
 - A cold runtime image warm-fill still took `1346.78s`, with `cargo chef cook` accounting for `20m39s` and the final workspace build `54.85s`.
-- A source-change runtime Docker image rebuild with `cargo-chef` took `50.92s` total, with the final Cargo build at `29.92s`.
-- A release-image-style RISC0 source-change build should include guest refresh plus Docker image build. The measured comparison is `972.61s` (`63.05s` forced guest rebuild plus `909.56s` pre-PR Docker build from the removed workspace LTO profile) to `51.41s` (`0.490s` fingerprint-hit guest refresh plus `50.92s` cached Docker build).
+- A source-change runtime Docker image rebuild with `cargo-chef` took `50.92s` total, with the final Cargo build at `29.92s`. The measured optimized release-image-style path is `51.41s` total: `0.490s` fingerprint-hit guest refresh plus `50.92s` cached Docker build.
+- The original end-to-end image build time, including pre-optimization guest refresh plus Docker image build, was not captured. The old Docker-only LTO baseline was already `909.56s`, so the optimized `51.41s` end-to-end path is at least `17.7x` faster than the old Docker portion alone; the exact original end-to-end improvement is higher but unmeasured.
 - Enabling host LTO was not acceptable for the Docker image-build portion: the pre-PR Docker run using the removed workspace LTO profile took `909.56s` total, with a `10m03s` final Cargo build.
 - The old no-LTO/debug release profile produced very large artifacts: `793.9MB` for `/usr/local/bin/raiko2` and `942.4MB` for the image.
-- A RISC0 forced guest rebuild took `63.05s` total, while a fingerprint-hit `just build-guest risc0` took `0.490s`; these are different regimes and should not be averaged together.
+- A RISC0 forced guest rebuild with Rust and C/C++ both routed through `sccache` took `56.94s`; narrowing guest `sccache` to C/C++ only reduced that clean-target path to `48.22s` while preserving `15/15` C/C++ cache hits.
+- Disabling guest C/C++ `sccache` on the same clean RISC0 rebuild took `47.43s`; adding the current cached Docker image build gives `98.35s` for a current forced guest rebuild plus Docker build diagnostic path. This is not an original pre-optimization end-to-end baseline.
+- A fingerprint-hit `just build-guest risc0` took `0.490s`; forced rebuilds and fingerprint hits are different regimes and should not be averaged together.
 - Clean RISC0 guest target rebuilds were not final-link-bound: `cargo +risc0 build --timings` reported `507` dirty units over `57.30s`, with the longest units in `protobuf`, `ark-ff`, and `zerocopy`; touching the final guest binary rebuilt in only about `2.32s`.
 
 ### Benchmark Setup
@@ -51,6 +53,7 @@ The benchmark matrix intentionally compared different cache states instead of re
 - cold or profile-invalidated runtime image builds measure dependency and profile-boundary cost;
 - source-change release-image-style builds should add guest refresh time to Docker image-build time;
 - source-change Docker image rebuilds measure whether the dependency boundary stays cached;
+- guest `sccache` measurements should distinguish Rust wrapper overhead from native C/C++ compiler cache hits;
 - no-chef transition runs measure the cost of removing `cargo-chef`, not only the steady-state result after a new target cache is warm;
 - forced guest rebuilds measure actual guest compilation and export;
 - fingerprint-hit guest runs measure the no-op path.
@@ -123,7 +126,7 @@ Guest build orchestration now makes cache and skip behavior visible:
 - forced rebuilds write fingerprints so the next normal run can skip;
 - Docker Cargo and `sccache` cache volumes are deterministic per backend;
 - RISC0/SP1 toolchain images install pinned `sccache`;
-- guest C/C++ compilers are wrapped through `sccache` when supported;
+- guest C/C++ compilers are wrapped through `sccache` when supported, while guest Rust compilation stays on Cargo's normal path because the measured clean-target Rust wrapper path had cache misses that outweighed the native C/C++ cache hits;
 - rebuild logs print elapsed time and `sccache --show-stats`.
 
 The fingerprint optimization has a correctness boundary: every guest-affecting source, environment, toolchain image tag, build flag, and expected output must be part of the fingerprint inputs. Otherwise a performance skip can become a stale-artifact bug.
@@ -136,7 +139,7 @@ BuildKit cache mounts, `sccache`, and `cargo-chef` address a different class of 
 
 `cargo-chef` remains useful as a stable Docker dependency boundary. The no-chef warm path can be competitive once its cache is already hot, but the first transition penalty makes removal a regression for normal branch and image-build workflows.
 
-The guest path benefits most from fingerprinting and cache observability. Timing showed that clean guest rebuilds were dominated by many Rust units, not only final linking. That makes deterministic cache volumes, compiler wrapping, skip checks, and elapsed-time logging more valuable than changing linker choice alone.
+The guest path benefits most from fingerprinting and cache observability. Timing showed that clean guest rebuilds were dominated by many Rust units, not only final linking. Routing those Rust misses through `sccache` made the clean-target path slower, so the final guest cache wiring keeps `sccache` on native C/C++ compilers only and relies on Cargo target/cache reuse plus fingerprints for the Rust graph.
 
 The benchmark matrix was essential because each row answered a different question: whether a no-op truly skips, whether native C/C++ cache hits, whether `cargo-chef` is still buying anything, whether LTO is justified, and whether binary-size work actually changed the artifact.
 
@@ -149,6 +152,7 @@ The benchmark matrix was essential because each row answered a different questio
   - no-chef transition and warm no-chef rebuild before removing `cargo-chef`;
   - forced guest rebuild;
   - fingerprint-hit guest skip.
+- Do not count mixed synthetic totals as original build times. If the original end-to-end image build was not measured, report the current end-to-end time and the measured component deltas separately.
 - Treat release-profile changes as artifact decisions. Before enabling LTO or debug info on host images, record build time, binary size, image size, and a runtime benchmark that justifies the tradeoff.
 - Keep host helper tuning separate from guest artifact tuning. `CARGO_PROFILE_RELEASE_OPT_LEVEL=1` is appropriate for `xtask-build-guest` because it is orchestration code; do not use that measurement as proof about zkVM guest runtime behavior.
 - Require step-level cache evidence for Docker builds. A buildx cache import is not enough; check whether `cargo chef cook`, final `cargo build`, and native compiler work actually hit cache.

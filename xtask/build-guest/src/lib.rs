@@ -1099,7 +1099,6 @@ fn configure_docker_sccache(cmd: &mut Command, root: &Path, backend_key: &str) -
     cmd.arg("-e")
         .arg(format!("SCCACHE_DIR={}", util::DOCKER_SCCACHE_DIR));
     cmd.arg("-e").arg("SCCACHE_BASEDIRS=/work");
-    cmd.arg("-e").arg("RUSTC_WRAPPER=sccache");
     Ok(true)
 }
 

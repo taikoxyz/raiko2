@@ -35,11 +35,7 @@ const DEFAULT_SP1_AR_ENV: &str = "AR_riscv64im_succinct_zkvm_elf";
 const DEFAULT_SP1_CC: &str = "riscv64-unknown-elf-gcc -specs=picolibc.specs";
 const DEFAULT_SP1_CXX: &str = "riscv64-unknown-elf-g++ -specs=picolibcpp.specs";
 const DEFAULT_SP1_AR: &str = "riscv64-unknown-elf-ar";
-const HOST_LAUNCHER_PROFILE_OVERRIDES: &[&str] = &[
-    "CARGO_PROFILE_RELEASE_LTO",
-    "CARGO_PROFILE_RELEASE_OPT_LEVEL",
-    "CARGO_PROFILE_RELEASE_DEBUG",
-];
+const HOST_LAUNCHER_PROFILE_OVERRIDES: &[&str] = &["CARGO_PROFILE_RELEASE_OPT_LEVEL"];
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {

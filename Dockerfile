@@ -7,7 +7,6 @@ FROM rust:1.94.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
 ARG CARGO_CHEF_VERSION=0.1.77
-ARG CARGO_PROFILE_RELEASE_LTO=true
 ARG RUSTFLAGS="-C link-arg=-fuse-ld=mold"
 ARG RUSTC_WRAPPER=sccache
 ARG CC="sccache cc"
@@ -29,7 +28,6 @@ RUN apt-get update && \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-ENV CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
 ENV RUSTFLAGS="${RUSTFLAGS}"
 ENV RUSTC_WRAPPER="${RUSTC_WRAPPER}"
 ENV SCCACHE_DIR=/var/cache/sccache

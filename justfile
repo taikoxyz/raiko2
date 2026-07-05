@@ -8,9 +8,7 @@ check-secrets *args:
     uv run --with cryptography --with eth-utils python scripts/security/check_evm_private_keys.py {{args}}
 
 build-guest backend="all" *args:
-    CARGO_PROFILE_RELEASE_LTO=false \
     CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
-    CARGO_PROFILE_RELEASE_DEBUG=0 \
         cargo run -r -p xtask-build-guest --bin xtask-build-guest -- {{backend}} {{args}}
 
 build-guest-risc0:

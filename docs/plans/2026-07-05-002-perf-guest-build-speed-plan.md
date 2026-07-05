@@ -26,14 +26,14 @@ execution: code
 
 ### Summary
 
-Guest builds already skip unchanged release ELFs through a backend fingerprint and reuse Docker Cargo cache volumes, but repeated builds still pay host-side `xtask-build-guest` release LTO cost, lack visible phase timings, and do not cache Rust or C/C++ compilation through `sccache` inside the repo-managed zkVM toolchain containers.
+Guest builds already skip unchanged release ELFs through a backend fingerprint and reuse Docker Cargo cache volumes, but repeated builds still pay host-side `xtask-build-guest` release optimization cost, lack visible phase timings, and do not cache Rust or C/C++ compilation through `sccache` inside the repo-managed zkVM toolchain containers.
 This plan adds measurable guest build timings and default, opt-out `sccache` support for the Docker toolchain image paths without changing which guest binaries are built or where ELFs are exported.
 
 ### Problem Frame
 
 `just build-guest risc0`, `just build-guest sp1`, and release guest refreshes are expensive because zkVM guest crates pull large Rust and native dependency graphs.
 The current build path has important coarse caching, but logs do not quantify fingerprint hit cost, rebuild duration, toolchain-image check duration, export duration, or cache backend selection.
-Local measurement also showed the direct `just build-guest` entrypoint can spend minutes compiling and linking the host-side launcher with full release LTO before entering guest compilation.
+Local measurement also showed the direct `just build-guest` entrypoint can spend unnecessary time compiling and linking the host-side launcher before entering guest compilation.
 The optimization must be conservative because guest ELF and SP1 VK artifacts are part of verifier registration and image release provenance.
 
 ### Requirements
@@ -56,7 +56,7 @@ The optimization must be conservative because guest ELF and SP1 VK artifacts are
 - R8. Cache configuration must not force guest ELF rebuilds when sources and artifact bytes are unchanged.
 - R9. RISC0 and SP1 output export locations must remain `crates/guests/elf`.
 - R10. The implementation must not hand-edit generated ELF or VK artifacts.
-- R11. The `just build-guest` entrypoint should avoid full release LTO for the host-side launcher because launcher runtime is negligible compared with guest compilation and fingerprinting.
+- R11. The `just build-guest` entrypoint should lower optimization for the host-side launcher because launcher runtime is negligible compared with guest compilation and fingerprinting.
 
 ### Scope Boundaries
 
@@ -138,16 +138,16 @@ flowchart TB
 
 ## Implementation Units
 
-### U0. Avoid Host Launcher LTO In Guest Build Entrypoint
+### U0. Lower Host Launcher Optimization In Guest Build Entrypoint
 
-- **Goal:** Prevent direct `just build-guest` runs from spending minutes on full release LTO before guest compilation starts.
+- **Goal:** Prevent direct `just build-guest` runs from spending extra time optimizing the host launcher before guest compilation starts.
 - **Requirements:** R11.
 - **Dependencies:** None.
 - **Files:** `justfile`, `docs/development.md`.
-- **Approach:** Apply Cargo release profile environment overrides only to the `xtask-build-guest` just recipe, keeping workspace release settings unchanged for production binaries.
-- **Patterns to follow:** Existing runtime image smoke docs that override release LTO for build-only host binaries.
-- **Test scenarios:** Measure `cargo build -r -p xtask-build-guest --bin xtask-build-guest` or `just build-guest <backend>` after the override and confirm the launcher rebuild no longer uses full release LTO.
-- **Verification:** The build-guest launcher enters guest fingerprinting/build work without the prior full-LTO link delay.
+- **Approach:** Apply a Cargo release opt-level override only to the `xtask-build-guest` just recipe, keeping workspace release settings at Cargo defaults for production binaries.
+- **Patterns to follow:** Existing runtime image smoke docs that keep build-only host binaries out of hot-path tuning.
+- **Test scenarios:** Measure `cargo build -r -p xtask-build-guest --bin xtask-build-guest` or `just build-guest <backend>` after the override and confirm the launcher enters guest work quickly.
+- **Verification:** The build-guest launcher enters guest fingerprinting/build work without an unnecessary high-optimization delay.
 
 ### U1. Add Guest Build Timing Primitives
 
@@ -200,7 +200,7 @@ flowchart TB
 | Gate | Applies to | Done signal |
 |---|---|---|
 | `cargo fmt --all -- --check` | Rust changes | Formatting passes. |
-| `just build-guest <backend>` or equivalent `CARGO_PROFILE_RELEASE_* cargo run -r -p xtask-build-guest` | U0, U1, U3 | The launcher avoids full release LTO, then reports guest fingerprint/build timing. |
+| `just build-guest <backend>` or equivalent `CARGO_PROFILE_RELEASE_OPT_LEVEL=1 cargo run -r -p xtask-build-guest` | U0, U1, U3 | The launcher uses reduced optimization, then reports guest fingerprint/build timing. |
 | `cargo test -p xtask-build-guest` | U1, U2, U3 | Unit tests cover cache volume parsing, fingerprint invariants, and any timing helpers. |
 | `cargo clippy -p xtask-build-guest -- -D warnings` | U1, U2, U3 | Guest build orchestration has no new clippy warnings. |
 | `docker build -f docker/risc0-toolchain/Dockerfile -t raiko2-risc0-toolchain:guest-cache-test docker/risc0-toolchain` | U3 | RISC0 toolchain image builds with `sccache` installed. |

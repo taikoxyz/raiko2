@@ -15,7 +15,7 @@ product_contract_source: ce-plan-bootstrap
 | Field | Value |
 |---|---|
 | Objective | Reduce runtime Docker image build time for repeated `release-image` and local image builds while preserving the current runtime image behavior. |
-| Authority | The user request is primary: host images do not need full LTO, build cache hits should improve, zkVM native/C++ dependencies should be cached, linker choice should be intentional, and the effect must be measurable. |
+| Authority | The user request is primary: host images do not need full LTO, release builds should use Cargo defaults unless a specific command overrides them, build cache hits should improve, zkVM native/C++ dependencies should be cached, linker choice should be intentional, and the effect must be measurable. |
 | Execution profile | Standard infra/performance change touching Docker build inputs, Cargo build configuration inside the image, and `xtask release-image` build flags/output. |
 | Stop conditions | Stop if Docker cannot build the root runtime image, if the host build no longer selects `--no-default-features --features host`, or if `.dockerignore` hides files required by `Dockerfile` or `Dockerfile.sgx`. |
 
@@ -25,13 +25,13 @@ product_contract_source: ce-plan-bootstrap
 
 ### Summary
 
-Speed up raiko2 runtime image builds by shrinking the Docker context, making the Rust/C/C++ compile cache survive BuildKit rebuilds, using a fast linker in the builder stage, and disabling full release LTO only for host-only image builds.
+Speed up raiko2 runtime image builds by shrinking the Docker context, making the Rust/C/C++ compile cache survive BuildKit rebuilds, using a fast linker in the builder stage, and returning the workspace release profile to Cargo defaults.
 The work keeps the release command and guest ELF refresh semantics intact, but makes `xtask release-image` print timing evidence so future runs can compare cold and warm cache behavior.
 
 ### Problem Frame
 
 The root `Dockerfile` already uses `cargo-chef` and `xtask release-image` already exports a local buildx cache, but the current context includes large directories that the runtime image never copies, including `guests/` and local core dumps.
-The current Docker build also inherits workspace `[profile.release] lto = true` for both dependency cooking and final host builds, even when `release-image host` only needs the host feature set.
+The current Docker build also inherits workspace `[profile.release]` overrides for both dependency cooking and final host builds, even when `release-image host` only needs the host feature set.
 The builder installs `clang` and heavy zkVM-related dependencies can compile native code, but there is no compiler wrapper cache or explicit fast linker inside the Docker build.
 
 ### Requirements
@@ -43,8 +43,8 @@ The builder installs `clang` and heavy zkVM-related dependencies can compile nat
 
 **Cargo and Linker Behavior**
 
-- R3. Host-only image builds must disable full release LTO through a Docker build argument driven by `xtask release-image host`.
-- R4. Non-host runtime images must retain the current release LTO default unless the caller overrides the Docker build argument.
+- R3. Runtime image builds must use Cargo's default release profile unless the caller explicitly overrides Cargo profile environment variables.
+- R4. Host-only image builds must still select the host feature set through `xtask release-image host`.
 - R5. The builder stage must use the repository-precedent fast linker choice without adding a slow source-built linker installation.
 
 **Cache Behavior**
@@ -79,7 +79,7 @@ The builder installs `clang` and heavy zkVM-related dependencies can compile nat
 ### Key Technical Decisions
 
 - KTD1. Trim Docker context before compiler tuning. The live checkout has `guests/` at tens of gigabytes plus local core dumps, while the root runtime image only copies `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/`, `bin/`, `xtask/`, `config/`, `config.example.toml`, and `test/guest_inputs/`.
-- KTD2. Disable host LTO with Cargo's profile environment override instead of creating a custom profile. `CARGO_PROFILE_RELEASE_LTO=false` keeps output in `target/release`, applies to both `cargo chef cook --release` and the final `cargo build --release`, and avoids Docker `COPY` path drift.
+- KTD2. Remove the workspace `[profile.release]` override instead of carrying per-command LTO exceptions. Cargo's default release profile already uses `opt-level = 3`, `debug = false`, and `lto = false`, which keeps output in `target/release` without Docker `COPY` path drift.
 - KTD3. Use `mold` in the image builder, not `wild`. The repo CI already installs mold through `rui314/setup-mold`, Debian bookworm can install mold in the builder stage, and using `wild` would require an extra Rust-installed tool in the hot build image path.
 - KTD4. Use BuildKit cache mounts plus `sccache`, then copy the final binary out of the mounted target directory during the final build step. Cache mounts are intentionally not committed to the image layer, so the binary must be persisted to a normal path before the stage ends.
 - KTD5. Keep `release-image` as the release orchestrator. It already handles clean-tree checks, guest refresh policy, local buildx cache export/import, push, and digest reporting; this plan only adds build args and elapsed-time output.
@@ -89,8 +89,8 @@ The builder installs `clang` and heavy zkVM-related dependencies can compile nat
 ```mermaid
 flowchart TB
   A[release-image backend] --> B{backend == host}
-  B -->|yes| C[Add BIN_FEATURES host and CARGO_PROFILE_RELEASE_LTO=false]
-  B -->|no| D[Keep default release LTO]
+  B -->|yes| C[Add BIN_FEATURES host]
+  B -->|no| D[Use backend default features]
   C --> E[docker buildx build with local cache]
   D --> E
   E --> F[Docker context filtered by .dockerignore]
@@ -111,7 +111,7 @@ flowchart TB
 
 - `Dockerfile` currently uses `cargo-chef` but no cache mounts, `sccache`, or linker build arg.
 - `xtask/src/release_image.rs` already centralizes buildx cache flags and host `BIN_FEATURES`.
-- `Cargo.toml` sets workspace `[profile.release] lto = true`.
+- `Cargo.toml` previously set workspace `[profile.release] debug = 1` and `lto = true`; this change removes that override and returns release builds to Cargo defaults.
 - `.dockerignore` currently ignores `target` and `.git`, but not `guests/`, core dumps, or local virtualenv/cache directories.
 - Docker docs describe cache mounts as persistent build caches for steps that otherwise need to rebuild or redownload packages: <https://docs.docker.com/build/cache/optimize/>.
 - Dockerfile reference documents `# syntax=` parser directives and `ARG`/`ENV` build-time variable behavior: <https://docs.docker.com/reference/dockerfile/>.
@@ -152,16 +152,16 @@ flowchart TB
   - Confirm the runtime image still contains `/usr/local/bin/raiko2` and `/app/crates/guests/elf`.
 - **Verification:** The Dockerfile completes a host runtime build with BuildKit cache mounts enabled and produces a runnable image.
 
-### U3. Drive Host LTO Override from release-image
+### U3. Return Release Profile to Cargo Defaults
 
-- **Goal:** Make `release-image host` disable full release LTO while other backends keep the current release profile default.
+- **Goal:** Remove the workspace release profile override so runtime image builds use Cargo's default release profile.
 - **Requirements:** R3, R4, R9.
 - **Dependencies:** U2.
-- **Files:** `xtask/src/release_image.rs`.
-- **Approach:** Extend the existing `build_image_flags` host branch to pass `CARGO_PROFILE_RELEASE_LTO=false`, keep non-host flags unchanged, and time only the `docker buildx build` phase with `Instant`. Print the elapsed duration before push so release logs capture build speed separately from registry push time.
+- **Files:** `Cargo.toml`, `xtask/src/release_image.rs`, `Dockerfile`.
+- **Approach:** Delete `[profile.release]` from the workspace manifest, remove the now-redundant Docker and release-image Cargo profile override knobs, keep host `BIN_FEATURES` unchanged, and time only the `docker buildx build` phase with `Instant`. Print the elapsed duration before push so release logs capture build speed separately from registry push time.
 - **Patterns to follow:** Mirror the existing unit-tested `BIN_FEATURES` flag construction and keep release summary digest output unchanged.
 - **Test scenarios:**
-  - Host backend flags include `BIN_FEATURES=--no-default-features --features host` and `CARGO_PROFILE_RELEASE_LTO=false`.
+  - Host backend flags include `BIN_FEATURES=--no-default-features --features host`.
   - Non-host backend flags include only metadata unless future backend-specific args are added.
   - Build duration formatting is stable enough for logs and does not alter `release_summary_lines`.
 - **Verification:** `cargo test -p xtask release_image` passes.
@@ -205,7 +205,7 @@ flowchart TB
 
 ## Definition of Done
 
-- Host image builds pass `CARGO_PROFILE_RELEASE_LTO=false` through `xtask release-image host`; non-host image builds keep the existing LTO default.
+- Runtime image builds use Cargo's default release profile, and host image builds still pass `BIN_FEATURES=--no-default-features --features host` through `xtask release-image host`.
 - The root runtime Dockerfile uses BuildKit cache mounts for Cargo registry, Cargo git, Cargo target, and `sccache`, and uses mold as the default fast linker.
 - Rust and native C/C++ compilation inside the builder stage route through `sccache` where supported.
 - The Docker context for the root runtime image no longer includes `guests/`, local core dumps, local virtualenvs, target outputs, or generated release artifacts.

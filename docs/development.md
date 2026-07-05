@@ -140,9 +140,7 @@ just build-guest sp1
 Direct `xtask-build-guest` entrypoint:
 
 ```bash
-CARGO_PROFILE_RELEASE_LTO=false \
 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
-CARGO_PROFILE_RELEASE_DEBUG=0 \
   cargo run -r -p xtask-build-guest --bin xtask-build-guest -- all
 ```
 
@@ -214,9 +212,9 @@ inputs.
 RISC0 and SP1 Docker-image rebuilds also print `sccache --show-stats` output so cache hit/miss
 rates are visible in the build log.
 
-The `just build-guest` entrypoint applies those Cargo profile overrides to the host-side
-`xtask-build-guest` launcher so guest refreshes do not spend time on full release LTO before
-entering the zkVM build.
+The `just build-guest` entrypoint lowers the host-side `xtask-build-guest` launcher optimization
+level so guest refreshes enter the zkVM build quickly. The launcher is build orchestration, not a
+runtime hot path.
 
 To disable toolchain images and use local toolchains instead:
 
@@ -228,15 +226,13 @@ RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
 ## Runtime Image Build Smoke
 
 For local runtime image build checks that must not push an image, use `docker buildx build`
-directly. This mirrors the host-only release image feature set and disables release LTO like
-`release-image host`:
+directly. This mirrors the host-only release image feature set:
 
 ```bash
 time docker buildx build \
   --load \
   --progress=plain \
   --build-arg 'BIN_FEATURES=--no-default-features --features host' \
-  --build-arg CARGO_PROFILE_RELEASE_LTO=false \
   -t raiko2-host:local \
   .
 ```
@@ -253,7 +249,6 @@ for diagnosis:
 docker buildx build \
   --load \
   --build-arg 'BIN_FEATURES=--no-default-features --features host' \
-  --build-arg CARGO_PROFILE_RELEASE_LTO=false \
   --build-arg RUSTC_WRAPPER= \
   --build-arg CC=cc \
   --build-arg CXX=c++ \

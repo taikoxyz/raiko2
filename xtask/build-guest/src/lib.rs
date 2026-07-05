@@ -35,6 +35,11 @@ const DEFAULT_SP1_AR_ENV: &str = "AR_riscv64im_succinct_zkvm_elf";
 const DEFAULT_SP1_CC: &str = "riscv64-unknown-elf-gcc -specs=picolibc.specs";
 const DEFAULT_SP1_CXX: &str = "riscv64-unknown-elf-g++ -specs=picolibcpp.specs";
 const DEFAULT_SP1_AR: &str = "riscv64-unknown-elf-ar";
+const HOST_LAUNCHER_PROFILE_OVERRIDES: &[&str] = &[
+    "CARGO_PROFILE_RELEASE_LTO",
+    "CARGO_PROFILE_RELEASE_OPT_LEVEL",
+    "CARGO_PROFILE_RELEASE_DEBUG",
+];
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -584,6 +589,7 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
 
     let target_root = util::target_root(root).join("risc0");
     cmd.env("CARGO_TARGET_DIR", &target_root);
+    clear_host_launcher_profile_overrides(&mut cmd);
 
     let risc0_docker_tag = env::var("RISC0_DOCKER_CONTAINER_TAG")
         .ok()
@@ -893,6 +899,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root.join("guests/sp1"));
+    clear_host_launcher_profile_overrides(&mut cmd);
     cmd.arg("prove")
         .arg("build")
         .arg("--docker")
@@ -1041,7 +1048,7 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         cmd.arg("-e").arg(format!("CFLAGS={cflags}"));
     }
 
-    let mut script = String::from("set -eu\n");
+    let mut script = String::from("set -u\n");
     if sccache_enabled {
         script.push_str("sccache --zero-stats || true\n");
     }
@@ -1058,7 +1065,9 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     script.push_str(container_export_dir.to_string_lossy().as_ref());
     script.push_str(" --locked --workspace-directory /work\n");
     if sccache_enabled {
+        script.push_str("status=$?\n");
         script.push_str("sccache --show-stats || true\n");
+        script.push_str("exit \"$status\"\n");
     }
 
     cmd.arg(image).arg("sh").arg("-lc").arg(script);
@@ -1103,6 +1112,12 @@ fn sccache_compiler(enabled: bool, compiler: &str) -> String {
         format!("sccache {compiler}")
     } else {
         compiler.to_string()
+    }
+}
+
+fn clear_host_launcher_profile_overrides(cmd: &mut Command) {
+    for key in HOST_LAUNCHER_PROFILE_OVERRIDES {
+        cmd.env_remove(key);
     }
 }
 

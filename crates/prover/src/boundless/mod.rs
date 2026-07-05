@@ -223,6 +223,25 @@ const fn no_lock_deadline_elapsed(
     now_secs >= no_lock_deadline(submitted_at, lock_expires_at, timeout)
 }
 
+/// Whether the overall poll timeout must be deferred for the current submission.
+///
+/// On the final attempt (`Abort`) the request stays payable until its lock deadline, and a
+/// timeout-triggered resubmission can reopen the double-pay window through the fresh-id
+/// fallback, so the overall timeout only takes effect once the payable window has closed.
+/// The deferral is bounded by `expires_at` so a corrupt stored record (or one with an
+/// implausibly distant lock deadline) cannot keep the poll loop open forever.
+const fn defer_poll_timeout_while_payable(
+    submitted_at: u64,
+    lock_expires_at: u64,
+    expires_at: u64,
+    timeout: NoLockTimeout,
+    now_secs: u64,
+) -> bool {
+    matches!(timeout.action, NoLockTimeoutAction::Abort)
+        && now_secs < expires_at
+        && !no_lock_deadline_elapsed(submitted_at, lock_expires_at, timeout, now_secs)
+}
+
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
     let rounded = if evaluated_mcycles == 0 {
         0
@@ -930,7 +949,15 @@ impl BoundlessProver {
         let mut consecutive_poll_errors = 0_u32;
 
         loop {
-            if started_at.elapsed() > timeout {
+            if started_at.elapsed() > timeout
+                && !defer_poll_timeout_while_payable(
+                    submission.submitted_at,
+                    submission.lock_expires_at,
+                    submission.expires_at,
+                    no_lock_timeout,
+                    now_secs(),
+                )
+            {
                 let detail = last_poll_error
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
@@ -1651,10 +1678,11 @@ mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        attempt_for_price_multiplier, enforce_market_max_price_cap, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        attempt_for_price_multiplier, defer_poll_timeout_while_payable,
+        enforce_market_max_price_cap, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
+        parse_env_bool, parse_env_url, quote_batch_mcycles, retry_price_multiplier,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2052,6 +2080,48 @@ mod tests {
 
         assert!(!no_lock_deadline_elapsed(1_000, 0, timeout, 1_299));
         assert!(no_lock_deadline_elapsed(1_000, 0, timeout, 1_300));
+    }
+
+    #[test]
+    fn poll_timeout_defers_while_final_attempt_is_payable() {
+        // submitted_at = 1_000, lock deadline = 10_000, request expiry = 20_000.
+        let abort = no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(abort.action, NoLockTimeoutAction::Abort);
+
+        // Within the payable window the overall poll timeout must not fire: a timeout-triggered
+        // resubmission could reopen the double-pay window through the fresh-id fallback.
+        assert!(defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, abort, 9_999
+        ));
+        // Once the lock deadline passes, the timeout may fire again.
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, abort, 10_000
+        ));
+        // The deferral is bounded by the request expiry even when a (corrupt) record claims a
+        // later lock deadline, so the poll loop cannot be pinned open forever.
+        assert!(!defer_poll_timeout_while_payable(
+            1_000,
+            u64::MAX,
+            20_000,
+            abort,
+            20_000
+        ));
+
+        // Rebid attempts never defer the overall timeout.
+        let rebid = no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(rebid.action, NoLockTimeoutAction::Rebid);
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, rebid, 9_999
+        ));
+
+        // Legacy records (lock_expires_at == 0) defer only for the rebid-delay window, matching
+        // their abort deadline.
+        assert!(defer_poll_timeout_while_payable(
+            1_000, 0, 20_000, abort, 1_299
+        ));
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 0, 20_000, abort, 1_300
+        ));
     }
 
     #[test]

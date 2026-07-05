@@ -125,6 +125,8 @@ pub(crate) struct TaskRuntimeMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lock_expires_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) submitted_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) quoted_mcycles_count: Option<u32>,
@@ -534,6 +536,7 @@ impl TaskRuntimeMetadata {
         self.deployment = Some(progress.deployment.clone());
         self.offchain = Some(progress.offchain);
         self.expires_at = Some(progress.expires_at);
+        self.lock_expires_at = Some(progress.lock_expires_at);
         self.submitted_at = Some(progress.submitted_at);
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;

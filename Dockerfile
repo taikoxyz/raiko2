@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Raiko2 runtime image for Docker and Docker Compose deployments.
 # This image intentionally excludes SGX-specific setup.
 
@@ -5,6 +7,11 @@ FROM rust:1.94.0-bookworm AS chef
 
 ARG BIN_FEATURES=""
 ARG CARGO_CHEF_VERSION=0.1.77
+ARG CARGO_PROFILE_RELEASE_LTO=true
+ARG RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+ARG RUSTC_WRAPPER=sccache
+ARG CC="sccache cc"
+ARG CXX="sccache c++"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUSTUP_TOOLCHAIN=1.94.0-x86_64-unknown-linux-gnu
@@ -15,12 +22,24 @@ RUN apt-get update && \
     clang \
     libprotobuf-dev \
     libssl-dev \
+    mold \
     protobuf-compiler \
     pkg-config \
+    sccache \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN cargo install --locked cargo-chef --version ${CARGO_CHEF_VERSION}
+ENV CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO}"
+ENV RUSTFLAGS="${RUSTFLAGS}"
+ENV RUSTC_WRAPPER="${RUSTC_WRAPPER}"
+ENV SCCACHE_DIR=/var/cache/sccache
+ENV CC="${CC}"
+ENV CXX="${CXX}"
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/var/cache/sccache,sharing=locked \
+    cargo install --locked cargo-chef --version ${CARGO_CHEF_VERSION}
 
 WORKDIR /app
 
@@ -40,7 +59,11 @@ FROM chef AS builder
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY --from=planner /app/recipe.json ./recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/var/cache/sccache,sharing=locked \
+    cargo chef cook --release --recipe-path recipe.json -p raiko2 ${BIN_FEATURES}
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
@@ -50,7 +73,14 @@ COPY config ./config
 COPY config.example.toml ./
 COPY test/guest_inputs ./test/guest_inputs
 
-RUN cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES}
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/var/cache/sccache,sharing=locked \
+    cargo +1.94.0 build --release -p raiko2 ${BIN_FEATURES} && \
+    mkdir -p /app/build-output && \
+    cp /app/target/release/raiko2 /app/build-output/raiko2 && \
+    (sccache --show-stats || true)
 
 FROM debian:bookworm-slim AS runtime
 
@@ -68,7 +98,7 @@ WORKDIR /app
 
 RUN mkdir -p /etc/raiko2
 
-COPY --from=builder /app/target/release/raiko2 /usr/local/bin/raiko2
+COPY --from=builder /app/build-output/raiko2 /usr/local/bin/raiko2
 COPY --from=builder /app/crates/guests/elf ./crates/guests/elf
 COPY --from=builder /app/config/chain_spec_list_default.json /etc/raiko2/chain_spec_list_default.json
 COPY --from=builder /app/config.example.toml /etc/raiko2/config.example.toml

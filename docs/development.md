@@ -173,6 +173,43 @@ RISC0_TOOLCHAIN_IMAGE=none SP1_TOOLCHAIN_IMAGE=none \
   cargo run -r -p xtask -- build-guest all
 ```
 
+## Runtime Image Build Smoke
+
+For local runtime image build checks that must not push an image, use `docker buildx build`
+directly. This mirrors the host-only release image feature set and disables release LTO like
+`release-image host`:
+
+```bash
+time docker buildx build \
+  --load \
+  --progress=plain \
+  --build-arg 'BIN_FEATURES=--no-default-features --features host' \
+  --build-arg CARGO_PROFILE_RELEASE_LTO=false \
+  -t raiko2-host:local \
+  .
+```
+
+The `--progress=plain` output includes the `transferring context` size; use it together with the
+shell `time` output to compare cold and warm cache runs. The root runtime `Dockerfile` uses
+BuildKit cache mounts for Cargo registry, Cargo git, Cargo target artifacts, and `sccache`.
+It also defaults to `mold` through `RUSTFLAGS=-C link-arg=-fuse-ld=mold`.
+
+If a local toolchain issue points at the compiler wrapper or linker, override the relevant knobs
+for diagnosis:
+
+```bash
+docker buildx build \
+  --load \
+  --build-arg 'BIN_FEATURES=--no-default-features --features host' \
+  --build-arg CARGO_PROFILE_RELEASE_LTO=false \
+  --build-arg RUSTC_WRAPPER= \
+  --build-arg CC=cc \
+  --build-arg CXX=c++ \
+  --build-arg RUSTFLAGS= \
+  -t raiko2-host:local \
+  .
+```
+
 If a guest ELF changes and the target environment relies on onchain verifier trust lists,
 register the new digests explicitly:
 

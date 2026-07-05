@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
@@ -11,6 +12,7 @@ use crate::util;
 const DEFAULT_IMAGE_REPOSITORY: &str = "us-docker.pkg.dev/evmchain/images/raiko2";
 const DEFAULT_BUILDX_BUILDER: &str = "raiko2-local-cache";
 const HOST_BIN_FEATURES: &str = "--no-default-features --features host";
+const HOST_RELEASE_LTO: &str = "false";
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageBackend {
@@ -127,7 +129,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
+    let build_started_at = Instant::now();
     util::run(build_cmd)?;
+    println!(
+        "[INFO] Runtime image build completed in {:.1}s",
+        build_started_at.elapsed().as_secs_f64()
+    );
     promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
     println!("[INFO] Pushing runtime image `{image_ref}`...");
@@ -249,6 +256,8 @@ fn build_image_flags(image_backend: ImageBackend, source_revision: &str) -> Vec<
         flags.extend([
             "--build-arg".to_string(),
             format!("BIN_FEATURES={HOST_BIN_FEATURES}"),
+            "--build-arg".to_string(),
+            format!("CARGO_PROFILE_RELEASE_LTO={HOST_RELEASE_LTO}"),
         ]);
     }
     flags
@@ -407,7 +416,19 @@ mod tests {
                 "VCS_REF=26eff23".to_string(),
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features host".to_string(),
+                "--build-arg".to_string(),
+                "CARGO_PROFILE_RELEASE_LTO=false".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn non_host_image_flags_keep_default_release_profile() {
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
         );
     }
 

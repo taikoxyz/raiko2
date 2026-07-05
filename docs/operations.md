@@ -477,6 +477,12 @@ cargo run -r -p xtask -- release-image risc0 \
   --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
+`release-image host` automatically builds the host-only feature set with
+`CARGO_PROFILE_RELEASE_LTO=false`; non-host image builds keep the workspace release LTO default.
+The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
+`release-image` prints the Docker build elapsed time before pushing so release logs can compare
+cold and warm cache runs.
+
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
 process starts and does not rebuild guest sources by itself. The image sets

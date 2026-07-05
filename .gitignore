@@ -10,6 +10,7 @@ test.json
 __pycache__/
 *.pyc
 core.[0-9]*
+*.log
 regression.log
 test/regression/**/*.log
 scripts/regression/*.log

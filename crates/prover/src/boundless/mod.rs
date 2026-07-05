@@ -1288,7 +1288,7 @@ impl BoundlessProver {
                         attempt,
                         reason,
                         rotate_request_id,
-                        "Boundless submission did not finish; retrying with a new market request"
+                        "Boundless submission did not finish; retrying"
                     );
                     reuse_request_id = if rotate_request_id {
                         None

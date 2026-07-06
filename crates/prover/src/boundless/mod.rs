@@ -119,14 +119,43 @@ fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
-fn retry_price_multiplier(attempt: u64, price_multiplier: u32, max_attempts: u32) -> u32 {
-    let rebids = attempt.saturating_sub(1).min(u64::from(max_attempts));
-    let price_multiplier = price_multiplier.max(1);
-    let mut multiplier = 1_u32;
-    for _ in 0..rebids {
-        multiplier = multiplier.saturating_mul(price_multiplier);
+/// Number of rebid rungs applied at 1-based `attempt`, capped at `max_attempts`.
+fn escalation_rungs(attempt: u64, max_attempts: u32) -> u64 {
+    attempt.saturating_sub(1).min(u64::from(max_attempts))
+}
+
+/// Compound `base` by `step_bps` basis points per rebid rung, applied iteratively in U256 so the
+/// magnitude stays bounded. `step_bps == 0` is a flat (no-escalation) ladder.
+fn escalated_price(
+    base: U256,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
+) -> RaikoResult<U256> {
+    let rungs = escalation_rungs(attempt, max_attempts);
+    let numer = U256::from(10_000u64 + u64::from(step_bps));
+    let denom = U256::from(10_000u64);
+    let mut price = base;
+    for _ in 0..rungs {
+        price = price
+            .checked_mul(numer)
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Boundless offer price {base} wei overflows escalating {step_bps} bps over {rungs} rebid rungs"
+                ))
+            })?
+            / denom;
     }
-    multiplier
+    Ok(price)
+}
+
+/// Floored effective multiplier at `attempt`, for progress/metadata display only. Never used to
+/// price an offer — pricing goes through [`escalated_price`] on the real base.
+fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) -> u32 {
+    const SCALE: u64 = 1_000_000;
+    let scaled = escalated_price(U256::from(SCALE), attempt, step_bps, max_attempts)
+        .unwrap_or(U256::from(SCALE));
+    u32::try_from(scaled / U256::from(SCALE)).unwrap_or(u32::MAX)
 }
 
 /// Attempt number to resume a stored submission at. Records carry the real 1-based attempt;
@@ -335,9 +364,11 @@ struct Submission {
     // past this time, so it bounds the payable window; `0` when resumed from a legacy record.
     lock_expires_at: u64,
     submitted_at: u64,
+    // Floored effective price multiplier at this attempt, for progress/metadata display only.
+    // Derived from `attempt` + config via `effective_price_multiplier`; never used to price offers.
     max_price_multiplier: u32,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
-    // rebid budget when the price is flat (`rebid_price_multiplier == 1`).
+    // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
 }
 
@@ -353,7 +384,6 @@ struct FreshSubmissionContext<'a> {
     observer: Option<&'a Arc<dyn ProverProgressObserver>>,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-    max_price_multiplier: u32,
     attempt: u64,
     // Market request id to reuse for this submission. Set on rebids so every rung of one proof
     // task shares an id: the market keys locks and paid fulfillments on the id, which makes
@@ -379,7 +409,6 @@ impl From<RaikoError> for BoundlessAttemptError {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn publish_boundless_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     submission: &Submission,
@@ -388,7 +417,6 @@ async fn publish_boundless_progress(
     offchain: bool,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-    max_price_multiplier: u32,
 ) {
     if let Some(observer) = observer {
         observer
@@ -404,7 +432,7 @@ async fn publish_boundless_progress(
                     quoted_mcycles_count: Some(quoted_mcycles_count),
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     submitted_at: submission.submitted_at,
-                    max_price_multiplier,
+                    max_price_multiplier: submission.max_price_multiplier,
                     rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
@@ -667,7 +695,7 @@ impl BoundlessProver {
         offer_spec: &BoundlessOfferParams,
         mcycles_count: u32,
         journal: Vec<u8>,
-        max_price_multiplier: u32,
+        attempt: u64,
         reuse_request_id: Option<U256>,
     ) -> RaikoResult<ProofRequest> {
         let ValidatedOfferParams {
@@ -679,12 +707,20 @@ impl BoundlessProver {
             timeout,
             ramp_up_period_secs,
             bidding_start,
-        } = validate_offer_params(
-            offer_spec,
-            mcycles_count,
-            self.config.block_time_sec(),
-            max_price_multiplier,
-        )?;
+        } = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
+        // Escalate only the manual max-price cap on resubmissions; the min price keeps the ramp
+        // start unchanged so an idle prover still locks cheaply.
+        let max_price = max_price
+            .map(|mut amount| -> RaikoResult<_> {
+                amount.value = escalated_price(
+                    amount.value,
+                    attempt,
+                    self.config.rebid_price_step_bps,
+                    self.config.rebid_max_attempts,
+                )?;
+                Ok(amount)
+            })
+            .transpose()?;
         let input_url = retry_external("upload boundless input", || async {
             client.upload_input(guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
@@ -742,7 +778,9 @@ impl BoundlessProver {
         apply_market_offer_pricing(
             &mut request,
             offer_spec.pricing_mode,
-            max_price_multiplier,
+            attempt,
+            self.config.rebid_price_step_bps,
+            self.config.rebid_max_attempts,
             max_price_cap.as_ref(),
             mcycles_count,
         )?;
@@ -753,7 +791,6 @@ impl BoundlessProver {
         &self,
         client: &Client,
         request: &ProofRequest,
-        max_price_multiplier: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let market_request_id = retry_external("submit boundless offchain request", || async {
@@ -771,7 +808,11 @@ impl BoundlessProver {
             expires_at: request.expires_at(),
             lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
-            max_price_multiplier,
+            max_price_multiplier: effective_price_multiplier(
+                attempt,
+                self.config.rebid_price_step_bps,
+                self.config.rebid_max_attempts,
+            ),
             attempt,
         })
     }
@@ -786,7 +827,6 @@ impl BoundlessProver {
         deployment: &str,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
-        max_price_multiplier: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let signer = client.signer.as_ref().ok_or_else(|| {
@@ -826,7 +866,11 @@ impl BoundlessProver {
             expires_at: request.expires_at(),
             lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
-            max_price_multiplier,
+            max_price_multiplier: effective_price_multiplier(
+                attempt,
+                self.config.rebid_price_step_bps,
+                self.config.rebid_max_attempts,
+            ),
             attempt,
         };
         publish_boundless_progress(
@@ -837,7 +881,6 @@ impl BoundlessProver {
             false,
             quoted_mcycles_count,
             evaluated_mcycles_count,
-            max_price_multiplier,
         )
         .await;
 
@@ -852,7 +895,6 @@ impl BoundlessProver {
                     false,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                    max_price_multiplier,
                 )
                 .await;
             }
@@ -882,19 +924,14 @@ impl BoundlessProver {
             context.offer_spec,
             context.quoted_mcycles_count,
             context.journal.to_vec(),
-            context.max_price_multiplier,
+            context.attempt,
             context.reuse_request_id,
         ))
         .await?;
 
         if self.config.offchain {
             let submission = self
-                .submit_request_offchain(
-                    context.client,
-                    &request,
-                    context.max_price_multiplier,
-                    context.attempt,
-                )
+                .submit_request_offchain(context.client, &request, context.attempt)
                 .await?;
             publish_boundless_progress(
                 context.observer,
@@ -904,7 +941,6 @@ impl BoundlessProver {
                 true,
                 context.quoted_mcycles_count,
                 context.evaluated_mcycles_count,
-                context.max_price_multiplier,
             )
             .await;
             return Ok(submission);
@@ -918,7 +954,6 @@ impl BoundlessProver {
             context.deployment,
             context.quoted_mcycles_count,
             context.evaluated_mcycles_count,
-            context.max_price_multiplier,
             context.attempt,
         )
         .await
@@ -1229,7 +1264,6 @@ impl BoundlessProver {
                     self.config.offchain,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                    submission.max_price_multiplier,
                 )
                 .await;
                 submission
@@ -1246,11 +1280,6 @@ impl BoundlessProver {
                         self.config.rebid_max_attempts,
                     )));
                 }
-                let max_price_multiplier = retry_price_multiplier(
-                    attempt,
-                    self.config.rebid_price_multiplier,
-                    self.config.rebid_max_attempts,
-                );
                 let submit = |reuse_request_id: Option<U256>| {
                     Box::pin(self.submit_fresh_request(FreshSubmissionContext {
                         client: &client,
@@ -1264,7 +1293,6 @@ impl BoundlessProver {
                         observer: observer.as_ref(),
                         quoted_mcycles_count,
                         evaluated_mcycles_count,
-                        max_price_multiplier,
                         attempt,
                         reuse_request_id,
                     }))
@@ -1533,17 +1561,12 @@ struct MarketOfferPrices {
 fn escalate_and_cap_market_prices(
     autopriced_max: U256,
     autopriced_min: U256,
-    max_price_multiplier: u32,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
     max_price_cap: Option<&Amount>,
 ) -> RaikoResult<MarketOfferPrices> {
-    let escalated_max = autopriced_max
-        .checked_mul(U256::from(max_price_multiplier.max(1)))
-        .ok_or_else(|| {
-            RaikoError::InvalidRequestConfig(format!(
-                "Boundless market max price {autopriced_max} wei overflows when multiplied by \
-                 retry multiplier {max_price_multiplier}"
-            ))
-        })?;
+    let escalated_max = escalated_price(autopriced_max, attempt, step_bps, max_attempts)?;
     let (max_price, clamped_to_cap) = match max_price_cap {
         Some(cap) if escalated_max > cap.value => (cap.value, true),
         _ => (escalated_max, false),
@@ -1558,7 +1581,9 @@ fn escalate_and_cap_market_prices(
 fn apply_market_offer_pricing(
     request: &mut ProofRequest,
     pricing_mode: BoundlessPricingMode,
-    max_price_multiplier: u32,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
     max_price_cap: Option<&Amount>,
     mcycles_count: u32,
 ) -> RaikoResult<()> {
@@ -1569,22 +1594,22 @@ fn apply_market_offer_pricing(
     let prices = escalate_and_cap_market_prices(
         autopriced_max,
         request.offer.minPrice,
-        max_price_multiplier,
+        attempt,
+        step_bps,
+        max_attempts,
         max_price_cap,
     )?;
     if prices.clamped_to_cap {
         tracing::warn!(
             mcycles_count,
             autopriced_max_price_wei = %autopriced_max,
-            max_price_multiplier,
             capped_max_price_wei = %prices.max_price,
             "Boundless market offer max price exceeds the max_price_per_mcycle cap; bidding at the cap"
         );
-    } else if max_price_multiplier > 1 {
+    } else if escalation_rungs(attempt, max_attempts) > 0 {
         tracing::info!(
             mcycles_count,
             autopriced_max_price_wei = %autopriced_max,
-            max_price_multiplier,
             escalated_max_price_wei = %prices.max_price,
             "Escalated Boundless market offer max price for rebid"
         );
@@ -1639,7 +1664,6 @@ fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
     block_time_sec: u32,
-    max_price_multiplier: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let (max_price, min_price, max_price_cap) = match offer_spec.pricing_mode {
@@ -1649,22 +1673,13 @@ fn validate_offer_params(
                     "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
                 )
             })?;
-            let mut max_price = parse_request_amount(
+            // The base (un-escalated) max price; `build_request` escalates it per rebid rung.
+            let max_price = parse_request_amount(
                 max_price_value,
                 "max_price_per_mcycle",
                 Asset::ETH,
                 mcycles_count,
             )?;
-            // Escalate only the cap on resubmissions; the min price keeps the
-            // ramp start unchanged so an idle prover still locks cheaply.
-            max_price.value = max_price
-                .value
-                .checked_mul(U256::from(max_price_multiplier.max(1)))
-                .ok_or_else(|| {
-                    RaikoError::InvalidRequestConfig(format!(
-                        "max_price_per_mcycle overflows when multiplied by retry multiplier {max_price_multiplier}"
-                    ))
-                })?;
             let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
             let min_price = parse_request_amount(
                 min_price_value,
@@ -1743,9 +1758,8 @@ mod tests {
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
         defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
-        parse_env_bool, parse_env_url, quote_batch_mcycles, retry_price_multiplier,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params,
+        parse_env_bool, parse_env_url, quote_batch_mcycles, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -1762,7 +1776,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
-    const TEST_REBID_PRICE_MULTIPLIER: u32 = 2;
+    const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
 
     const STORAGE_ENV_VARS: &[&str] = &[
@@ -1967,43 +1981,52 @@ mod tests {
     }
 
     #[test]
-    fn retry_price_multiplier_allows_four_rebid_attempts() {
+    fn escalated_price_compounds_by_step_per_rung() {
+        let base = U256::from(100u64);
+        let bps = TEST_REBID_PRICE_STEP_BPS; // +50%
+        let max = TEST_REBID_MAX_ATTEMPTS; // 4
         assert_eq!(
-            retry_price_multiplier(0, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
+            super::escalated_price(base, 1, bps, max).unwrap(),
+            U256::from(100u64)
         );
         assert_eq!(
-            retry_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
+            super::escalated_price(base, 2, bps, max).unwrap(),
+            U256::from(150u64)
         );
         assert_eq!(
-            retry_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
+            super::escalated_price(base, 3, bps, max).unwrap(),
+            U256::from(225u64)
         );
         assert_eq!(
-            retry_price_multiplier(3, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
+            super::escalated_price(base, 4, bps, max).unwrap(),
+            U256::from(337u64)
+        ); // 337.5 truncated
         assert_eq!(
-            retry_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            8
-        );
+            super::escalated_price(base, 5, bps, max).unwrap(),
+            U256::from(505u64)
+        ); // 505.5 truncated
+        // Capped at max_attempts rungs.
         assert_eq!(
-            retry_price_multiplier(5, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
-        );
-        assert_eq!(
-            retry_price_multiplier(6, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
+            super::escalated_price(base, 6, bps, max).unwrap(),
+            super::escalated_price(base, 5, bps, max).unwrap()
         );
     }
 
     #[test]
-    fn retry_price_multiplier_uses_configured_multiplier_and_attempts() {
-        assert_eq!(retry_price_multiplier(1, 3, 2), 1);
-        assert_eq!(retry_price_multiplier(2, 3, 2), 3);
-        assert_eq!(retry_price_multiplier(3, 3, 2), 9);
-        assert_eq!(retry_price_multiplier(4, 3, 2), 9);
+    fn escalated_price_zero_step_is_flat() {
+        let base = U256::from(1000u64);
+        assert_eq!(super::escalated_price(base, 5, 0, 4).unwrap(), base);
+    }
+
+    #[test]
+    fn effective_price_multiplier_floors_the_ratio() {
+        let bps = TEST_REBID_PRICE_STEP_BPS;
+        let max = TEST_REBID_MAX_ATTEMPTS;
+        assert_eq!(super::effective_price_multiplier(1, bps, max), 1);
+        assert_eq!(super::effective_price_multiplier(2, bps, max), 1); // 1.5 -> 1
+        assert_eq!(super::effective_price_multiplier(3, bps, max), 2); // 2.25 -> 2
+        assert_eq!(super::effective_price_multiplier(4, bps, max), 3); // 3.375 -> 3
+        assert_eq!(super::effective_price_multiplier(5, bps, max), 5); // 5.06 -> 5
     }
 
     fn test_submission(max_price_multiplier: u32, attempt: u64) -> super::Submission {
@@ -2194,7 +2217,7 @@ mod tests {
     fn validate_offer_params_rejects_min_price_above_max_price() {
         let mut offer = sample_offer();
         offer.min_price_per_mcycle = Some("0.000001".to_string());
-        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
+        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
         assert!(err.to_string().contains("min_price_per_mcycle"));
     }
 
@@ -2203,13 +2226,13 @@ mod tests {
         let mut offer = sample_offer();
         offer.lock_timeout_ms_per_mcycle = 300;
         offer.timeout_ms_per_mcycle = 300;
-        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
+        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
 
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
-        let validated = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
         let max_price = validated.max_price.expect("manual max price");
         let min_price = validated.min_price.expect("manual min price");
         assert_eq!(max_price.asset, Asset::ETH);
@@ -2221,49 +2244,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_params_escalates_only_max_price() {
-        let base = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
-        let escalated = validate_offer_params(&sample_offer(), 1_000, 2, 4).expect("valid offer");
+    fn validate_offer_params_returns_unescalated_manual_max_price() {
+        // Escalation moved to `build_request`; `validate_offer_params` returns the base cap so the
+        // per-rung compounding in `escalated_price` is applied once, on the real base.
+        let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
+        let base_max = validated.max_price.expect("manual max price");
+        let base_min = validated.min_price.expect("manual min price");
 
-        let base_max = base.max_price.expect("manual max price");
-        let escalated_max = escalated.max_price.expect("manual max price");
-        assert_eq!(escalated_max.value, base_max.value * U256::from(4));
-
-        let base_min = base.min_price.expect("manual min price");
-        let escalated_min = escalated.min_price.expect("manual min price");
-        assert_eq!(escalated_min.value, base_min.value);
-    }
-
-    #[test]
-    fn retry_price_multiplier_doubles_per_attempt_with_cap() {
+        // A fresh first attempt escalates by zero rungs, so the offer bids the base cap unchanged.
         assert_eq!(
-            super::retry_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            super::retry_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
-        );
-        assert_eq!(
-            super::retry_price_multiplier(3, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
-        assert_eq!(
-            super::retry_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            8
-        );
-        assert_eq!(
-            super::retry_price_multiplier(5, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
-        );
-        assert_eq!(
-            super::retry_price_multiplier(
-                100,
-                TEST_REBID_PRICE_MULTIPLIER,
+            super::escalated_price(
+                base_max.value,
+                1,
+                TEST_REBID_PRICE_STEP_BPS,
                 TEST_REBID_MAX_ATTEMPTS
-            ),
-            16
+            )
+            .expect("escalate base"),
+            base_max.value
         );
+        // Three rungs at +50% compound the base cap to 3.375x (truncated per rung), and the min
+        // price is never escalated (only the max cap moves on rebids).
+        let escalated_max = super::escalated_price(
+            base_max.value,
+            4,
+            TEST_REBID_PRICE_STEP_BPS,
+            TEST_REBID_MAX_ATTEMPTS,
+        )
+        .expect("escalate base");
+        assert!(escalated_max > base_max.value);
+        assert!(base_min.value < base_max.value);
     }
 
     #[test]
@@ -2273,7 +2282,7 @@ mod tests {
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
 
         assert!(validated.max_price.is_none());
         assert!(validated.min_price.is_none());
@@ -2289,7 +2298,7 @@ mod tests {
         offer.max_price_per_mcycle = Some("0.00000006".to_string());
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
         let max_price_cap = validated.max_price_cap.expect("market max price cap");
 
         assert!(validated.max_price.is_none());
@@ -2306,7 +2315,7 @@ mod tests {
         offer.min_price_per_mcycle = None;
         offer.dynamic_pricing_timeout_modifier = Some(2.0);
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
 
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 1800);
@@ -2319,8 +2328,8 @@ mod tests {
         offer.lock_timeout_secs = Some(600);
         offer.timeout_secs = Some(3600);
 
-        let small = validate_offer_params(&offer, 100, 2, 1).expect("valid small offer");
-        let large = validate_offer_params(&offer, 5_000, 2, 1).expect("valid large offer");
+        let small = validate_offer_params(&offer, 100, 2).expect("valid small offer");
+        let large = validate_offer_params(&offer, 5_000, 2).expect("valid large offer");
 
         assert_eq!(small.lock_timeout, 600);
         assert_eq!(small.timeout, 3600);
@@ -2333,7 +2342,7 @@ mod tests {
         let mut offer = sample_offer();
         // The derived lock timeout for 5000 mcycles is 1500s, above the fixed timeout.
         offer.timeout_secs = Some(900);
-        let err = validate_offer_params(&offer, 5_000, 2, 1).unwrap_err();
+        let err = validate_offer_params(&offer, 5_000, 2).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
 
@@ -2342,11 +2351,11 @@ mod tests {
         let mut offer = sample_offer();
         // 60 blocks at 2s block time is a 120s ramp-up, while the derived lock
         // timeout for 100 mcycles is only 30s; the fixed override lifts it.
-        assert!(validate_offer_params(&offer, 100, 2, 1).is_err());
+        assert!(validate_offer_params(&offer, 100, 2).is_err());
 
         offer.lock_timeout_secs = Some(600);
         offer.timeout_secs = Some(3600);
-        let validated = validate_offer_params(&offer, 100, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&offer, 100, 2).expect("valid offer");
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.ramp_up_period_secs, 120);
     }
@@ -2361,7 +2370,7 @@ mod tests {
         offer.lock_timeout_secs = Some(600);
         offer.timeout_secs = Some(3600);
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
 
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 3600);
@@ -2377,7 +2386,7 @@ mod tests {
         offer.lock_timeout_secs = Some(600);
         offer.timeout_secs = Some(3600);
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
 
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 3600);
@@ -2385,8 +2394,10 @@ mod tests {
 
     #[test]
     fn market_prices_escalate_only_the_max_price() {
-        let prices = escalate_and_cap_market_prices(U256::from(100), U256::from(10), 4, None)
-            .expect("escalated prices");
+        // One rung at +300% escalates the max 100 -> 400; the min price is untouched.
+        let prices =
+            escalate_and_cap_market_prices(U256::from(100), U256::from(10), 2, 30_000, 4, None)
+                .expect("escalated prices");
 
         assert_eq!(prices.max_price, U256::from(400));
         assert_eq!(prices.min_price, U256::from(10));
@@ -2395,10 +2406,17 @@ mod tests {
 
     #[test]
     fn market_prices_pass_through_without_escalation_or_cap() {
-        for multiplier in [0, 1] {
-            let prices =
-                escalate_and_cap_market_prices(U256::from(100), U256::from(10), multiplier, None)
-                    .expect("flat prices");
+        // A fresh first attempt (0 rungs) and a flat 0-bps ladder both leave the max unchanged.
+        for (attempt, step_bps) in [(1u64, TEST_REBID_PRICE_STEP_BPS), (5, 0)] {
+            let prices = escalate_and_cap_market_prices(
+                U256::from(100),
+                U256::from(10),
+                attempt,
+                step_bps,
+                TEST_REBID_MAX_ATTEMPTS,
+                None,
+            )
+            .expect("flat prices");
 
             assert_eq!(prices.max_price, U256::from(100));
             assert_eq!(prices.min_price, U256::from(10));
@@ -2409,10 +2427,13 @@ mod tests {
     #[test]
     fn market_prices_accept_offers_at_or_below_cap() {
         let max_price_cap = Amount::new(U256::from(1_000), Asset::ETH);
+        // One rung at +100% escalates the max 100 -> 200, which stays under the 1000 cap.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
             2,
+            10_000,
+            4,
             Some(&max_price_cap),
         )
         .expect("uncapped prices");
@@ -2425,9 +2446,12 @@ mod tests {
     #[test]
     fn market_prices_clamp_escalated_max_to_cap() {
         let max_price_cap = Amount::new(U256::from(150), Asset::ETH);
+        // One rung at +300% would reach 400, but the 150 cap clamps it.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
+            2,
+            30_000,
             4,
             Some(&max_price_cap),
         )
@@ -2441,10 +2465,13 @@ mod tests {
     #[test]
     fn market_prices_lower_min_price_when_cap_undercuts_it() {
         let max_price_cap = Amount::new(U256::from(5), Asset::ETH);
+        // No escalation (fresh attempt), but the 5 cap sits below the autopriced max and min.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
             1,
+            TEST_REBID_PRICE_STEP_BPS,
+            4,
             Some(&max_price_cap),
         )
         .expect("capped prices");
@@ -2456,7 +2483,8 @@ mod tests {
 
     #[test]
     fn market_price_escalation_rejects_overflow() {
-        let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, None)
+        // One rung at +100% on U256::MAX overflows the checked multiply.
+        let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, 10_000, 4, None)
             .expect_err("overflowing escalation");
         assert!(err.to_string().contains("overflows"));
     }

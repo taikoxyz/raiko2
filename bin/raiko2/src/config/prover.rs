@@ -3,7 +3,7 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_MULTIPLIER,
+        BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS,
         DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, MIN_REBID_TIMEOUT_MS, OfferParamsConfig,
         REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
@@ -273,8 +273,8 @@ pub struct BoundlessConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_boundless_rebid_timeout_ms")]
     pub rebid_timeout_ms: u64,
-    #[serde(default = "default_boundless_rebid_price_multiplier")]
-    pub rebid_price_multiplier: u32,
+    #[serde(default = "default_boundless_rebid_price_step_bps")]
+    pub rebid_price_step_bps: u32,
     #[serde(default = "default_boundless_rebid_max_attempts")]
     pub rebid_max_attempts: u32,
 }
@@ -298,7 +298,7 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
             rebid_timeout_ms: default_boundless_rebid_timeout_ms(),
-            rebid_price_multiplier: default_boundless_rebid_price_multiplier(),
+            rebid_price_step_bps: default_boundless_rebid_price_step_bps(),
             rebid_max_attempts: default_boundless_rebid_max_attempts(),
         }
     }
@@ -315,9 +315,6 @@ impl BoundlessConfig {
         }
         if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
             bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if self.rebid_price_multiplier == 0 {
-            bail!("prover.boundless.rebid_price_multiplier must be > 0");
         }
         if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
             bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
@@ -352,8 +349,8 @@ impl BoundlessConfig {
         if let Some(rebid_timeout_ms) = pair.rebid_timeout_ms {
             merged.rebid_timeout_ms = rebid_timeout_ms;
         }
-        if let Some(rebid_price_multiplier) = pair.rebid_price_multiplier {
-            merged.rebid_price_multiplier = rebid_price_multiplier;
+        if let Some(rebid_price_step_bps) = pair.rebid_price_step_bps {
+            merged.rebid_price_step_bps = rebid_price_step_bps;
         }
         if let Some(rebid_max_attempts) = pair.rebid_max_attempts {
             merged.rebid_max_attempts = rebid_max_attempts;
@@ -385,8 +382,8 @@ const fn default_boundless_rebid_timeout_ms() -> u64 {
     DEFAULT_REBID_TIMEOUT_MS
 }
 
-const fn default_boundless_rebid_price_multiplier() -> u32 {
-    DEFAULT_REBID_PRICE_MULTIPLIER
+const fn default_boundless_rebid_price_step_bps() -> u32 {
+    DEFAULT_REBID_PRICE_STEP_BPS
 }
 
 const fn default_boundless_rebid_max_attempts() -> u32 {
@@ -474,17 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn prover_config_rejects_zero_boundless_rebid_price_multiplier() {
+    fn prover_config_accepts_zero_boundless_rebid_price_step_bps() {
         let mut config = ProverConfig::default();
-        config.boundless.rebid_price_multiplier = 0;
+        config.boundless.rebid_price_step_bps = 0;
 
-        assert!(
-            config
-                .validate()
-                .expect_err("zero rebid price multiplier should fail")
-                .to_string()
-                .contains("rebid_price_multiplier")
-        );
+        // 0 bps is a valid flat (no-escalation) ladder.
+        config
+            .validate()
+            .expect("zero rebid price step bps should be accepted");
     }
 
     #[test]

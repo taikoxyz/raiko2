@@ -39,7 +39,7 @@ pairs = [
   # This only affects the `risc0/network` route. SP1 ignores it.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
 # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote_strategy = "evaluated" } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", rebid_timeout_ms = 600000, rebid_price_multiplier = 3, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", dynamic_pricing_timeout_modifier = 2.0, max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_blocks = 60, lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, lock_collateral = "20" } } } },
 ]
 
 [rpc.client]
@@ -111,12 +111,13 @@ poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
 rebid_timeout_ms = 300000
-# Each rebid multiplies the offer max price by this value (the configured max price in
-# manual mode, the SDK autopriced max price in market mode).
-rebid_price_multiplier = 2
+# Each rebid escalates the offer max price by this many basis points, compounding per attempt
+# (5000 = +50%/attempt: 1x, 1.5x, 2.25x, 3.375x, 5.06x ...). 0 = flat rebids. The base is the
+# configured max price in manual mode, the SDK autopriced max price in market mode.
+rebid_price_step_bps = 5000
 # Maximum number of rebids across all retry paths (no-lock, expired, and timed-out
 # requests share one budget); the proof task fails once it is exhausted. The default
-# allows a final 16x max price.
+# allows ~5x max price at the default step.
 rebid_max_attempts = 4
 
 # Optional request sampling policy for proof_type=zk_any.

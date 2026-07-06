@@ -13,7 +13,7 @@ pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
 /// Minimum accepted rebid timeout. Config validation rejects anything lower, and the runtime clamps
 /// the effective no-lock delay to this floor, so this is the single source of truth for both.
 pub const MIN_REBID_TIMEOUT_MS: u64 = 1_000;
-pub const DEFAULT_REBID_PRICE_MULTIPLIER: u32 = 2;
+pub const DEFAULT_REBID_PRICE_STEP_BPS: u32 = 5000;
 pub const DEFAULT_REBID_MAX_ATTEMPTS: u32 = 4;
 pub const REBID_MAX_ATTEMPTS_LIMIT: u32 = 31;
 
@@ -116,8 +116,8 @@ pub struct BoundlessConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_rebid_timeout_ms")]
     pub rebid_timeout_ms: u64,
-    #[serde(default = "default_rebid_price_multiplier")]
-    pub rebid_price_multiplier: u32,
+    #[serde(default = "default_rebid_price_step_bps")]
+    pub rebid_price_step_bps: u32,
     #[serde(default = "default_rebid_max_attempts")]
     pub rebid_max_attempts: u32,
 }
@@ -146,7 +146,7 @@ impl Default for BoundlessConfig {
             poll_interval_ms: default_poll_interval_ms(),
             timeout_ms: default_timeout_ms(),
             rebid_timeout_ms: default_rebid_timeout_ms(),
-            rebid_price_multiplier: default_rebid_price_multiplier(),
+            rebid_price_step_bps: default_rebid_price_step_bps(),
             rebid_max_attempts: default_rebid_max_attempts(),
         }
     }
@@ -168,8 +168,8 @@ const fn default_rebid_timeout_ms() -> u64 {
     DEFAULT_REBID_TIMEOUT_MS
 }
 
-const fn default_rebid_price_multiplier() -> u32 {
-    DEFAULT_REBID_PRICE_MULTIPLIER
+const fn default_rebid_price_step_bps() -> u32 {
+    DEFAULT_REBID_PRICE_STEP_BPS
 }
 
 const fn default_rebid_max_attempts() -> u32 {
@@ -332,7 +332,7 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
 mod tests {
     use super::{
         BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS,
-        DEFAULT_REBID_PRICE_MULTIPLIER, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
+        DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
         validate_offer_spec,
     };
 
@@ -342,10 +342,7 @@ mod tests {
         assert_eq!(config.get_deployment_type(), DeploymentType::Base);
         assert!(!config.offchain);
         assert_eq!(config.rebid_timeout_ms, DEFAULT_REBID_TIMEOUT_MS);
-        assert_eq!(
-            config.rebid_price_multiplier,
-            DEFAULT_REBID_PRICE_MULTIPLIER
-        );
+        assert_eq!(config.rebid_price_step_bps, DEFAULT_REBID_PRICE_STEP_BPS);
         assert_eq!(config.rebid_max_attempts, DEFAULT_REBID_MAX_ATTEMPTS);
     }
 

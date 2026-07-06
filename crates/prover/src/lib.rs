@@ -91,9 +91,9 @@ pub struct BoundlessSubmissionProgress {
     pub max_price_multiplier: u32,
     /// Rebid attempt number that produced this submission: `1`-based, or `0` when not recorded.
     /// `#[serde(default)]` supplies `0` for legacy records written before this field existed; the
-    /// resume path treats `0` as "unknown" and falls back to inferring the attempt from the price.
-    /// Persisted so a resume after restart restores the attempt count even when rebids reuse the same
-    /// price (`rebid_price_multiplier == 1`), which cannot be recovered from `max_price_multiplier`
+    /// resume path treats `0` as "unknown" and falls back to `1`. Persisted so a resume after
+    /// restart restores the attempt count even when rebids reuse the same price (a flat
+    /// `rebid_price_step_bps == 0` ladder), which cannot be recovered from `max_price_multiplier`
     /// alone.
     #[serde(default)]
     pub rebid_attempt: u32,

@@ -117,7 +117,7 @@ pub struct BoundlessPairConfig {
     pub poll_interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
     pub rebid_timeout_ms: Option<u64>,
-    pub rebid_price_multiplier: Option<u32>,
+    pub rebid_price_step_bps: Option<u32>,
     pub rebid_max_attempts: Option<u32>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
@@ -139,9 +139,6 @@ impl BoundlessPairConfig {
         }
         if matches!(self.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
             bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
-        }
-        if matches!(self.rebid_price_multiplier, Some(0)) {
-            bail!("{pair_key}: boundless.rebid_price_multiplier must be > 0");
         }
         if let Some(rebid_max_attempts) = self.rebid_max_attempts
             && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
@@ -479,19 +476,16 @@ mod tests {
     }
 
     #[test]
-    fn boundless_pair_config_rejects_zero_rebid_price_multiplier() {
+    fn boundless_pair_config_accepts_zero_rebid_price_step_bps() {
         let config = BoundlessPairConfig {
-            rebid_price_multiplier: Some(0),
+            rebid_price_step_bps: Some(0),
             ..Default::default()
         };
 
-        assert!(
-            config
-                .validate("taiko_hoodi/hoodi")
-                .expect_err("zero rebid price multiplier should fail")
-                .to_string()
-                .contains("rebid_price_multiplier")
-        );
+        // 0 bps is a valid flat (no-escalation) ladder.
+        config
+            .validate("taiko_hoodi/hoodi")
+            .expect("zero rebid price step bps should be accepted");
     }
 
     #[test]

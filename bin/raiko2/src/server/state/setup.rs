@@ -166,7 +166,7 @@ pub(crate) fn boundless_prover_config(
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
         rebid_timeout_ms: boundless.rebid_timeout_ms,
-        rebid_price_multiplier: boundless.rebid_price_multiplier,
+        rebid_price_step_bps: boundless.rebid_price_step_bps,
         rebid_max_attempts: boundless.rebid_max_attempts,
     }
 }
@@ -326,7 +326,7 @@ mod tests {
     fn boundless_prover_applies_pair_specific_overrides() {
         let mut config = Config::default();
         config.prover.boundless.rebid_timeout_ms = 900_000;
-        config.prover.boundless.rebid_price_multiplier = 3;
+        config.prover.boundless.rebid_price_step_bps = 3000;
         config.prover.boundless.rebid_max_attempts = 5;
         config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
         config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
@@ -335,7 +335,7 @@ mod tests {
         config.rpc.pairs[0].boundless.poll_interval_ms = Some(15_000);
         config.rpc.pairs[0].boundless.timeout_ms = Some(4_200_000);
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
-        config.rpc.pairs[0].boundless.rebid_price_multiplier = Some(4);
+        config.rpc.pairs[0].boundless.rebid_price_step_bps = Some(4000);
         config.rpc.pairs[0].boundless.rebid_max_attempts = Some(2);
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless::BoundlessOfferParams {
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(boundless.poll_interval_ms, 15_000);
         assert_eq!(boundless.timeout_ms, 4_200_000);
         assert_eq!(boundless.rebid_timeout_ms, 450_000);
-        assert_eq!(boundless.rebid_price_multiplier, 4);
+        assert_eq!(boundless.rebid_price_step_bps, 4000);
         assert_eq!(boundless.rebid_max_attempts, 2);
     }
 

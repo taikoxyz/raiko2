@@ -163,14 +163,20 @@ fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) ->
 /// Records written before `rebid_attempt` was persisted deserialize with `attempt == 0`. The first
 /// release carrying that field is also the first to resume such records, so on that one upgrade
 /// every in-flight submission would otherwise reset to attempt 1 — re-granting the full rebid budget
-/// and rebidding below prices the market already declined. Those legacy records were all produced by
-/// the old ×2-per-rung ladder, which set `max_price_multiplier = 2^(attempt - 1)`, so the attempt is
-/// recovered exactly as `1 + log2(max_price_multiplier)`. Post-upgrade records always carry a real
+/// and rebidding below prices the market already declined. The reconstruction inverts the old
+/// `max_price_multiplier = base_multiplier^(attempt - 1)` ladder as `1 + log2(max_price_multiplier)`,
+/// which is exact only for the ×2 default ladder (`rebid_price_multiplier = 2`) — the multiplier
+/// every known deployment ran, as the live k8s fleet never set a custom value. A legacy record from a
+/// non-default ladder (multiplier 3, 4, …) resolves to a conservative upper bound on the attempt:
+/// `log2` under-counts the rungs, so the resumed attempt is no larger than the real one, leaving
+/// fewer remaining rebids at higher prices — never more. Post-upgrade records always carry a real
 /// `attempt`, so this branch is dead after one deploy.
 fn resume_attempt(submission: &Submission) -> u64 {
     if submission.attempt > 0 {
         return submission.attempt;
     }
+    // TODO: delete this legacy branch, its tests, and this comment after one release carrying
+    // rebid_attempt has shipped — records with attempt == 0 cannot exist beyond that deploy.
     1 + u64::from(submission.max_price_multiplier.max(1).ilog2())
 }
 

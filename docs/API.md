@@ -1017,8 +1017,10 @@ All API errors use the Hoodi-style envelope:
   while the rest of the provider keeps using `l2_rpc`.
 - `prover.boundless.batch_quote` and `prover.boundless.aggregation_quote` select how proposal and
   aggregation quote cycles are sized for `risc0/network`. Each is a table with
-  `strategy = "raiko_agent"` (default; let the SDK price provider size the quote), `"evaluated"`
-  (use the local dry-run mcycle count), or `"fixed"` with a positive `mcycles` value.
+  `strategy = "raiko_agent"` (default; rounds the evaluated dry-run mcycle count up locally — batch
+  to the next `1000` mcycles with a `2000` mcycle floor, aggregation to the next `100` mcycles with a
+  `200` mcycle floor), `"evaluated"` (use the local dry-run mcycle count as-is), or `"fixed"` with a
+  positive `mcycles` value.
   `rpc.pairs[*].boundless` can override either table for one `(network, l1_network)` pair.
 - `prover.boundless.rebid_timeout_ms` defaults to `300000` and controls how long an unlocked
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.

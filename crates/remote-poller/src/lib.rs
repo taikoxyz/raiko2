@@ -16,9 +16,11 @@ use raiko2_primitives::ProofType;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
+
+const MIN_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct RemoteStatusTracker {
@@ -60,12 +62,16 @@ impl RemoteStatusTracker {
 #[derive(Debug, Clone, Copy)]
 pub struct RemotePollerConfig {
     pub poll_interval: Duration,
+    pub poll_timeout: Duration,
 }
 
 impl RemotePollerConfig {
     #[must_use]
-    pub const fn new(poll_interval: Duration) -> Self {
-        Self { poll_interval }
+    pub fn new(poll_interval: Duration) -> Self {
+        Self {
+            poll_interval,
+            poll_timeout: poll_interval.saturating_mul(2).max(MIN_POLL_TIMEOUT),
+        }
     }
 }
 
@@ -344,17 +350,25 @@ impl TrackerActor {
                 .iter()
                 .map(|submission| submission.id)
                 .collect::<BTreeSet<_>>();
+            let poll_timeout = self.config.poll_timeout;
             self.in_flight_proof_types.insert(proof_type);
-            let poll_task = tokio::spawn(async move { source.poll(proof_type, submissions).await });
+            let mut poll_task =
+                tokio::spawn(async move { source.poll(proof_type, submissions).await });
             self.in_flight.push(Box::pin(async move {
-                let result = match poll_task.await {
-                    Ok(result) => result,
-                    Err(err) if err.is_panic() => Err(RemotePollError::SourceUnavailable(format!(
-                        "remote status poll panicked: {err}"
-                    ))),
-                    Err(err) => Err(RemotePollError::SourceUnavailable(format!(
+                let result = match timeout(poll_timeout, &mut poll_task).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(err)) if err.is_panic() => Err(RemotePollError::SourceUnavailable(
+                        format!("remote status poll panicked: {err}"),
+                    )),
+                    Ok(Err(err)) => Err(RemotePollError::SourceUnavailable(format!(
                         "remote status poll task failed: {err}"
                     ))),
+                    Err(_) => {
+                        poll_task.abort();
+                        Err(RemotePollError::SourceUnavailable(format!(
+                            "remote status poll exceeded timeout {poll_timeout:?}"
+                        )))
+                    }
                 };
                 PollCompletion {
                     proof_type,
@@ -468,6 +482,10 @@ impl TrackerActor {
                 selected = selected_ids.len(),
                 returned = statuses.len(),
                 "remote status source violated selected submission result contract"
+            );
+            self.fail_submissions_unrecoverable(
+                selected_ids.iter().copied(),
+                "remote status source returned a mismatched status set",
             );
             return;
         }
@@ -627,6 +645,7 @@ mod tests {
         calls: AtomicUsize,
         statuses: Mutex<Vec<Vec<RemoteSubmissionStatus>>>,
         delay: Option<Duration>,
+        delay_once: Mutex<Option<Duration>>,
         error_once: Mutex<Option<RemotePollError>>,
         panic_once: AtomicBool,
     }
@@ -642,6 +661,14 @@ mod tests {
         fn with_delay(delay: Duration) -> Self {
             Self {
                 delay: Some(delay),
+                ..Self::default()
+            }
+        }
+
+        fn with_delay_once(delay: Duration, statuses: Vec<Vec<RemoteSubmissionStatus>>) -> Self {
+            Self {
+                delay_once: Mutex::new(Some(delay)),
+                statuses: Mutex::new(statuses),
                 ..Self::default()
             }
         }
@@ -669,6 +696,9 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.panic_once.swap(false, Ordering::SeqCst) {
                 panic!("remote status source panic");
+            }
+            if let Some(delay) = self.delay_once.lock().await.take() {
+                tokio::time::sleep(delay).await;
             }
             if let Some(delay) = self.delay {
                 tokio::time::sleep(delay).await;
@@ -718,9 +748,16 @@ mod tests {
         source: Arc<FakeSource>,
         poll_interval: Duration,
     ) -> RemoteStatusTracker {
+        tracker_with_config(source, RemotePollerConfig::new(poll_interval))
+    }
+
+    fn tracker_with_config(
+        source: Arc<FakeSource>,
+        config: RemotePollerConfig,
+    ) -> RemoteStatusTracker {
         let mut sources: HashMap<ProofType, Arc<dyn RemoteStatusSource>> = HashMap::new();
         sources.insert(ProofType::Sp1, source);
-        RemoteStatusTracker::spawn(RemotePollerConfig::new(poll_interval), sources)
+        RemoteStatusTracker::spawn(config, sources)
     }
 
     #[tokio::test]
@@ -800,6 +837,83 @@ mod tests {
         tracker
             .register(second, second_tx)
             .expect("register second after panic");
+        let second_terminal = tokio::time::timeout(Duration::from_secs(1), second_rx)
+            .await
+            .expect("second terminal")
+            .expect("second sender");
+
+        assert!(matches!(
+            first_terminal,
+            RemoteTerminalResult::Unrecoverable { .. }
+        ));
+        assert!(matches!(
+            second_terminal,
+            RemoteTerminalResult::Fulfilled { .. }
+        ));
+        assert!(source.calls() >= 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_status_set_fails_selected_submissions() {
+        let first = submission(ProofType::Sp1);
+        let second = submission(ProofType::Sp1);
+        let source = Arc::new(FakeSource::with_statuses(vec![vec![fulfilled_status(
+            first.id,
+        )]]));
+        let tracker = tracker_with_source(Arc::clone(&source), Duration::from_millis(10));
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+
+        tracker.register(first, first_tx).expect("register first");
+        tracker
+            .register(second, second_tx)
+            .expect("register second");
+
+        let first_terminal = tokio::time::timeout(Duration::from_secs(1), first_rx)
+            .await
+            .expect("first terminal")
+            .expect("first sender");
+        let second_terminal = tokio::time::timeout(Duration::from_secs(1), second_rx)
+            .await
+            .expect("second terminal")
+            .expect("second sender");
+
+        assert!(matches!(
+            first_terminal,
+            RemoteTerminalResult::Unrecoverable { .. }
+        ));
+        assert!(matches!(
+            second_terminal,
+            RemoteTerminalResult::Unrecoverable { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_timeout_fails_selected_batch_without_sticking_proof_type() {
+        let first = submission(ProofType::Sp1);
+        let second = submission(ProofType::Sp1);
+        let source = Arc::new(FakeSource::with_delay_once(
+            Duration::from_millis(200),
+            vec![vec![fulfilled_status(second.id)]],
+        ));
+        let tracker = tracker_with_config(
+            Arc::clone(&source),
+            RemotePollerConfig {
+                poll_interval: Duration::from_millis(10),
+                poll_timeout: Duration::from_millis(30),
+            },
+        );
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+
+        tracker.register(first, first_tx).expect("register first");
+        let first_terminal = tokio::time::timeout(Duration::from_secs(1), first_rx)
+            .await
+            .expect("first terminal")
+            .expect("first sender");
+        tracker
+            .register(second, second_tx)
+            .expect("register second after timeout");
         let second_terminal = tokio::time::timeout(Duration::from_secs(1), second_rx)
             .await
             .expect("second terminal")

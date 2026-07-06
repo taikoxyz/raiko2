@@ -593,6 +593,10 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
+    /// One market `Client` (provider + signer + storage uploader) built lazily on first proof and
+    /// reused across every subsequent proof, so we don't rebuild the RPC provider and signer per
+    /// proof. Lazy (rather than in `new()`) because building it is fallible and async.
+    client: tokio::sync::OnceCell<Client>,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
     /// Running total of the max-price claims of every in-flight on-chain submission from this
     /// signer. Serializes the balance-read→submit critical section so concurrent submissions
@@ -607,9 +611,26 @@ impl BoundlessProver {
         Self {
             deployment: config.get_effective_deployment(),
             config,
+            client: tokio::sync::OnceCell::new(),
             programs: Arc::new(RwLock::new(HashMap::new())),
             balance_gate: Arc::new(tokio::sync::Mutex::new(U256::ZERO)),
         }
+    }
+
+    /// Returns the shared market `Client`, building it once on first call and reusing the same
+    /// instance for every later proof. The build is wrapped in `retry_external` so a transient
+    /// storage/RPC hiccup at first use retries instead of failing the proof; on success the
+    /// `Client` is cached and later callers skip the build entirely.
+    async fn client(&self) -> RaikoResult<&Client> {
+        // `Box::pin` the init future: building the client (storage uploader + provider + signer) is
+        // a large future, and `get_or_try_init` would otherwise inline it into this frame.
+        self.client
+            .get_or_try_init(|| {
+                Box::pin(retry_external("create boundless client", || {
+                    self.create_client()
+                }))
+            })
+            .await
     }
 
     async fn create_client(&self) -> RaikoResult<Client> {
@@ -1286,10 +1307,10 @@ impl BoundlessProver {
         proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
-        let client = retry_external("create boundless client", || self.create_client()).await?;
+        let client = self.client().await?;
         // Seed the program cache (and derive the stable image ref) up front; the per-attempt
         // refresh below is a cache hit unless the presigned URL nears expiry.
-        let program = self.ensure_uploaded(&client, elf_type, elf).await?;
+        let program = self.ensure_uploaded(client, elf_type, elf).await?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
@@ -1327,7 +1348,7 @@ impl BoundlessProver {
         loop {
             // Refresh the program URL per attempt (cheap cache hit unless a refresh is due) so late
             // rebids never carry an expired presigned program URL. The image id is unchanged.
-            let program = self.ensure_uploaded(&client, elf_type, elf).await?;
+            let program = self.ensure_uploaded(client, elf_type, elf).await?;
             let submission = if let Some(submission) = resume_submission.take() {
                 attempt = attempt.max(resume_attempt(&submission));
                 // Expired records are deliberately not short-circuited: the poll below gives
@@ -1365,7 +1386,7 @@ impl BoundlessProver {
                 // (rather than via a closure) because it borrows `&mut input_cache`, whose lifetime
                 // a closure returning the borrow cannot name.
                 let first = Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                    client: &client,
+                    client,
                     input: &input,
                     elf,
                     program: &program,
@@ -1397,7 +1418,7 @@ impl BoundlessProver {
                             "Boundless rebid under the reused request id failed; retrying once with a fresh id"
                         );
                         Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                            client: &client,
+                            client,
                             input: &input,
                             elf,
                             program: &program,
@@ -1432,7 +1453,7 @@ impl BoundlessProver {
 
             match self
                 .poll_until_fulfilled(
-                    &client,
+                    client,
                     &submission,
                     elf_type,
                     program.image_id,

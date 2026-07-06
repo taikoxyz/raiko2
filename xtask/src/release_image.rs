@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
@@ -127,7 +128,12 @@ pub(crate) fn run(root: &std::path::Path, args: ReleaseImageArgs) -> Result<()> 
         .arg("-t")
         .arg(&image_ref)
         .arg(root);
+    let build_started_at = Instant::now();
     util::run(build_cmd)?;
+    println!(
+        "[INFO] Runtime image build completed in {:.1}s",
+        build_started_at.elapsed().as_secs_f64()
+    );
     promote_local_cache(&buildx_cache_current, &buildx_cache_next)?;
 
     println!("[INFO] Pushing runtime image `{image_ref}`...");
@@ -408,6 +414,16 @@ mod tests {
                 "--build-arg".to_string(),
                 "BIN_FEATURES=--no-default-features --features host".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn non_host_image_flags_keep_default_release_profile() {
+        let flags = build_image_flags(ImageBackend::Risc0, "26eff23");
+
+        assert_eq!(
+            flags,
+            vec!["--build-arg".to_string(), "VCS_REF=26eff23".to_string()]
         );
     }
 

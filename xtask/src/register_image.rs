@@ -79,6 +79,10 @@ pub(crate) struct RegisterImageArgs {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "register-image profiles intentionally include the fork name for future non-Shasta profiles"
+)]
 enum RegisterImageProfile {
     HoodiShasta,
     DevnetShasta,
@@ -807,9 +811,10 @@ mod tests {
         DEVNET_NETWORK, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK, MAINNET_CHAIN_ID,
         MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall,
         Stage, backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
-        materialize_checked_plan, resolve_profile,
+        materialize_checked_plan, profile_name, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
+    use clap::ValueEnum;
     use raiko2_guests::load_risc0_shasta_guest_elves;
     use std::{collections::BTreeSet, path::PathBuf};
     use xtask_build_guest::Backend;
@@ -826,6 +831,29 @@ mod tests {
         assert_eq!(backend_name(Backend::Risc0), "risc0");
         assert_eq!(backend_name(Backend::Sp1), "sp1");
         assert_eq!(backend_name(Backend::All), "all");
+    }
+
+    #[test]
+    fn profile_names_match_cli_values() {
+        let cli_values = RegisterImageProfile::value_variants()
+            .iter()
+            .map(|profile| {
+                profile
+                    .to_possible_value()
+                    .expect("register-image profile has a CLI value")
+                    .get_name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            cli_values,
+            ["hoodi-shasta", "devnet-shasta", "mainnet-shasta"]
+        );
+        assert_eq!(
+            profile_name(RegisterImageProfile::HoodiShasta),
+            "hoodi-shasta"
+        );
     }
 
     #[test]

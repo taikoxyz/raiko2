@@ -477,6 +477,13 @@ cargo run -r -p xtask -- release-image risc0 \
   --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
+`release-image host` automatically builds the host-only feature set. Runtime image builds use
+Cargo's default release profile unless the caller explicitly overrides Cargo profile environment
+variables.
+The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
+`release-image` prints the Docker build elapsed time before pushing so release logs can compare
+cold and warm cache runs.
+
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
 process starts and does not rebuild guest sources by itself. The image sets
@@ -487,6 +494,14 @@ For unreleased testing, build local ELFs with `just build-guest all` before buil
 released artifacts, download guest ELF/VK assets from GitHub Releases with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
 `release-image` refreshes guest ELFs for the selected non-host backend by default.
+Guest builds and refreshes skip unchanged backends by fingerprint unless `--force` or
+`--force-rebuild-guests` is used. Logs include backend elapsed time, and the repo-managed Docker
+toolchain image path uses persistent Cargo and `sccache` volumes by default. Custom toolchain images
+must opt in with `DOCKER_SCCACHE_CACHE=volume` or `DOCKER_SCCACHE_CACHE_VOLUME=<volume>` so images
+without `sccache` keep working. RISC0 and SP1 rebuild logs print `sccache --show-stats`, so release
+logs expose cache hit/miss counts as well as wall time. Use `DOCKER_CARGO_CACHE=none` or
+`DOCKER_SCCACHE_CACHE=none` only for diagnostics; disabling either cache should not be needed for
+normal releases.
 If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
 provenance still matches the committed repo state.

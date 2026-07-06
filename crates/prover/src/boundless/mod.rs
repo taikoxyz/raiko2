@@ -827,12 +827,16 @@ impl BoundlessProver {
     }
 
     /// Ensure the guest input is uploaded with a live presigned URL, returning the cached URL on a
-    /// hit. Encodes `guest_env` (a multi-MB serialization) only when actually (re)uploading — a
-    /// rebid rung that hits the cache skips both the encode and the upload.
+    /// hit. Building the `GuestEnv` from `input` and encoding it (both multi-MB copies) happen only
+    /// in the cache-miss branch — a rebid rung that hits the cache skips the env construction, the
+    /// encode, and the upload. The env is used solely to produce the uploaded bytes: the request
+    /// itself carries the input by URL (`with_input_url`), and every SDK layer that would otherwise
+    /// consume a `with_env(...)` value is short-circuited because raiko2 sets `request_input`,
+    /// `cycles`, and `journal` explicitly, so no `GuestEnv` is threaded into `build_request`.
     async fn ensure_input_uploaded(
         &self,
         client: &Client,
-        guest_env: &GuestEnv,
+        input: &[u8],
         cache: &mut Option<UploadedInput>,
     ) -> RaikoResult<Url> {
         if let Some(input) = cache.as_ref()
@@ -840,9 +844,13 @@ impl BoundlessProver {
         {
             return Ok(input.url.clone());
         }
-        let guest_env_bytes = guest_env.encode().map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
-        })?;
+        let guest_env_bytes = GuestEnv::builder()
+            .write_frame(input)
+            .build_env()
+            .encode()
+            .map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
+            })?;
         let url = retry_external("upload boundless input", || async {
             client.upload_input(&guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
@@ -855,10 +863,6 @@ impl BoundlessProver {
             refresh_at,
         });
         Ok(url)
-    }
-
-    fn build_guest_env(input: &[u8]) -> GuestEnv {
-        GuestEnv::builder().write_frame(input).build_env()
     }
 
     async fn evaluate_guest(
@@ -890,7 +894,6 @@ impl BoundlessProver {
     async fn build_request(
         &self,
         client: &Client,
-        guest_env: GuestEnv,
         elf: &[u8],
         program: &UploadedProgram,
         offer_spec: &BoundlessOfferParams,
@@ -936,13 +939,18 @@ impl BoundlessProver {
         if let Some(min_price) = min_price {
             offer_params.min_price(min_price);
         }
+        // No `.with_env(...)`: the input is carried by URL (`with_input_url` below), and every SDK
+        // request-builder layer that would consume a `GuestEnv` is short-circuited because
+        // `request_input`, `cycles`, and `journal` are all set — the storage layer skips env upload
+        // when `request_input` is present, and the preflight layer early-returns on set
+        // cycles+journal. `ensure_input_uploaded` already produced the uploaded bytes from the raw
+        // input, so building a second env here would just be a discarded multi-MB copy per rebid.
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())
             .with_program_url(program.url.clone())
             .expect("with_program_url is infallible for valid URLs")
             .with_groth16_proof()
-            .with_env(guest_env)
             .with_cycles(u64::from(mcycles_count) * MILLION_CYCLES)
             .with_image_id(program.image_id)
             .with_journal(Journal::new(journal))
@@ -1132,13 +1140,11 @@ impl BoundlessProver {
         &self,
         context: FreshSubmissionContext<'_>,
     ) -> RaikoResult<Submission> {
-        let guest_env = Self::build_guest_env(context.input.as_ref());
         let input_url = self
-            .ensure_input_uploaded(context.client, &guest_env, context.input_cache)
+            .ensure_input_uploaded(context.client, context.input.as_ref(), context.input_cache)
             .await?;
         let request = Box::pin(self.build_request(
             context.client,
-            guest_env,
             context.elf,
             context.program,
             context.offer_spec,

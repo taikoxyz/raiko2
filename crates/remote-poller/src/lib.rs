@@ -262,7 +262,7 @@ impl TrackerActor {
                         None => commands_open = false,
                     }
                 }
-                _ = poll_interval.tick() => {
+                _ = poll_interval.tick(), if !self.active.is_empty() => {
                     let now = Instant::now();
                     self.prune_closed_and_timed_out(now);
                     self.schedule_polls(now);

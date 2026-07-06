@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::time::timeout;
+use tokio::{task::JoinSet, time::timeout};
 use tracing::info;
 use url::Url;
 
@@ -57,6 +57,7 @@ use crate::{
 
 const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
 const SP1_NETWORK_REQUEST_RETRY_DELAY: Duration = Duration::from_secs(15);
+const SP1_STATUS_POLL_CONCURRENCY: usize = 4;
 const SP1_MAINNET_RPC_URL: &str = "https://rpc.mainnet.succinct.xyz";
 const SP1_RESERVED_RPC_URL: &str = "https://rpc.production.succinct.xyz";
 
@@ -94,15 +95,31 @@ impl RemoteStatusSource for Sp1StatusSource {
         _proof_type: ProofType,
         submissions: Vec<RemoteSubmission>,
     ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+        let submission_count = submissions.len();
         let mut statuses = Vec::with_capacity(submissions.len());
-        for submission in submissions {
-            let submission_id = submission.id;
-            match self.status_for_submission(submission).await {
+        let mut submissions = submissions.into_iter();
+        let mut tasks = JoinSet::new();
+
+        for _ in 0..SP1_STATUS_POLL_CONCURRENCY.min(submission_count) {
+            if let Some(submission) = submissions.next() {
+                self.spawn_status_task(&mut tasks, submission);
+            }
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            let (submission_id, status_result) = result.map_err(|err| {
+                RemotePollError::SourceUnavailable(format!("sp1 status poll task failed: {err}"))
+            })?;
+            match status_result {
                 Ok(status) => statuses.push(status),
                 Err(RemotePollError::Transient(error)) => {
                     statuses.push(sp1_transient_poll_status(submission_id, error));
                 }
                 Err(err) => return Err(err),
+            }
+
+            if let Some(submission) = submissions.next() {
+                self.spawn_status_task(&mut tasks, submission);
             }
         }
         Ok(statuses)
@@ -110,6 +127,24 @@ impl RemoteStatusSource for Sp1StatusSource {
 }
 
 impl Sp1StatusSource {
+    fn spawn_status_task(
+        &self,
+        tasks: &mut JoinSet<(
+            RemoteSubmissionId,
+            Result<RemoteSubmissionStatus, RemotePollError>,
+        )>,
+        submission: RemoteSubmission,
+    ) {
+        let source = self.clone();
+        let submission_id = submission.id;
+        tasks.spawn(async move {
+            (
+                submission_id,
+                source.status_for_submission(submission).await,
+            )
+        });
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn status_for_submission(
         &self,

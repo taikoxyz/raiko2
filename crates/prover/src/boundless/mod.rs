@@ -164,6 +164,14 @@ const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool 
     attempt > 0 && attempt <= max_attempts as u64
 }
 
+/// Total market submissions allowed per proof task: the initial attempt plus `max_attempts`
+/// rebids. The no-lock path already enforces this bound through [`NoLockTimeoutAction::Abort`];
+/// this check extends the same budget to the `Expired` and poll-timeout retry paths, which would
+/// otherwise mint replacement requests without limit.
+const fn exceeds_submission_budget(attempt: u64, max_attempts: u32) -> bool {
+    attempt > max_attempts as u64 + 1
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NoLockTimeoutAction {
     Rebid,
@@ -731,7 +739,7 @@ impl BoundlessProver {
             })?;
             request_params = request_params.with_request_id(request_id);
         }
-        let request = retry_external("build boundless request", || {
+        let mut request = retry_external("build boundless request", || {
             let request_params = request_params.clone();
             async move {
                 Box::pin(client.build_request(request_params))
@@ -744,11 +752,12 @@ impl BoundlessProver {
             }
         })
         .await?;
-        enforce_market_max_price_cap(
-            U256::from(request.offer.maxPrice),
+        apply_market_offer_pricing(
+            &mut request,
+            offer_spec.pricing_mode,
+            max_price_multiplier,
             max_price_cap.as_ref(),
             mcycles_count,
-            offer_spec.pricing_mode,
         )?;
         Ok(request)
     }
@@ -1207,6 +1216,7 @@ impl BoundlessProver {
             None
         };
         let mut attempt = 1_u64;
+        let mut last_retry_reason: Option<String> = None;
         // Market request id shared by rebid rungs of this proof task. The market keys locks and
         // paid fulfillments on the id, so reusing it across rebids makes paying for more than one
         // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
@@ -1226,6 +1236,17 @@ impl BoundlessProver {
                         expires_at = submission.expires_at,
                         "Stored Boundless submission is expired; submitting a new request"
                     );
+                    // The stored submission consumed its budget slot and lived out its full
+                    // market lifetime, so its replacement is the next attempt — same as the
+                    // in-process `Expired` path. Without this, every restart after expiry
+                    // would resubmit under the stored attempt number, escaping the submission
+                    // budget one request per restart and stalling price escalation a rung.
+                    last_retry_reason = Some(format!(
+                        "stored Boundless request {} from a previous run expired at {} before \
+                         fulfillment",
+                        submission.provider_request_id, submission.expires_at
+                    ));
+                    attempt = attempt.saturating_add(1);
                     continue;
                 }
                 publish_boundless_progress(
@@ -1241,6 +1262,18 @@ impl BoundlessProver {
                 .await;
                 submission
             } else {
+                if exceeds_submission_budget(attempt, self.config.rebid_max_attempts) {
+                    let detail = last_retry_reason
+                        .as_deref()
+                        .map(|reason| format!("; last attempt: {reason}"))
+                        .unwrap_or_default();
+                    return Err(RaikoError::Guest(format!(
+                        "Exhausted Boundless submission budget of {} attempts \
+                         (rebid_max_attempts = {}){detail}",
+                        u64::from(self.config.rebid_max_attempts) + 1,
+                        self.config.rebid_max_attempts,
+                    )));
+                }
                 let max_price_multiplier = retry_price_multiplier(
                     attempt,
                     self.config.rebid_price_multiplier,
@@ -1334,6 +1367,7 @@ impl BoundlessProver {
                     } else {
                         Some(submission.market_request_id)
                     };
+                    last_retry_reason = Some(reason);
                     attempt = attempt.saturating_add(1);
                     tokio::time::sleep(EXTERNAL_RETRY_INITIAL_DELAY).await;
                 }
@@ -1514,32 +1548,86 @@ fn parse_request_amount(
     Ok(amount)
 }
 
-fn enforce_market_max_price_cap(
-    autoprice_max_price: U256,
+/// Escalated and capped market-mode offer prices derived from the SDK's autopriced offer.
+#[derive(Debug, PartialEq, Eq)]
+struct MarketOfferPrices {
+    max_price: U256,
+    min_price: U256,
+    clamped_to_cap: bool,
+}
+
+/// Escalate the autopriced max price by the rebid multiplier, then clamp it to the configured
+/// per-mcycle cap.
+///
+/// Manual pricing escalates its configured max price in [`validate_offer_params`]; this is the
+/// market-mode counterpart, applied after the SDK autoprices the offer — without it, market-mode
+/// rebids would just resubmit at whatever the SDK quotes again, repeating an offer the market
+/// already declined to lock. Only the max price escalates; the min price keeps the ramp start
+/// unchanged so an idle prover still locks cheaply, and is lowered only when the clamped max
+/// falls below it so the offer stays well-formed. Clamping (rather than rejecting) keeps an
+/// autoprice spike from turning into a proving outage: the offer bids at the operator's ceiling,
+/// and the no-lock rebid machinery handles a ceiling the market will not clear.
+fn escalate_and_cap_market_prices(
+    autopriced_max: U256,
+    autopriced_min: U256,
+    max_price_multiplier: u32,
+    max_price_cap: Option<&Amount>,
+) -> RaikoResult<MarketOfferPrices> {
+    let escalated_max = autopriced_max
+        .checked_mul(U256::from(max_price_multiplier.max(1)))
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "Boundless market max price {autopriced_max} wei overflows when multiplied by \
+                 retry multiplier {max_price_multiplier}"
+            ))
+        })?;
+    let (max_price, clamped_to_cap) = match max_price_cap {
+        Some(cap) if escalated_max > cap.value => (cap.value, true),
+        _ => (escalated_max, false),
+    };
+    Ok(MarketOfferPrices {
+        max_price,
+        min_price: autopriced_min.min(max_price),
+        clamped_to_cap,
+    })
+}
+
+fn apply_market_offer_pricing(
+    request: &mut ProofRequest,
+    pricing_mode: BoundlessPricingMode,
+    max_price_multiplier: u32,
     max_price_cap: Option<&Amount>,
     mcycles_count: u32,
-    pricing_mode: BoundlessPricingMode,
 ) -> RaikoResult<()> {
     if pricing_mode != BoundlessPricingMode::Market {
         return Ok(());
     }
-    let Some(max_price_cap) = max_price_cap else {
-        return Ok(());
-    };
-
-    if autoprice_max_price > max_price_cap.value {
-        return Err(RaikoError::InvalidRequestConfig(format!(
-            "Boundless market autoprice maxPrice {} wei exceeds configured max_price_per_mcycle cap {} wei for {} mcycles",
-            autoprice_max_price, max_price_cap.value, mcycles_count
-        )));
+    let autopriced_max = request.offer.maxPrice;
+    let prices = escalate_and_cap_market_prices(
+        autopriced_max,
+        request.offer.minPrice,
+        max_price_multiplier,
+        max_price_cap,
+    )?;
+    if prices.clamped_to_cap {
+        tracing::warn!(
+            mcycles_count,
+            autopriced_max_price_wei = %autopriced_max,
+            max_price_multiplier,
+            capped_max_price_wei = %prices.max_price,
+            "Boundless market offer max price exceeds the max_price_per_mcycle cap; bidding at the cap"
+        );
+    } else if max_price_multiplier > 1 {
+        tracing::info!(
+            mcycles_count,
+            autopriced_max_price_wei = %autopriced_max,
+            max_price_multiplier,
+            escalated_max_price_wei = %prices.max_price,
+            "Escalated Boundless market offer max price for rebid"
+        );
     }
-
-    tracing::debug!(
-        mcycles_count,
-        autoprice_max_price_wei = %autoprice_max_price,
-        cap_max_price_wei = %max_price_cap.value,
-        "Boundless market max price cap accepted"
-    );
+    request.offer.maxPrice = prices.max_price;
+    request.offer.minPrice = prices.min_price;
     Ok(())
 }
 
@@ -1691,10 +1779,10 @@ mod tests {
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
         attempt_for_price_multiplier, defer_poll_timeout_while_payable,
-        enforce_market_max_price_cap, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
-        parse_env_bool, parse_env_url, quote_batch_mcycles, retry_price_multiplier,
-        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
-        validate_offer_params,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
+        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2385,41 +2473,93 @@ mod tests {
     }
 
     #[test]
-    fn market_max_price_cap_accepts_autoprice_at_or_below_cap() {
-        let max_price_cap = Amount::new(U256::from(100), Asset::ETH);
+    fn market_prices_escalate_only_the_max_price() {
+        let prices = escalate_and_cap_market_prices(U256::from(100), U256::from(10), 4, None)
+            .expect("escalated prices");
 
-        enforce_market_max_price_cap(
-            U256::from(80),
-            Some(&max_price_cap),
-            1_000,
-            BoundlessPricingMode::Market,
-        )
-        .expect("autoprice below cap");
-        enforce_market_max_price_cap(
-            U256::from(100),
-            Some(&max_price_cap),
-            1_000,
-            BoundlessPricingMode::Market,
-        )
-        .expect("autoprice at cap");
+        assert_eq!(prices.max_price, U256::from(400));
+        assert_eq!(prices.min_price, U256::from(10));
+        assert!(!prices.clamped_to_cap);
     }
 
     #[test]
-    fn market_max_price_cap_rejects_autoprice_above_cap() {
-        let max_price_cap = Amount::new(U256::from(100), Asset::ETH);
+    fn market_prices_pass_through_without_escalation_or_cap() {
+        for multiplier in [0, 1] {
+            let prices =
+                escalate_and_cap_market_prices(U256::from(100), U256::from(10), multiplier, None)
+                    .expect("flat prices");
 
-        let err = enforce_market_max_price_cap(
-            U256::from(120),
+            assert_eq!(prices.max_price, U256::from(100));
+            assert_eq!(prices.min_price, U256::from(10));
+            assert!(!prices.clamped_to_cap);
+        }
+    }
+
+    #[test]
+    fn market_prices_accept_offers_at_or_below_cap() {
+        let max_price_cap = Amount::new(U256::from(1_000), Asset::ETH);
+        let prices = escalate_and_cap_market_prices(
+            U256::from(100),
+            U256::from(10),
+            2,
             Some(&max_price_cap),
-            1_000,
-            BoundlessPricingMode::Market,
         )
-        .expect_err("autoprice above cap");
+        .expect("uncapped prices");
 
-        assert!(
-            err.to_string()
-                .contains("exceeds configured max_price_per_mcycle cap")
-        );
+        assert_eq!(prices.max_price, U256::from(200));
+        assert_eq!(prices.min_price, U256::from(10));
+        assert!(!prices.clamped_to_cap);
+    }
+
+    #[test]
+    fn market_prices_clamp_escalated_max_to_cap() {
+        let max_price_cap = Amount::new(U256::from(150), Asset::ETH);
+        let prices = escalate_and_cap_market_prices(
+            U256::from(100),
+            U256::from(10),
+            4,
+            Some(&max_price_cap),
+        )
+        .expect("capped prices");
+
+        assert_eq!(prices.max_price, U256::from(150));
+        assert_eq!(prices.min_price, U256::from(10));
+        assert!(prices.clamped_to_cap);
+    }
+
+    #[test]
+    fn market_prices_lower_min_price_when_cap_undercuts_it() {
+        let max_price_cap = Amount::new(U256::from(5), Asset::ETH);
+        let prices = escalate_and_cap_market_prices(
+            U256::from(100),
+            U256::from(10),
+            1,
+            Some(&max_price_cap),
+        )
+        .expect("capped prices");
+
+        assert_eq!(prices.max_price, U256::from(5));
+        assert_eq!(prices.min_price, U256::from(5));
+        assert!(prices.clamped_to_cap);
+    }
+
+    #[test]
+    fn market_price_escalation_rejects_overflow() {
+        let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, None)
+            .expect_err("overflowing escalation");
+        assert!(err.to_string().contains("overflows"));
+    }
+
+    #[test]
+    fn submission_budget_bounds_every_retry_path() {
+        // Initial attempt plus rebid_max_attempts rebids, matching the no-lock Abort bound.
+        assert!(!exceeds_submission_budget(1, TEST_REBID_MAX_ATTEMPTS));
+        assert!(!exceeds_submission_budget(5, TEST_REBID_MAX_ATTEMPTS));
+        assert!(exceeds_submission_budget(6, TEST_REBID_MAX_ATTEMPTS));
+
+        // Zero configured rebids allow exactly the initial submission.
+        assert!(!exceeds_submission_budget(1, 0));
+        assert!(exceeds_submission_budget(2, 0));
     }
 
     #[test]

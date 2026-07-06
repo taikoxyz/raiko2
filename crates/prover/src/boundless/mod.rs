@@ -2613,6 +2613,28 @@ mod tests {
     }
 
     #[test]
+    fn balance_gate_tops_up_combined_reserved_total_and_releases_on_drop() {
+        use alloy_primitives::U256;
+        let gate = super::BoundlessBalanceGate::new();
+        // First in-flight submission reserves its max price; against an empty account it must
+        // deposit its full claim.
+        let claim_a = gate.reserve(U256::from(100u64));
+        assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(100u64));
+        {
+            // A second concurrent submission reserves on the SAME shared gate. Each now tops up to
+            // the COMBINED reserved total, so neither under-funds the other against the shared
+            // account (the concurrent-underfunding case this gate closes).
+            let claim_b = gate.reserve(U256::from(50u64));
+            assert_eq!(claim_b.deposit_topup(U256::ZERO), U256::from(150u64));
+            assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(150u64));
+            // An account already covering the combined total needs no deposit.
+            assert_eq!(claim_b.deposit_topup(U256::from(200u64)), U256::ZERO);
+        } // claim_b drops here, releasing its reservation.
+        // No leak on drop: with B released, A's required top-up falls back to A's claim alone.
+        assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(100u64));
+    }
+
+    #[test]
     fn market_prices_pass_through_without_escalation_or_cap() {
         // A fresh first attempt (0 rungs) and a flat 0-bps ladder both leave the max unchanged.
         for (attempt, step_bps) in [(1u64, TEST_REBID_PRICE_STEP_BPS), (5, 0)] {

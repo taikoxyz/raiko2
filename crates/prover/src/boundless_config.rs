@@ -100,7 +100,12 @@ pub struct OfferParamsConfig {
     pub aggregation: BoundlessOfferParams,
 }
 
+// Fail closed on stale/typo'd keys inside `[prover.boundless.deployment]`. Without this, a typo
+// such as `deployment_typ` deserializes with `deployment_type = None`, and `get_deployment_type()`
+// silently falls back to `Base` — booting the wrong market for a Taiko/Sepolia deployment. The
+// free-form `overrides` value stays unrestricted (it deserializes into a `serde_json::Value`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentConfig {
     pub deployment_type: Option<DeploymentType>,
     pub overrides: Option<serde_json::Value>,
@@ -399,6 +404,18 @@ mod tests {
         .expect("deserialize taiko deployment");
 
         assert_eq!(deployment.deployment_type, Some(DeploymentType::Taiko));
+    }
+
+    #[test]
+    fn deployment_config_rejects_unknown_key() {
+        // A typo'd key inside [prover.boundless.deployment] (here `deployment_typ`) must fail
+        // closed rather than deserialize with `deployment_type = None` and silently fall back to
+        // the Base deployment.
+        let err = serde_json::from_value::<DeploymentConfig>(serde_json::json!({
+            "deployment_typ": "taiko"
+        }))
+        .expect_err("unknown deployment key should be rejected");
+        assert!(err.to_string().contains("deployment_typ"));
     }
 
     #[test]

@@ -1215,7 +1215,6 @@ impl BoundlessProver {
                                     "zkvm": "risc0",
                                     "runner": "network",
                                     "proof_type": elf_type.proof_type_str(),
-                                    "mcycles_count": quoted_mcycles_count,
                                     "quoted_mcycles_count": quoted_mcycles_count,
                                     "evaluated_mcycles_count": evaluated_mcycles_count,
                         "boundless": {

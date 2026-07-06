@@ -949,27 +949,31 @@ impl BoundlessProver {
         let mut consecutive_poll_errors = 0_u32;
 
         loop {
+            let now = now_secs();
             if started_at.elapsed() > timeout
                 && !defer_poll_timeout_while_payable(
                     submission.submitted_at,
                     submission.lock_expires_at,
                     submission.expires_at,
                     no_lock_timeout,
-                    now_secs(),
+                    now,
                 )
             {
                 let detail = last_poll_error
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
                     .unwrap_or_default();
-                // The request may still be within its payable window, so keep the shared id: a
-                // replacement rung under the same id cannot be double-paid.
+                // Before the request expiry the rungs may still be payable, so keep the shared
+                // id: a replacement rung under the same id cannot be double-paid. Past the
+                // expiry every rung is past its lock deadline (nothing on this id is payable),
+                // and the id may even carry a dead lock that the failing status reads could not
+                // surface, so treat this like the Expired branch and rotate.
                 return Err(BoundlessAttemptError::Retryable {
                     reason: format!(
                         "Boundless request {} timed out before fulfillment{detail}",
                         submission.provider_request_id
                     ),
-                    rotate_request_id: false,
+                    rotate_request_id: now >= submission.expires_at,
                 });
             }
 

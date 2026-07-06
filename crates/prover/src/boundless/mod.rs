@@ -4,7 +4,8 @@ pub mod aggregation;
 
 pub use crate::boundless_config::{
     BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
-    DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, validate_offer_spec,
+    DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, TimeoutPolicy,
+    validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -1685,30 +1686,6 @@ fn apply_market_offer_pricing(
     Ok(())
 }
 
-fn apply_dynamic_pricing_timeout_modifier(
-    offer_spec: &BoundlessOfferParams,
-    timeout: u32,
-    field: &str,
-) -> RaikoResult<u32> {
-    if offer_spec.pricing_mode != BoundlessPricingMode::Market {
-        return Ok(timeout);
-    }
-    let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
-        return Ok(timeout);
-    };
-
-    let modified_timeout = scale_timeout(timeout, modifier, field)?;
-
-    tracing::debug!(
-        modifier,
-        timeout,
-        modified_timeout,
-        field,
-        "Applied Boundless dynamic-pricing timeout modifier"
-    );
-    Ok(modified_timeout)
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
     if !modifier.is_finite() || modifier < 1.0 {
@@ -1771,19 +1748,31 @@ fn validate_offer_params(
             (None, None, max_price_cap)
         }
     };
-    let derived_lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
-    let derived_timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let lock_timeout = match offer_spec.lock_timeout_secs {
-        Some(lock_timeout) => lock_timeout,
-        None => apply_dynamic_pricing_timeout_modifier(
-            offer_spec,
-            derived_lock_timeout,
-            "lock_timeout",
-        )?,
-    };
-    let timeout = match offer_spec.timeout_secs {
-        Some(timeout) => timeout,
-        None => apply_dynamic_pricing_timeout_modifier(offer_spec, derived_timeout, "timeout")?,
+    let (lock_timeout, timeout) = match &offer_spec.timeouts {
+        TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle,
+            timeout_ms_per_mcycle,
+            dynamic_pricing_timeout_modifier,
+        } => {
+            let derived_lock = lock_timeout_ms_per_mcycle * mcycles_count / 1000;
+            let derived_timeout = timeout_ms_per_mcycle * mcycles_count / 1000;
+            if offer_spec.pricing_mode == BoundlessPricingMode::Market {
+                if let Some(modifier) = dynamic_pricing_timeout_modifier {
+                    (
+                        scale_timeout(derived_lock, *modifier, "lock_timeout")?,
+                        scale_timeout(derived_timeout, *modifier, "timeout")?,
+                    )
+                } else {
+                    (derived_lock, derived_timeout)
+                }
+            } else {
+                (derived_lock, derived_timeout)
+            }
+        }
+        TimeoutPolicy::Fixed {
+            lock_timeout_secs,
+            timeout_secs,
+        } => (*lock_timeout_secs, *timeout_secs),
     };
     if timeout <= lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
@@ -1822,7 +1811,7 @@ mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
+        TimeoutPolicy, defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
         parse_env_bool, parse_env_url, quote_batch_mcycles, should_rebid_unlocked_request,
         storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
@@ -2291,8 +2280,11 @@ mod tests {
     #[test]
     fn validate_offer_params_rejects_timeout_not_above_lock_timeout() {
         let mut offer = sample_offer();
-        offer.lock_timeout_ms_per_mcycle = 300;
-        offer.timeout_ms_per_mcycle = 300;
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 300,
+            dynamic_pricing_timeout_modifier: None,
+        };
         let err = validate_offer_params(&offer, 100, 2).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
@@ -2380,7 +2372,11 @@ mod tests {
         offer.pricing_mode = BoundlessPricingMode::Market;
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: Some(2.0),
+        };
 
         let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
 
@@ -2390,10 +2386,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_params_uses_fixed_timeout_overrides() {
+    fn validate_offer_params_uses_fixed_timeout_policy() {
         let mut offer = sample_offer();
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
+        offer.timeouts = TimeoutPolicy::Fixed {
+            lock_timeout_secs: 600,
+            timeout_secs: 3600,
+        };
 
         let small = validate_offer_params(&offer, 100, 2).expect("valid small offer");
         let large = validate_offer_params(&offer, 5_000, 2).expect("valid large offer");
@@ -2402,61 +2400,6 @@ mod tests {
         assert_eq!(small.timeout, 3600);
         assert_eq!(large.lock_timeout, 600);
         assert_eq!(large.timeout, 3600);
-    }
-
-    #[test]
-    fn validate_offer_params_rejects_fixed_timeout_below_derived_lock_timeout() {
-        let mut offer = sample_offer();
-        // The derived lock timeout for 5000 mcycles is 1500s, above the fixed timeout.
-        offer.timeout_secs = Some(900);
-        let err = validate_offer_params(&offer, 5_000, 2).unwrap_err();
-        assert!(err.to_string().contains("timeout"));
-    }
-
-    #[test]
-    fn validate_offer_params_ramp_up_check_uses_fixed_lock_timeout() {
-        let mut offer = sample_offer();
-        // 60 blocks at 2s block time is a 120s ramp-up, while the derived lock
-        // timeout for 100 mcycles is only 30s; the fixed override lifts it.
-        assert!(validate_offer_params(&offer, 100, 2).is_err());
-
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-        let validated = validate_offer_params(&offer, 100, 2).expect("valid offer");
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.ramp_up_period_secs, 120);
-    }
-
-    #[test]
-    fn validate_offer_params_market_timeout_modifier_does_not_scale_fixed_overrides() {
-        let mut offer = sample_offer();
-        offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
-        offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
-
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.timeout, 3600);
-    }
-
-    #[test]
-    fn validate_offer_params_skips_timeout_modifier_overflow_for_fixed_overrides() {
-        let mut offer = sample_offer();
-        offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
-        offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(f64::from(u32::MAX));
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
-
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.timeout, 3600);
     }
 
     #[test]

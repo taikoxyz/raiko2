@@ -46,24 +46,34 @@ pub enum BoundlessPricingMode {
     Market,
 }
 
+/// How the lock/request timeouts for an offer are chosen.
+///
+/// `PerMcycle` derives both timeouts from the quoted mcycles and, in market mode, may scale
+/// them by `dynamic_pricing_timeout_modifier`. `Fixed` pins both timeouts to explicit seconds
+/// and is never scaled. Because the modifier lives inside `PerMcycle`, a fixed policy cannot
+/// carry a modifier — the two are mutually exclusive by construction.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum TimeoutPolicy {
+    PerMcycle {
+        lock_timeout_ms_per_mcycle: u32,
+        timeout_ms_per_mcycle: u32,
+        #[serde(default)]
+        dynamic_pricing_timeout_modifier: Option<f64>,
+    },
+    Fixed {
+        lock_timeout_secs: u32,
+        timeout_secs: u32,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BoundlessOfferParams {
     #[serde(default)]
     pub pricing_mode: BoundlessPricingMode,
     pub ramp_up_start_sec: u32,
     pub ramp_up_period_blocks: u32,
-    pub lock_timeout_ms_per_mcycle: u32,
-    pub timeout_ms_per_mcycle: u32,
-    /// Fixed lock timeout in seconds. When set, it replaces the per-mcycle derived
-    /// lock timeout and is not scaled by `dynamic_pricing_timeout_modifier`.
-    #[serde(default)]
-    pub lock_timeout_secs: Option<u32>,
-    /// Fixed request timeout in seconds. When set, it replaces the per-mcycle derived
-    /// timeout and is not scaled by `dynamic_pricing_timeout_modifier`.
-    #[serde(default)]
-    pub timeout_secs: Option<u32>,
-    #[serde(default)]
-    pub dynamic_pricing_timeout_modifier: Option<f64>,
+    pub timeouts: TimeoutPolicy,
     #[serde(default)]
     pub max_price_per_mcycle: Option<String>,
     #[serde(default)]
@@ -189,11 +199,11 @@ pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 300,
-        timeout_ms_per_mcycle: 900,
-        lock_timeout_secs: None,
-        timeout_secs: None,
-        dynamic_pricing_timeout_modifier: None,
+        timeouts: TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: None,
+        },
         max_price_per_mcycle: Some("0.0000006".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
         lock_collateral: "20".to_string(),
@@ -205,11 +215,11 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
         ramp_up_period_blocks: 60,
-        lock_timeout_ms_per_mcycle: 3000,
-        timeout_ms_per_mcycle: 6000,
-        lock_timeout_secs: None,
-        timeout_secs: None,
-        dynamic_pricing_timeout_modifier: None,
+        timeouts: TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 3000,
+            timeout_ms_per_mcycle: 6000,
+            dynamic_pricing_timeout_modifier: None,
+        },
         max_price_per_mcycle: Some("0.0000008".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
         lock_collateral: "20".to_string(),
@@ -253,15 +263,41 @@ fn parse_staking_token(value: &str) -> RaikoResult<U256> {
 /// amount is invalid.
 pub fn validate_offer_spec(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
     validate_offer_prices(offer_spec)?;
-    validate_dynamic_pricing_timeout_modifier(offer_spec)?;
-    if offer_spec.timeout_ms_per_mcycle <= offer_spec.lock_timeout_ms_per_mcycle {
-        return Err("timeout must be greater than lock_timeout".to_string());
-    }
-    if let (Some(lock_timeout_secs), Some(timeout_secs)) =
-        (offer_spec.lock_timeout_secs, offer_spec.timeout_secs)
-        && timeout_secs <= lock_timeout_secs
-    {
-        return Err("timeout_secs must be greater than lock_timeout_secs".to_string());
+    match &offer_spec.timeouts {
+        TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle,
+            timeout_ms_per_mcycle,
+            dynamic_pricing_timeout_modifier,
+        } => {
+            if timeout_ms_per_mcycle <= lock_timeout_ms_per_mcycle {
+                return Err(
+                    "timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle"
+                        .to_string(),
+                );
+            }
+            if let Some(modifier) = dynamic_pricing_timeout_modifier {
+                if offer_spec.pricing_mode != BoundlessPricingMode::Market {
+                    return Err(
+                        "dynamic_pricing_timeout_modifier is only valid when pricing_mode=market"
+                            .to_string(),
+                    );
+                }
+                if !modifier.is_finite() || *modifier < 1.0 {
+                    return Err(
+                        "dynamic_pricing_timeout_modifier must be a finite number greater than or equal to 1.0"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        TimeoutPolicy::Fixed {
+            lock_timeout_secs,
+            timeout_secs,
+        } => {
+            if timeout_secs <= lock_timeout_secs {
+                return Err("timeout_secs must be greater than lock_timeout_secs".to_string());
+            }
+        }
     }
     parse_staking_token(&offer_spec.lock_collateral).map_err(|err| err.to_string())?;
     Ok(())
@@ -290,26 +326,6 @@ fn validate_manual_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
     Ok(())
 }
 
-fn validate_dynamic_pricing_timeout_modifier(
-    offer_spec: &BoundlessOfferParams,
-) -> Result<(), String> {
-    let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
-        return Ok(());
-    };
-    if offer_spec.pricing_mode != BoundlessPricingMode::Market {
-        return Err(
-            "dynamic_pricing_timeout_modifier is only valid when pricing_mode=market".to_string(),
-        );
-    }
-    if !modifier.is_finite() || modifier < 1.0 {
-        return Err(
-            "dynamic_pricing_timeout_modifier must be a finite number greater than or equal to 1.0"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
 fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(), String> {
     if offer_spec.min_price_per_mcycle.is_some() {
         return Err("min_price_per_mcycle must be omitted when pricing_mode=market".to_string());
@@ -333,7 +349,7 @@ mod tests {
     use super::{
         BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DEFAULT_REBID_MAX_ATTEMPTS,
         DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, DeploymentType,
-        validate_offer_spec,
+        TimeoutPolicy, validate_offer_spec,
     };
 
     #[test]
@@ -377,8 +393,14 @@ mod tests {
         let batch = BoundlessConfig::default().offer_params.batch;
         assert_eq!(batch.ramp_up_start_sec, 20);
         assert_eq!(batch.ramp_up_period_blocks, 60);
-        assert_eq!(batch.lock_timeout_ms_per_mcycle, 300);
-        assert_eq!(batch.timeout_ms_per_mcycle, 900);
+        assert_eq!(
+            batch.timeouts,
+            TimeoutPolicy::PerMcycle {
+                lock_timeout_ms_per_mcycle: 300,
+                timeout_ms_per_mcycle: 900,
+                dynamic_pricing_timeout_modifier: None,
+            }
+        );
         assert_eq!(batch.pricing_mode, BoundlessPricingMode::Manual);
         assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.0000006"));
         assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
@@ -390,8 +412,14 @@ mod tests {
         let aggregation = BoundlessConfig::default().offer_params.aggregation;
         assert_eq!(aggregation.ramp_up_start_sec, 20);
         assert_eq!(aggregation.ramp_up_period_blocks, 60);
-        assert_eq!(aggregation.lock_timeout_ms_per_mcycle, 3000);
-        assert_eq!(aggregation.timeout_ms_per_mcycle, 6000);
+        assert_eq!(
+            aggregation.timeouts,
+            TimeoutPolicy::PerMcycle {
+                lock_timeout_ms_per_mcycle: 3000,
+                timeout_ms_per_mcycle: 6000,
+                dynamic_pricing_timeout_modifier: None,
+            }
+        );
         assert_eq!(aggregation.pricing_mode, BoundlessPricingMode::Manual);
         assert_eq!(
             aggregation.max_price_per_mcycle.as_deref(),
@@ -413,55 +441,61 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_spec_rejects_timeout_not_above_lock_timeout() {
+    fn timeout_policy_per_mcycle_requires_timeout_above_lock() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.timeout_ms_per_mcycle = offer.lock_timeout_ms_per_mcycle;
-
-        let err = validate_offer_spec(&offer).expect_err("timeout not above lock_timeout");
-        assert!(err.contains("timeout must be greater than lock_timeout"));
+        offer.timeouts = super::TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 900,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: None,
+        };
+        let err = validate_offer_spec(&offer).expect_err("timeout not above lock");
+        assert!(
+            err.contains("timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
+        );
     }
 
     #[test]
-    fn validate_offer_spec_rejects_timeout_secs_not_above_lock_timeout_secs() {
+    fn timeout_policy_fixed_requires_timeout_above_lock() {
         let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(600);
-        let err = validate_offer_spec(&offer).expect_err("timeout_secs not above lock");
-        assert!(err.contains("timeout_secs"));
+        offer.timeouts = super::TimeoutPolicy::Fixed {
+            lock_timeout_secs: 600,
+            timeout_secs: 600,
+        };
+        let err = validate_offer_spec(&offer).expect_err("fixed timeout not above lock");
+        assert!(err.contains("timeout_secs must be greater than lock_timeout_secs"));
     }
 
     #[test]
-    fn validate_offer_spec_accepts_fixed_timeout_overrides() {
-        let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-        validate_offer_spec(&offer).expect("valid fixed timeout overrides");
-    }
-
-    #[test]
-    fn offer_params_default_to_no_fixed_timeout_overrides() {
-        let batch = BoundlessConfig::default().offer_params.batch;
-        assert_eq!(batch.lock_timeout_secs, None);
-        assert_eq!(batch.timeout_secs, None);
-    }
-
-    #[test]
-    fn offer_params_deserialize_fixed_timeout_overrides() {
+    fn timeout_policy_fixed_deserializes_from_tagged_table() {
         let offer: BoundlessOfferParams = serde_json::from_value(serde_json::json!({
             "pricing_mode": "manual",
             "max_price_per_mcycle": "0.0000006",
             "min_price_per_mcycle": "0",
             "ramp_up_start_sec": 0,
             "ramp_up_period_blocks": 180,
-            "lock_timeout_ms_per_mcycle": 300,
-            "timeout_ms_per_mcycle": 900,
             "lock_collateral": "50",
-            "lock_timeout_secs": 600,
-            "timeout_secs": 3600
+            "timeouts": { "mode": "fixed", "lock_timeout_secs": 600, "timeout_secs": 3600 }
         }))
-        .expect("deserialize offer params with fixed timeout overrides");
-        assert_eq!(offer.lock_timeout_secs, Some(600));
-        assert_eq!(offer.timeout_secs, Some(3600));
+        .expect("deserialize fixed timeout policy");
+        assert!(matches!(
+            offer.timeouts,
+            super::TimeoutPolicy::Fixed {
+                lock_timeout_secs: 600,
+                timeout_secs: 3600
+            }
+        ));
+    }
+
+    #[test]
+    fn timeout_policy_modifier_rejected_in_manual_mode() {
+        let mut offer = BoundlessConfig::default().offer_params.batch; // pricing_mode = manual by default
+        offer.timeouts = super::TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: Some(2.0),
+        };
+        let err = validate_offer_spec(&offer).expect_err("modifier in manual mode");
+        assert!(err.contains("dynamic_pricing_timeout_modifier is only valid"));
     }
 
     #[test]
@@ -509,18 +543,13 @@ mod tests {
         offer.pricing_mode = BoundlessPricingMode::Market;
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: Some(2.0),
+        };
 
         validate_offer_spec(&offer).expect("valid market offer with timeout modifier");
-    }
-
-    #[test]
-    fn validate_offer_spec_rejects_manual_pricing_with_timeout_modifier() {
-        let mut offer = BoundlessConfig::default().offer_params.batch;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
-
-        let err = validate_offer_spec(&offer).expect_err("manual offer with timeout modifier");
-        assert!(err.contains("dynamic_pricing_timeout_modifier is only valid"));
     }
 
     #[test]
@@ -529,7 +558,11 @@ mod tests {
         offer.pricing_mode = BoundlessPricingMode::Market;
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(0.5);
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: Some(0.5),
+        };
 
         let err = validate_offer_spec(&offer).expect_err("timeout modifier below one");
         assert!(err.contains("greater than or equal to 1.0"));

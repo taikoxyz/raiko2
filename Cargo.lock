@@ -8655,6 +8655,7 @@ dependencies = [
  "raiko2-primitives",
  "raiko2-primitives-shasta",
  "raiko2-protocol-shasta",
+ "raiko2-remote-poller",
  "reqwest 0.12.28",
  "reth-ethereum-primitives",
  "risc0-binfmt",
@@ -8721,6 +8722,19 @@ dependencies = [
  "serde",
  "testcontainers",
  "tokio",
+]
+
+[[package]]
+name = "raiko2-remote-poller"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "raiko2-primitives",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -13342,6 +13356,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "md-5",
+ "serde_core",
  "sha1_smol",
  "wasm-bindgen",
 ]

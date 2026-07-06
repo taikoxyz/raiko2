@@ -16,9 +16,16 @@ use alloy::{providers::ProviderBuilder, sol};
 use alloy_primitives::{Address, B256, Bytes};
 use raiko2_guest_common::aggregate_shasta_zk_with_verifier;
 use raiko2_pipeline::{ProofStage, ProverBackend};
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig, RaikoError, RaikoResult};
+use raiko2_primitives::{
+    AggregationGuestInput, Proof, ProofType, ProverConfig, RaikoError, RaikoResult,
+};
 use raiko2_primitives_shasta::{
     GuestInput, ShastaZkAggregationGuestInput, instance::sp1_contract_block_program_id,
+};
+use raiko2_remote_poller::{
+    RemotePollError, RemotePollerConfig, RemoteStatus, RemoteStatusReason, RemoteStatusSource,
+    RemoteStatusTracker, RemoteSubmission, RemoteSubmissionId, RemoteSubmissionStatus,
+    RemoteTerminalResult,
 };
 use serde::Deserialize;
 use sp1_sdk::{
@@ -29,13 +36,15 @@ use sp1_sdk::{
         Prover as BlockingProver, ProverClient as BlockingProverClient,
     },
     network::{
-        Error as Sp1NetworkError, FulfillmentStrategy, NetworkMode as Sp1SdkNetworkMode,
+        FulfillmentStrategy, NetworkMode as Sp1SdkNetworkMode,
+        proto::types::{ExecutionStatus, FulfillmentStatus},
         signer::NetworkSigner,
     },
 };
+use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::time::timeout;
 use tracing::info;
 use url::Url;
@@ -50,6 +59,270 @@ const SP1_NETWORK_WAIT_RETRY_DELAY: Duration = Duration::from_secs(15);
 const SP1_NETWORK_REQUEST_RETRY_DELAY: Duration = Duration::from_secs(15);
 const SP1_MAINNET_RPC_URL: &str = "https://rpc.mainnet.succinct.xyz";
 const SP1_RESERVED_RPC_URL: &str = "https://rpc.production.succinct.xyz";
+
+type Sp1StatusRegistry = Arc<Mutex<HashMap<RemoteSubmissionId, Sp1SubmissionState>>>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Sp1SubmissionMetadata {
+    auction_timeout_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Sp1SubmissionState {
+    metadata: Sp1SubmissionMetadata,
+    terminal_outcome: Option<Sp1TerminalOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Sp1TerminalOutcome {
+    Unfulfillable,
+    TimedOut,
+    AuctionTimedOut,
+    Unexecutable,
+}
+
+#[derive(Clone)]
+struct Sp1StatusSource {
+    client: NetworkProver,
+    registry: Sp1StatusRegistry,
+}
+
+#[async_trait::async_trait]
+impl RemoteStatusSource for Sp1StatusSource {
+    async fn poll(
+        &self,
+        _proof_type: ProofType,
+        submissions: Vec<RemoteSubmission>,
+    ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
+        let mut statuses = Vec::with_capacity(submissions.len());
+        for submission in submissions {
+            statuses.push(self.status_for_submission(submission).await?);
+        }
+        Ok(statuses)
+    }
+}
+
+impl Sp1StatusSource {
+    #[allow(clippy::too_many_lines)]
+    async fn status_for_submission(
+        &self,
+        submission: RemoteSubmission,
+    ) -> Result<RemoteSubmissionStatus, RemotePollError> {
+        let Some(metadata) = sp1_submission_metadata(&self.registry, submission.id)? else {
+            return Ok(unrecoverable_sp1_status(
+                submission.id,
+                format!(
+                    "sp1 status source missing metadata for request {}",
+                    submission.provider_request_id
+                ),
+            ));
+        };
+        let request_id = match B256::from_str(&submission.provider_request_id) {
+            Ok(request_id) => request_id,
+            Err(err) => {
+                return Ok(unrecoverable_sp1_status(
+                    submission.id,
+                    format!("invalid sp1 request id: {err}"),
+                ));
+            }
+        };
+
+        let (status, maybe_proof) = self
+            .client
+            .get_proof_status(request_id)
+            .await
+            .map_err(|err| RemotePollError::Transient(format!("sp1 status rpc: {err}")))?;
+        let fulfillment_status =
+            FulfillmentStatus::try_from(status.fulfillment_status()).map_err(|err| {
+                RemotePollError::Transient(format!("unknown sp1 fulfillment status: {err}"))
+            })?;
+        let execution_status =
+            ExecutionStatus::try_from(status.execution_status()).map_err(|err| {
+                RemotePollError::Transient(format!("unknown sp1 execution status: {err}"))
+            })?;
+
+        if fulfillment_status == FulfillmentStatus::Requested
+            && metadata
+                .auction_timeout_at
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.client
+                .cancel_request(request_id)
+                .await
+                .map_err(|err| RemotePollError::Transient(format!("sp1 cancel request: {err}")))?;
+            record_sp1_terminal_outcome(
+                &self.registry,
+                submission.id,
+                Sp1TerminalOutcome::AuctionTimedOut,
+            )?;
+            return Ok(sp1_status(
+                submission.id,
+                fulfillment_status,
+                execution_status,
+                status.deadline(),
+                RemoteStatus::Failed,
+                Some(RemoteStatusReason::new(
+                    "SP1 network request auction timeout elapsed",
+                )),
+            ));
+        }
+
+        let now = sp1_now_secs();
+        let (remote_status, reason, terminal_outcome) =
+            if fulfillment_status == FulfillmentStatus::Fulfilled && maybe_proof.is_some() {
+                (RemoteStatus::Fulfilled, None, None)
+            } else if execution_status == ExecutionStatus::Unexecutable {
+                (
+                    RemoteStatus::Unrecoverable,
+                    Some(RemoteStatusReason::new(
+                        "SP1 network request is unexecutable",
+                    )),
+                    Some(Sp1TerminalOutcome::Unexecutable),
+                )
+            } else if fulfillment_status == FulfillmentStatus::Unfulfillable {
+                (
+                    RemoteStatus::Failed,
+                    Some(RemoteStatusReason::new(
+                        "SP1 network request is unfulfillable",
+                    )),
+                    Some(Sp1TerminalOutcome::Unfulfillable),
+                )
+            } else if now > status.deadline() {
+                (
+                    RemoteStatus::Failed,
+                    Some(RemoteStatusReason::new("SP1 network request timed out")),
+                    Some(Sp1TerminalOutcome::TimedOut),
+                )
+            } else if fulfillment_status == FulfillmentStatus::Assigned {
+                (RemoteStatus::Locked, None, None)
+            } else {
+                (RemoteStatus::Pending, None, None)
+            };
+        if let Some(outcome) = terminal_outcome {
+            record_sp1_terminal_outcome(&self.registry, submission.id, outcome)?;
+        }
+
+        Ok(RemoteSubmissionStatus {
+            submission_id: submission.id,
+            status: remote_status,
+            reason,
+            observed_unix_secs: now,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sp1_status(
+    submission_id: RemoteSubmissionId,
+    fulfillment_status: FulfillmentStatus,
+    execution_status: ExecutionStatus,
+    deadline: u64,
+    status: RemoteStatus,
+    reason: Option<RemoteStatusReason>,
+) -> RemoteSubmissionStatus {
+    let _ = (fulfillment_status, execution_status, deadline);
+    RemoteSubmissionStatus {
+        submission_id,
+        status,
+        reason,
+        observed_unix_secs: sp1_now_secs(),
+    }
+}
+
+fn unrecoverable_sp1_status(
+    submission_id: RemoteSubmissionId,
+    reason: impl Into<String>,
+) -> RemoteSubmissionStatus {
+    RemoteSubmissionStatus {
+        submission_id,
+        status: RemoteStatus::Unrecoverable,
+        reason: Some(RemoteStatusReason::new(reason)),
+        observed_unix_secs: sp1_now_secs(),
+    }
+}
+
+fn lock_sp1_registry(
+    registry: &Sp1StatusRegistry,
+) -> Result<
+    std::sync::MutexGuard<'_, HashMap<RemoteSubmissionId, Sp1SubmissionState>>,
+    RemotePollError,
+> {
+    registry.lock().map_err(|err| {
+        RemotePollError::SourceUnavailable(format!("sp1 status registry lock poisoned: {err}"))
+    })
+}
+
+fn sp1_submission_metadata(
+    registry: &Sp1StatusRegistry,
+    submission_id: RemoteSubmissionId,
+) -> Result<Option<Sp1SubmissionMetadata>, RemotePollError> {
+    Ok(lock_sp1_registry(registry)?
+        .get(&submission_id)
+        .map(|state| state.metadata.clone()))
+}
+
+fn record_sp1_terminal_outcome(
+    registry: &Sp1StatusRegistry,
+    submission_id: RemoteSubmissionId,
+    outcome: Sp1TerminalOutcome,
+) -> Result<(), RemotePollError> {
+    if let Some(state) = lock_sp1_registry(registry)?.get_mut(&submission_id) {
+        state.terminal_outcome = Some(outcome);
+    }
+    Ok(())
+}
+
+fn sp1_terminal_outcome(
+    registry: &Sp1StatusRegistry,
+    submission_id: RemoteSubmissionId,
+) -> RaikoResult<Option<Sp1TerminalOutcome>> {
+    registry
+        .lock()
+        .map_err(|err| RaikoError::Guest(format!("SP1 status registry lock poisoned: {err}")))?
+        .get(&submission_id)
+        .map(|state| state.terminal_outcome)
+        .ok_or_else(|| {
+            RaikoError::Guest(format!(
+                "SP1 status registry missing submission {submission_id}"
+            ))
+        })
+}
+
+struct Sp1SubmissionGuard {
+    tracker: RemoteStatusTracker,
+    registry: Sp1StatusRegistry,
+    submission_id: RemoteSubmissionId,
+}
+
+impl Sp1SubmissionGuard {
+    const fn new(
+        tracker: RemoteStatusTracker,
+        registry: Sp1StatusRegistry,
+        submission_id: RemoteSubmissionId,
+    ) -> Self {
+        Self {
+            tracker,
+            registry,
+            submission_id,
+        }
+    }
+}
+
+impl Drop for Sp1SubmissionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.remove(&self.submission_id);
+        }
+        self.tracker.untrack(self.submission_id);
+    }
+}
+
+fn sp1_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 sol!(
     #[sol(rpc)]
@@ -88,6 +361,14 @@ impl From<Sp1FulfillmentStrategy> for FulfillmentStrategy {
 pub struct Sp1Prover {
     config: Sp1Config,
     setup_cache: Arc<Sp1SetupCache>,
+    network_status_trackers: Arc<Mutex<HashMap<Sp1StatusTrackerKey, RemoteStatusTracker>>>,
+    network_status_registry: Sp1StatusRegistry,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Sp1StatusTrackerKey {
+    network_mode: Sp1NetworkMode,
+    rpc_url: String,
 }
 
 struct Sp1SetupCache {
@@ -159,6 +440,8 @@ impl Sp1Prover {
         Self {
             config,
             setup_cache: Arc::new(Sp1SetupCache::new()),
+            network_status_trackers: Arc::new(Mutex::new(HashMap::new())),
+            network_status_registry: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -217,6 +500,39 @@ impl Sp1Prover {
         Ok(system
             .as_ref()
             .map_or(effective.clone(), |system| system.applied_to(&effective)))
+    }
+
+    fn network_status_tracker(
+        &self,
+        config: &Sp1Config,
+        client: &NetworkProver,
+    ) -> RaikoResult<RemoteStatusTracker> {
+        let key = Sp1StatusTrackerKey {
+            network_mode: config.network_mode,
+            rpc_url: sp1_network_rpc_url(config)?,
+        };
+        let mut trackers = self.network_status_trackers.lock().map_err(|err| {
+            RaikoError::Guest(format!(
+                "SP1 network status tracker cache lock poisoned: {err}"
+            ))
+        })?;
+        if let Some(tracker) = trackers.get(&key) {
+            return Ok(tracker.clone());
+        }
+        let tracker = {
+            let source: Arc<dyn RemoteStatusSource> = Arc::new(Sp1StatusSource {
+                client: client.clone(),
+                registry: Arc::clone(&self.network_status_registry),
+            });
+            let mut sources = HashMap::new();
+            sources.insert(ProofType::Sp1, source);
+            RemoteStatusTracker::spawn(
+                RemotePollerConfig::new(SP1_NETWORK_WAIT_RETRY_DELAY),
+                sources,
+            )
+        };
+        trackers.insert(key, tracker.clone());
+        Ok(tracker)
     }
 
     fn preload_setup_for_stage<B>(
@@ -368,8 +684,12 @@ where
                         let mut stdin = SP1Stdin::new();
                         stdin.write(&guest_input);
                         let client = build_network_prover(&effective_config).await?;
+                        let status_tracker =
+                            self.network_status_tracker(&effective_config, &client)?;
                         prove_proposal_with_network_client(
                             &client,
+                            &status_tracker,
+                            &self.network_status_registry,
                             setup.as_ref(),
                             stdin,
                             proof_mode,
@@ -424,8 +744,11 @@ where
                 stdin.write(&aggregation_input);
                 let expected_input_hash = expected_sp1_aggregation_input_hash(&aggregation_input)?;
                 let client = build_network_prover(&effective_config).await?;
+                let status_tracker = self.network_status_tracker(&effective_config, &client)?;
                 aggregate_with_network_client(
                     &client,
+                    &status_tracker,
+                    &self.network_status_registry,
                     proposal_setup.as_ref(),
                     aggregation_setup.as_ref(),
                     &input,
@@ -476,8 +799,11 @@ where
                 stdin.write(&aggregation_input);
                 let expected_input_hash = expected_sp1_aggregation_input_hash(&aggregation_input)?;
                 let client = build_network_prover(&effective_config).await?;
+                let status_tracker = self.network_status_tracker(&effective_config, &client)?;
                 aggregate_with_network_client(
                     &client,
+                    &status_tracker,
+                    &self.network_status_registry,
                     proposal_setup.as_ref(),
                     aggregation_setup.as_ref(),
                     &input,
@@ -877,8 +1203,11 @@ fn prove_proposal_with_client(
     .into())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prove_proposal_with_network_client(
     client: &NetworkProver,
+    status_tracker: &RemoteStatusTracker,
+    status_registry: &Sp1StatusRegistry,
     setup: &Sp1ProgramSetup,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
@@ -887,7 +1216,15 @@ async fn prove_proposal_with_network_client(
     observer: Option<std::sync::Arc<dyn ProverProgressObserver>>,
 ) -> RaikoResult<Proof> {
     let request = request_network_proof(
-        client, &setup.pk, stdin, proof_mode, config, observer, "proposal",
+        client,
+        status_tracker,
+        status_registry,
+        &setup.pk,
+        stdin,
+        proof_mode,
+        config,
+        observer,
+        "proposal",
     )
     .await?;
 
@@ -1029,6 +1366,8 @@ fn expected_sp1_aggregation_input_hash(
 #[allow(clippy::too_many_arguments)]
 async fn aggregate_with_network_client(
     client: &NetworkProver,
+    status_tracker: &RemoteStatusTracker,
+    status_registry: &Sp1StatusRegistry,
     proposal_setup: &Sp1ProgramSetup,
     aggregation_setup: &Sp1ProgramSetup,
     input: &AggregationGuestInput,
@@ -1053,6 +1392,8 @@ async fn aggregate_with_network_client(
     let proof_mode: SP1ProofMode = config.recursion.into();
     let request = request_network_proof(
         client,
+        status_tracker,
+        status_registry,
         &aggregation_setup.pk,
         stdin,
         proof_mode,
@@ -1177,8 +1518,11 @@ async fn notify_sp1_network_submission(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request_network_proof(
     client: &NetworkProver,
+    status_tracker: &RemoteStatusTracker,
+    status_registry: &Sp1StatusRegistry,
     pk: &SP1ProvingKey,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
@@ -1187,7 +1531,9 @@ async fn request_network_proof(
     stage: &str,
 ) -> RaikoResult<NetworkProofRequestResult> {
     let timeout = Duration::from_secs(config.timeout_secs);
-    let auction_timeout = config.auction_timeout_secs.map(Duration::from_secs);
+    let auction_timeout = (config.network_mode == Sp1NetworkMode::Mainnet)
+        .then(|| config.auction_timeout_secs.map(Duration::from_secs))
+        .flatten();
     let mut stored_request_id = if let Some(observer) = observer.as_ref() {
         observer.load_sp1_network_request_id().await
     } else {
@@ -1257,6 +1603,8 @@ async fn request_network_proof(
         })?;
         match wait_sp1_network_proof(
             client,
+            status_tracker,
+            status_registry,
             request_id,
             timeout,
             auction_timeout,
@@ -1291,61 +1639,108 @@ enum Sp1NetworkWaitOutcome {
     RetryRequest(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_sp1_network_proof(
     client: &NetworkProver,
+    status_tracker: &RemoteStatusTracker,
+    status_registry: &Sp1StatusRegistry,
     request_id: B256,
     timeout: Duration,
     auction_timeout: Option<Duration>,
     stage: &str,
     request_id_string: &str,
 ) -> RaikoResult<Sp1NetworkWaitOutcome> {
-    let mut attempt = 1_u64;
-    loop {
-        let wait_started = std::time::Instant::now();
-        match client
-            .wait_proof(request_id, Some(timeout), auction_timeout)
-            .await
-        {
-            Ok(proof) => {
-                tracing::info!(
-                    stage,
-                    request_id = %request_id_string,
-                    proof_mode = sp1_proof_mode_name(&proof),
-                    attempt,
-                    elapsed_ms = wait_started.elapsed().as_millis(),
-                    "SP1 network proof received"
-                );
-                return Ok(Sp1NetworkWaitOutcome::Fulfilled(Box::new(proof)));
-            }
-            Err(error) => {
-                if let Some(network_error) = error.downcast_ref::<Sp1NetworkError>() {
-                    match network_error {
-                        Sp1NetworkError::RequestUnfulfillable { .. }
-                        | Sp1NetworkError::RequestTimedOut { .. }
-                        | Sp1NetworkError::RequestAuctionTimedOut { .. } => {
-                            return Ok(Sp1NetworkWaitOutcome::RetryRequest(error.to_string()));
-                        }
-                        Sp1NetworkError::RequestUnexecutable { .. }
-                        | Sp1NetworkError::SimulationFailed => {
-                            return Err(RaikoError::Guest(format!(
-                                "SP1 {stage} network proof failed: {error}"
-                            )));
-                        }
-                        Sp1NetworkError::RpcError(_) | Sp1NetworkError::Other(_) => {}
-                    }
-                }
-                tracing::warn!(
-                    stage,
-                    request_id = %request_id_string,
-                    attempt,
-                    error = ?error,
-                    "SP1 network proof wait failed; retrying existing request id"
-                );
-                attempt = attempt.saturating_add(1);
-                tokio::time::sleep(SP1_NETWORK_WAIT_RETRY_DELAY).await;
+    let wait_started = Instant::now();
+    let submission_id = RemoteSubmissionId::new();
+    status_registry
+        .lock()
+        .map_err(|err| RaikoError::Guest(format!("SP1 status registry lock poisoned: {err}")))?
+        .insert(
+            submission_id,
+            Sp1SubmissionState {
+                metadata: Sp1SubmissionMetadata {
+                    auction_timeout_at: auction_timeout.map(|timeout| Instant::now() + timeout),
+                },
+                terminal_outcome: None,
+            },
+        );
+    let _guard = Sp1SubmissionGuard::new(
+        status_tracker.clone(),
+        Arc::clone(status_registry),
+        submission_id,
+    );
+    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+    let remote_submission = RemoteSubmission {
+        id: submission_id,
+        proof_type: ProofType::Sp1,
+        provider_request_id: request_id_string.to_string(),
+        timeout_at: Some(Instant::now() + timeout),
+    };
+    status_tracker
+        .register(remote_submission, terminal_tx)
+        .map_err(|err| {
+            RaikoError::Guest(format!("Failed to register SP1 network status poll: {err}"))
+        })?;
+
+    let terminal = terminal_rx.await.map_err(|err| {
+        RaikoError::Guest(format!(
+            "SP1 network status poller stopped before terminal status: {err}"
+        ))
+    })?;
+
+    match terminal {
+        RemoteTerminalResult::Fulfilled { .. } => {
+            let proof =
+                fetch_sp1_network_proof(client, request_id, stage, request_id_string).await?;
+            tracing::info!(
+                stage,
+                request_id = %request_id_string,
+                proof_mode = sp1_proof_mode_name(&proof),
+                elapsed_ms = wait_started.elapsed().as_millis(),
+                "SP1 network proof received"
+            );
+            Ok(Sp1NetworkWaitOutcome::Fulfilled(Box::new(proof)))
+        }
+        RemoteTerminalResult::Failed { reason, .. } => {
+            match sp1_terminal_outcome(status_registry, submission_id)? {
+                Some(
+                    Sp1TerminalOutcome::Unfulfillable
+                    | Sp1TerminalOutcome::TimedOut
+                    | Sp1TerminalOutcome::AuctionTimedOut,
+                ) => Ok(Sp1NetworkWaitOutcome::RetryRequest(reason.message)),
+                Some(Sp1TerminalOutcome::Unexecutable) | None => Err(RaikoError::Guest(format!(
+                    "SP1 {stage} network proof failed: {}",
+                    reason.message
+                ))),
             }
         }
+        RemoteTerminalResult::TimedOut { reason, .. }
+        | RemoteTerminalResult::Expired { reason, .. } => {
+            Ok(Sp1NetworkWaitOutcome::RetryRequest(reason.message))
+        }
+        RemoteTerminalResult::Unrecoverable { reason, .. } => Err(RaikoError::Guest(format!(
+            "SP1 {stage} network proof failed: {}",
+            reason.message
+        ))),
     }
+}
+
+async fn fetch_sp1_network_proof(
+    client: &NetworkProver,
+    request_id: B256,
+    stage: &str,
+    request_id_string: &str,
+) -> RaikoResult<SP1ProofWithPublicValues> {
+    let (_status, maybe_proof) = client.get_proof_status(request_id).await.map_err(|err| {
+        RaikoError::Guest(format!(
+            "Failed to fetch fulfilled SP1 {stage} proof {request_id_string}: {err}"
+        ))
+    })?;
+    maybe_proof.ok_or_else(|| {
+        RaikoError::Guest(format!(
+            "SP1 {stage} proof {request_id_string} is fulfilled but proof payload is missing"
+        ))
+    })
 }
 
 fn insert_sp1_metadata(

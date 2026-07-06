@@ -355,6 +355,23 @@ struct UploadedProgram {
 }
 
 #[derive(Clone, Debug)]
+struct UploadedInput {
+    url: Url,
+    refresh_at: SystemTime,
+}
+
+/// Refresh deadline for a presigned upload URL: `X-Amz-Expires` seconds out (default 3600),
+/// pulled back by 120s of headroom and floored at 60s so we re-upload before the URL dies.
+fn presigned_refresh_at(url: &Url) -> SystemTime {
+    let expires_secs = url
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("X-Amz-Expires"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .unwrap_or(3600);
+    SystemTime::now() + Duration::from_secs(expires_secs.saturating_sub(120).max(60))
+}
+
+#[derive(Clone, Debug)]
 struct Submission {
     market_request_id: U256,
     provider_request_id: String,
@@ -385,6 +402,9 @@ struct FreshSubmissionContext<'a> {
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
     attempt: u64,
+    // Per-proof input-upload cache. Uploaded once (first attempt) and reused across rebids; a fresh
+    // presigned URL is minted only when the cached one nears expiry (see `ensure_input_uploaded`).
+    input_cache: &'a mut Option<UploadedInput>,
     // Market request id to reuse for this submission. Set on rebids so every rung of one proof
     // task shares an id: the market keys locks and paid fulfillments on the id, which makes
     // paying more than one rung impossible by construction. `None` mints a fresh id.
@@ -633,22 +653,42 @@ impl BoundlessProver {
             })
         })
         .await?;
-        let expires_secs = url
-            .query_pairs()
-            .find(|(key, _)| key.eq_ignore_ascii_case("X-Amz-Expires"))
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-            .unwrap_or(3600);
+        let refresh_at = presigned_refresh_at(&url);
         let program = UploadedProgram {
             image_id,
             url,
-            refresh_at: SystemTime::now()
-                + Duration::from_secs(expires_secs.saturating_sub(120).max(60)),
+            refresh_at,
         };
         self.programs
             .write()
             .await
             .insert(elf_type, program.clone());
         Ok(program)
+    }
+
+    async fn ensure_input_uploaded(
+        &self,
+        client: &Client,
+        guest_env_bytes: &[u8],
+        cache: &mut Option<UploadedInput>,
+    ) -> RaikoResult<Url> {
+        if let Some(input) = cache.as_ref()
+            && SystemTime::now() < input.refresh_at
+        {
+            return Ok(input.url.clone());
+        }
+        let url = retry_external("upload boundless input", || async {
+            client.upload_input(guest_env_bytes).await.map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
+            })
+        })
+        .await?;
+        let refresh_at = presigned_refresh_at(&url);
+        *cache = Some(UploadedInput {
+            url: url.clone(),
+            refresh_at,
+        });
+        Ok(url)
     }
 
     fn process_input(input: &[u8]) -> RaikoResult<(GuestEnv, Vec<u8>)> {
@@ -689,13 +729,13 @@ impl BoundlessProver {
         &self,
         client: &Client,
         guest_env: GuestEnv,
-        guest_env_bytes: &[u8],
         elf: &[u8],
         program: &UploadedProgram,
         offer_spec: &BoundlessOfferParams,
         mcycles_count: u32,
         journal: Vec<u8>,
         attempt: u64,
+        input_url: Url,
         reuse_request_id: Option<U256>,
     ) -> RaikoResult<ProofRequest> {
         let ValidatedOfferParams {
@@ -721,12 +761,6 @@ impl BoundlessProver {
                 Ok(amount)
             })
             .transpose()?;
-        let input_url = retry_external("upload boundless input", || async {
-            client.upload_input(guest_env_bytes).await.map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
-            })
-        })
-        .await?;
         let mut offer_params = OfferParams::builder();
         offer_params
             .ramp_up_period(ramp_up_period_secs)
@@ -915,16 +949,19 @@ impl BoundlessProver {
         context: FreshSubmissionContext<'_>,
     ) -> RaikoResult<Submission> {
         let (guest_env, guest_env_bytes) = Self::process_input(context.input.as_ref())?;
+        let input_url = self
+            .ensure_input_uploaded(context.client, &guest_env_bytes, context.input_cache)
+            .await?;
         let request = Box::pin(self.build_request(
             context.client,
             guest_env,
-            &guest_env_bytes,
             context.elf,
             context.program,
             context.offer_spec,
             context.quoted_mcycles_count,
             context.journal.to_vec(),
             context.attempt,
+            input_url,
             context.reuse_request_id,
         ))
         .await?;
@@ -1216,6 +1253,8 @@ impl BoundlessProver {
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let client = retry_external("create boundless client", || self.create_client()).await?;
+        // Seed the program cache (and derive the stable image ref) up front; the per-attempt
+        // refresh below is a cache hit unless the presigned URL nears expiry.
         let program = self.ensure_uploaded(&client, elf_type, elf).await?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
@@ -1227,6 +1266,7 @@ impl BoundlessProver {
             parse_shasta_aggregation_input_hash(&journal)?
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
+        // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
         let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
 
@@ -1246,8 +1286,14 @@ impl BoundlessProver {
         // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
         // previous id became unusable).
         let mut reuse_request_id: Option<U256> = None;
+        // Per-proof input-upload cache: the guest env is uploaded once and reused across rebids,
+        // refreshed only when its presigned URL nears expiry.
+        let mut input_cache: Option<UploadedInput> = None;
 
         loop {
+            // Refresh the program URL per attempt (cheap cache hit unless a refresh is due) so late
+            // rebids never carry an expired presigned program URL. The image id is unchanged.
+            let program = self.ensure_uploaded(&client, elf_type, elf).await?;
             let submission = if let Some(submission) = resume_submission.take() {
                 attempt = attempt.max(resume_attempt(&submission));
                 // Expired records are deliberately not short-circuited: the poll below gives
@@ -1280,24 +1326,28 @@ impl BoundlessProver {
                         self.config.rebid_max_attempts,
                     )));
                 }
-                let submit = |reuse_request_id: Option<U256>| {
-                    Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                        client: &client,
-                        input: &input,
-                        elf,
-                        program: &program,
-                        offer_spec,
-                        journal: &journal,
-                        image_ref: &image_ref,
-                        deployment: &deployment,
-                        observer: observer.as_ref(),
-                        quoted_mcycles_count,
-                        evaluated_mcycles_count,
-                        attempt,
-                        reuse_request_id,
-                    }))
-                };
-                match submit(reuse_request_id).await {
+                // `input_cache` is threaded by `&mut` so the reused-id attempt and the fresh-id
+                // fallback below share a single per-proof input upload. The context is built inline
+                // (rather than via a closure) because it borrows `&mut input_cache`, whose lifetime
+                // a closure returning the borrow cannot name.
+                let first = Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                    client: &client,
+                    input: &input,
+                    elf,
+                    program: &program,
+                    offer_spec,
+                    journal: &journal,
+                    image_ref: &image_ref,
+                    deployment: &deployment,
+                    observer: observer.as_ref(),
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
+                    attempt,
+                    input_cache: &mut input_cache,
+                    reuse_request_id,
+                }))
+                .await;
+                match first {
                     Ok(submission) => submission,
                     Err(error) => {
                         // Id reuse is best-effort: an order stream or RPC may refuse a same-id
@@ -1312,7 +1362,23 @@ impl BoundlessProver {
                             error = %error,
                             "Boundless rebid under the reused request id failed; retrying once with a fresh id"
                         );
-                        submit(None).await?
+                        Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                            client: &client,
+                            input: &input,
+                            elf,
+                            program: &program,
+                            offer_spec,
+                            journal: &journal,
+                            image_ref: &image_ref,
+                            deployment: &deployment,
+                            observer: observer.as_ref(),
+                            quoted_mcycles_count,
+                            evaluated_mcycles_count,
+                            attempt,
+                            input_cache: &mut input_cache,
+                            reuse_request_id: None,
+                        }))
+                        .await?
                     }
                 }
             };
@@ -1771,8 +1837,9 @@ mod tests {
     use std::{
         env,
         sync::{Mutex, MutexGuard},
-        time::Duration,
+        time::{Duration, SystemTime},
     };
+    use url::Url;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
@@ -2653,5 +2720,14 @@ mod tests {
                 }
             }))
         );
+    }
+
+    #[test]
+    fn presigned_refresh_at_leaves_headroom_before_expiry() {
+        let url = Url::parse("https://s3.example/obj?X-Amz-Expires=3600").unwrap();
+        let refresh = super::presigned_refresh_at(&url);
+        // Refreshes at least 120s before the 3600s expiry.
+        assert!(refresh <= SystemTime::now() + Duration::from_secs(3600 - 120));
+        assert!(refresh >= SystemTime::now() + Duration::from_secs(3600 - 121));
     }
 }

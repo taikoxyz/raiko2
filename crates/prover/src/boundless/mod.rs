@@ -594,6 +594,11 @@ pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
+    /// Running total of the max-price claims of every in-flight on-chain submission from this
+    /// signer. Serializes the balance-read→submit critical section so concurrent submissions
+    /// deposit against their combined reserved total instead of each reading the same pre-deposit
+    /// balance and under-funding the account.
+    balance_gate: Arc<tokio::sync::Mutex<U256>>,
 }
 
 impl BoundlessProver {
@@ -603,6 +608,7 @@ impl BoundlessProver {
             deployment: config.get_effective_deployment(),
             config,
             programs: Arc::new(RwLock::new(HashMap::new())),
+            balance_gate: Arc::new(tokio::sync::Mutex::new(U256::ZERO)),
         }
     }
 
@@ -866,17 +872,10 @@ impl BoundlessProver {
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
-        let balance = client
-            .boundless_market
-            .balance_of(request.client_address())
-            .await
-            .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))?;
         let max_price = U256::from(request.offer.maxPrice);
-        let value = if balance > max_price {
-            U256::ZERO
-        } else {
-            max_price - balance
-        };
+        // Sign the request before entering the balance-gate critical section: signing is fallible
+        // and independent of the deposit value, so keeping it outside guarantees that nothing
+        // between the claim-increment and the claim-release can early-return and leak a claim.
         let chain_id =
             client.boundless_market.get_chain_id().await.map_err(|e| {
                 RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
@@ -886,6 +885,33 @@ impl BoundlessProver {
             .sign_request(signer, market_addr, chain_id)
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
+
+        // Serialize the balance-read→deposit computation. Claiming this request's max price on the
+        // shared reserved total before reading the balance means a concurrent submission from the
+        // same signer computes its top-up against the combined reserved claim, not the same
+        // pre-deposit balance we just saw. The lock is held only across the increment+read+compute
+        // (the reserved total, elevated until the submit returns, carries the claim across the slow
+        // sign/send). Over-depositing under RPC lag is acceptable and safe — deposits accrue to the
+        // account — whereas under-depositing is exactly the concurrent-underfunding bug this fixes.
+        let value = {
+            let mut reserved = self.balance_gate.lock().await;
+            *reserved = reserved.saturating_add(max_price);
+            match client
+                .boundless_market
+                .balance_of(request.client_address())
+                .await
+            {
+                Ok(balance) => deposit_topup(balance, *reserved),
+                Err(e) => {
+                    // Release the claim we just took before bailing out, so a failed balance query
+                    // never leaks a reservation that would permanently over-deposit later requests.
+                    *reserved = reserved.saturating_sub(max_price);
+                    return Err(RaikoError::Guest(format!(
+                        "Failed to query boundless balance: {e}"
+                    )));
+                }
+            }
+        };
         let call = client
             .boundless_market
             .instance()
@@ -939,6 +965,15 @@ impl BoundlessProver {
                     "Boundless submitRequest returned an uncertain error; polling reserved request id"
                 );
             }
+        }
+
+        // Release this request's claim now that the submit attempt has returned. Both send() arms
+        // (confirmed tx and uncertain error) converge here with no early return in between, so the
+        // decrement matches the earlier increment on every reachable path. The submitted request
+        // itself now debits the on-chain balance, so keeping the claim would double-count it.
+        {
+            let mut reserved = self.balance_gate.lock().await;
+            *reserved = reserved.saturating_sub(max_price);
         }
 
         Ok(submission)
@@ -1589,6 +1624,14 @@ fn parse_request_amount(
             ))
         })?;
     Ok(amount)
+}
+
+/// Top-up needed so the on-chain balance covers the sum of all in-flight max-price claims.
+/// Depositing against the reserved total (not this request alone) closes the concurrent-submission
+/// underfunding window: two requests that each look individually covered still top up their combined
+/// shortfall. Over-deposit under RPC lag is possible and safe — deposits accrue to the account.
+const fn deposit_topup(on_chain_balance: U256, reserved_total: U256) -> U256 {
+    reserved_total.saturating_sub(on_chain_balance)
 }
 
 /// Escalated and capped market-mode offer prices derived from the SDK's autopriced offer.
@@ -2384,6 +2427,26 @@ mod tests {
         assert_eq!(prices.max_price, U256::from(400));
         assert_eq!(prices.min_price, U256::from(10));
         assert!(!prices.clamped_to_cap);
+    }
+
+    #[test]
+    fn deposit_topup_covers_all_in_flight_claims() {
+        use alloy_primitives::U256;
+        // Balance already covers all reserved claims -> no deposit.
+        assert_eq!(
+            super::deposit_topup(U256::from(30u64), U256::from(20u64)),
+            U256::ZERO
+        );
+        // Two 10-wei claims, 15 on chain -> top up the 5 shortfall (the bug case: each alone looked covered).
+        assert_eq!(
+            super::deposit_topup(U256::from(15u64), U256::from(20u64)),
+            U256::from(5u64)
+        );
+        // Empty account, one 10-wei claim -> deposit 10.
+        assert_eq!(
+            super::deposit_topup(U256::ZERO, U256::from(10u64)),
+            U256::from(10u64)
+        );
     }
 
     #[test]

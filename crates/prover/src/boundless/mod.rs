@@ -748,7 +748,7 @@ impl BoundlessProver {
             timeout,
             ramp_up_period_secs,
             bidding_start,
-        } = validate_offer_params(offer_spec, mcycles_count, self.config.block_time_sec())?;
+        } = validate_offer_params(offer_spec, mcycles_count)?;
         // Escalate only the manual max-price cap on resubmissions; the min price keeps the ramp
         // start unchanged so an idle prover still locks cheaply.
         let max_price = max_price
@@ -1706,7 +1706,6 @@ fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
-    block_time_sec: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let (max_price, min_price, max_price_cap) = match offer_spec.pricing_mode {
@@ -1779,13 +1778,11 @@ fn validate_offer_params(
             "timeout {timeout}s must be greater than lock timeout {lock_timeout}s for {mcycles_count} mcycles"
         )));
     }
-    let ramp_up_period_secs = offer_spec
-        .ramp_up_period_blocks
-        .saturating_mul(block_time_sec);
+    let ramp_up_period_secs = offer_spec.ramp_up_period_sec;
     if ramp_up_period_secs > lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
-            "ramp_up_period_blocks={} exceeds lock timeout for {} mcycles",
-            offer_spec.ramp_up_period_blocks, mcycles_count
+            "ramp_up_period_sec={} exceeds lock timeout for {} mcycles",
+            offer_spec.ramp_up_period_sec, mcycles_count
         )));
     }
 
@@ -2273,7 +2270,7 @@ mod tests {
     fn validate_offer_params_rejects_min_price_above_max_price() {
         let mut offer = sample_offer();
         offer.min_price_per_mcycle = Some("0.000001".to_string());
-        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
+        let err = validate_offer_params(&offer, 100).unwrap_err();
         assert!(err.to_string().contains("min_price_per_mcycle"));
     }
 
@@ -2285,13 +2282,13 @@ mod tests {
             timeout_ms_per_mcycle: 300,
             dynamic_pricing_timeout_modifier: None,
         };
-        let err = validate_offer_params(&offer, 100, 2).unwrap_err();
+        let err = validate_offer_params(&offer, 100).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
 
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
-        let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&sample_offer(), 1_000).expect("valid offer");
         let max_price = validated.max_price.expect("manual max price");
         let min_price = validated.min_price.expect("manual min price");
         assert_eq!(max_price.asset, Asset::ETH);
@@ -2306,7 +2303,7 @@ mod tests {
     fn validate_offer_params_returns_unescalated_manual_max_price() {
         // Escalation moved to `build_request`; `validate_offer_params` returns the base cap so the
         // per-rung compounding in `escalated_price` is applied once, on the real base.
-        let validated = validate_offer_params(&sample_offer(), 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&sample_offer(), 1_000).expect("valid offer");
         let base_max = validated.max_price.expect("manual max price");
         let base_min = validated.min_price.expect("manual min price");
 
@@ -2341,7 +2338,7 @@ mod tests {
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
 
         assert!(validated.max_price.is_none());
         assert!(validated.min_price.is_none());
@@ -2357,7 +2354,7 @@ mod tests {
         offer.max_price_per_mcycle = Some("0.00000006".to_string());
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
         let max_price_cap = validated.max_price_cap.expect("market max price cap");
 
         assert!(validated.max_price.is_none());
@@ -2378,7 +2375,7 @@ mod tests {
             dynamic_pricing_timeout_modifier: Some(2.0),
         };
 
-        let validated = validate_offer_params(&offer, 1_000, 2).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid market offer");
 
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 1800);
@@ -2393,8 +2390,8 @@ mod tests {
             timeout_secs: 3600,
         };
 
-        let small = validate_offer_params(&offer, 100, 2).expect("valid small offer");
-        let large = validate_offer_params(&offer, 5_000, 2).expect("valid large offer");
+        let small = validate_offer_params(&offer, 100).expect("valid small offer");
+        let large = validate_offer_params(&offer, 5_000).expect("valid large offer");
 
         assert_eq!(small.lock_timeout, 600);
         assert_eq!(small.timeout, 3600);

@@ -56,7 +56,8 @@ order_stream_url = "https://base-mainnet.boundless.network"
 [prover.boundless.offer_params.batch]
 pricing_mode = "manual"
 ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
+# Ramp-up duration in seconds (auction price climbs from min to max over this window).
+ramp_up_period_sec = 120
 max_price_per_mcycle = "0.0000006"
 min_price_per_mcycle = "0.000000010"
 lock_collateral = "20"
@@ -69,7 +70,8 @@ timeout_ms_per_mcycle = 900
 [prover.boundless.offer_params.aggregation]
 pricing_mode = "manual"
 ramp_up_start_sec = 20
-ramp_up_period_blocks = 60
+# Ramp-up duration in seconds (auction price climbs from min to max over this window).
+ramp_up_period_sec = 120
 max_price_per_mcycle = "0.0000008"
 min_price_per_mcycle = "0.000000006"
 lock_collateral = "20"

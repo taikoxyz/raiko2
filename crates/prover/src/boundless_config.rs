@@ -72,7 +72,7 @@ pub struct BoundlessOfferParams {
     #[serde(default)]
     pub pricing_mode: BoundlessPricingMode,
     pub ramp_up_start_sec: u32,
-    pub ramp_up_period_blocks: u32,
+    pub ramp_up_period_sec: u32,
     pub timeouts: TimeoutPolicy,
     #[serde(default)]
     pub max_price_per_mcycle: Option<String>,
@@ -198,7 +198,7 @@ pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
-        ramp_up_period_blocks: 60,
+        ramp_up_period_sec: 120,
         timeouts: TimeoutPolicy::PerMcycle {
             lock_timeout_ms_per_mcycle: 300,
             timeout_ms_per_mcycle: 900,
@@ -214,7 +214,7 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
     BoundlessOfferParams {
         pricing_mode: BoundlessPricingMode::Manual,
         ramp_up_start_sec: 20,
-        ramp_up_period_blocks: 60,
+        ramp_up_period_sec: 120,
         timeouts: TimeoutPolicy::PerMcycle {
             lock_timeout_ms_per_mcycle: 3000,
             timeout_ms_per_mcycle: 6000,
@@ -233,15 +233,6 @@ impl BoundlessConfig {
             .as_ref()
             .and_then(|deployment| deployment.deployment_type.clone())
             .unwrap_or(DeploymentType::Base)
-    }
-
-    #[must_use]
-    pub fn block_time_sec(&self) -> u32 {
-        match self.get_deployment_type() {
-            DeploymentType::Base => 2,
-            DeploymentType::Sepolia => 12,
-            DeploymentType::Taiko => 1,
-        }
     }
 }
 
@@ -363,19 +354,16 @@ mod tests {
     }
 
     #[test]
-    fn taiko_deployment_type_parses_and_uses_taiko_block_time() {
+    fn taiko_deployment_type_parses() {
         let deployment_type = "taiko".parse::<DeploymentType>().expect("parse taiko");
         assert_eq!(deployment_type, DeploymentType::Taiko);
-
         let mut config = BoundlessConfig::default();
         config
             .deployment
             .as_mut()
             .expect("default deployment")
             .deployment_type = Some(deployment_type);
-
         assert_eq!(config.get_deployment_type(), DeploymentType::Taiko);
-        assert_eq!(config.block_time_sec(), 1);
     }
 
     #[test]
@@ -392,7 +380,7 @@ mod tests {
     fn default_batch_offer_matches_documented_defaults() {
         let batch = BoundlessConfig::default().offer_params.batch;
         assert_eq!(batch.ramp_up_start_sec, 20);
-        assert_eq!(batch.ramp_up_period_blocks, 60);
+        assert_eq!(batch.ramp_up_period_sec, 120);
         assert_eq!(
             batch.timeouts,
             TimeoutPolicy::PerMcycle {
@@ -411,7 +399,7 @@ mod tests {
     fn default_aggregation_offer_matches_documented_defaults() {
         let aggregation = BoundlessConfig::default().offer_params.aggregation;
         assert_eq!(aggregation.ramp_up_start_sec, 20);
-        assert_eq!(aggregation.ramp_up_period_blocks, 60);
+        assert_eq!(aggregation.ramp_up_period_sec, 120);
         assert_eq!(
             aggregation.timeouts,
             TimeoutPolicy::PerMcycle {
@@ -472,7 +460,7 @@ mod tests {
             "max_price_per_mcycle": "0.0000006",
             "min_price_per_mcycle": "0",
             "ramp_up_start_sec": 0,
-            "ramp_up_period_blocks": 180,
+            "ramp_up_period_sec": 180,
             "lock_collateral": "50",
             "timeouts": { "mode": "fixed", "lock_timeout_secs": 600, "timeout_secs": 3600 }
         }))

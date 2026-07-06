@@ -94,11 +94,29 @@ pub struct DeploymentConfig {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchQuoteStrategy {
+#[serde(tag = "strategy", rename_all = "snake_case")]
+pub enum QuoteSizing {
     #[default]
     RaikoAgent,
     Evaluated,
+    Fixed {
+        mcycles: u32,
+    },
+}
+
+impl QuoteSizing {
+    /// Validate the fixed-quote value.
+    ///
+    /// # Errors
+    /// Returns an error when a `Fixed` quote is zero.
+    pub fn validate(&self, field: &str) -> Result<(), String> {
+        if let QuoteSizing::Fixed { mcycles } = self
+            && *mcycles == 0
+        {
+            return Err(format!("{field} fixed mcycles must be greater than 0"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,13 +130,9 @@ pub struct BoundlessConfig {
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
     #[serde(default)]
-    pub batch_quoted_mcycles: Option<u32>,
+    pub batch_quote: QuoteSizing,
     #[serde(default)]
-    pub batch_quote_strategy: BatchQuoteStrategy,
-    #[serde(default)]
-    pub aggregation_quoted_mcycles: Option<u32>,
-    #[serde(default)]
-    pub aggregation_quote_strategy: BatchQuoteStrategy,
+    pub aggregation_quote: QuoteSizing,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -145,10 +159,8 @@ impl Default for BoundlessConfig {
                     "order_stream_url": "https://base-mainnet.boundless.network"
                 })),
             }),
-            batch_quoted_mcycles: None,
-            batch_quote_strategy: BatchQuoteStrategy::default(),
-            aggregation_quoted_mcycles: None,
-            aggregation_quote_strategy: BatchQuoteStrategy::default(),
+            batch_quote: QuoteSizing::default(),
+            aggregation_quote: QuoteSizing::default(),
             offer_params: OfferParamsConfig {
                 batch: default_batch_offer_params(),
                 aggregation: default_aggregation_offer_params(),

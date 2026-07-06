@@ -3,9 +3,8 @@
 pub mod aggregation;
 
 pub use crate::boundless_config::{
-    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
-    DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, TimeoutPolicy,
-    validate_offer_spec,
+    BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DeploymentConfig, DeploymentType,
+    MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing, TimeoutPolicy, validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -1553,32 +1552,18 @@ where
 
 impl BoundlessProver {
     // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
-    fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
-        match elf_type {
-            ElfType::Batch => {
-                if let Some(batch_quoted_mcycles) = self.config.batch_quoted_mcycles {
-                    batch_quoted_mcycles
-                } else {
-                    match self.config.batch_quote_strategy.clone() {
-                        BatchQuoteStrategy::RaikoAgent => {
-                            quote_batch_mcycles(evaluated_mcycles_count)
-                        }
-                        BatchQuoteStrategy::Evaluated => evaluated_mcycles_count,
-                    }
-                }
-            }
-            ElfType::Aggregation => {
-                if let Some(aggregation_quoted_mcycles) = self.config.aggregation_quoted_mcycles {
-                    aggregation_quoted_mcycles
-                } else {
-                    match self.config.aggregation_quote_strategy.clone() {
-                        BatchQuoteStrategy::RaikoAgent => {
-                            quote_aggregation_mcycles(evaluated_mcycles_count)
-                        }
-                        BatchQuoteStrategy::Evaluated => evaluated_mcycles_count,
-                    }
-                }
-            }
+    const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
+        let quote = match elf_type {
+            ElfType::Batch => &self.config.batch_quote,
+            ElfType::Aggregation => &self.config.aggregation_quote,
+        };
+        match quote {
+            QuoteSizing::RaikoAgent => match elf_type {
+                ElfType::Batch => quote_batch_mcycles(evaluated_mcycles_count),
+                ElfType::Aggregation => quote_aggregation_mcycles(evaluated_mcycles_count),
+            },
+            QuoteSizing::Evaluated => evaluated_mcycles_count,
+            QuoteSizing::Fixed { mcycles } => *mcycles,
         }
     }
 }
@@ -1806,9 +1791,9 @@ fn validate_offer_params(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
-        DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        TimeoutPolicy, defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
+        BoundlessConfig, BoundlessPricingMode, BoundlessProver, DeploymentConfig, DeploymentType,
+        ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction, TimeoutPolicy,
+        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
         exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
         parse_env_bool, parse_env_url, quote_batch_mcycles, should_rebid_unlocked_request,
         storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
@@ -1937,49 +1922,39 @@ mod tests {
     }
 
     #[test]
-    fn quoted_mcycles_count_can_use_evaluated_cycles_directly() {
-        let config = BoundlessConfig {
-            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
-            ..Default::default()
-        };
-        let prover = BoundlessProver::new(config);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_188);
-    }
+    fn quoted_mcycles_count_dispatches_on_quote_sizing() {
+        use super::QuoteSizing;
+        // RaikoAgent rounds (batch floor 2000, step 1000).
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
 
-    #[test]
-    fn quoted_mcycles_count_can_use_fixed_override() {
-        let config = BoundlessConfig {
-            batch_quoted_mcycles: Some(1_500),
-            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
+        // Evaluated passes through.
+        let cfg = BoundlessConfig {
+            batch_quote: QuoteSizing::Evaluated,
             ..Default::default()
         };
-        let prover = BoundlessProver::new(config);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_500);
-    }
-
-    #[test]
-    fn aggregation_quoted_mcycles_can_use_evaluated_cycles_directly() {
-        let config = BoundlessConfig {
-            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
-            ..Default::default()
-        };
-        let prover = BoundlessProver::new(config);
         assert_eq!(
-            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
             1_188
         );
-    }
 
-    #[test]
-    fn aggregation_quoted_mcycles_can_use_fixed_override() {
-        let config = BoundlessConfig {
-            aggregation_quoted_mcycles: Some(320),
-            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
+        // Fixed pins the value.
+        let cfg = BoundlessConfig {
+            batch_quote: QuoteSizing::Fixed { mcycles: 1_500 },
             ..Default::default()
         };
-        let prover = BoundlessProver::new(config);
         assert_eq!(
-            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
+            1_500
+        );
+
+        // Aggregation Fixed pins independently.
+        let cfg = BoundlessConfig {
+            aggregation_quote: QuoteSizing::Fixed { mcycles: 320 },
+            ..Default::default()
+        };
+        assert_eq!(
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Aggregation, 1_188),
             320
         );
     }

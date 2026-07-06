@@ -158,10 +158,8 @@ pub(crate) fn boundless_prover_config(
         rpc_url: boundless.rpc_url,
         signer_key: boundless.signer_key,
         deployment: boundless.deployment,
-        batch_quoted_mcycles: boundless.batch_quoted_mcycles,
-        batch_quote_strategy: boundless.batch_quote_strategy,
-        aggregation_quoted_mcycles: boundless.aggregation_quoted_mcycles,
-        aggregation_quote_strategy: boundless.aggregation_quote_strategy,
+        batch_quote: boundless.batch_quote,
+        aggregation_quote: boundless.aggregation_quote,
         offer_params: boundless.offer_params,
         poll_interval_ms: boundless.poll_interval_ms,
         timeout_ms: boundless.timeout_ms,
@@ -328,10 +326,10 @@ mod tests {
         config.prover.boundless.rebid_timeout_ms = 900_000;
         config.prover.boundless.rebid_price_step_bps = 3000;
         config.prover.boundless.rebid_max_attempts = 5;
-        config.rpc.pairs[0].boundless.batch_quoted_mcycles = Some(5_000);
-        config.rpc.pairs[0].boundless.aggregation_quoted_mcycles = Some(320);
-        config.rpc.pairs[0].boundless.aggregation_quote_strategy =
-            Some(raiko2_prover::boundless::BatchQuoteStrategy::Evaluated);
+        config.rpc.pairs[0].boundless.batch_quote =
+            Some(raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 });
+        config.rpc.pairs[0].boundless.aggregation_quote =
+            Some(raiko2_prover::boundless::QuoteSizing::Evaluated);
         config.rpc.pairs[0].boundless.poll_interval_ms = Some(15_000);
         config.rpc.pairs[0].boundless.timeout_ms = Some(4_200_000);
         config.rpc.pairs[0].boundless.rebid_timeout_ms = Some(450_000);
@@ -364,11 +362,13 @@ mod tests {
 
         let boundless = boundless_prover_config(&config, &pair);
 
-        assert_eq!(boundless.batch_quoted_mcycles, Some(5_000));
-        assert_eq!(boundless.aggregation_quoted_mcycles, Some(320));
         assert_eq!(
-            boundless.aggregation_quote_strategy,
-            raiko2_prover::boundless::BatchQuoteStrategy::Evaluated
+            boundless.batch_quote,
+            raiko2_prover::boundless::QuoteSizing::Fixed { mcycles: 5_000 }
+        );
+        assert_eq!(
+            boundless.aggregation_quote,
+            raiko2_prover::boundless::QuoteSizing::Evaluated
         );
         assert_eq!(
             boundless.offer_params.batch.timeouts,

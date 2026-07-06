@@ -2,7 +2,7 @@ use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless_config::{
-    BatchQuoteStrategy, BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, REBID_MAX_ATTEMPTS_LIMIT,
+    BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT,
     validate_offer_spec,
 };
 use raiko2_provider::{
@@ -111,9 +111,8 @@ pub struct ResolvedNetworkPair {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
-    pub batch_quoted_mcycles: Option<u32>,
-    pub aggregation_quoted_mcycles: Option<u32>,
-    pub aggregation_quote_strategy: Option<BatchQuoteStrategy>,
+    pub batch_quote: Option<QuoteSizing>,
+    pub aggregation_quote: Option<QuoteSizing>,
     pub poll_interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
     pub rebid_timeout_ms: Option<u64>,
@@ -125,11 +124,13 @@ pub struct BoundlessPairConfig {
 impl BoundlessPairConfig {
     /// Validate the optional pair-specific Boundless overrides.
     pub fn validate(&self, pair_key: &str) -> Result<()> {
-        if matches!(self.batch_quoted_mcycles, Some(0)) {
-            bail!("{pair_key}: boundless.batch_quoted_mcycles must be > 0");
+        if let Some(q) = &self.batch_quote {
+            q.validate(&format!("{pair_key}: boundless.batch_quote"))
+                .map_err(anyhow::Error::msg)?;
         }
-        if matches!(self.aggregation_quoted_mcycles, Some(0)) {
-            bail!("{pair_key}: boundless.aggregation_quoted_mcycles must be > 0");
+        if let Some(q) = &self.aggregation_quote {
+            q.validate(&format!("{pair_key}: boundless.aggregation_quote"))
+                .map_err(anyhow::Error::msg)?;
         }
         if matches!(self.poll_interval_ms, Some(0)) {
             bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
@@ -430,7 +431,7 @@ mod tests {
     #[test]
     fn boundless_pair_config_rejects_zero_aggregation_quote() {
         let config = BoundlessPairConfig {
-            aggregation_quoted_mcycles: Some(0),
+            aggregation_quote: Some(QuoteSizing::Fixed { mcycles: 0 }),
             ..Default::default()
         };
 
@@ -439,7 +440,7 @@ mod tests {
                 .validate("taiko_hoodi/hoodi")
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
-                .contains("aggregation_quoted_mcycles")
+                .contains("aggregation_quote")
         );
     }
 

@@ -3,8 +3,8 @@ use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
-        BatchQuoteStrategy, DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS,
-        DEFAULT_REBID_TIMEOUT_MS, DeploymentConfig, MIN_REBID_TIMEOUT_MS, OfferParamsConfig,
+        DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
+        DeploymentConfig, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing,
         REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
@@ -259,13 +259,9 @@ pub struct BoundlessConfig {
     #[serde(default)]
     pub deployment: Option<DeploymentConfig>,
     #[serde(default)]
-    pub batch_quoted_mcycles: Option<u32>,
+    pub batch_quote: QuoteSizing,
     #[serde(default)]
-    pub batch_quote_strategy: BatchQuoteStrategy,
-    #[serde(default)]
-    pub aggregation_quoted_mcycles: Option<u32>,
-    #[serde(default)]
-    pub aggregation_quote_strategy: BatchQuoteStrategy,
+    pub aggregation_quote: QuoteSizing,
     pub offer_params: OfferParamsConfig,
     #[serde(default = "default_boundless_poll_interval_ms")]
     pub poll_interval_ms: u64,
@@ -286,14 +282,9 @@ impl Default for BoundlessConfig {
             rpc_url: raiko2_prover::boundless_config::BoundlessConfig::default().rpc_url,
             signer_key: String::new(),
             deployment: raiko2_prover::boundless_config::BoundlessConfig::default().deployment,
-            batch_quoted_mcycles: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .batch_quoted_mcycles,
-            batch_quote_strategy: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .batch_quote_strategy,
-            aggregation_quoted_mcycles: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .aggregation_quoted_mcycles,
-            aggregation_quote_strategy: raiko2_prover::boundless_config::BoundlessConfig::default()
-                .aggregation_quote_strategy,
+            batch_quote: raiko2_prover::boundless_config::BoundlessConfig::default().batch_quote,
+            aggregation_quote: raiko2_prover::boundless_config::BoundlessConfig::default()
+                .aggregation_quote,
             offer_params: raiko2_prover::boundless_config::BoundlessConfig::default().offer_params,
             poll_interval_ms: default_boundless_poll_interval_ms(),
             timeout_ms: default_boundless_timeout_ms(),
@@ -307,12 +298,12 @@ impl Default for BoundlessConfig {
 impl BoundlessConfig {
     /// Validate the effective Boundless config.
     pub fn validate(&self) -> Result<()> {
-        if matches!(self.batch_quoted_mcycles, Some(0)) {
-            bail!("prover.boundless.batch_quoted_mcycles must be > 0");
-        }
-        if matches!(self.aggregation_quoted_mcycles, Some(0)) {
-            bail!("prover.boundless.aggregation_quoted_mcycles must be > 0");
-        }
+        self.batch_quote
+            .validate("prover.boundless.batch_quote")
+            .map_err(anyhow::Error::msg)?;
+        self.aggregation_quote
+            .validate("prover.boundless.aggregation_quote")
+            .map_err(anyhow::Error::msg)?;
         if self.rebid_timeout_ms < MIN_REBID_TIMEOUT_MS {
             bail!("prover.boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
         }
@@ -331,14 +322,11 @@ impl BoundlessConfig {
     /// Merge a pair-specific Boundless override into the global default config.
     pub fn apply_pair_override(&self, pair: &BoundlessPairConfig) -> Result<Self> {
         let mut merged = self.clone();
-        if let Some(batch_quoted_mcycles) = pair.batch_quoted_mcycles {
-            merged.batch_quoted_mcycles = Some(batch_quoted_mcycles);
+        if let Some(batch_quote) = pair.batch_quote.clone() {
+            merged.batch_quote = batch_quote;
         }
-        if let Some(aggregation_quoted_mcycles) = pair.aggregation_quoted_mcycles {
-            merged.aggregation_quoted_mcycles = Some(aggregation_quoted_mcycles);
-        }
-        if let Some(aggregation_quote_strategy) = pair.aggregation_quote_strategy.clone() {
-            merged.aggregation_quote_strategy = aggregation_quote_strategy;
+        if let Some(aggregation_quote) = pair.aggregation_quote.clone() {
+            merged.aggregation_quote = aggregation_quote;
         }
         if let Some(poll_interval_ms) = pair.poll_interval_ms {
             merged.poll_interval_ms = poll_interval_ms;
@@ -459,14 +447,15 @@ mod tests {
     #[test]
     fn prover_config_rejects_zero_aggregation_quote() {
         let mut config = ProverConfig::default();
-        config.boundless.aggregation_quoted_mcycles = Some(0);
+        config.boundless.aggregation_quote =
+            raiko2_prover::boundless_config::QuoteSizing::Fixed { mcycles: 0 };
 
         assert!(
             config
                 .validate()
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
-                .contains("aggregation_quoted_mcycles")
+                .contains("prover.boundless.aggregation_quote")
         );
     }
 

@@ -38,8 +38,8 @@ pairs = [
   # Optional: override Boundless quote, offer, and runtime params per pair.
   # This only affects the `risc0/network` route. SP1 ignores it.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
-# { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote_strategy = "evaluated" } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote_strategy = "evaluated", rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
+# { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote = { strategy = "evaluated" } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote = { strategy = "evaluated" }, rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
 ]
 
 [rpc.client]
@@ -93,20 +93,11 @@ timeout_secs = 7200
 
 [prover.boundless]
 # Global default for the `risc0/network` route. Pair-specific overrides under `rpc.pairs[*].boundless`
-# can replace fixed quote overrides, `aggregation_quote_strategy`, runtime timeout/rebid fields,
+# can replace `batch_quote`/`aggregation_quote`, runtime timeout/rebid fields,
 # and either offer param block for selected pairs.
 offchain = false
 rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
-# Leave `batch_quoted_mcycles` unset so proposal quotes use evaluated cycles
-# (`raiko_agent` rounds up to the next 1000 mcycles with a 2000 mcycle floor).
-# Fixed quote underprices large proposals and overprices small ones.
-# batch_quoted_mcycles = 6000
-batch_quote_strategy = "raiko_agent"
-# Leave `aggregation_quoted_mcycles` unset so aggregation quotes follow the selected strategy.
-# `raiko_agent` rounds aggregation quotes to 100 mcycles with a 200 mcycle floor.
-# aggregation_quoted_mcycles = 200
-aggregation_quote_strategy = "raiko_agent"
 poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
@@ -148,6 +139,19 @@ deployment_type = "base"
 [prover.boundless.deployment.overrides]
 order_stream_url = "https://base-mainnet.boundless.network"
 
+# Quote sizing per stage. Default `raiko_agent` rounds evaluated cycles up (batch: 1000-step,
+# 2000 floor; aggregation: 100-step, 200 floor). Use `evaluated` for the honest cycle count,
+# or `fixed` to pin the quote. A fixed quote underprices large proposals and overprices small ones.
+[prover.boundless.batch_quote]
+strategy = "raiko_agent"
+# strategy = "fixed"
+# mcycles = 6000
+
+[prover.boundless.aggregation_quote]
+strategy = "raiko_agent"
+# strategy = "fixed"
+# mcycles = 200
+
 [prover.boundless.offer_params.batch]
 pricing_mode = "market"
 # Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
@@ -186,8 +190,8 @@ lock_collateral = "20"
 mode = "per_mcycle"
 lock_timeout_ms_per_mcycle = 3000
 timeout_ms_per_mcycle = 6000
-# Aggregation uses the selected quote strategy unless `aggregation_quoted_mcycles`
-# fixes the quote, so per-mcycle cap must also amortize prover overhead (~0.0000087 ETH).
+# Aggregation uses the `aggregation_quote` strategy above, so per-mcycle cap must also
+# amortize prover overhead (~0.0000087 ETH).
 # Manual caps below ~0.0000002 ETH/mcycle (= 0.00004 ETH total at 200 mcycles)
 # rarely lock.
 # max_price_per_mcycle = "0.0000008"

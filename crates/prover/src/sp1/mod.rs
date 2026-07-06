@@ -1690,8 +1690,14 @@ async fn wait_sp1_network_proof(
 
     match terminal {
         RemoteTerminalResult::Fulfilled { .. } => {
-            let proof =
-                fetch_sp1_network_proof(client, request_id, stage, request_id_string).await?;
+            let proof = fetch_sp1_network_proof_until(
+                client,
+                request_id,
+                stage,
+                request_id_string,
+                wait_started + timeout,
+            )
+            .await?;
             tracing::info!(
                 stage,
                 request_id = %request_id_string,
@@ -1722,6 +1728,33 @@ async fn wait_sp1_network_proof(
             "SP1 {stage} network proof failed: {}",
             reason.message
         ))),
+    }
+}
+
+async fn fetch_sp1_network_proof_until(
+    client: &NetworkProver,
+    request_id: B256,
+    stage: &str,
+    request_id_string: &str,
+    deadline: Instant,
+) -> RaikoResult<SP1ProofWithPublicValues> {
+    loop {
+        match fetch_sp1_network_proof(client, request_id, stage, request_id_string).await {
+            Ok(proof) => return Ok(proof),
+            Err(err) if Instant::now() < deadline => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let delay = SP1_NETWORK_WAIT_RETRY_DELAY.min(remaining);
+                tracing::warn!(
+                    stage,
+                    request_id = %request_id_string,
+                    error = %err,
+                    delay_ms = delay.as_millis(),
+                    "SP1 fulfilled proof fetch failed transiently; retrying"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 

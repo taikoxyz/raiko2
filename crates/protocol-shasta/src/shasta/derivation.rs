@@ -114,9 +114,6 @@ pub enum SourceDerivationError {
         /// Required blob length.
         expected: usize,
     },
-    /// The blob payloads could not be decoded using the Shasta blob codec.
-    #[error("blob-backed derivation source has invalid blob encoding")]
-    InvalidBlobEncoding,
 }
 
 /// Validate a derivation source manifest according to the Shasta metadata rules.
@@ -195,10 +192,13 @@ pub fn apply_inherited_metadata(
 
 /// Decode and sanitize a source manifest using the same default-manifest rules as taiko-mono-rs.
 ///
+/// Blob payloads that fail the shared Shasta blob codec degrade to the default manifest,
+/// mirroring the driver's undecodable-blob handling.
+///
 /// # Errors
 ///
-/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or when
-/// the provided blob bytes cannot be decoded with the shared Shasta blob codec.
+/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or a
+/// provided blob has an unexpected size (host-input corruption rather than proposal content).
 pub fn prepare_source_manifest(
     source: &DerivationSource,
     data_source: Option<&InputDataSource>,
@@ -220,10 +220,13 @@ pub fn prepare_source_manifest(
 
 /// Decode and sanitize a source manifest using a caller-selected per-source block limit.
 ///
+/// Blob payloads that fail the shared Shasta blob codec degrade to the default manifest,
+/// mirroring the driver's undecodable-blob handling.
+///
 /// # Errors
 ///
-/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or when
-/// the provided blob bytes cannot be decoded with the shared Shasta blob codec.
+/// Returns [`SourceDerivationError`] when a blob-backed source is missing raw blob bytes or a
+/// provided blob has an unexpected size (host-input corruption rather than proposal content).
 pub fn prepare_source_manifest_with_max_blocks(
     source: &DerivationSource,
     data_source: Option<&InputDataSource>,
@@ -365,8 +368,12 @@ fn decode_blob_backed_manifest(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let decoded =
-        BlobCoder::decode_blobs(&blobs).ok_or(SourceDerivationError::InvalidBlobEncoding)?;
+    // Undecodable blob content is a property of the proposal itself (the bytes are bound to the
+    // on-chain blob hashes), so it degrades to the default payload exactly like the driver's
+    // `resolve_source_manifest` (taiko-client-rs #21854) instead of failing the derivation.
+    let Some(decoded) = BlobCoder::decode_blobs(&blobs) else {
+        return Ok(DerivationSourceManifest::default());
+    };
     let mut concatenated = Vec::new();
     for chunk in decoded {
         concatenated.extend(chunk);
@@ -660,11 +667,96 @@ mod tests {
     }
 
     #[test]
-    fn prepare_source_manifest_rejects_malformed_blob_backed_payloads() {
+    fn prepare_source_manifest_defaults_malformed_blob_backed_payloads() {
         let mut source = DerivationSource::default();
         source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
         let data_source = InputDataSource {
             tx_data_from_blob: vec![vec![0xAB; BYTES_PER_BLOB]],
+            ..Default::default()
+        };
+
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("undecodable blob payload must degrade to the default manifest");
+
+        assert_eq!(prepared.blocks.len(), 1);
+        assert!(prepared.blocks[0].transactions.is_empty());
+        assert_eq!(prepared.blocks[0].coinbase, proposal_metadata().proposer);
+        assert_eq!(
+            prepared.blocks[0].anchor_block_number,
+            parent_context().anchor_block_number
+        );
+    }
+
+    #[test]
+    fn prepare_source_manifest_defaults_stray_byte_blob() {
+        // Mirrors the taiko-client-rs #21854 regression blob (proposal 1812 / L1 block 5167):
+        // the first field element is all zeros (version 0, declared length 0) and a stray
+        // non-zero byte sits past the declared length, so the blob codec rejects it.
+        let mut raw = vec![0u8; BYTES_PER_BLOB];
+        raw[6] = 0x02;
+        let source = DerivationSource {
+            isForcedInclusion: true,
+            blobSlice: crate::shasta::BlobSlice {
+                blobHashes: vec![alloy_primitives::B256::repeat_byte(0xAA)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let data_source = InputDataSource {
+            tx_data_from_blob: vec![raw],
+            ..Default::default()
+        };
+
+        let prepared = prepare_source_manifest(
+            &source,
+            Some(&data_source),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect("stray-byte forced-inclusion blob must degrade to the default manifest");
+
+        assert_eq!(prepared.blocks.len(), 1);
+        assert!(prepared.blocks[0].transactions.is_empty());
+        assert_eq!(prepared.blocks[0].coinbase, proposal_metadata().proposer);
+        assert_eq!(
+            prepared.blocks[0].anchor_block_number,
+            parent_context().anchor_block_number
+        );
+    }
+
+    #[test]
+    fn prepare_source_manifest_still_rejects_missing_blob_data() {
+        // Missing blob bytes are host-input corruption, not proposal content: unlike an
+        // undecodable blob, this must stay a hard error (driver analog: transient fetch
+        // failure that is retried, never defaulted).
+        let mut source = DerivationSource::default();
+        source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
+
+        let err = prepare_source_manifest(
+            &source,
+            Some(&InputDataSource::default()),
+            parent_context(),
+            proposal_metadata(),
+            0,
+        )
+        .expect_err("missing blob data must remain a hard error");
+
+        assert_eq!(err, SourceDerivationError::MissingBlobData);
+    }
+
+    #[test]
+    fn prepare_source_manifest_still_rejects_wrong_blob_length() {
+        let mut source = DerivationSource::default();
+        source.blobSlice.blobHashes = vec![alloy_primitives::B256::repeat_byte(0xAA)];
+        let data_source = InputDataSource {
+            tx_data_from_blob: vec![vec![0u8; 10]],
             ..Default::default()
         };
 
@@ -675,9 +767,16 @@ mod tests {
             proposal_metadata(),
             0,
         )
-        .expect_err("malformed blob payload should be rejected");
+        .expect_err("wrong-size blob payload must remain a hard error");
 
-        assert_eq!(err, SourceDerivationError::InvalidBlobEncoding);
+        assert_eq!(
+            err,
+            SourceDerivationError::InvalidBlobLength {
+                index: 0,
+                actual: 10,
+                expected: BYTES_PER_BLOB,
+            }
+        );
     }
 
     #[test]

@@ -315,8 +315,15 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
         return Err("min_price_per_mcycle must be omitted when pricing_mode=market".to_string());
     }
     if let Some(max_price_value) = offer_spec.max_price_per_mcycle.as_deref() {
-        parse_ether(max_price_value)
+        let max_price_cap = parse_ether(max_price_value)
             .map_err(|e| format!("Failed to parse max_price_per_mcycle {max_price_value}: {e}"))?;
+        // Market offers are clamped to this cap, so a zero cap would silently bid 0 wei forever.
+        if max_price_cap.is_zero() {
+            return Err(
+                "max_price_per_mcycle must be positive when set with pricing_mode=market"
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -477,6 +484,17 @@ mod tests {
         offer.max_price_per_mcycle = Some("0.000000060".to_string());
         offer.min_price_per_mcycle = None;
         validate_offer_spec(&offer).expect("valid market offer with max cap");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_zero_market_price_cap() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.min_price_per_mcycle = None;
+        offer.max_price_per_mcycle = Some("0".to_string());
+
+        let err = validate_offer_spec(&offer).expect_err("zero market cap");
+        assert!(err.contains("must be positive"));
     }
 
     #[test]

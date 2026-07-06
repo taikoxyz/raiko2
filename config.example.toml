@@ -111,9 +111,12 @@ poll_interval_ms = 10000
 timeout_ms = 3600000
 # How long to wait for an unlocked market request before rebidding.
 rebid_timeout_ms = 300000
-# Each rebid multiplies the manual max price by this value.
+# Each rebid multiplies the offer max price by this value (the configured max price in
+# manual mode, the SDK autopriced max price in market mode).
 rebid_price_multiplier = 2
-# Maximum number of no-lock rebids. The default allows a final 16x manual max price.
+# Maximum number of rebids across all retry paths (no-lock, expired, and timed-out
+# requests share one budget); the proof task fails once it is exhausted. The default
+# allows a final 16x max price.
 rebid_max_attempts = 4
 
 # Optional request sampling policy for proof_type=zk_any.
@@ -149,7 +152,8 @@ pricing_mode = "market"
 # Optional in market mode: multiply lockTimeout and timeout after dynamic pricing.
 # 2.0 doubles both values, giving provers more time to accept larger proofs.
 dynamic_pricing_timeout_modifier = 2.0
-# Optional in market mode: reject SDK autoprice offers above this per-mcycle safety cap.
+# Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
+# per-mcycle safety cap instead of failing them. Must be positive when set.
 max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20
 ramp_up_period_blocks = 60

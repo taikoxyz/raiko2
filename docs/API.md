@@ -1022,10 +1022,12 @@ All API errors use the Hoodi-style envelope:
   Boundless market request may remain unclaimed before `raiko2` resubmits at a higher max price.
   It must be at least `1000` ms and is separate from the overall
   `prover.boundless.timeout_ms` fulfillment deadline.
-- `prover.boundless.rebid_price_multiplier` defaults to `2` and controls the manual max-price
-  multiplier applied on each no-lock rebid.
-- `prover.boundless.rebid_max_attempts` defaults to `4` and caps no-lock rebids. It must be no
-  greater than `31`.
+- `prover.boundless.rebid_price_multiplier` defaults to `2` and controls the max-price
+  multiplier applied on each rebid. `manual` pricing escalates the configured max price;
+  `market` pricing escalates the SDK autopriced max price, still subject to the optional cap.
+- `prover.boundless.rebid_max_attempts` defaults to `4` and caps rebids across every retry
+  path: no-lock, expired, and timed-out requests all draw from the same submission budget, and
+  the proof task fails once it is exhausted. It must be no greater than `31`.
   `rpc.pairs[*].boundless` can override `poll_interval_ms`, `timeout_ms`, `rebid_timeout_ms`,
   `rebid_price_multiplier`, and `rebid_max_attempts` per `(network, l1_network)` pair.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
@@ -1033,12 +1035,15 @@ All API errors use the Hoodi-style envelope:
   `market` delegates price selection to the Boundless SDK price provider, may set
   `dynamic_pricing_timeout_modifier >= 1.0` to multiply `lockTimeout` and `timeout` after dynamic
   pricing, and optionally accepts `max_price_per_mcycle` as a per-mcycle safety cap. The cap value
-  is multiplied by the quoted mcycle count; SDK autoprice offers whose resulting `maxPrice` exceeds
-  that total cap fail before submission. `market` must omit `min_price_per_mcycle`.
-- Expired Boundless requests are resubmitted automatically. `manual` pricing multiplies the
-  offer's max price by `prover.boundless.rebid_price_multiplier` on each resubmission up to
-  `prover.boundless.rebid_max_attempts`; min price is unchanged. `market` resubmissions are
-  re-priced by the SDK price provider.
+  must be positive and is multiplied by the quoted mcycle count; offers whose (possibly
+  rebid-escalated) `maxPrice` exceeds that total cap are clamped to it instead of failing, with
+  the min price lowered to the cap when needed to keep the offer well-formed. `market` must omit
+  `min_price_per_mcycle`.
+- Expired Boundless requests are resubmitted automatically up to the shared
+  `prover.boundless.rebid_max_attempts` budget. `manual` pricing multiplies the offer's max price
+  by `prover.boundless.rebid_price_multiplier` on each resubmission; min price is unchanged.
+  `market` resubmissions are re-priced by the SDK price provider and then escalated by the same
+  multiplier, subject to the cap.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

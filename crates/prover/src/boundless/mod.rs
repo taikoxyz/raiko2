@@ -1241,6 +1241,11 @@ impl BoundlessProver {
                     // in-process `Expired` path. Without this, every restart after expiry
                     // would resubmit under the stored attempt number, escaping the submission
                     // budget one request per restart and stalling price escalation a rung.
+                    last_retry_reason = Some(format!(
+                        "stored Boundless request {} from a previous run expired at {} before \
+                         fulfillment",
+                        submission.provider_request_id, submission.expires_at
+                    ));
                     attempt = attempt.saturating_add(1);
                     continue;
                 }

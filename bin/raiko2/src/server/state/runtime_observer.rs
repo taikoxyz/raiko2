@@ -799,10 +799,12 @@ impl EngineObserver for RuntimeObserver {
         }?;
 
         let now = now_secs();
+        // Expired records must still reach the prover: it gives them one final market status
+        // read (an expired-but-fulfilled request still reports Fulfilled, recovering a proof
+        // that is already paid for) and otherwise counts the stored attempt against the rebid
+        // budget. Dropping them here would reset the budget and the price-escalation ladder on
+        // every restart after expiry.
         let expires_at = runtime.expires_at?;
-        if expires_at <= now {
-            return None;
-        }
 
         Some(BoundlessSubmissionResume {
             provider_request_id: runtime.provider_request_id.clone()?,
@@ -1150,26 +1152,33 @@ mod tests {
             .await?
             .expect("runtime task");
         let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
-        metadata
-            .runtime
-            .proposals
-            .get_mut(&task_ref)
-            .expect("proposal runtime exists")
-            .expires_at = Some(now_secs().saturating_sub(1));
+        let expired_at = now_secs().saturating_sub(1);
+        {
+            let runtime_entry = metadata
+                .runtime
+                .proposals
+                .get_mut(&task_ref)
+                .expect("proposal runtime exists");
+            runtime_entry.expires_at = Some(expired_at);
+            runtime_entry.rebid_attempt = Some(5);
+        }
         record.metadata = serde_json::to_value(metadata)?;
         runtime.upsert_task(&record).await?;
-        assert!(
-            observer
-                .load_boundless_submission(
-                    &proposal_task_id,
-                    &EngineTask::ProveProposal {
-                        request: proposal_request(),
-                        input_task: proposal_task_id.clone(),
-                    },
-                )
-                .await
-                .is_none()
-        );
+        // Expired records still resume: the prover gives them one final status read (recovering
+        // an already-paid fulfillment) and counts the stored attempt against the rebid budget.
+        let resumed = observer
+            .load_boundless_submission(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request: proposal_request(),
+                    input_task: proposal_task_id.clone(),
+                },
+            )
+            .await
+            .expect("expired boundless submission still resumes");
+        assert_eq!(resumed.provider_request_id, "0x1234");
+        assert_eq!(resumed.expires_at, expired_at);
+        assert_eq!(resumed.rebid_attempt, 5);
         Ok(())
     }
 

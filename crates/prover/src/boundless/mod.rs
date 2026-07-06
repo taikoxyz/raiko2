@@ -1230,25 +1230,12 @@ impl BoundlessProver {
                     self.config.rebid_price_multiplier,
                     self.config.rebid_max_attempts,
                 ));
-                if submission.expires_at <= now_secs() {
-                    tracing::warn!(
-                    provider_request_id = %submission.provider_request_id,
-                        expires_at = submission.expires_at,
-                        "Stored Boundless submission is expired; submitting a new request"
-                    );
-                    // The stored submission consumed its budget slot and lived out its full
-                    // market lifetime, so its replacement is the next attempt — same as the
-                    // in-process `Expired` path. Without this, every restart after expiry
-                    // would resubmit under the stored attempt number, escaping the submission
-                    // budget one request per restart and stalling price escalation a rung.
-                    last_retry_reason = Some(format!(
-                        "stored Boundless request {} from a previous run expired at {} before \
-                         fulfillment",
-                        submission.provider_request_id, submission.expires_at
-                    ));
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
+                // Expired records are deliberately not short-circuited: the poll below gives
+                // them one final market status read. An expired-but-fulfilled request still
+                // reports Fulfilled (the SDK checks fulfillment before expiry), recovering a
+                // proof that is already paid for; an expired-unfulfilled one classifies as
+                // Expired and takes the normal retry arm, which escalates the attempt and
+                // draws down the submission budget.
                 publish_boundless_progress(
                     observer.as_ref(),
                     &submission,

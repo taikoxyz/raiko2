@@ -174,14 +174,8 @@ impl Sp1StatusSource {
             .get_proof_status(request_id)
             .await
             .map_err(|err| RemotePollError::Transient(format!("sp1 status rpc: {err}")))?;
-        let fulfillment_status =
-            FulfillmentStatus::try_from(status.fulfillment_status()).map_err(|err| {
-                RemotePollError::Transient(format!("unknown sp1 fulfillment status: {err}"))
-            })?;
-        let execution_status =
-            ExecutionStatus::try_from(status.execution_status()).map_err(|err| {
-                RemotePollError::Transient(format!("unknown sp1 execution status: {err}"))
-            })?;
+        let fulfillment_status = decode_fulfillment_status(status.fulfillment_status());
+        let execution_status = decode_execution_status(status.execution_status());
 
         if fulfillment_status == FulfillmentStatus::Requested
             && metadata
@@ -199,9 +193,6 @@ impl Sp1StatusSource {
             )?;
             return Ok(sp1_status(
                 submission.id,
-                fulfillment_status,
-                execution_status,
-                status.deadline(),
                 RemoteStatus::Failed,
                 Some(RemoteStatusReason::new(
                     "SP1 network request auction timeout elapsed",
@@ -253,16 +244,20 @@ impl Sp1StatusSource {
     }
 }
 
+fn decode_fulfillment_status(value: i32) -> FulfillmentStatus {
+    FulfillmentStatus::try_from(value).unwrap_or(FulfillmentStatus::UnspecifiedFulfillmentStatus)
+}
+
+fn decode_execution_status(value: i32) -> ExecutionStatus {
+    ExecutionStatus::try_from(value).unwrap_or(ExecutionStatus::UnspecifiedExecutionStatus)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sp1_status(
     submission_id: RemoteSubmissionId,
-    fulfillment_status: FulfillmentStatus,
-    execution_status: ExecutionStatus,
-    deadline: u64,
     status: RemoteStatus,
     reason: Option<RemoteStatusReason>,
 ) -> RemoteSubmissionStatus {
-    let _ = (fulfillment_status, execution_status, deadline);
     RemoteSubmissionStatus {
         submission_id,
         status,
@@ -1853,7 +1848,8 @@ fn insert_sp1_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
+        decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
+        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
         remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
         sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
     };
@@ -1869,6 +1865,7 @@ mod tests {
         SP1VerifyingKey,
         blocking::{Prover as _, ProverClient},
         network::NetworkMode as Sp1SdkNetworkMode,
+        network::proto::types::{ExecutionStatus, FulfillmentStatus},
     };
     use std::str::FromStr;
 
@@ -1885,6 +1882,18 @@ mod tests {
         assert_eq!(status.submission_id, submission_id);
         assert_eq!(status.status, RemoteStatus::Pending);
         assert!(status.reason.is_none());
+    }
+
+    #[test]
+    fn sp1_unknown_status_values_decode_to_unspecified() {
+        assert_eq!(
+            decode_fulfillment_status(i32::MAX),
+            FulfillmentStatus::UnspecifiedFulfillmentStatus
+        );
+        assert_eq!(
+            decode_execution_status(i32::MAX),
+            ExecutionStatus::UnspecifiedExecutionStatus
+        );
     }
 
     fn setup_sp1_pk(client: &sp1_sdk::blocking::MockProver, elf: &[u8]) -> SP1ProvingKey {

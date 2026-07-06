@@ -360,12 +360,12 @@ impl TrackerActor {
                     Ok(Err(err)) if err.is_panic() => Err(RemotePollError::SourceUnavailable(
                         format!("remote status poll panicked: {err}"),
                     )),
-                    Ok(Err(err)) => Err(RemotePollError::SourceUnavailable(format!(
+                    Ok(Err(err)) => Err(RemotePollError::Transient(format!(
                         "remote status poll task failed: {err}"
                     ))),
                     Err(_) => {
                         poll_task.abort();
-                        Err(RemotePollError::SourceUnavailable(format!(
+                        Err(RemotePollError::Transient(format!(
                             "remote status poll exceeded timeout {poll_timeout:?}"
                         )))
                     }
@@ -889,12 +889,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_timeout_fails_selected_batch_without_sticking_proof_type() {
+    async fn poll_timeout_keeps_selected_batch_active_without_sticking_proof_type() {
         let first = submission(ProofType::Sp1);
         let second = submission(ProofType::Sp1);
         let source = Arc::new(FakeSource::with_delay_once(
             Duration::from_millis(200),
-            vec![vec![fulfilled_status(second.id)]],
+            vec![
+                vec![fulfilled_status(first.id)],
+                vec![fulfilled_status(second.id)],
+            ],
         ));
         let tracker = tracker_with_config(
             Arc::clone(&source),
@@ -921,7 +924,7 @@ mod tests {
 
         assert!(matches!(
             first_terminal,
-            RemoteTerminalResult::Unrecoverable { .. }
+            RemoteTerminalResult::Fulfilled { .. }
         ));
         assert!(matches!(
             second_terminal,

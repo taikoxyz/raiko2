@@ -243,14 +243,17 @@ impl TrackerActor {
     async fn run(mut self) {
         let mut poll_interval = interval(self.config.poll_interval);
         poll_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut commands_open = true;
 
         loop {
+            if !commands_open && self.active.is_empty() && self.in_flight.is_empty() {
+                break;
+            }
             tokio::select! {
-                command = self.command_rx.recv() => {
+                command = self.command_rx.recv(), if commands_open => {
                     match command {
                         Some(command) => self.handle_command(command),
-                        None if self.active.is_empty() && self.in_flight.is_empty() => break,
-                        None => {}
+                        None => commands_open = false,
                     }
                 }
                 _ = poll_interval.tick() => {
@@ -342,8 +345,17 @@ impl TrackerActor {
                 .map(|submission| submission.id)
                 .collect::<BTreeSet<_>>();
             self.in_flight_proof_types.insert(proof_type);
+            let poll_task = tokio::spawn(async move { source.poll(proof_type, submissions).await });
             self.in_flight.push(Box::pin(async move {
-                let result = source.poll(proof_type, submissions).await;
+                let result = match poll_task.await {
+                    Ok(result) => result,
+                    Err(err) if err.is_panic() => Err(RemotePollError::SourceUnavailable(format!(
+                        "remote status poll panicked: {err}"
+                    ))),
+                    Err(err) => Err(RemotePollError::SourceUnavailable(format!(
+                        "remote status poll task failed: {err}"
+                    ))),
+                };
                 PollCompletion {
                     proof_type,
                     selected_ids,
@@ -602,7 +614,7 @@ mod tests {
         collections::HashMap,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -616,6 +628,7 @@ mod tests {
         statuses: Mutex<Vec<Vec<RemoteSubmissionStatus>>>,
         delay: Option<Duration>,
         error_once: Mutex<Option<RemotePollError>>,
+        panic_once: AtomicBool,
     }
 
     impl FakeSource {
@@ -633,6 +646,14 @@ mod tests {
             }
         }
 
+        fn with_panic_once(statuses: Vec<Vec<RemoteSubmissionStatus>>) -> Self {
+            Self {
+                statuses: Mutex::new(statuses),
+                panic_once: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
@@ -646,6 +667,9 @@ mod tests {
             submissions: Vec<RemoteSubmission>,
         ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.panic_once.swap(false, Ordering::SeqCst) {
+                panic!("remote status source panic");
+            }
             if let Some(delay) = self.delay {
                 tokio::time::sleep(delay).await;
             }
@@ -754,6 +778,41 @@ mod tests {
             .expect("sender");
 
         assert!(matches!(terminal, RemoteTerminalResult::Fulfilled { .. }));
+        assert!(source.calls() >= 2);
+    }
+
+    #[tokio::test]
+    async fn poll_panic_fails_selected_batch_without_killing_actor() {
+        let first = submission(ProofType::Sp1);
+        let second = submission(ProofType::Sp1);
+        let source = Arc::new(FakeSource::with_panic_once(vec![vec![fulfilled_status(
+            second.id,
+        )]]));
+        let tracker = tracker_with_source(Arc::clone(&source), Duration::from_millis(10));
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+
+        tracker.register(first, first_tx).expect("register first");
+        let first_terminal = tokio::time::timeout(Duration::from_secs(1), first_rx)
+            .await
+            .expect("first terminal")
+            .expect("first sender");
+        tracker
+            .register(second, second_tx)
+            .expect("register second after panic");
+        let second_terminal = tokio::time::timeout(Duration::from_secs(1), second_rx)
+            .await
+            .expect("second terminal")
+            .expect("second sender");
+
+        assert!(matches!(
+            first_terminal,
+            RemoteTerminalResult::Unrecoverable { .. }
+        ));
+        assert!(matches!(
+            second_terminal,
+            RemoteTerminalResult::Fulfilled { .. }
+        ));
         assert!(source.calls() >= 2);
     }
 

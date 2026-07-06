@@ -96,7 +96,14 @@ impl RemoteStatusSource for Sp1StatusSource {
     ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
         let mut statuses = Vec::with_capacity(submissions.len());
         for submission in submissions {
-            statuses.push(self.status_for_submission(submission).await?);
+            let submission_id = submission.id;
+            match self.status_for_submission(submission).await {
+                Ok(status) => statuses.push(status),
+                Err(RemotePollError::Transient(error)) => {
+                    statuses.push(sp1_transient_poll_status(submission_id, error));
+                }
+                Err(err) => return Err(err),
+            }
         }
         Ok(statuses)
     }
@@ -237,6 +244,24 @@ fn unrecoverable_sp1_status(
         submission_id,
         status: RemoteStatus::Unrecoverable,
         reason: Some(RemoteStatusReason::new(reason)),
+        observed_unix_secs: sp1_now_secs(),
+    }
+}
+
+fn sp1_transient_poll_status(
+    submission_id: RemoteSubmissionId,
+    error: impl Into<String>,
+) -> RemoteSubmissionStatus {
+    let error = error.into();
+    tracing::warn!(
+        submission_id = %submission_id,
+        error = %error,
+        "SP1 status poll failed for one submission; keeping it active"
+    );
+    RemoteSubmissionStatus {
+        submission_id,
+        status: RemoteStatus::Pending,
+        reason: None,
         observed_unix_secs: sp1_now_secs(),
     }
 }
@@ -1795,7 +1820,7 @@ mod tests {
     use super::{
         default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
         remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
-        sp1_sdk_network_mode, sp1_vk_uuid,
+        sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
     };
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
@@ -1803,6 +1828,7 @@ mod tests {
     use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
     use raiko2_primitives::Proof;
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
+    use raiko2_remote_poller::{RemoteStatus, RemoteSubmissionId};
     use sp1_sdk::{
         HashableKey, ProvingKey as _, SP1ProofMode, SP1ProofWithPublicValues, SP1ProvingKey,
         SP1VerifyingKey,
@@ -1813,6 +1839,17 @@ mod tests {
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
+    }
+
+    #[test]
+    fn sp1_transient_poll_status_keeps_submission_active() {
+        let submission_id = RemoteSubmissionId::new();
+
+        let status = sp1_transient_poll_status(submission_id, "rpc 429");
+
+        assert_eq!(status.submission_id, submission_id);
+        assert_eq!(status.status, RemoteStatus::Pending);
+        assert!(status.reason.is_none());
     }
 
     fn setup_sp1_pk(client: &sp1_sdk::blocking::MockProver, elf: &[u8]) -> SP1ProvingKey {

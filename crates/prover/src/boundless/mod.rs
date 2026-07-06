@@ -261,11 +261,12 @@ impl BoundlessStatusSource {
             ) {
                 Ok(status) => status,
                 Err(err) => {
-                    return boundless_poll_error_statuses(
-                        submissions,
-                        err.to_string(),
+                    let error = err.to_string();
+                    boundless_single_poll_error_status(
+                        &submission.submission,
+                        &error,
                         &self.registry,
-                    );
+                    )
                 }
             };
             statuses.push(status);
@@ -329,10 +330,14 @@ impl BoundlessStatusSource {
         let base_id = rpc_base_id(index);
         let fulfilled_result = take_rpc_result(by_id, base_id)?;
         let locked_result = take_rpc_result(by_id, base_id + 1)?;
-        let deadline_result = take_rpc_result(by_id, base_id + 2)?;
         let is_fulfilled = parse_bool_result(&fulfilled_result)?;
         let is_locked = parse_bool_result(&locked_result)?;
-        let request_deadline = parse_u64_result(&deadline_result)?;
+        let request_deadline = if is_locked {
+            let deadline_result = take_rpc_result(by_id, base_id + 2)?;
+            parse_u64_result(&deadline_result)?
+        } else {
+            0
+        };
 
         let (status, terminal_outcome) = classify_boundless_status(
             submission.id,
@@ -604,7 +609,6 @@ fn boundless_poll_error_statuses(
     error: String,
     registry: &BoundlessStatusRegistry,
 ) -> Result<Vec<RemoteSubmissionStatus>, RemotePollError> {
-    let local_now = now_secs();
     let mut has_terminal_status = false;
     let statuses = submissions
         .into_iter()
@@ -616,49 +620,11 @@ fn boundless_poll_error_statuses(
                     format!("invalid boundless provider request id: {err}"),
                 );
             }
-            let metadata = match boundless_submission_metadata(registry, submission.id) {
-                Ok(Some(metadata)) => metadata,
-                Ok(None) => {
-                    has_terminal_status = true;
-                    return unrecoverable_boundless_status(
-                        submission.id,
-                        format!(
-                            "boundless status source missing metadata for request {}",
-                            submission.provider_request_id
-                        ),
-                    );
-                }
-                Err(err) => {
-                    has_terminal_status = true;
-                    return err_status(submission.id, &err);
-                }
-            };
-            if Instant::now() >= metadata.poll_timeout_at
-                && !should_defer_boundless_poll_timeout(&metadata, local_now)
-            {
+            let status = boundless_single_poll_error_status(&submission, &error, registry);
+            if status.status.is_terminal() {
                 has_terminal_status = true;
-                let rotate_request_id = local_now >= metadata.expires_at;
-                let _ = record_boundless_terminal_outcome(
-                    registry,
-                    submission.id,
-                    BoundlessTerminalOutcome::PollTimeout { rotate_request_id },
-                );
-                return RemoteSubmissionStatus {
-                    submission_id: submission.id,
-                    status: RemoteStatus::Failed,
-                    reason: Some(RemoteStatusReason::new(format!(
-                        "Boundless request {} timed out before fulfillment; last polling error: {error}",
-                        submission.provider_request_id
-                    ))),
-                    observed_unix_secs: local_now,
-                };
             }
-            RemoteSubmissionStatus {
-                submission_id: submission.id,
-                status: RemoteStatus::Pending,
-                reason: None,
-                observed_unix_secs: local_now,
-            }
+            status
         })
         .collect::<Vec<_>>();
 
@@ -666,6 +632,52 @@ fn boundless_poll_error_statuses(
         Ok(statuses)
     } else {
         Err(RemotePollError::Transient(error))
+    }
+}
+
+fn boundless_single_poll_error_status(
+    submission: &RemoteSubmission,
+    error: &str,
+    registry: &BoundlessStatusRegistry,
+) -> RemoteSubmissionStatus {
+    let local_now = now_secs();
+    let metadata = match boundless_submission_metadata(registry, submission.id) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
+            return unrecoverable_boundless_status(
+                submission.id,
+                format!(
+                    "boundless status source missing metadata for request {}",
+                    submission.provider_request_id
+                ),
+            );
+        }
+        Err(err) => return err_status(submission.id, &err),
+    };
+    if Instant::now() >= metadata.poll_timeout_at
+        && !should_defer_boundless_poll_timeout(&metadata, local_now)
+    {
+        let rotate_request_id = local_now >= metadata.expires_at;
+        let _ = record_boundless_terminal_outcome(
+            registry,
+            submission.id,
+            BoundlessTerminalOutcome::PollTimeout { rotate_request_id },
+        );
+        return RemoteSubmissionStatus {
+            submission_id: submission.id,
+            status: RemoteStatus::Failed,
+            reason: Some(RemoteStatusReason::new(format!(
+                "Boundless request {} timed out before fulfillment; last polling error: {error}",
+                submission.provider_request_id
+            ))),
+            observed_unix_secs: local_now,
+        };
+    }
+    RemoteSubmissionStatus {
+        submission_id: submission.id,
+        status: RemoteStatus::Pending,
+        reason: None,
+        observed_unix_secs: local_now,
     }
 }
 
@@ -2513,15 +2525,16 @@ fn validate_offer_params(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
-        BoundlessSubmissionMetadata, BoundlessSubmissionState, BoundlessTerminalOutcome,
-        BoundlessTimeoutAction, DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS,
-        NoLockTimeoutAction, attempt_for_price_multiplier, boundless_poll_error_statuses,
-        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
-        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
-        parse_bool_result, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        BatchQuoteStrategy, BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode,
+        BoundlessProver, BoundlessStatusSource, BoundlessSubmissionMetadata,
+        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
+        DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
+        MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction, attempt_for_price_multiplier,
+        boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
+        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        quote_batch_mcycles, retry_price_multiplier, should_rebid_unlocked_request,
+        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2771,6 +2784,219 @@ mod tests {
                 .expect("valid status")
                 .status,
             RemoteStatus::Pending
+        );
+    }
+
+    fn rpc_word(value: u64) -> serde_json::Value {
+        serde_json::json!(format!("0x{value:064x}"))
+    }
+
+    fn rpc_result(id: u64, result: serde_json::Value) -> JsonRpcResponse {
+        JsonRpcResponse {
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn rpc_error(id: u64, message: &str) -> JsonRpcResponse {
+        JsonRpcResponse {
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: 3,
+                message: message.to_string(),
+            }),
+        }
+    }
+
+    fn boundless_submission_state(
+        now: u64,
+        no_lock_timeout_action: BoundlessTimeoutAction,
+        no_lock_deadline_delta: i64,
+        poll_timeout_at: Instant,
+    ) -> BoundlessSubmissionState {
+        BoundlessSubmissionState {
+            metadata: BoundlessSubmissionMetadata {
+                expires_at: now.saturating_add(300),
+                lock_expires_at: now.saturating_add(120),
+                submitted_at: now.saturating_sub(30),
+                no_lock_deadline: if no_lock_deadline_delta.is_negative() {
+                    now.saturating_sub(no_lock_deadline_delta.unsigned_abs())
+                } else {
+                    now.saturating_add(no_lock_deadline_delta.unsigned_abs())
+                },
+                no_lock_timeout_action,
+                poll_timeout_at,
+            },
+            terminal_outcome: None,
+        }
+    }
+
+    #[test]
+    fn boundless_deadline_revert_for_unlocked_request_does_not_poison_batch() {
+        let now = now_secs();
+        let unlocked = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x1".to_string(),
+            timeout_at: None,
+        };
+        let fulfilled = RemoteSubmission {
+            id: RemoteSubmissionId::new(),
+            proof_type: ProofType::Risc0,
+            provider_request_id: "0x2".to_string(),
+            timeout_at: None,
+        };
+        let registry = Arc::new(Mutex::new(HashMap::from([
+            (
+                unlocked.id,
+                boundless_submission_state(
+                    now,
+                    BoundlessTimeoutAction::Rebid,
+                    60,
+                    Instant::now() + Duration::from_secs(60),
+                ),
+            ),
+            (
+                fulfilled.id,
+                boundless_submission_state(
+                    now,
+                    BoundlessTimeoutAction::Rebid,
+                    60,
+                    Instant::now() + Duration::from_secs(60),
+                ),
+            ),
+        ])));
+        let source = BoundlessStatusSource {
+            rpc_url: "http://localhost".to_string(),
+            market_address: "0x0000000000000000000000000000000000000000".to_string(),
+            http: reqwest::Client::new(),
+            registry,
+        };
+        let mut by_id = HashMap::from([
+            (1, rpc_result(1, rpc_word(0))),
+            (2, rpc_result(2, rpc_word(0))),
+            (3, rpc_error(3, "RequestIsNotLocked")),
+            (4, rpc_result(4, rpc_word(1))),
+            (5, rpc_result(5, rpc_word(0))),
+            (6, rpc_error(6, "RequestIsNotLocked")),
+        ]);
+
+        let unlocked_status = source
+            .status_from_rpc_results(
+                0,
+                &BoundlessPollSubmission {
+                    submission: unlocked.clone(),
+                    request_id: U256::from(1),
+                },
+                now,
+                &mut by_id,
+            )
+            .expect("unlocked status");
+        let fulfilled_status = source
+            .status_from_rpc_results(
+                1,
+                &BoundlessPollSubmission {
+                    submission: fulfilled.clone(),
+                    request_id: U256::from(2),
+                },
+                now,
+                &mut by_id,
+            )
+            .expect("fulfilled status");
+
+        assert_eq!(unlocked_status.status, RemoteStatus::Pending);
+        assert_eq!(fulfilled_status.status, RemoteStatus::Fulfilled);
+    }
+
+    #[test]
+    fn classify_boundless_status_covers_timeout_actions_and_rotate_boundary() {
+        let now = now_secs();
+        let submission_id = RemoteSubmissionId::new();
+        let request_id = U256::from(1);
+        let rebid_state = boundless_submission_state(
+            now,
+            BoundlessTimeoutAction::Rebid,
+            -1,
+            Instant::now() + Duration::from_secs(60),
+        );
+        let abort_state = boundless_submission_state(
+            now,
+            BoundlessTimeoutAction::Abort,
+            -1,
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        let (status, outcome) = classify_boundless_status(
+            submission_id,
+            "0x1",
+            request_id,
+            &rebid_state.metadata,
+            false,
+            false,
+            0,
+            now,
+        );
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(outcome, Some(BoundlessTerminalOutcome::NoLockRebidTimeout));
+
+        let (status, outcome) = classify_boundless_status(
+            submission_id,
+            "0x1",
+            request_id,
+            &abort_state.metadata,
+            false,
+            false,
+            0,
+            now,
+        );
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(outcome, Some(BoundlessTerminalOutcome::NoLockAbortTimeout));
+
+        let mut locked_state = boundless_submission_state(
+            now,
+            BoundlessTimeoutAction::Rebid,
+            60,
+            Instant::now() + Duration::from_secs(60),
+        );
+        locked_state.metadata.expires_at = now.saturating_add(300);
+        let (status, outcome) = classify_boundless_status(
+            submission_id,
+            "0x1",
+            request_id,
+            &locked_state.metadata,
+            false,
+            true,
+            now.saturating_sub(1),
+            now,
+        );
+        assert_eq!(status.status, RemoteStatus::Expired);
+        assert_eq!(outcome, Some(BoundlessTerminalOutcome::LockExpired));
+
+        let mut poll_timeout_state = boundless_submission_state(
+            now,
+            BoundlessTimeoutAction::Rebid,
+            60,
+            Instant::now() - Duration::from_secs(1),
+        );
+        poll_timeout_state.metadata.expires_at = now.saturating_sub(1);
+        let (status, outcome) = classify_boundless_status(
+            submission_id,
+            "0x1",
+            request_id,
+            &poll_timeout_state.metadata,
+            false,
+            false,
+            0,
+            now.saturating_sub(1),
+        );
+        assert_eq!(status.status, RemoteStatus::Failed);
+        assert_eq!(
+            outcome,
+            Some(BoundlessTerminalOutcome::PollTimeout {
+                rotate_request_id: true
+            })
         );
     }
 

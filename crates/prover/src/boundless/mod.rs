@@ -697,9 +697,6 @@ pub struct BoundlessProver {
     /// reused across every subsequent proof, so we don't rebuild the RPC provider and signer per
     /// proof. Lazy (rather than in `new()`) because building it is fallible and async.
     client: tokio::sync::OnceCell<Client>,
-    /// Chain id for signing requests, queried once via the market client and cached (see
-    /// [`BoundlessProver::chain_id`]).
-    chain_id: tokio::sync::OnceCell<u64>,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
     /// Balance gate serializing concurrent on-chain submissions that fund this market account so
     /// they deposit against their combined in-flight claim total instead of each reading the same
@@ -725,7 +722,6 @@ impl BoundlessProver {
             deployment: config.get_effective_deployment(),
             config,
             client: tokio::sync::OnceCell::new(),
-            chain_id: tokio::sync::OnceCell::new(),
             programs: Arc::new(RwLock::new(HashMap::new())),
             balance_gate,
         }
@@ -745,23 +741,6 @@ impl BoundlessProver {
                 }))
             })
             .await
-    }
-
-    /// Chain id used to sign requests, queried once via the market client and cached. Wrapped in
-    /// `retry_external` so a transient RPC hiccup retries rather than surfacing an error: a signing
-    /// failure aborts the reused-id submission and falls back to a fresh id, re-opening the
-    /// double-pay window that id reuse closes.
-    async fn chain_id(&self, client: &Client) -> RaikoResult<u64> {
-        self.chain_id
-            .get_or_try_init(|| {
-                retry_external("query boundless chain id", || async {
-                    client.boundless_market.get_chain_id().await.map_err(|e| {
-                        RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
-                    })
-                })
-            })
-            .await
-            .copied()
     }
 
     async fn create_client(&self) -> RaikoResult<Client> {
@@ -991,6 +970,35 @@ impl BoundlessProver {
         Ok(request)
     }
 
+    /// Build a [`Submission`] record for a just-submitted request. Derives the provider id,
+    /// deadlines, and exact escalated max price from `request`, and the floored display multiplier
+    /// from `attempt` + config. `market_request_id` is passed separately because the offchain submit
+    /// returns the market's assigned id, which need not equal `request.id`; the onchain path passes
+    /// `request.id`. `remote_tx_hash` is set later on the onchain path once the tx is sent.
+    fn make_submission(
+        &self,
+        market_request_id: U256,
+        remote_tx_hash: Option<String>,
+        request: &ProofRequest,
+        attempt: u64,
+    ) -> Submission {
+        Submission {
+            market_request_id,
+            provider_request_id: format!("0x{market_request_id:x}"),
+            remote_tx_hash,
+            expires_at: request.expires_at(),
+            lock_expires_at: request.lock_expires_at(),
+            submitted_at: now_secs(),
+            max_price_multiplier: effective_price_multiplier(
+                attempt,
+                self.config.rebid_price_step_bps,
+                self.config.rebid_max_attempts,
+            ),
+            max_price_wei: U256::from(request.offer.maxPrice),
+            attempt,
+        }
+    }
+
     async fn submit_request_offchain(
         &self,
         client: &Client,
@@ -1005,21 +1013,7 @@ impl BoundlessProver {
                 .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
         })
         .await?;
-        Ok(Submission {
-            market_request_id,
-            provider_request_id: format!("0x{market_request_id:x}"),
-            remote_tx_hash: None,
-            expires_at: request.expires_at(),
-            lock_expires_at: request.lock_expires_at(),
-            submitted_at: now_secs(),
-            max_price_multiplier: effective_price_multiplier(
-                attempt,
-                self.config.rebid_price_step_bps,
-                self.config.rebid_max_attempts,
-            ),
-            max_price_wei: U256::from(request.offer.maxPrice),
-            attempt,
-        })
+        Ok(self.make_submission(market_request_id, None, request, attempt))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1039,20 +1033,30 @@ impl BoundlessProver {
         })?;
         let max_price = U256::from(request.offer.maxPrice);
         // Sign the request before reserving on the balance gate: signing is independent of the
-        // deposit value, so there's no reason to hold a reservation across it. `chain_id` is cached
-        // and both it and signing retry transient RPC errors, so a hiccup here does not abort the
-        // reused-id submission and rotate to a fresh id.
-        let chain_id = self.chain_id(client).await?;
+        // deposit value, so there's no reason to hold a reservation across it. The chain id query
+        // and signing both retry transient RPC errors, so a hiccup here does not abort the reused-id
+        // submission and rotate to a fresh id. `get_chain_id` caches the value inside the SDK's
+        // market service after the first fetch, and the `Client` is reused across proofs, so this
+        // is effectively a single query per process despite the per-submission call.
+        let chain_id =
+            retry_external("query boundless chain id", || async {
+                client.boundless_market.get_chain_id().await.map_err(|e| {
+                    RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
+                })
+            })
+            .await?;
         let market_addr = *client.boundless_market.instance().address();
         let client_sig = request
             .sign_request(signer, market_addr, chain_id)
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
 
-        // Reserve this request's max-price claim on the shared balance gate. `claim` releases the
-        // reservation when it drops — at the end of this call on the happy path, or immediately if
-        // this future is cancelled or an early `?` fires — so a reservation can never leak and
-        // permanently over-deposit later requests.
+        // Reserve this request's max-price claim on the shared balance gate. `claim`'s `Drop`
+        // releases the reservation on every exit from this function — the normal return below (both
+        // send() arms converge there), an early `?`, or this future being cancelled — so a
+        // reservation can never leak and permanently over-deposit later requests. `value` has
+        // already credited the account by the time we return, so scope-end release does not
+        // over-count this request against later concurrent submissions.
         //
         // Depositing against the *combined* reserved total (not this request alone) is what
         // serializes concurrent submissions funding the same market account: a second concurrent
@@ -1080,21 +1084,7 @@ impl BoundlessProver {
             .from(client.boundless_market.caller())
             .value(value);
 
-        let mut submission = Submission {
-            market_request_id: request.id,
-            provider_request_id: format!("0x{:x}", request.id),
-            remote_tx_hash: None,
-            expires_at: request.expires_at(),
-            lock_expires_at: request.lock_expires_at(),
-            submitted_at: now_secs(),
-            max_price_multiplier: effective_price_multiplier(
-                attempt,
-                self.config.rebid_price_step_bps,
-                self.config.rebid_max_attempts,
-            ),
-            max_price_wei: max_price,
-            attempt,
-        };
+        let mut submission = self.make_submission(request.id, None, request, attempt);
         publish_boundless_progress(
             observer,
             &submission,
@@ -1129,10 +1119,6 @@ impl BoundlessProver {
             }
         }
 
-        // Release this request's reservation now that the submit attempt has returned; both send()
-        // arms converge here. `value` has already credited the account, so keeping the claim past
-        // this point would over-count this request against later concurrent submissions.
-        drop(claim);
         Ok(submission)
     }
 

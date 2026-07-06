@@ -808,6 +808,7 @@ impl EngineObserver for RuntimeObserver {
             provider_request_id: runtime.provider_request_id.clone()?,
             remote_tx_hash: runtime.remote_tx_hash.clone(),
             expires_at,
+            lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
             submitted_at: runtime.submitted_at.unwrap_or(now),
             max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
             rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
@@ -1050,6 +1051,7 @@ mod tests {
                     provider_request_id: "0x1234".to_string(),
                     remote_tx_hash: Some("0xabcd".to_string()),
                     expires_at: future_expires_at,
+                    lock_expires_at: future_expires_at - 600,
                     submitted_at: future_expires_at - 300,
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
@@ -1083,6 +1085,7 @@ mod tests {
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
         assert_eq!(runtime_entry.max_price_multiplier, Some(4));
         assert_eq!(runtime_entry.rebid_attempt, Some(3));
+        assert_eq!(runtime_entry.lock_expires_at, Some(future_expires_at - 600));
         let mut record = runtime
             .get_task("task_public")
             .await?
@@ -1102,6 +1105,7 @@ mod tests {
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
         assert_eq!(resumed.expires_at, future_expires_at);
+        assert_eq!(resumed.lock_expires_at, future_expires_at - 600);
         assert_eq!(resumed.submitted_at, future_expires_at - 300);
         assert_eq!(resumed.max_price_multiplier, 4);
         assert_eq!(resumed.rebid_attempt, 3);
@@ -1119,6 +1123,7 @@ mod tests {
         runtime_entry.submitted_at = None;
         runtime_entry.max_price_multiplier = None;
         runtime_entry.rebid_attempt = None;
+        runtime_entry.lock_expires_at = None;
         record.metadata = serde_json::to_value(metadata)?;
         runtime.upsert_task(&record).await?;
         let before_legacy_resume = now_secs();
@@ -1135,6 +1140,7 @@ mod tests {
         let after_legacy_resume = now_secs();
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.expires_at, future_expires_at);
+        assert_eq!(resumed.lock_expires_at, 0);
         assert!((before_legacy_resume..=after_legacy_resume).contains(&resumed.submitted_at));
         assert_eq!(resumed.max_price_multiplier, 1);
         assert_eq!(resumed.rebid_attempt, 0);

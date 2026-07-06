@@ -19,7 +19,7 @@ use alloy_primitives::{B256, Bytes, U256, address};
 use alloy_signer_local::PrivateKeySigner;
 use boundless_market::{
     Client, ProofRequest, StorageUploaderConfig,
-    contracts::RequestStatus,
+    contracts::{RequestId, RequestStatus},
     deployments::{BASE, Deployment, SEPOLIA},
     input::GuestEnv,
     price_oracle::{Amount, Asset},
@@ -192,12 +192,54 @@ fn no_lock_timeout_for_attempt(
     }
 }
 
+/// Wall-clock deadline after which an unlocked submission is given up on.
+///
+/// Rebid attempts use the configured rebid delay: the request is abandoned early in favor of a
+/// higher-priced resubmission. The final attempt (`Abort`) instead waits out the offer's lock
+/// deadline when known: the market pays nothing for fulfillments past `lock_expires_at`, so that
+/// is the exact end of the payable window — aborting sooner walks away from a live request the
+/// client could still be charged for, and waiting longer cannot yield a paid fulfillment.
+const fn no_lock_deadline(submitted_at: u64, lock_expires_at: u64, timeout: NoLockTimeout) -> u64 {
+    let rebid_deadline = submitted_at.saturating_add(timeout.delay.as_secs());
+    match timeout.action {
+        NoLockTimeoutAction::Rebid => rebid_deadline,
+        // `lock_expires_at == 0` means a legacy resume record; keep the old rebid-delay behavior.
+        NoLockTimeoutAction::Abort => {
+            if lock_expires_at > 0 {
+                lock_expires_at
+            } else {
+                rebid_deadline
+            }
+        }
+    }
+}
+
 const fn no_lock_deadline_elapsed(
     submitted_at: u64,
+    lock_expires_at: u64,
     timeout: NoLockTimeout,
     now_secs: u64,
 ) -> bool {
-    now_secs >= submitted_at.saturating_add(timeout.delay.as_secs())
+    now_secs >= no_lock_deadline(submitted_at, lock_expires_at, timeout)
+}
+
+/// Whether the overall poll timeout must be deferred for the current submission.
+///
+/// On the final attempt (`Abort`) the request stays payable until its lock deadline, and a
+/// timeout-triggered resubmission can reopen the double-pay window through the fresh-id
+/// fallback, so the overall timeout only takes effect once the payable window has closed.
+/// The deferral is bounded by `expires_at` so a corrupt stored record (or one with an
+/// implausibly distant lock deadline) cannot keep the poll loop open forever.
+const fn defer_poll_timeout_while_payable(
+    submitted_at: u64,
+    lock_expires_at: u64,
+    expires_at: u64,
+    timeout: NoLockTimeout,
+    now_secs: u64,
+) -> bool {
+    matches!(timeout.action, NoLockTimeoutAction::Abort)
+        && now_secs < expires_at
+        && !no_lock_deadline_elapsed(submitted_at, lock_expires_at, timeout, now_secs)
 }
 
 const fn quote_batch_mcycles(evaluated_mcycles: u32) -> u32 {
@@ -294,6 +336,9 @@ struct Submission {
     provider_request_id: String,
     remote_tx_hash: Option<String>,
     expires_at: u64,
+    // Offer lock deadline (`rampUpStart + lockTimeout`). The market pays nothing for fulfillments
+    // past this time, so it bounds the payable window; `0` when resumed from a legacy record.
+    lock_expires_at: u64,
     submitted_at: u64,
     max_price_multiplier: u32,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
@@ -315,10 +360,21 @@ struct FreshSubmissionContext<'a> {
     evaluated_mcycles_count: u32,
     max_price_multiplier: u32,
     attempt: u64,
+    // Market request id to reuse for this submission. Set on rebids so every rung of one proof
+    // task shares an id: the market keys locks and paid fulfillments on the id, which makes
+    // paying more than one rung impossible by construction. `None` mints a fresh id.
+    reuse_request_id: Option<U256>,
 }
 
 enum BoundlessAttemptError {
-    Retryable(String),
+    Retryable {
+        reason: String,
+        // Whether the next attempt must mint a fresh market request id. Rebid rungs of one proof
+        // task share an id so the market can pay for at most one of them; rotation is only needed
+        // once that id is dead (request expired, or a locked rung's deadline passed — the id can
+        // never be locked again).
+        rotate_request_id: bool,
+    },
     Fatal(RaikoError),
 }
 
@@ -346,6 +402,7 @@ async fn publish_boundless_progress(
                     provider_request_id: submission.provider_request_id.clone(),
                     remote_tx_hash: submission.remote_tx_hash.clone(),
                     expires_at: submission.expires_at,
+                    lock_expires_at: submission.lock_expires_at,
                     image_ref: image_ref.to_string(),
                     deployment: deployment.to_string(),
                     offchain,
@@ -391,6 +448,7 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             provider_request_id: value.provider_request_id,
             remote_tx_hash: value.remote_tx_hash,
             expires_at: value.expires_at,
+            lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
             max_price_multiplier: value.max_price_multiplier.max(1),
             attempt: u64::from(value.rebid_attempt),
@@ -615,6 +673,7 @@ impl BoundlessProver {
         mcycles_count: u32,
         journal: Vec<u8>,
         max_price_multiplier: u32,
+        reuse_request_id: Option<U256>,
     ) -> RaikoResult<ProofRequest> {
         let ValidatedOfferParams {
             max_price,
@@ -664,6 +723,14 @@ impl BoundlessProver {
         request_params = request_params
             .with_input_url(input_url)
             .expect("with_input_url is infallible for valid URLs");
+        if let Some(reuse_request_id) = reuse_request_id {
+            let request_id = RequestId::try_from(reuse_request_id).map_err(|e| {
+                RaikoError::Guest(format!(
+                    "Invalid boundless request id 0x{reuse_request_id:x} to reuse: {e}"
+                ))
+            })?;
+            request_params = request_params.with_request_id(request_id);
+        }
         let request = retry_external("build boundless request", || {
             let request_params = request_params.clone();
             async move {
@@ -706,6 +773,7 @@ impl BoundlessProver {
             provider_request_id: format!("0x{market_request_id:x}"),
             remote_tx_hash: None,
             expires_at: request.expires_at(),
+            lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
             max_price_multiplier,
             attempt,
@@ -760,6 +828,7 @@ impl BoundlessProver {
             provider_request_id: format!("0x{:x}", request.id),
             remote_tx_hash: None,
             expires_at: request.expires_at(),
+            lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
             max_price_multiplier,
             attempt,
@@ -818,6 +887,7 @@ impl BoundlessProver {
             context.quoted_mcycles_count,
             context.journal.to_vec(),
             context.max_price_multiplier,
+            context.reuse_request_id,
         ))
         .await?;
 
@@ -879,15 +949,32 @@ impl BoundlessProver {
         let mut consecutive_poll_errors = 0_u32;
 
         loop {
-            if started_at.elapsed() > timeout {
+            let now = now_secs();
+            if started_at.elapsed() > timeout
+                && !defer_poll_timeout_while_payable(
+                    submission.submitted_at,
+                    submission.lock_expires_at,
+                    submission.expires_at,
+                    no_lock_timeout,
+                    now,
+                )
+            {
                 let detail = last_poll_error
                     .as_deref()
                     .map(|error| format!("; last polling error: {error}"))
                     .unwrap_or_default();
-                return Err(BoundlessAttemptError::Retryable(format!(
-                    "Boundless request {} timed out before fulfillment{detail}",
-                    submission.provider_request_id
-                )));
+                // Before the request expiry the rungs may still be payable, so keep the shared
+                // id: a replacement rung under the same id cannot be double-paid. Past the
+                // expiry every rung is past its lock deadline (nothing on this id is payable),
+                // and the id may even carry a dead lock that the failing status reads could not
+                // surface, so treat this like the Expired branch and rotate.
+                return Err(BoundlessAttemptError::Retryable {
+                    reason: format!(
+                        "Boundless request {} timed out before fulfillment{detail}",
+                        submission.provider_request_id
+                    ),
+                    rotate_request_id: now >= submission.expires_at,
+                });
             }
 
             let status = match client
@@ -918,21 +1005,36 @@ impl BoundlessProver {
                 RequestStatus::Unknown => {
                     if no_lock_deadline_elapsed(
                         submission.submitted_at,
+                        submission.lock_expires_at,
                         no_lock_timeout,
                         now_secs(),
                     ) {
-                        let message = format!(
-                            "Boundless request {} was not locked within {} seconds",
-                            submission.provider_request_id,
-                            no_lock_timeout.delay.as_secs()
-                        );
                         return match no_lock_timeout.action {
-                            NoLockTimeoutAction::Rebid => Err(BoundlessAttemptError::Retryable(
-                                format!("{message}; rebidding with higher max price"),
-                            )),
+                            // Escalate under the same market request id: the market pays for at
+                            // most one request per id, so the abandoned cheaper rung can never be
+                            // paid in addition to its replacement.
+                            NoLockTimeoutAction::Rebid => Err(BoundlessAttemptError::Retryable {
+                                reason: format!(
+                                    "Boundless request {} was not locked within {} seconds; \
+                                     rebidding with higher max price under the same request id",
+                                    submission.provider_request_id,
+                                    no_lock_timeout.delay.as_secs()
+                                ),
+                                rotate_request_id: false,
+                            }),
                             NoLockTimeoutAction::Abort => {
+                                // Legacy resume records (lock_expires_at == 0) abort on the
+                                // rebid-delay fallback, not the offer's lock deadline; report
+                                // whichever deadline actually elapsed.
+                                let deadline_detail = if submission.lock_expires_at > 0 {
+                                    "before its payable window closed".to_string()
+                                } else {
+                                    format!("within {} seconds", no_lock_timeout.delay.as_secs())
+                                };
                                 Err(BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                                    "{message}; exhausted boundless no-lock rebids"
+                                    "Boundless request {} was not locked {deadline_detail}; \
+                                     exhausted boundless no-lock rebids",
+                                    submission.provider_request_id
                                 ))))
                             }
                         };
@@ -940,10 +1042,16 @@ impl BoundlessProver {
                 }
                 RequestStatus::Locked => {}
                 RequestStatus::Expired => {
-                    return Err(BoundlessAttemptError::Retryable(format!(
-                        "Boundless request {} expired before fulfillment",
-                        submission.provider_request_id
-                    )));
+                    // Expired covers both a fully timed-out request and a locked rung whose
+                    // deadline passed. Either way the id is dead for paid fulfillment (a lock is
+                    // never re-grantable), so the next attempt must mint a fresh id.
+                    return Err(BoundlessAttemptError::Retryable {
+                        reason: format!(
+                            "Boundless request {} expired before fulfillment",
+                            submission.provider_request_id
+                        ),
+                        rotate_request_id: true,
+                    });
                 }
                 RequestStatus::Fulfilled => {
                     let fulfillment = match client
@@ -1010,6 +1118,7 @@ impl BoundlessProver {
                             "provider_request_id": submission.provider_request_id,
                             "remote_tx_hash": submission.remote_tx_hash,
                             "expires_at": submission.expires_at,
+                            "lock_expires_at": submission.lock_expires_at,
                             "submitted_at": submission.submitted_at,
                             "max_price_multiplier": submission.max_price_multiplier,
                             "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
@@ -1098,6 +1207,11 @@ impl BoundlessProver {
             None
         };
         let mut attempt = 1_u64;
+        // Market request id shared by rebid rungs of this proof task. The market keys locks and
+        // paid fulfillments on the id, so reusing it across rebids makes paying for more than one
+        // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
+        // previous id became unusable).
+        let mut reuse_request_id: Option<U256> = None;
 
         loop {
             let submission = if let Some(submission) = resume_submission.take() {
@@ -1127,26 +1241,47 @@ impl BoundlessProver {
                 .await;
                 submission
             } else {
-                Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                    client: &client,
-                    input: &input,
-                    elf,
-                    program: &program,
-                    offer_spec,
-                    journal: &journal,
-                    image_ref: &image_ref,
-                    deployment: &deployment,
-                    observer: observer.as_ref(),
-                    quoted_mcycles_count,
-                    evaluated_mcycles_count,
-                    max_price_multiplier: retry_price_multiplier(
-                        attempt,
-                        self.config.rebid_price_multiplier,
-                        self.config.rebid_max_attempts,
-                    ),
+                let max_price_multiplier = retry_price_multiplier(
                     attempt,
-                }))
-                .await?
+                    self.config.rebid_price_multiplier,
+                    self.config.rebid_max_attempts,
+                );
+                let submit = |reuse_request_id: Option<U256>| {
+                    Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                        client: &client,
+                        input: &input,
+                        elf,
+                        program: &program,
+                        offer_spec,
+                        journal: &journal,
+                        image_ref: &image_ref,
+                        deployment: &deployment,
+                        observer: observer.as_ref(),
+                        quoted_mcycles_count,
+                        evaluated_mcycles_count,
+                        max_price_multiplier,
+                        attempt,
+                        reuse_request_id,
+                    }))
+                };
+                match submit(reuse_request_id).await {
+                    Ok(submission) => submission,
+                    Err(error) => {
+                        // Id reuse is best-effort: an order stream or RPC may refuse a same-id
+                        // resubmission. Fall back to a fresh id (the pre-reuse behavior, which
+                        // re-opens the double-pay window for this rung) instead of failing the
+                        // proof.
+                        let Some(previous_request_id) = reuse_request_id.take() else {
+                            return Err(error);
+                        };
+                        tracing::warn!(
+                            previous_request_id = format!("0x{previous_request_id:x}"),
+                            error = %error,
+                            "Boundless rebid under the reused request id failed; retrying once with a fresh id"
+                        );
+                        submit(None).await?
+                    }
+                }
             };
             attempt = attempt.max(attempt_for_price_multiplier(
                 submission.max_price_multiplier,
@@ -1183,13 +1318,22 @@ impl BoundlessProver {
                 .await
             {
                 Ok(proof) => return Ok(proof),
-                Err(BoundlessAttemptError::Retryable(reason)) => {
+                Err(BoundlessAttemptError::Retryable {
+                    reason,
+                    rotate_request_id,
+                }) => {
                     tracing::warn!(
                         provider_request_id = %submission.provider_request_id,
                         attempt,
                         reason,
-                        "Boundless submission did not finish; retrying with a new market request"
+                        rotate_request_id,
+                        "Boundless submission did not finish; retrying"
                     );
+                    reuse_request_id = if rotate_request_id {
+                        None
+                    } else {
+                        Some(submission.market_request_id)
+                    };
                     attempt = attempt.saturating_add(1);
                     tokio::time::sleep(EXTERNAL_RETRY_INITIAL_DELAY).await;
                 }
@@ -1546,10 +1690,11 @@ mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        attempt_for_price_multiplier, enforce_market_max_price_cap, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        attempt_for_price_multiplier, defer_poll_timeout_while_payable,
+        enforce_market_max_price_cap, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
+        parse_env_bool, parse_env_url, quote_batch_mcycles, retry_price_multiplier,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -1838,6 +1983,7 @@ mod tests {
             provider_request_id: "0x1".to_string(),
             remote_tx_hash: None,
             expires_at: 1,
+            lock_expires_at: 1,
             submitted_at: 1,
             max_price_multiplier,
             attempt,
@@ -1883,13 +2029,111 @@ mod tests {
     }
 
     #[test]
+    fn resumed_submission_carries_lock_deadline() {
+        let resume = crate::BoundlessSubmissionResume {
+            provider_request_id: "0x1".to_string(),
+            remote_tx_hash: None,
+            expires_at: 2_000,
+            lock_expires_at: 1_500,
+            submitted_at: 1_000,
+            max_price_multiplier: 1,
+            rebid_attempt: 1,
+        };
+        let submission = super::Submission::try_from(resume).expect("valid resume record");
+        assert_eq!(submission.lock_expires_at, 1_500);
+
+        // Legacy records deserialize with lock_expires_at == 0 and must stay accepted.
+        let legacy: crate::BoundlessSubmissionResume = serde_json::from_value(serde_json::json!({
+            "provider_request_id": "0x1",
+            "remote_tx_hash": null,
+            "expires_at": 2_000,
+            "submitted_at": 1_000,
+            "max_price_multiplier": 1,
+        }))
+        .expect("legacy record without lock_expires_at");
+        assert_eq!(legacy.lock_expires_at, 0);
+        let submission = super::Submission::try_from(legacy).expect("valid legacy record");
+        assert_eq!(submission.lock_expires_at, 0);
+    }
+
+    #[test]
     fn no_lock_deadline_uses_submission_wall_clock() {
         let timeout =
             no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
 
-        assert!(!no_lock_deadline_elapsed(1_000, timeout, 1_299));
-        assert!(no_lock_deadline_elapsed(1_000, timeout, 1_300));
-        assert!(no_lock_deadline_elapsed(1_000, timeout, 1_600));
+        // Rebid attempts abandon the request after the configured rebid delay; the offer's lock
+        // deadline (here far in the future) must not stretch that window.
+        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_299));
+        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_300));
+        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_600));
+    }
+
+    #[test]
+    fn final_attempt_waits_for_the_offer_lock_deadline() {
+        // Attempt 5 exhausts the rebid budget (action = Abort). The request stays payable until
+        // the offer's lock deadline, so the final attempt must wait it out rather than walking
+        // away from a live request after only the rebid delay.
+        let timeout =
+            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(timeout.action, NoLockTimeoutAction::Abort);
+
+        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 1_300));
+        assert!(!no_lock_deadline_elapsed(1_000, 10_000, timeout, 9_999));
+        assert!(no_lock_deadline_elapsed(1_000, 10_000, timeout, 10_000));
+    }
+
+    #[test]
+    fn final_attempt_falls_back_to_rebid_delay_without_lock_deadline() {
+        // Legacy resume records predate the lock_expires_at field (stored as 0); keep the old
+        // rebid-delay behavior for them.
+        let timeout =
+            no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(timeout.action, NoLockTimeoutAction::Abort);
+
+        assert!(!no_lock_deadline_elapsed(1_000, 0, timeout, 1_299));
+        assert!(no_lock_deadline_elapsed(1_000, 0, timeout, 1_300));
+    }
+
+    #[test]
+    fn poll_timeout_defers_while_final_attempt_is_payable() {
+        // submitted_at = 1_000, lock deadline = 10_000, request expiry = 20_000.
+        let abort = no_lock_timeout_for_attempt(5, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(abort.action, NoLockTimeoutAction::Abort);
+
+        // Within the payable window the overall poll timeout must not fire: a timeout-triggered
+        // resubmission could reopen the double-pay window through the fresh-id fallback.
+        assert!(defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, abort, 9_999
+        ));
+        // Once the lock deadline passes, the timeout may fire again.
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, abort, 10_000
+        ));
+        // The deferral is bounded by the request expiry even when a (corrupt) record claims a
+        // later lock deadline, so the poll loop cannot be pinned open forever.
+        assert!(!defer_poll_timeout_while_payable(
+            1_000,
+            u64::MAX,
+            20_000,
+            abort,
+            20_000
+        ));
+
+        // Rebid attempts never defer the overall timeout.
+        let rebid = no_lock_timeout_for_attempt(1, TEST_REBID_TIMEOUT_MS, TEST_REBID_MAX_ATTEMPTS);
+        assert_eq!(rebid.action, NoLockTimeoutAction::Rebid);
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 10_000, 20_000, rebid, 9_999
+        ));
+
+        // Legacy records (lock_expires_at == 0) defer only for the rebid-delay window, matching
+        // their abort deadline.
+        assert!(defer_poll_timeout_while_payable(
+            1_000, 0, 20_000, abort, 1_299
+        ));
+        assert!(!defer_poll_timeout_while_payable(
+            1_000, 0, 20_000, abort, 1_300
+        ));
     }
 
     #[test]

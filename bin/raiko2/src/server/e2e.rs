@@ -3713,6 +3713,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             provider_request_id: "0x1234".to_string(),
             remote_tx_hash: Some("0xabcd".to_string()),
             expires_at: 123_456,
+            lock_expires_at: 123_300,
             submitted_at: 123_000,
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),

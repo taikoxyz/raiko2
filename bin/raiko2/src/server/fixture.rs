@@ -564,7 +564,7 @@ fn native_fixture_engine_with_observer(
     native_fixture_engine_for_pipeline(PipelineKey::ShastaNative, observer)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture-server"))]
 pub(crate) fn native_fixture_engine_for_pipeline(
     pipeline_key: PipelineKey,
     observer: Option<Arc<dyn EngineObserver>>,

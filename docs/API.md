@@ -522,6 +522,80 @@ Scope:
   resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
   backend, which are cleared through `POST /v3/prover/clear`.
 
+### Invalidate V4 Proof Artifacts
+
+```http
+POST /v4/prover/invalidate-artifacts
+Content-Type: application/json
+x-api-key: <server.acl.keys[].key with allow=["prover.clear"] or allow=["admin"]>
+```
+
+Request:
+
+```json
+{
+  "proof_type": "sgxgeth",
+  "proof_prefix": "0x00000005",
+  "proposal_id_start": 15950,
+  "proposal_id_end": 15980,
+  "dry_run": true
+}
+```
+
+Request fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
+| `proof_prefix` | string | no | Optional hex prefix matched against cached proof payloads. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
+| `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
+| `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
+| `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof files. |
+
+Response:
+
+```json
+{
+  "status": "ok",
+  "proof_type": "sgxgeth",
+  "data": {
+    "dry_run": true,
+    "artifacts": {
+      "matched": 10,
+      "removed": 0,
+      "files_removed": 0,
+      "files_missing": 0,
+      "failed": 0
+    },
+    "tasks": {
+      "matched": 10,
+      "removed": 0,
+      "skipped_non_terminal": 0,
+      "invalid_metadata": 0,
+      "failed": 0
+    }
+  }
+}
+```
+
+Scope:
+
+- The endpoint invalidates completed, failed, or cancelled local runtime tasks and matching proof
+  artifacts for the selected concrete proof type. It also removes completed child tasks from the local
+  engine so a retried aggregate does not reuse stale child-proof state.
+- It does not cancel or delete non-terminal tasks. Use `POST /v4/prover/clear` first if active work
+  must be cancelled.
+- If no proposal range is supplied, all terminal tasks and matching proof artifacts for `proof_type`
+  are selected. If a proposal range is supplied, standalone proof artifacts are selected only when they
+  are linked to a matched runtime task.
+
+Validation:
+
+- Unknown request body fields return `400 invalid_request`.
+- `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
+  equal to end.
+- `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string.
+
 ## Submit Shasta Batch Proof
 
 ```http

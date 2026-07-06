@@ -575,6 +575,69 @@ impl RuntimeManager {
 
     /// # Errors
     ///
+    /// Returns an error if proof artifact records cannot be listed.
+    pub async fn list_proof_artifacts(&self) -> Result<Vec<ProofArtifactRecord>> {
+        let conn = self.connection().await?;
+        let artifacts = conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    r"
+                    SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                    FROM proof_artifacts
+                    ORDER BY updated_at ASC, network_pair ASC, proof_ref ASC
+                    ",
+                )?;
+                let mut rows = stmt.query([])?;
+                let mut artifacts = Vec::new();
+                while let Some(row) = rows.next()? {
+                    artifacts.push(proof_artifact_record_from_row(row)?);
+                }
+                Ok(artifacts)
+            })
+            .await
+            .context("failed to list proof artifacts")?;
+        Ok(artifacts)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the proof artifact record cannot be removed.
+    pub async fn remove_proof_artifact(
+        &self,
+        network_pair: &str,
+        proof_ref: &str,
+    ) -> Result<Option<ProofArtifactRecord>> {
+        let conn = self.connection().await?;
+        let network_pair = network_pair.to_string();
+        let proof_ref = proof_ref.to_string();
+        let artifact = conn
+            .call(move |conn| {
+                let artifact = conn
+                    .query_row(
+                        r"
+                        SELECT network_pair, proof_ref, pipeline_key, route, proof_path, updated_at
+                        FROM proof_artifacts
+                        WHERE network_pair = ?1 AND proof_ref = ?2
+                        ",
+                        params![network_pair, proof_ref],
+                        proof_artifact_record_from_row,
+                    )
+                    .optional()?;
+                if artifact.is_some() {
+                    conn.execute(
+                        "DELETE FROM proof_artifacts WHERE network_pair = ?1 AND proof_ref = ?2",
+                        params![network_pair, proof_ref],
+                    )?;
+                }
+                Ok(artifact)
+            })
+            .await
+            .context("failed to remove proof artifact")?;
+        Ok(artifact)
+    }
+
+    /// # Errors
+    ///
     /// Returns an error if runtime task records cannot be loaded.
     pub async fn list_tasks(&self) -> Result<Vec<RuntimeTaskRecord>> {
         let conn = self.connection().await?;

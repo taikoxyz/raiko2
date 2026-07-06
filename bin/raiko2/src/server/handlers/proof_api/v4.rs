@@ -7,17 +7,21 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::sync::Arc;
+use raiko2_pipeline::PipelineKey;
+use raiko2_primitives::Proof;
+use std::{collections::HashSet, sync::Arc};
+use tokio::fs;
 
 use super::super::proof_types::v4 as wire;
 use super::{
     ApiData, ApiError, ApiOk, AppState, BatchProofType, BatchShastaRequest,
     CanonicalBatchSubmission, ClearProverStatus, EngineHandle, ProofStatus, ProverStatus,
-    ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData,
+    ProverTaskScope, PublicProverArgs, ServerAclFeature, ShastaProposal, TaskData, TaskMetadata,
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
-    collect_prover_status, handle_created_batch_task, handle_existing_batch_task, load_task_data,
-    parse_task_metadata, register_batch_task, replace_existing_batch_task, resolve_engine,
+    collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
+    is_terminal_runtime_status, load_task_data, parse_task_metadata, register_batch_task,
+    remove_task_children, replace_existing_batch_task, resolve_engine,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -134,6 +138,345 @@ pub(crate) async fn clear_prover(
         proof_type: req.proof_type.as_str().to_string(),
         data,
     }))
+}
+
+pub(crate) async fn invalidate_artifacts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Request<Body>,
+) -> Result<Json<ApiOk<wire::InvalidateArtifactsData>>, Error> {
+    authorize_acl_feature_with_rate_limit(&state, &headers, ServerAclFeature::ProverClear)
+        .map_err(Error::from_api_error)?;
+    let Json(req) = Json::<wire::InvalidateArtifactsRequest>::from_request(req, &state)
+        .await
+        .map_err(|err| Error::from_json_rejection(&err))?;
+    validate_invalidate_artifacts_request(&req)?;
+
+    let data = invalidate_artifacts_inner(&state, &req)
+        .await
+        .map_err(Error::from_api_error)?;
+    Ok(Json(ApiOk {
+        status: "ok",
+        proof_type: req.proof_type.as_str().to_string(),
+        data,
+    }))
+}
+
+async fn invalidate_artifacts_inner(
+    state: &AppState,
+    req: &wire::InvalidateArtifactsRequest,
+) -> Result<wire::InvalidateArtifactsData, ApiError> {
+    let mut data = wire::InvalidateArtifactsData {
+        dry_run: req.dry_run,
+        ..wire::InvalidateArtifactsData::default()
+    };
+    let pipeline_keys = pipeline_keys_for_invalidate(req.proof_type);
+    let proposal_range = invalidate_proposal_range(req);
+    let scope = ProverTaskScope::ProofType(batch_proof_type(req.proof_type));
+
+    let matched_tasks = collect_invalidation_tasks(
+        state,
+        &pipeline_keys,
+        scope,
+        proposal_range,
+        req.proof_prefix.as_deref(),
+        &mut data,
+    )
+    .await?;
+    let matched_artifacts = collect_invalidation_artifacts(
+        state,
+        &pipeline_keys,
+        proposal_range,
+        &matched_tasks.proof_paths,
+        req.proof_prefix.as_deref(),
+        &mut data,
+    )
+    .await?;
+
+    if !req.dry_run {
+        remove_invalidated_tasks(state, matched_tasks.records, &mut data).await;
+        remove_invalidated_artifacts(state, matched_artifacts, &mut data).await;
+    }
+
+    Ok(data)
+}
+
+struct MatchedInvalidationTasks {
+    records: Vec<(raiko2_runtime::RuntimeTaskRecord, TaskMetadata)>,
+    proof_paths: HashSet<String>,
+}
+
+async fn collect_invalidation_tasks(
+    state: &AppState,
+    pipeline_keys: &[PipelineKey],
+    scope: ProverTaskScope,
+    proposal_range: Option<(u64, u64)>,
+    proof_prefix: Option<&str>,
+    data: &mut wire::InvalidateArtifactsData,
+) -> Result<MatchedInvalidationTasks, ApiError> {
+    let tasks = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+    let mut matched = MatchedInvalidationTasks {
+        records: Vec::new(),
+        proof_paths: HashSet::new(),
+    };
+    for record in tasks {
+        if !pipeline_keys.contains(&record.pipeline_key) {
+            continue;
+        }
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                data.tasks.invalid_metadata = data.tasks.invalid_metadata.saturating_add(1);
+                tracing::warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping artifact invalidation record with invalid metadata"
+                );
+                continue;
+            }
+        };
+        if !scope.matches(&metadata) {
+            continue;
+        }
+        if !metadata_matches_proposal_range(&metadata, proposal_range) {
+            continue;
+        }
+        if !task_matches_proof_prefix(&record, proof_prefix).await {
+            continue;
+        }
+        if !is_terminal_runtime_status(record.runner_status) {
+            data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
+            continue;
+        }
+        if let Some(path) = record.proof_path.as_ref() {
+            matched.proof_paths.insert(path.clone());
+        }
+        data.tasks.matched = data.tasks.matched.saturating_add(1);
+        matched.records.push((record, metadata));
+    }
+    Ok(matched)
+}
+
+async fn collect_invalidation_artifacts(
+    state: &AppState,
+    pipeline_keys: &[PipelineKey],
+    proposal_range: Option<(u64, u64)>,
+    matched_task_proof_paths: &HashSet<String>,
+    proof_prefix: Option<&str>,
+    data: &mut wire::InvalidateArtifactsData,
+) -> Result<Vec<raiko2_runtime::ProofArtifactRecord>, ApiError> {
+    let artifacts = state
+        .runtime
+        .list_proof_artifacts()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list proof artifacts: {err}")))?;
+    let mut matched_artifacts = Vec::new();
+    let mut seen_artifacts = HashSet::new();
+    for artifact in artifacts {
+        if !pipeline_keys.contains(&artifact.pipeline_key) {
+            continue;
+        }
+        if !artifact_matches_proposal_scope(&artifact, proposal_range, matched_task_proof_paths) {
+            continue;
+        }
+        if !artifact_matches_proof_prefix(&artifact, proof_prefix).await {
+            continue;
+        }
+        if seen_artifacts.insert((artifact.network_pair.clone(), artifact.proof_ref.clone())) {
+            data.artifacts.matched = data.artifacts.matched.saturating_add(1);
+            matched_artifacts.push(artifact);
+        }
+    }
+    Ok(matched_artifacts)
+}
+
+async fn remove_invalidated_tasks(
+    state: &AppState,
+    matched_task_ids: Vec<(raiko2_runtime::RuntimeTaskRecord, TaskMetadata)>,
+    data: &mut wire::InvalidateArtifactsData,
+) {
+    let mut removed_engine_task_ids = HashSet::new();
+    for (record, metadata) in matched_task_ids {
+        if let Ok(engine) = resolve_engine(state, &metadata.network_pair, record.pipeline_key)
+            && let Err(err) = remove_task_children(
+                &engine,
+                record.pipeline_key,
+                &metadata,
+                &mut removed_engine_task_ids,
+            )
+            .await
+        {
+            data.tasks.failed = data.tasks.failed.saturating_add(1);
+            tracing::warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed to remove invalidated task children"
+            );
+            continue;
+        }
+
+        match state.runtime.remove_task(&record.task_id).await {
+            Ok(true) => data.tasks.removed = data.tasks.removed.saturating_add(1),
+            Ok(false) => {}
+            Err(err) => {
+                data.tasks.failed = data.tasks.failed.saturating_add(1);
+                tracing::warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "failed to remove invalidated runtime task"
+                );
+            }
+        }
+    }
+}
+
+async fn remove_invalidated_artifacts(
+    state: &AppState,
+    matched_artifacts: Vec<raiko2_runtime::ProofArtifactRecord>,
+    data: &mut wire::InvalidateArtifactsData,
+) {
+    for artifact in matched_artifacts {
+        match state
+            .runtime
+            .remove_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .await
+        {
+            Ok(Some(record)) => {
+                data.artifacts.removed = data.artifacts.removed.saturating_add(1);
+                match fs::remove_file(&record.proof_path).await {
+                    Ok(()) => {
+                        data.artifacts.files_removed =
+                            data.artifacts.files_removed.saturating_add(1);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        data.artifacts.files_missing =
+                            data.artifacts.files_missing.saturating_add(1);
+                    }
+                    Err(err) => {
+                        data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                        tracing::warn!(
+                            network_pair = %record.network_pair,
+                            proof_ref = %record.proof_ref,
+                            proof_path = %record.proof_path,
+                            error = %err,
+                            "failed to remove invalidated proof artifact file"
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    error = %err,
+                    "failed to remove invalidated proof artifact record"
+                );
+            }
+        }
+    }
+}
+
+fn validate_invalidate_artifacts_request(
+    req: &wire::InvalidateArtifactsRequest,
+) -> Result<(), Error> {
+    if let Some(prefix) = req.proof_prefix.as_deref() {
+        if !prefix.starts_with("0x") {
+            return Err(Error::invalid_request("proof_prefix must start with 0x"));
+        }
+        if prefix.len() <= 2 {
+            return Err(Error::invalid_request("proof_prefix must not be empty"));
+        }
+        if prefix.len() > 130 {
+            return Err(Error::invalid_request("proof_prefix is too long"));
+        }
+        if !prefix[2..].bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::invalid_request(
+                "proof_prefix must contain hex characters",
+            ));
+        }
+    }
+    match (req.proposal_id_start, req.proposal_id_end) {
+        (Some(start), Some(end)) if start > end => Err(Error::invalid_request(
+            "proposal_id_start must be <= proposal_id_end",
+        )),
+        (Some(_), None) | (None, Some(_)) => Err(Error::invalid_request(
+            "proposal_id_start and proposal_id_end must be provided together",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn invalidate_proposal_range(req: &wire::InvalidateArtifactsRequest) -> Option<(u64, u64)> {
+    req.proposal_id_start.zip(req.proposal_id_end)
+}
+
+fn pipeline_keys_for_invalidate(proof_type: wire::ProofType) -> Vec<PipelineKey> {
+    match proof_type {
+        wire::ProofType::Risc0 => vec![PipelineKey::ShastaRisc0, PipelineKey::ShastaRisc0Network],
+        wire::ProofType::Sp1 => vec![PipelineKey::ShastaSp1],
+        wire::ProofType::Sgx => vec![PipelineKey::ShastaSgx],
+        wire::ProofType::SgxGeth => vec![PipelineKey::ShastaSgxGeth],
+    }
+}
+
+fn metadata_matches_proposal_range(metadata: &TaskMetadata, range: Option<(u64, u64)>) -> bool {
+    let Some((start, end)) = range else {
+        return true;
+    };
+    metadata
+        .proposals
+        .iter()
+        .any(|proposal| (start..=end).contains(&proposal.proposal_id))
+}
+
+async fn task_matches_proof_prefix(
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    proof_prefix: Option<&str>,
+) -> bool {
+    let Some(prefix) = proof_prefix else {
+        return true;
+    };
+    let Some(path) = record.proof_path.as_deref() else {
+        return false;
+    };
+    proof_file_starts_with(path, prefix).await
+}
+
+fn artifact_matches_proposal_scope(
+    artifact: &raiko2_runtime::ProofArtifactRecord,
+    proposal_range: Option<(u64, u64)>,
+    matched_task_proof_paths: &HashSet<String>,
+) -> bool {
+    proposal_range.is_none() || matched_task_proof_paths.contains(&artifact.proof_path)
+}
+
+async fn artifact_matches_proof_prefix(
+    artifact: &raiko2_runtime::ProofArtifactRecord,
+    proof_prefix: Option<&str>,
+) -> bool {
+    match proof_prefix {
+        Some(prefix) => proof_file_starts_with(&artifact.proof_path, prefix).await,
+        None => true,
+    }
+}
+
+async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
+    let Ok(bytes) = fs::read(path).await else {
+        return false;
+    };
+    let Ok(proof) = serde_json::from_slice::<Proof>(&bytes) else {
+        return false;
+    };
+    proof
+        .proof
+        .as_deref()
+        .is_some_and(|proof| proof.starts_with(prefix))
 }
 
 // Handler-level error plumbing stays here; only the v4 wire payload lives in proof_types::v4.

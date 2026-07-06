@@ -926,6 +926,69 @@ async fn e2e_v4_clear_rate_limits_acl_key() {
 }
 
 #[tokio::test]
+async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
+    let (app, engine) = v4_sp1_acl_app();
+    let payload = v4_sp1_proposal_request(11);
+
+    let (status, first) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["status"], "registered");
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, completed) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
+
+    let request = json!({
+        "proof_type": "sp1",
+        "dry_run": true
+    });
+    let (status, dry_run) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["status"], "ok");
+    assert_eq!(dry_run["proof_type"], "sp1");
+    assert_eq!(dry_run["data"]["dry_run"], true);
+    assert_eq!(dry_run["data"]["artifacts"]["matched"], 1);
+    assert_eq!(dry_run["data"]["artifacts"]["removed"], 0);
+    assert_eq!(dry_run["data"]["tasks"]["matched"], 1);
+    assert_eq!(dry_run["data"]["tasks"]["removed"], 0);
+
+    let request = json!({
+        "proof_type": "sp1"
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["dry_run"], false);
+    assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["files_removed"], 1);
+    assert_eq!(invalidated["data"]["tasks"]["matched"], 1);
+    assert_eq!(invalidated["data"]["tasks"]["removed"], 1);
+
+    let (status, resubmitted) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload).await;
+    assert_eq!(status, StatusCode::OK, "{resubmitted}");
+    assert_eq!(resubmitted["data"]["status"], "registered");
+    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
+}
+
+#[tokio::test]
 async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(11_155_111).await {
         Ok(value) => value,

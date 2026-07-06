@@ -4,8 +4,8 @@ use raiko2_primitives::ProofType;
 use raiko2_prover::{
     boundless_config::{
         DEFAULT_REBID_MAX_ATTEMPTS, DEFAULT_REBID_PRICE_STEP_BPS, DEFAULT_REBID_TIMEOUT_MS,
-        DeploymentConfig, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing,
-        REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
+        DeploymentConfig, MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, MIN_REBID_TIMEOUT_MS,
+        OfferParamsConfig, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT, validate_offer_spec,
     },
     gaiko2::Gaiko2Config as Gaiko2ProverConfig,
     sp1_config::{ExecutionMode as Sp1ExecutionMode, ProverMode as Sp1ProverMode, Sp1Config},
@@ -310,6 +310,14 @@ impl BoundlessConfig {
         if self.rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT {
             bail!("prover.boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
         }
+        if (1..MIN_MEANINGFUL_REBID_PRICE_STEP_BPS).contains(&self.rebid_price_step_bps) {
+            bail!(
+                "prover.boundless.rebid_price_step_bps = {} is below the {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} bps (1%) floor; \
+                 values in 1..{MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} are almost always a basis-points/multiplier confusion \
+                 (e.g. `2` meaning ×2). Use 0 for an explicit flat ladder or >= {MIN_MEANINGFUL_REBID_PRICE_STEP_BPS} to escalate.",
+                self.rebid_price_step_bps
+            );
+        }
         validate_offer_spec(&self.offer_params.batch)
             .map_err(anyhow::Error::msg)
             .context("prover.boundless.offer_params.batch")?;
@@ -381,7 +389,8 @@ const fn default_boundless_rebid_max_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProverConfig, REBID_MAX_ATTEMPTS_LIMIT, Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
+        MIN_MEANINGFUL_REBID_PRICE_STEP_BPS, ProverConfig, REBID_MAX_ATTEMPTS_LIMIT,
+        Sp1ExecutionMode, ZkAnyConfig, ZkAnyTargetConfig,
     };
 
     #[test]
@@ -468,6 +477,31 @@ mod tests {
         config
             .validate()
             .expect("zero rebid price step bps should be accepted");
+    }
+
+    #[test]
+    fn prover_config_rejects_sub_floor_boundless_rebid_price_step_bps() {
+        // A value in 1..100 bps is almost always a bps/multiplier confusion (e.g. `2` meaning ×2).
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_price_step_bps = 2;
+
+        assert!(
+            config
+                .validate()
+                .expect_err("sub-floor rebid price step bps should fail")
+                .to_string()
+                .contains("rebid_price_step_bps")
+        );
+    }
+
+    #[test]
+    fn prover_config_accepts_floor_boundless_rebid_price_step_bps() {
+        let mut config = ProverConfig::default();
+        config.boundless.rebid_price_step_bps = MIN_MEANINGFUL_REBID_PRICE_STEP_BPS;
+
+        config
+            .validate()
+            .expect("floor rebid price step bps should be accepted");
     }
 
     #[test]

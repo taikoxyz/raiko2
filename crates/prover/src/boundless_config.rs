@@ -14,6 +14,11 @@ pub const DEFAULT_REBID_TIMEOUT_MS: u64 = 300_000;
 /// the effective no-lock delay to this floor, so this is the single source of truth for both.
 pub const MIN_REBID_TIMEOUT_MS: u64 = 1_000;
 pub const DEFAULT_REBID_PRICE_STEP_BPS: u32 = 5000;
+/// Smallest non-zero rebid step config validation accepts (1%). `0` is a valid, explicit flat
+/// ladder, but a value in `1..MIN` is almost always a basis-points/multiplier confusion (e.g. `2`
+/// meant as "×2", which is really +0.02%/rung) — a curve so flat it re-creates the same-price-retry
+/// pathology bounded rebids were added to avoid, so it is rejected rather than silently honored.
+pub const MIN_MEANINGFUL_REBID_PRICE_STEP_BPS: u32 = 100;
 pub const DEFAULT_REBID_MAX_ATTEMPTS: u32 = 4;
 pub const REBID_MAX_ATTEMPTS_LIMIT: u32 = 31;
 
@@ -68,6 +73,13 @@ pub enum TimeoutPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+// Fail closed on stale/renamed offer-level keys (matching the bin-level config posture). The
+// hard cutover deleted several offer fields; without this, a config that leaves e.g.
+// `dynamic_pricing_timeout_modifier` at its old offer level — instead of inside `[timeouts]` —
+// would boot clean with the value silently ignored. NOTE: this does not reach inside the
+// internally-tagged `timeouts`/`*_quote` enums, which serde cannot deny unknown fields on; stale
+// keys nested in those tables are still dropped silently (see the migration notes in docs/API.md).
+#[serde(deny_unknown_fields)]
 pub struct BoundlessOfferParams {
     #[serde(default)]
     pub pricing_mode: BoundlessPricingMode,
@@ -82,6 +94,7 @@ pub struct BoundlessOfferParams {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OfferParamsConfig {
     pub batch: BoundlessOfferParams,
     pub aggregation: BoundlessOfferParams,
@@ -484,6 +497,23 @@ mod tests {
                 timeout_secs: 3600
             }
         ));
+    }
+
+    #[test]
+    fn offer_params_reject_stale_offer_level_key() {
+        // A stale offer-level key left over from the pre-cutover schema (here
+        // `dynamic_pricing_timeout_modifier`, which now lives only inside `[timeouts]`) must fail
+        // closed rather than boot with the value silently ignored.
+        let err = serde_json::from_value::<BoundlessOfferParams>(serde_json::json!({
+            "pricing_mode": "market",
+            "ramp_up_start_sec": 0,
+            "ramp_up_period_sec": 180,
+            "lock_collateral": "50",
+            "timeouts": { "mode": "fixed", "lock_timeout_secs": 600, "timeout_secs": 3600 },
+            "dynamic_pricing_timeout_modifier": 2.0
+        }))
+        .expect_err("stale offer-level key should be rejected");
+        assert!(err.to_string().contains("dynamic_pricing_timeout_modifier"));
     }
 
     #[test]

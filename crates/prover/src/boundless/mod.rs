@@ -329,6 +329,18 @@ impl ElfType {
             Self::Aggregation => "aggregation",
         }
     }
+
+    /// Journal/seal/metadata discriminator: `ElfType::Batch` proves a "proposal", `Aggregation` an "aggregation".
+    const fn proof_type_str(self) -> &'static str {
+        match self {
+            Self::Batch => "proposal",
+            Self::Aggregation => "aggregation",
+        }
+    }
+
+    const fn is_proposal(self) -> bool {
+        matches!(self, Self::Batch)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -942,7 +954,7 @@ impl BoundlessProver {
         &self,
         client: &Client,
         submission: &Submission,
-        proof_type: &'static str,
+        elf_type: ElfType,
         image_id: Digest,
         block_image_id: Option<Digest>,
         expected_input_hash: B256,
@@ -1093,7 +1105,7 @@ impl BoundlessProver {
                         ))
                     })?;
                     let seal = fulfillment.seal.clone();
-                    let receipt_json = if proof_type == "proposal" {
+                    let receipt_json = if elf_type.is_proposal() {
                         match decode_seal(seal.clone(), image_id, journal.to_vec()) {
                             Ok(ContractReceipt::Base(receipt)) => {
                                 serde_json::to_string(&receipt).ok()
@@ -1103,11 +1115,12 @@ impl BoundlessProver {
                     } else {
                         None
                     };
-                    let input_hash = match proof_type {
-                        "proposal" => parse_shasta_proposal_input_hash(journal)?,
-                        _ => parse_shasta_aggregation_input_hash(journal)?,
+                    let input_hash = if elf_type.is_proposal() {
+                        parse_shasta_proposal_input_hash(journal)?
+                    } else {
+                        parse_shasta_aggregation_input_hash(journal)?
                     };
-                    if let ("proposal", Some(carry)) = (proof_type, proposal_carry_data) {
+                    if let (true, Some(carry)) = (elf_type.is_proposal(), proposal_carry_data) {
                         ensure_shasta_proposal_input_matches_carry(input_hash, carry, "boundless")?;
                     }
                     if input_hash != expected_input_hash {
@@ -1119,7 +1132,7 @@ impl BoundlessProver {
                     let stage_metadata = serde_json::json!({
                                     "zkvm": "risc0",
                                     "runner": "network",
-                                    "proof_type": proof_type,
+                                    "proof_type": elf_type.proof_type_str(),
                                     "mcycles_count": quoted_mcycles_count,
                                     "quoted_mcycles_count": quoted_mcycles_count,
                                     "evaluated_mcycles_count": evaluated_mcycles_count,
@@ -1135,18 +1148,19 @@ impl BoundlessProver {
                             "offchain": self.config.offchain,
                         }
                     });
-                    let extra_data = match (proof_type, proposal_carry_data) {
-                        ("proposal", Some(carry)) => {
+                    let extra_data = match (elf_type.is_proposal(), proposal_carry_data) {
+                        (true, Some(carry)) => {
                             with_shasta_extra_data(carry, "risc0", Some(stage_metadata))?
                         }
                         _ => Some(stage_metadata),
                     };
-                    let proof = match proof_type {
-                        "proposal" => encode_risc0_proposal_seal_payload(
+                    let proof = if elf_type.is_proposal() {
+                        encode_risc0_proposal_seal_payload(
                             &seal,
                             B256::from_slice(image_id.as_bytes()),
-                        ),
-                        _ => encode_risc0_aggregation_seal_payload(
+                        )
+                    } else {
+                        encode_risc0_aggregation_seal_payload(
                             &seal,
                             B256::from_slice(
                                 block_image_id
@@ -1159,7 +1173,7 @@ impl BoundlessProver {
                                     .as_bytes(),
                             ),
                             B256::from_slice(image_id.as_bytes()),
-                        ),
+                        )
                     };
                     return Ok(Proof {
                         proof: Some(proof),
@@ -1185,7 +1199,6 @@ impl BoundlessProver {
         &self,
         elf_type: ElfType,
         offer_spec: &BoundlessOfferParams,
-        proof_type: &'static str,
         input: Bytes,
         elf: &[u8],
         block_image_id: Option<Digest>,
@@ -1198,9 +1211,10 @@ impl BoundlessProver {
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
             Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
-        let expected_input_hash = match proof_type {
-            "proposal" => parse_shasta_proposal_input_hash(&journal)?,
-            _ => parse_shasta_aggregation_input_hash(&journal)?,
+        let expected_input_hash = if elf_type.is_proposal() {
+            parse_shasta_proposal_input_hash(&journal)?
+        } else {
+            parse_shasta_aggregation_input_hash(&journal)?
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
@@ -1326,7 +1340,7 @@ impl BoundlessProver {
                 .poll_until_fulfilled(
                     &client,
                     &submission,
-                    proof_type,
+                    elf_type,
                     program.image_id,
                     block_image_id,
                     expected_input_hash,
@@ -1395,7 +1409,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Batch,
             &self.config.offer_params.batch,
-            "proposal",
             input,
             &elf,
             None,
@@ -1418,7 +1431,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Batch,
             &self.config.offer_params.batch,
-            "proposal",
             input,
             &elf,
             None,
@@ -1443,7 +1455,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
             &self.config.offer_params.aggregation,
-            "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -1469,7 +1480,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
             &self.config.offer_params.aggregation,
-            "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -1866,6 +1876,16 @@ mod tests {
 
     fn sample_offer() -> super::BoundlessOfferParams {
         default_batch_offer_params()
+    }
+
+    #[test]
+    fn elf_type_maps_to_proof_type_and_stage() {
+        assert_eq!(ElfType::Batch.proof_type_str(), "proposal");
+        assert_eq!(ElfType::Aggregation.proof_type_str(), "aggregation");
+        assert_eq!(ElfType::Batch.stage_name(), "batch");
+        assert_eq!(ElfType::Aggregation.stage_name(), "aggregation");
+        assert!(ElfType::Batch.is_proposal());
+        assert!(!ElfType::Aggregation.is_proposal());
     }
 
     #[test]

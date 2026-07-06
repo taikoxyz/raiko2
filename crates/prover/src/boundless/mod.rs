@@ -1236,6 +1236,12 @@ impl BoundlessProver {
                         expires_at = submission.expires_at,
                         "Stored Boundless submission is expired; submitting a new request"
                     );
+                    // The stored submission consumed its budget slot and lived out its full
+                    // market lifetime, so its replacement is the next attempt — same as the
+                    // in-process `Expired` path. Without this, every restart after expiry
+                    // would resubmit under the stored attempt number, escaping the submission
+                    // budget one request per restart and stalling price escalation a rung.
+                    attempt = attempt.saturating_add(1);
                     continue;
                 }
                 publish_boundless_progress(

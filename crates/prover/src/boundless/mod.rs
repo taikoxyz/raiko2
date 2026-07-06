@@ -894,9 +894,10 @@ impl BoundlessProver {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
         let max_price = U256::from(request.offer.maxPrice);
-        // Sign the request before entering the balance-gate critical section: signing is fallible
-        // and independent of the deposit value, so keeping it outside guarantees that nothing
-        // between the claim-increment and the claim-release can early-return and leak a claim.
+        // Query the chain id and sign the request before entering the balance-gate critical section:
+        // both are fallible and independent of the deposit value, so keeping them outside guarantees
+        // that nothing between the claim-increment and the claim-release can early-return and leak a
+        // claim.
         let chain_id =
             client.boundless_market.get_chain_id().await.map_err(|e| {
                 RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
@@ -1309,8 +1310,9 @@ impl BoundlessProver {
     ) -> RaikoResult<Proof> {
         let client = self.client().await?;
         // Seed the program cache (and derive the stable image ref) up front; the per-attempt
-        // refresh below is a cache hit unless the presigned URL nears expiry.
-        let program = self.ensure_uploaded(client, elf_type, elf).await?;
+        // refresh inside the loop below shadows this and is a cache hit unless the presigned URL
+        // nears expiry.
+        let seed_program = self.ensure_uploaded(client, elf_type, elf).await?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
@@ -1322,7 +1324,7 @@ impl BoundlessProver {
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
-        let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
+        let image_ref = alloy_primitives::hex::encode_prefixed(seed_program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
@@ -1662,11 +1664,11 @@ struct MarketOfferPrices {
     clamped_to_cap: bool,
 }
 
-/// Escalate the autopriced max price by the rebid multiplier, then clamp it to the configured
+/// Escalate the autopriced max price by the rebid step (bps), then clamp it to the configured
 /// per-mcycle cap.
 ///
-/// Manual pricing escalates its configured max price in [`validate_offer_params`]; this is the
-/// market-mode counterpart, applied after the SDK autoprices the offer — without it, market-mode
+/// Manual pricing escalates its configured max price in [`BoundlessProver::build_request`]; this is
+/// the market-mode counterpart, applied after the SDK autoprices the offer — without it, market-mode
 /// rebids would just resubmit at whatever the SDK quotes again, repeating an offer the market
 /// already declined to lock. Only the max price escalates; the min price keeps the ramp start
 /// unchanged so an idle prover still locks cheaply, and is lowered only when the clamped max
@@ -1803,15 +1805,15 @@ fn validate_offer_params(
         } => {
             let derived_lock = lock_timeout_ms_per_mcycle * mcycles_count / 1000;
             let derived_timeout = timeout_ms_per_mcycle * mcycles_count / 1000;
-            if offer_spec.pricing_mode == BoundlessPricingMode::Market {
-                if let Some(modifier) = dynamic_pricing_timeout_modifier {
-                    (
-                        scale_timeout(derived_lock, *modifier, "lock_timeout")?,
-                        scale_timeout(derived_timeout, *modifier, "timeout")?,
-                    )
-                } else {
-                    (derived_lock, derived_timeout)
-                }
+            // Scale only in market mode with a configured modifier; every other case uses the
+            // per-mcycle derived timeouts unchanged.
+            if offer_spec.pricing_mode == BoundlessPricingMode::Market
+                && let Some(modifier) = dynamic_pricing_timeout_modifier
+            {
+                (
+                    scale_timeout(derived_lock, *modifier, "lock_timeout")?,
+                    scale_timeout(derived_timeout, *modifier, "timeout")?,
+                )
             } else {
                 (derived_lock, derived_timeout)
             }
@@ -1976,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregation_quoted_mcycles_matches_raiko_agent_strategy() {
+    fn aggregation_quote_matches_raiko_agent_strategy() {
         let prover = BoundlessProver::new(BoundlessConfig::default());
         assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 0), 200);
         assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 123), 200);

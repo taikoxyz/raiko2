@@ -1019,9 +1019,17 @@ impl BoundlessProver {
                                 rotate_request_id: false,
                             }),
                             NoLockTimeoutAction::Abort => {
+                                // Legacy resume records (lock_expires_at == 0) abort on the
+                                // rebid-delay fallback, not the offer's lock deadline; report
+                                // whichever deadline actually elapsed.
+                                let deadline_detail = if submission.lock_expires_at > 0 {
+                                    "before its payable window closed".to_string()
+                                } else {
+                                    format!("within {} seconds", no_lock_timeout.delay.as_secs())
+                                };
                                 Err(BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
-                                    "Boundless request {} was not locked before its payable \
-                                     window closed; exhausted boundless no-lock rebids",
+                                    "Boundless request {} was not locked {deadline_detail}; \
+                                     exhausted boundless no-lock rebids",
                                     submission.provider_request_id
                                 ))))
                             }

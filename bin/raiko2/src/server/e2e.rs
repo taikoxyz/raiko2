@@ -3721,6 +3721,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
             max_price_multiplier: 4,
+            max_price_wei: Some("9000000000000".to_string()),
             rebid_attempt: 2,
         },
         updated_at,
@@ -3796,6 +3797,10 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["max_price_multiplier"],
         4
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["max_price_wei"],
+        "9000000000000"
     );
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],

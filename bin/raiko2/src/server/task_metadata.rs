@@ -134,6 +134,10 @@ pub(crate) struct TaskRuntimeMetadata {
     pub(crate) evaluated_mcycles_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
+    /// Exact escalated max price bid, in wei, as a decimal string. The floored
+    /// `max_price_multiplier` renders the common ×1.5 rung as `1`, so this carries the precise bid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_wei: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rebid_attempt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -541,6 +545,7 @@ impl TaskRuntimeMetadata {
         self.quoted_mcycles_count = progress.quoted_mcycles_count;
         self.evaluated_mcycles_count = progress.evaluated_mcycles_count;
         self.max_price_multiplier = Some(progress.max_price_multiplier);
+        self.max_price_wei.clone_from(&progress.max_price_wei);
         self.rebid_attempt = Some(progress.rebid_attempt);
     }
 

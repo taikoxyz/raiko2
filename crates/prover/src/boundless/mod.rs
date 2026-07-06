@@ -158,10 +158,20 @@ fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) ->
     u32::try_from(scaled / U256::from(SCALE)).unwrap_or(u32::MAX)
 }
 
-/// Attempt number to resume a stored submission at. Records carry the real 1-based attempt;
-/// legacy records written before the field existed (`attempt == 0`) fall back to 1.
+/// Attempt number to resume a stored submission at. Records carry the real 1-based attempt.
+///
+/// Records written before `rebid_attempt` was persisted deserialize with `attempt == 0`. The first
+/// release carrying that field is also the first to resume such records, so on that one upgrade
+/// every in-flight submission would otherwise reset to attempt 1 — re-granting the full rebid budget
+/// and rebidding below prices the market already declined. Those legacy records were all produced by
+/// the old ×2-per-rung ladder, which set `max_price_multiplier = 2^(attempt - 1)`, so the attempt is
+/// recovered exactly as `1 + log2(max_price_multiplier)`. Post-upgrade records always carry a real
+/// `attempt`, so this branch is dead after one deploy.
 fn resume_attempt(submission: &Submission) -> u64 {
-    submission.attempt.max(1)
+    if submission.attempt > 0 {
+        return submission.attempt;
+    }
+    1 + u64::from(submission.max_price_multiplier.max(1).ilog2())
 }
 
 const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool {
@@ -384,6 +394,11 @@ struct Submission {
     // Floored effective price multiplier at this attempt, for progress/metadata display only.
     // Derived from `attempt` + config via `effective_price_multiplier`; never used to price offers.
     max_price_multiplier: u32,
+    // Exact escalated max price this submission bid, in wei. The floored `max_price_multiplier`
+    // renders the common attempt-2 (×1.5) rung as `1` — indistinguishable from an un-escalated bid —
+    // so this carries the precise value for telemetry. `0` when resumed from a record that predates
+    // the field.
+    max_price_wei: U256,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
@@ -453,6 +468,7 @@ async fn publish_boundless_progress(
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     submitted_at: submission.submitted_at,
                     max_price_multiplier: submission.max_price_multiplier,
+                    max_price_wei: Some(submission.max_price_wei.to_string()),
                     rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
@@ -494,6 +510,13 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
             max_price_multiplier: value.max_price_multiplier.max(1),
+            // Display-only; `0` for records that predate the field. The next live submit overwrites
+            // it with the exact bid.
+            max_price_wei: value
+                .max_price_wei
+                .as_deref()
+                .and_then(|wei| wei.parse().ok())
+                .unwrap_or(U256::ZERO),
             attempt: u64::from(value.rebid_attempt),
         })
     }
@@ -590,6 +613,77 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     Ok(config)
 }
 
+/// Lock the gate counter, recovering the value on poisoning. The critical sections only do
+/// saturating arithmetic on a `U256`, so they can't actually panic and poison the mutex; recovering
+/// anyway keeps [`BalanceClaim`]'s `Drop` from turning a stray poison into a double-panic abort.
+fn lock_gate(gate: &std::sync::Mutex<U256>) -> std::sync::MutexGuard<'_, U256> {
+    gate.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Serialization point for concurrent on-chain Boundless submissions that fund one market account
+/// (same market + signer). Holds the running total of the max-price claims of every in-flight
+/// on-chain submission, so each submission tops the account up to the *combined* reserved total
+/// rather than each reading the same pre-deposit balance and under-funding the others. Cloned into
+/// every [`BoundlessProver`] built for that account — one prover per network pair, all funding the
+/// same on-chain balance — so the caller builds one gate at setup and shares it across pairs.
+///
+/// Backed by a `std::sync::Mutex` (not a `tokio::Mutex`) so [`BalanceClaim`]'s `Drop` can release a
+/// reservation synchronously when a submission future is cancelled; the critical sections are tiny
+/// and never hold an `.await`.
+#[derive(Clone)]
+pub struct BoundlessBalanceGate(Arc<std::sync::Mutex<U256>>);
+
+impl Default for BoundlessBalanceGate {
+    fn default() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(U256::ZERO)))
+    }
+}
+
+impl BoundlessBalanceGate {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve `amount` on the shared total, returning an RAII claim that releases it on drop.
+    fn reserve(&self, amount: U256) -> BalanceClaim {
+        {
+            let mut reserved = lock_gate(&self.0);
+            *reserved = reserved.saturating_add(amount);
+        }
+        BalanceClaim {
+            gate: self.clone(),
+            amount,
+        }
+    }
+}
+
+/// RAII reservation on a [`BoundlessBalanceGate`]. Holds `amount` on the shared reserved total from
+/// construction until drop, so a submission future that is cancelled or errors mid-flight cannot
+/// leak a reservation (which would permanently over-deposit later requests). Normal completion drops
+/// it at the end of the submit, exactly where the old hand-paired release sites decremented.
+struct BalanceClaim {
+    gate: BoundlessBalanceGate,
+    amount: U256,
+}
+
+impl BalanceClaim {
+    /// Deposit needed to top the account up to the current combined reserved total for the given
+    /// on-chain `balance`. Reads the live reserved total (this claim plus any concurrent ones), so
+    /// concurrent submissions never each top up against the same pre-deposit balance.
+    fn deposit_topup(&self, balance: U256) -> U256 {
+        deposit_topup(balance, *lock_gate(&self.gate.0))
+    }
+}
+
+impl Drop for BalanceClaim {
+    fn drop(&mut self) {
+        let mut reserved = lock_gate(&self.gate.0);
+        *reserved = reserved.saturating_sub(self.amount);
+    }
+}
+
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
@@ -597,23 +691,37 @@ pub struct BoundlessProver {
     /// reused across every subsequent proof, so we don't rebuild the RPC provider and signer per
     /// proof. Lazy (rather than in `new()`) because building it is fallible and async.
     client: tokio::sync::OnceCell<Client>,
+    /// Chain id for signing requests, queried once via the market client and cached (see
+    /// [`BoundlessProver::chain_id`]).
+    chain_id: tokio::sync::OnceCell<u64>,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
-    /// Running total of the max-price claims of every in-flight on-chain submission from this
-    /// signer. Serializes the balance-read→submit critical section so concurrent submissions
-    /// deposit against their combined reserved total instead of each reading the same pre-deposit
-    /// balance and under-funding the account.
-    balance_gate: Arc<tokio::sync::Mutex<U256>>,
+    /// Balance gate serializing concurrent on-chain submissions that fund this market account so
+    /// they deposit against their combined in-flight claim total instead of each reading the same
+    /// pre-deposit balance. Shared across every pair's prover (they fund one account); see
+    /// [`BoundlessBalanceGate`].
+    balance_gate: BoundlessBalanceGate,
 }
 
 impl BoundlessProver {
+    /// Build a prover with its own private balance gate. Use [`BoundlessProver::with_balance_gate`]
+    /// in production so every pair funding the same market account shares one gate.
     #[must_use]
     pub fn new(config: BoundlessConfig) -> Self {
+        Self::with_balance_gate(config, BoundlessBalanceGate::new())
+    }
+
+    /// Build a prover sharing `balance_gate` with every other prover funding the same market account
+    /// (see [`BoundlessBalanceGate`]). Pairs share one signer/market, so the caller builds one gate
+    /// at setup and clones it into each pair's prover.
+    #[must_use]
+    pub fn with_balance_gate(config: BoundlessConfig, balance_gate: BoundlessBalanceGate) -> Self {
         Self {
             deployment: config.get_effective_deployment(),
             config,
             client: tokio::sync::OnceCell::new(),
+            chain_id: tokio::sync::OnceCell::new(),
             programs: Arc::new(RwLock::new(HashMap::new())),
-            balance_gate: Arc::new(tokio::sync::Mutex::new(U256::ZERO)),
+            balance_gate,
         }
     }
 
@@ -631,6 +739,23 @@ impl BoundlessProver {
                 }))
             })
             .await
+    }
+
+    /// Chain id used to sign requests, queried once via the market client and cached. Wrapped in
+    /// `retry_external` so a transient RPC hiccup retries rather than surfacing an error: a signing
+    /// failure aborts the reused-id submission and falls back to a fresh id, re-opening the
+    /// double-pay window that id reuse closes.
+    async fn chain_id(&self, client: &Client) -> RaikoResult<u64> {
+        self.chain_id
+            .get_or_try_init(|| {
+                retry_external("query boundless chain id", || async {
+                    client.boundless_market.get_chain_id().await.map_err(|e| {
+                        RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
+                    })
+                })
+            })
+            .await
+            .copied()
     }
 
     async fn create_client(&self) -> RaikoResult<Client> {
@@ -659,14 +784,16 @@ impl BoundlessProver {
             })
     }
 
+    /// Ensure the program for `elf_type` is uploaded with a live presigned URL, returning the cached
+    /// entry on a hit. `image_id` is passed in (computed once per proof) rather than recomputed here:
+    /// this runs every rebid rung, and hashing the multi-MB ELF on each cache hit was pure waste.
     async fn ensure_uploaded(
         &self,
         client: &Client,
         elf_type: ElfType,
         elf: &[u8],
+        image_id: Digest,
     ) -> RaikoResult<UploadedProgram> {
-        let image_id = compute_boundless_image_id(elf.to_vec(), elf_type.stage_name()).await?;
-
         if let Some(program) = self.programs.read().await.get(&elf_type).cloned()
             && program.image_id == image_id
             && SystemTime::now() < program.refresh_at
@@ -693,10 +820,13 @@ impl BoundlessProver {
         Ok(program)
     }
 
+    /// Ensure the guest input is uploaded with a live presigned URL, returning the cached URL on a
+    /// hit. Encodes `guest_env` (a multi-MB serialization) only when actually (re)uploading — a
+    /// rebid rung that hits the cache skips both the encode and the upload.
     async fn ensure_input_uploaded(
         &self,
         client: &Client,
-        guest_env_bytes: &[u8],
+        guest_env: &GuestEnv,
         cache: &mut Option<UploadedInput>,
     ) -> RaikoResult<Url> {
         if let Some(input) = cache.as_ref()
@@ -704,8 +834,11 @@ impl BoundlessProver {
         {
             return Ok(input.url.clone());
         }
+        let guest_env_bytes = guest_env.encode().map_err(|e| {
+            RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
+        })?;
         let url = retry_external("upload boundless input", || async {
-            client.upload_input(guest_env_bytes).await.map_err(|e| {
+            client.upload_input(&guest_env_bytes).await.map_err(|e| {
                 RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
             })
         })
@@ -718,12 +851,8 @@ impl BoundlessProver {
         Ok(url)
     }
 
-    fn process_input(input: &[u8]) -> RaikoResult<(GuestEnv, Vec<u8>)> {
-        let guest_env = GuestEnv::builder().write_frame(input).build_env();
-        let guest_env_bytes = guest_env.encode().map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
-        })?;
-        Ok((guest_env, guest_env_bytes))
+    fn build_guest_env(input: &[u8]) -> GuestEnv {
+        GuestEnv::builder().write_frame(input).build_env()
     }
 
     async fn evaluate_guest(
@@ -874,6 +1003,7 @@ impl BoundlessProver {
                 self.config.rebid_price_step_bps,
                 self.config.rebid_max_attempts,
             ),
+            max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
         })
     }
@@ -894,46 +1024,41 @@ impl BoundlessProver {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
         let max_price = U256::from(request.offer.maxPrice);
-        // Query the chain id and sign the request before entering the balance-gate critical section:
-        // both are fallible and independent of the deposit value, so keeping them outside guarantees
-        // that nothing between the claim-increment and the claim-release can early-return and leak a
-        // claim.
-        let chain_id =
-            client.boundless_market.get_chain_id().await.map_err(|e| {
-                RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
-            })?;
+        // Sign the request before reserving on the balance gate: signing is independent of the
+        // deposit value, so there's no reason to hold a reservation across it. `chain_id` is cached
+        // and both it and signing retry transient RPC errors, so a hiccup here does not abort the
+        // reused-id submission and rotate to a fresh id.
+        let chain_id = self.chain_id(client).await?;
         let market_addr = *client.boundless_market.instance().address();
         let client_sig = request
             .sign_request(signer, market_addr, chain_id)
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
 
-        // Serialize the balance-read→deposit computation. Claiming this request's max price on the
-        // shared reserved total before reading the balance means a concurrent submission from the
-        // same signer computes its top-up against the combined reserved claim, not the same
-        // pre-deposit balance we just saw. The lock is held only across the increment+read+compute
-        // (the reserved total, elevated until the submit returns, carries the claim across the slow
-        // sign/send). Over-depositing under RPC lag is acceptable and safe — deposits accrue to the
-        // account — whereas under-depositing is exactly the concurrent-underfunding bug this fixes.
-        let value = {
-            let mut reserved = self.balance_gate.lock().await;
-            *reserved = reserved.saturating_add(max_price);
-            match client
+        // Reserve this request's max-price claim on the shared balance gate. `claim` releases the
+        // reservation when it drops — at the end of this call on the happy path, or immediately if
+        // this future is cancelled or an early `?` fires — so a reservation can never leak and
+        // permanently over-deposit later requests.
+        //
+        // Depositing against the *combined* reserved total (not this request alone) is what
+        // serializes concurrent submissions funding the same market account: a second concurrent
+        // submission sees this claim in the reserved total and tops up above it, so neither
+        // under-funds the other. A stale-low balance read only over-deposits, which is safe
+        // (deposits accrue to the account); under-depositing was the concurrent-underfunding bug
+        // this closes. The guarantee spans the concurrent-submission window only — `value` credits
+        // the account now, but the market debits it later at *lock* time, so outside that window the
+        // shared account is not guaranteed to cover every submitted-but-unlocked request.
+        let claim = self.balance_gate.reserve(max_price);
+        let balance = retry_external("query boundless balance", || async {
+            client
                 .boundless_market
                 .balance_of(request.client_address())
                 .await
-            {
-                Ok(balance) => deposit_topup(balance, *reserved),
-                Err(e) => {
-                    // Release the claim we just took before bailing out, so a failed balance query
-                    // never leaks a reservation that would permanently over-deposit later requests.
-                    *reserved = reserved.saturating_sub(max_price);
-                    return Err(RaikoError::Guest(format!(
-                        "Failed to query boundless balance: {e}"
-                    )));
-                }
-            }
-        };
+                .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))
+        })
+        .await?;
+        let value = claim.deposit_topup(balance);
+
         let call = client
             .boundless_market
             .instance()
@@ -953,6 +1078,7 @@ impl BoundlessProver {
                 self.config.rebid_price_step_bps,
                 self.config.rebid_max_attempts,
             ),
+            max_price_wei: max_price,
             attempt,
         };
         publish_boundless_progress(
@@ -989,15 +1115,10 @@ impl BoundlessProver {
             }
         }
 
-        // Release this request's claim now that the submit attempt has returned. Both send() arms
-        // (confirmed tx and uncertain error) converge here with no early return in between, so the
-        // decrement matches the earlier increment on every reachable path. The submitted request
-        // itself now debits the on-chain balance, so keeping the claim would double-count it.
-        {
-            let mut reserved = self.balance_gate.lock().await;
-            *reserved = reserved.saturating_sub(max_price);
-        }
-
+        // Release this request's reservation now that the submit attempt has returned; both send()
+        // arms converge here. `value` has already credited the account, so keeping the claim past
+        // this point would over-count this request against later concurrent submissions.
+        drop(claim);
         Ok(submission)
     }
 
@@ -1005,9 +1126,9 @@ impl BoundlessProver {
         &self,
         context: FreshSubmissionContext<'_>,
     ) -> RaikoResult<Submission> {
-        let (guest_env, guest_env_bytes) = Self::process_input(context.input.as_ref())?;
+        let guest_env = Self::build_guest_env(context.input.as_ref());
         let input_url = self
-            .ensure_input_uploaded(context.client, &guest_env_bytes, context.input_cache)
+            .ensure_input_uploaded(context.client, &guest_env, context.input_cache)
             .await?;
         let request = Box::pin(self.build_request(
             context.client,
@@ -1246,6 +1367,7 @@ impl BoundlessProver {
                             "lock_expires_at": submission.lock_expires_at,
                             "submitted_at": submission.submitted_at,
                             "max_price_multiplier": submission.max_price_multiplier,
+                            "max_price_wei": submission.max_price_wei.to_string(),
                             "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                             "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
                             "offchain": self.config.offchain,
@@ -1309,10 +1431,15 @@ impl BoundlessProver {
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
         let client = self.client().await?;
+        // The image id is deterministic in `elf`, so hash the multi-MB ELF once here and reuse it
+        // for every per-attempt program refresh below instead of re-hashing each rebid rung.
+        let image_id = compute_boundless_image_id(elf.to_vec(), elf_type.stage_name()).await?;
         // Seed the program cache (and derive the stable image ref) up front; the per-attempt
         // refresh inside the loop below shadows this and is a cache hit unless the presigned URL
         // nears expiry.
-        let seed_program = self.ensure_uploaded(client, elf_type, elf).await?;
+        let seed_program = self
+            .ensure_uploaded(client, elf_type, elf, image_id)
+            .await?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
@@ -1350,7 +1477,9 @@ impl BoundlessProver {
         loop {
             // Refresh the program URL per attempt (cheap cache hit unless a refresh is due) so late
             // rebids never carry an expired presigned program URL. The image id is unchanged.
-            let program = self.ensure_uploaded(client, elf_type, elf).await?;
+            let program = self
+                .ensure_uploaded(client, elf_type, elf, image_id)
+                .await?;
             let submission = if let Some(submission) = resume_submission.take() {
                 attempt = attempt.max(resume_attempt(&submission));
                 // Expired records are deliberately not short-circuited: the poll below gives
@@ -2131,16 +2260,29 @@ mod tests {
             lock_expires_at: 1,
             submitted_at: 1,
             max_price_multiplier,
+            max_price_wei: U256::ZERO,
             attempt,
         }
     }
 
     #[test]
     fn resume_attempt_uses_persisted_attempt() {
-        // The persisted attempt is the sole source of truth.
+        // A persisted attempt (> 0) is the sole source of truth, ignoring the multiplier.
         assert_eq!(super::resume_attempt(&test_submission(4, 3)), 3);
-        // A legacy record without a persisted attempt (0) falls back to 1.
+        assert_eq!(super::resume_attempt(&test_submission(1, 7)), 7);
+    }
+
+    #[test]
+    fn resume_attempt_reconstructs_legacy_attempt_from_multiplier() {
+        // Records predating `rebid_attempt` (attempt == 0) came from the ×2-per-rung ladder, so the
+        // attempt is recovered exactly as `1 + log2(max_price_multiplier)`.
         assert_eq!(super::resume_attempt(&test_submission(1, 0)), 1);
+        assert_eq!(super::resume_attempt(&test_submission(2, 0)), 2);
+        assert_eq!(super::resume_attempt(&test_submission(4, 0)), 3);
+        assert_eq!(super::resume_attempt(&test_submission(8, 0)), 4);
+        assert_eq!(super::resume_attempt(&test_submission(16, 0)), 5);
+        // A malformed multiplier of 0 still resolves to attempt 1 (no ilog2(0) panic).
+        assert_eq!(super::resume_attempt(&test_submission(0, 0)), 1);
     }
 
     #[test]
@@ -2152,6 +2294,7 @@ mod tests {
             lock_expires_at: 1_500,
             submitted_at: 1_000,
             max_price_multiplier: 1,
+            max_price_wei: None,
             rebid_attempt: 1,
         };
         let submission = super::Submission::try_from(resume).expect("valid resume record");

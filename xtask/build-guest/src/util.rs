@@ -1,10 +1,12 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
 pub(crate) const DOCKER_CARGO_HOME: &str = "/cargo";
+pub(crate) const DOCKER_SCCACHE_DIR: &str = "/sccache";
 
 pub(crate) fn target_root(root: &Path) -> PathBuf {
     env::var("CARGO_TARGET_DIR")
@@ -13,7 +15,66 @@ pub(crate) fn target_root(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn docker_cargo_cache_volume(root: &Path, backend: &str) -> Result<Option<String>> {
-    let mode = env::var("DOCKER_CARGO_CACHE").ok().and_then(non_empty);
+    docker_cache_volume(
+        root,
+        backend,
+        "cargo",
+        env::var("DOCKER_CARGO_CACHE").ok().and_then(non_empty),
+        env::var("DOCKER_CARGO_CACHE_VOLUME")
+            .ok()
+            .and_then(non_empty),
+        "DOCKER_CARGO_CACHE",
+        "DOCKER_CARGO_CACHE_VOLUME",
+    )
+}
+
+pub(crate) fn docker_sccache_cache_volume(
+    root: &Path,
+    backend: &str,
+    default_enabled: bool,
+) -> Result<Option<String>> {
+    docker_sccache_cache_volume_for_env(
+        root,
+        backend,
+        env::var("DOCKER_SCCACHE_CACHE").ok().and_then(non_empty),
+        env::var("DOCKER_SCCACHE_CACHE_VOLUME")
+            .ok()
+            .and_then(non_empty),
+        default_enabled,
+    )
+}
+
+fn docker_sccache_cache_volume_for_env(
+    root: &Path,
+    backend: &str,
+    mode: Option<String>,
+    explicit: Option<String>,
+    default_enabled: bool,
+) -> Result<Option<String>> {
+    if !default_enabled && mode.is_none() && explicit.is_none() {
+        return Ok(None);
+    }
+
+    docker_cache_volume(
+        root,
+        backend,
+        "sccache",
+        mode,
+        explicit,
+        "DOCKER_SCCACHE_CACHE",
+        "DOCKER_SCCACHE_CACHE_VOLUME",
+    )
+}
+
+fn docker_cache_volume(
+    root: &Path,
+    backend: &str,
+    cache_kind: &str,
+    mode: Option<String>,
+    explicit: Option<String>,
+    mode_env: &str,
+    volume_env: &str,
+) -> Result<Option<String>> {
     let mode = mode
         .as_deref()
         .map(|value| value.to_ascii_lowercase())
@@ -22,26 +83,25 @@ pub(crate) fn docker_cargo_cache_volume(root: &Path, backend: &str) -> Result<Op
         "volume" | "1" | "true" => {}
         "none" | "0" | "false" | "off" => return Ok(None),
         _ => {
-            bail!("unsupported DOCKER_CARGO_CACHE={mode} (expected: volume|none|true|false|0|1)");
+            bail!("unsupported {mode_env}={mode} (expected: volume|none|off|true|false|0|1)");
         }
     }
 
-    let explicit = env::var("DOCKER_CARGO_CACHE_VOLUME")
-        .ok()
-        .and_then(non_empty);
     if let Some(value) = explicit.as_deref()
         && !is_valid_docker_volume_name(value)
     {
-        bail!(
-            "invalid DOCKER_CARGO_CACHE_VOLUME={value} (expected [A-Za-z0-9_.-], must start with alnum)"
-        );
+        bail!("invalid {volume_env}={value} (expected [A-Za-z0-9_.-], must start with alnum)");
     }
     let volume = explicit.unwrap_or_else(|| {
         let repo = sanitize_docker_name(&repo_name(root));
         let backend = sanitize_docker_name(backend);
-        format!("{repo}-cargo-{backend}")
+        format!("{repo}-{cache_kind}-{backend}")
     });
     Ok(Some(volume))
+}
+
+pub(crate) fn format_duration(duration: Duration) -> String {
+    format!("{:.2}s", duration.as_secs_f64())
 }
 
 pub(crate) fn ensure_command(mut cmd: Command, name: &str, hint: &str) -> Result<()> {
@@ -241,6 +301,128 @@ mod tests {
             )
             .unwrap(),
             "/target/risc0/.rustc_info.json"
+        );
+    }
+
+    #[test]
+    fn docker_cache_volume_defaults_are_kind_and_backend_scoped() {
+        assert_eq!(
+            super::docker_cache_volume(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                "sccache",
+                None,
+                None,
+                "MODE",
+                "VOLUME",
+            )
+            .unwrap(),
+            Some("raiko2-sccache-risc0".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_cache_volume_can_be_disabled() {
+        assert_eq!(
+            super::docker_cache_volume(
+                Path::new("/repo/raiko2"),
+                "sp1",
+                "sccache",
+                Some("off".to_string()),
+                None,
+                "MODE",
+                "VOLUME",
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn docker_cache_volume_error_lists_off_as_disable_mode() {
+        let err = super::docker_cache_volume(
+            Path::new("/repo/raiko2"),
+            "sp1",
+            "sccache",
+            Some("bogus".to_string()),
+            None,
+            "MODE",
+            "VOLUME",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("expected: volume|none|off|true|false|0|1")
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_is_off_by_default_when_not_default_enabled() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                None,
+                false
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_explicit_volume_opts_in() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                Some("custom-sccache".to_string()),
+                false
+            )
+            .unwrap(),
+            Some("custom-sccache".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_sccache_cache_volume_default_enabled_uses_scoped_volume() {
+        assert_eq!(
+            super::docker_sccache_cache_volume_for_env(
+                Path::new("/repo/raiko2"),
+                "risc0",
+                None,
+                None,
+                true
+            )
+            .unwrap(),
+            Some("raiko2-sccache-risc0".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_cache_volume_rejects_invalid_explicit_names() {
+        let err = super::docker_cache_volume(
+            Path::new("/repo/raiko2"),
+            "sp1",
+            "sccache",
+            None,
+            Some("-bad".to_string()),
+            "MODE",
+            "VOLUME",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid VOLUME=-bad"));
+    }
+
+    #[test]
+    fn format_duration_uses_seconds_with_two_decimals() {
+        assert_eq!(
+            super::format_duration(std::time::Duration::from_millis(1234)),
+            "1.23s"
         );
     }
 }

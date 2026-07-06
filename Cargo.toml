@@ -45,8 +45,8 @@ pedantic = "warn"
 redundant_pub_crate = "warn"
 missing_const_for_fn = "warn"
 
-# Dev builds favor compile speed; use `--release` (unchanged below) when runtime
-# performance matters.
+# Dev builds favor compile speed. Release builds use Cargo's built-in defaults
+# unless a specific command overrides them for a build-only launcher.
 [profile.dev]
 opt-level = 0
 debug = "line-tables-only"
@@ -57,10 +57,6 @@ split-debuginfo = "unpacked"
 # CARGO_PROFILE_TEST_OPT_LEVEL=1.
 [profile.test]
 opt-level = 1
-
-[profile.release]
-debug = 1
-lto = true
 
 [workspace.dependencies]
 # Raiko2 crates

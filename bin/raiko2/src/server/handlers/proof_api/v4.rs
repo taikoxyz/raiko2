@@ -20,8 +20,9 @@ use super::{
     authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
     build_canonical_batch_submission, build_submission_plan, clear_prover_tasks,
     collect_prover_status, handle_created_batch_task, handle_existing_batch_task,
-    is_terminal_runtime_status, load_task_data, parse_task_metadata, register_batch_task,
-    remove_task_children, replace_existing_batch_task, resolve_engine,
+    is_terminal_runtime_status, load_task_data, parse_task_metadata, proposal_proof_artifact_refs,
+    register_batch_task, remove_task_children_if_unreferenced, replace_existing_batch_task,
+    resolve_engine, root_proof_artifact_refs,
 };
 use crate::server::request_identity::{FingerprintSink, RequestFingerprint, RequestIdentity};
 
@@ -187,7 +188,7 @@ async fn invalidate_artifacts_inner(
         state,
         &pipeline_keys,
         proposal_range,
-        &matched_tasks.proof_paths,
+        &matched_tasks.artifact_refs,
         req.proof_prefix.as_deref(),
         &mut data,
     )
@@ -203,7 +204,13 @@ async fn invalidate_artifacts_inner(
 
 struct MatchedInvalidationTasks {
     records: Vec<(raiko2_runtime::RuntimeTaskRecord, TaskMetadata)>,
-    proof_paths: HashSet<String>,
+    artifact_refs: HashSet<ProofArtifactIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProofArtifactIdentity {
+    network_pair: String,
+    proof_ref: String,
 }
 
 async fn collect_invalidation_tasks(
@@ -221,7 +228,7 @@ async fn collect_invalidation_tasks(
         .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
     let mut matched = MatchedInvalidationTasks {
         records: Vec::new(),
-        proof_paths: HashSet::new(),
+        artifact_refs: HashSet::new(),
     };
     for record in tasks {
         if !pipeline_keys.contains(&record.pipeline_key) {
@@ -245,15 +252,18 @@ async fn collect_invalidation_tasks(
         if !metadata_matches_proposal_range(&metadata, proposal_range) {
             continue;
         }
-        if !task_matches_proof_prefix(&record, proof_prefix).await {
-            continue;
-        }
         if !is_terminal_runtime_status(record.runner_status) {
             data.tasks.skipped_non_terminal = data.tasks.skipped_non_terminal.saturating_add(1);
             continue;
         }
-        if let Some(path) = record.proof_path.as_ref() {
-            matched.proof_paths.insert(path.clone());
+        extend_invalidation_artifact_refs(
+            &mut matched.artifact_refs,
+            &metadata,
+            record.pipeline_key,
+            proposal_range,
+        );
+        if !task_matches_proof_prefix(&record, proof_prefix).await {
+            continue;
         }
         data.tasks.matched = data.tasks.matched.saturating_add(1);
         matched.records.push((record, metadata));
@@ -265,7 +275,7 @@ async fn collect_invalidation_artifacts(
     state: &AppState,
     pipeline_keys: &[PipelineKey],
     proposal_range: Option<(u64, u64)>,
-    matched_task_proof_paths: &HashSet<String>,
+    matched_task_artifact_refs: &HashSet<ProofArtifactIdentity>,
     proof_prefix: Option<&str>,
     data: &mut wire::InvalidateArtifactsData,
 ) -> Result<Vec<raiko2_runtime::ProofArtifactRecord>, ApiError> {
@@ -280,7 +290,7 @@ async fn collect_invalidation_artifacts(
         if !pipeline_keys.contains(&artifact.pipeline_key) {
             continue;
         }
-        if !artifact_matches_proposal_scope(&artifact, proposal_range, matched_task_proof_paths) {
+        if !artifact_matches_proposal_scope(&artifact, proposal_range, matched_task_artifact_refs) {
             continue;
         }
         if !artifact_matches_proof_prefix(&artifact, proof_prefix).await {
@@ -299,14 +309,14 @@ async fn remove_invalidated_tasks(
     matched_task_ids: Vec<(raiko2_runtime::RuntimeTaskRecord, TaskMetadata)>,
     data: &mut wire::InvalidateArtifactsData,
 ) {
-    let mut removed_engine_task_ids = HashSet::new();
     for (record, metadata) in matched_task_ids {
         if let Ok(engine) = resolve_engine(state, &metadata.network_pair, record.pipeline_key)
-            && let Err(err) = remove_task_children(
+            && let Err(err) = remove_task_children_if_unreferenced(
+                &state.runtime,
                 &engine,
+                &record.task_id,
                 record.pipeline_key,
                 &metadata,
-                &mut removed_engine_task_ids,
             )
             .await
         {
@@ -340,32 +350,32 @@ async fn remove_invalidated_artifacts(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
+        let file_removed = match fs::remove_file(&artifact.proof_path).await {
+            Ok(()) => true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                data.artifacts.failed = data.artifacts.failed.saturating_add(1);
+                tracing::warn!(
+                    network_pair = %artifact.network_pair,
+                    proof_ref = %artifact.proof_ref,
+                    proof_path = %artifact.proof_path,
+                    error = %err,
+                    "failed to remove invalidated proof artifact file"
+                );
+                continue;
+            }
+        };
         match state
             .runtime
             .remove_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
             .await
         {
-            Ok(Some(record)) => {
+            Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                match fs::remove_file(&record.proof_path).await {
-                    Ok(()) => {
-                        data.artifacts.files_removed =
-                            data.artifacts.files_removed.saturating_add(1);
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        data.artifacts.files_missing =
-                            data.artifacts.files_missing.saturating_add(1);
-                    }
-                    Err(err) => {
-                        data.artifacts.failed = data.artifacts.failed.saturating_add(1);
-                        tracing::warn!(
-                            network_pair = %record.network_pair,
-                            proof_ref = %record.proof_ref,
-                            proof_path = %record.proof_path,
-                            error = %err,
-                            "failed to remove invalidated proof artifact file"
-                        );
-                    }
+                if file_removed {
+                    data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
+                } else {
+                    data.artifacts.files_missing = data.artifacts.files_missing.saturating_add(1);
                 }
             }
             Ok(None) => {}
@@ -435,6 +445,41 @@ fn metadata_matches_proposal_range(metadata: &TaskMetadata, range: Option<(u64, 
         .any(|proposal| (start..=end).contains(&proposal.proposal_id))
 }
 
+fn extend_invalidation_artifact_refs(
+    refs: &mut HashSet<ProofArtifactIdentity>,
+    metadata: &TaskMetadata,
+    pipeline_key: PipelineKey,
+    proposal_range: Option<(u64, u64)>,
+) {
+    if let Some(root_refs) = root_proof_artifact_refs(metadata, pipeline_key) {
+        refs.extend(
+            root_refs
+                .refs
+                .into_iter()
+                .map(|proof_ref| ProofArtifactIdentity {
+                    network_pair: metadata.network_pair.clone(),
+                    proof_ref,
+                }),
+        );
+    }
+    let Some((start, end)) = proposal_range else {
+        return;
+    };
+    for proposal in &metadata.proposals {
+        if !(start..=end).contains(&proposal.proposal_id) {
+            continue;
+        }
+        refs.extend(
+            proposal_proof_artifact_refs(pipeline_key, proposal)
+                .into_iter()
+                .map(|proof_ref| ProofArtifactIdentity {
+                    network_pair: metadata.network_pair.clone(),
+                    proof_ref,
+                }),
+        );
+    }
+}
+
 async fn task_matches_proof_prefix(
     record: &raiko2_runtime::RuntimeTaskRecord,
     proof_prefix: Option<&str>,
@@ -451,9 +496,13 @@ async fn task_matches_proof_prefix(
 fn artifact_matches_proposal_scope(
     artifact: &raiko2_runtime::ProofArtifactRecord,
     proposal_range: Option<(u64, u64)>,
-    matched_task_proof_paths: &HashSet<String>,
+    matched_task_artifact_refs: &HashSet<ProofArtifactIdentity>,
 ) -> bool {
-    proposal_range.is_none() || matched_task_proof_paths.contains(&artifact.proof_path)
+    proposal_range.is_none()
+        || matched_task_artifact_refs.contains(&ProofArtifactIdentity {
+            network_pair: artifact.network_pair.clone(),
+            proof_ref: artifact.proof_ref.clone(),
+        })
 }
 
 async fn artifact_matches_proof_prefix(

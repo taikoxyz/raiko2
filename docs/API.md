@@ -547,7 +547,7 @@ Request fields:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `proof_type` | string | yes | One of `risc0`, `sp1`, `sgx`, `sgxgeth`. |
-| `proof_prefix` | string | no | Optional hex prefix matched against cached proof payloads. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
+| `proof_prefix` | string | no | Optional `0x`-prefixed hex prefix matched against cached proof payloads. Maximum length is 130 characters, including `0x`. This is useful for invalidating stale SGX instance-id prefixes after verifier rotation. |
 | `proposal_id_start` | number | no | Inclusive proposal-id range start. Must be provided with `proposal_id_end`. |
 | `proposal_id_end` | number | no | Inclusive proposal-id range end. Must be provided with `proposal_id_start`. |
 | `dry_run` | boolean | no | Defaults to `false`. When `true`, reports matches without deleting runtime tasks, engine children, proof-artifact rows, or proof files. |
@@ -594,7 +594,8 @@ Validation:
 - Unknown request body fields return `400 invalid_request`.
 - `proposal_id_start` and `proposal_id_end` must be supplied together, and start must be less than or
   equal to end.
-- `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string.
+- `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
+  characters including `0x`.
 
 ## Submit Shasta Batch Proof
 

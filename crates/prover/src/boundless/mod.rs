@@ -129,35 +129,10 @@ fn retry_price_multiplier(attempt: u64, price_multiplier: u32, max_attempts: u32
     multiplier
 }
 
-fn attempt_for_price_multiplier(multiplier: u32, price_multiplier: u32, max_attempts: u32) -> u64 {
-    let multiplier = multiplier.max(1);
-    if price_multiplier <= 1 {
-        return 1;
-    }
-    let mut attempt = 1_u64;
-    while retry_price_multiplier(attempt, price_multiplier, max_attempts) < multiplier
-        && attempt < u64::from(max_attempts).saturating_add(1)
-    {
-        attempt = attempt.saturating_add(1);
-    }
-    attempt
-}
-
-/// Attempt number to resume at for a stored submission. Submissions written after this field was
-/// added carry the real attempt; legacy records (`attempt == 0`) fall back to inferring it from the
-/// escalated price, which is only recoverable when the price actually escalates
-/// (`price_multiplier > 1`). Persisting the attempt is what keeps a flat-price (`== 1`) rebid budget
-/// bounded across restarts instead of resetting to 1 every time.
-fn resume_attempt(submission: &Submission, price_multiplier: u32, max_attempts: u32) -> u64 {
-    if submission.attempt > 0 {
-        submission.attempt
-    } else {
-        attempt_for_price_multiplier(
-            submission.max_price_multiplier,
-            price_multiplier,
-            max_attempts,
-        )
-    }
+/// Attempt number to resume a stored submission at. Records carry the real 1-based attempt;
+/// legacy records written before the field existed (`attempt == 0`) fall back to 1.
+fn resume_attempt(submission: &Submission) -> u64 {
+    submission.attempt.max(1)
 }
 
 const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool {
@@ -1239,11 +1214,7 @@ impl BoundlessProver {
 
         loop {
             let submission = if let Some(submission) = resume_submission.take() {
-                attempt = attempt.max(resume_attempt(
-                    &submission,
-                    self.config.rebid_price_multiplier,
-                    self.config.rebid_max_attempts,
-                ));
+                attempt = attempt.max(resume_attempt(&submission));
                 // Expired records are deliberately not short-circuited: the poll below gives
                 // them one final market status read. An expired-but-fulfilled request still
                 // reports Fulfilled (the SDK checks fulfillment before expiry), recovering a
@@ -1317,11 +1288,6 @@ impl BoundlessProver {
                     }
                 }
             };
-            attempt = attempt.max(attempt_for_price_multiplier(
-                submission.max_price_multiplier,
-                self.config.rebid_price_multiplier,
-                self.config.rebid_max_attempts,
-            ));
 
             tracing::info!(
                 provider_request_id = %submission.provider_request_id,
@@ -1775,11 +1741,11 @@ mod tests {
     use super::{
         BatchQuoteStrategy, BoundlessConfig, BoundlessPricingMode, BoundlessProver,
         DeploymentConfig, DeploymentType, ElfType, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
-        attempt_for_price_multiplier, defer_poll_timeout_while_payable,
-        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, parse_env_bool, parse_env_url, quote_batch_mcycles,
-        retry_price_multiplier, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
+        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt,
+        parse_env_bool, parse_env_url, quote_batch_mcycles, retry_price_multiplier,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2040,38 +2006,6 @@ mod tests {
         assert_eq!(retry_price_multiplier(4, 3, 2), 9);
     }
 
-    #[test]
-    fn attempt_for_price_multiplier_restores_rebid_state() {
-        assert_eq!(
-            attempt_for_price_multiplier(0, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            3
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(8, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(16, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            5
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(32, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            5
-        );
-    }
-
     fn test_submission(max_price_multiplier: u32, attempt: u64) -> super::Submission {
         super::Submission {
             market_request_id: U256::from(1u64),
@@ -2086,41 +2020,11 @@ mod tests {
     }
 
     #[test]
-    fn resume_attempt_prefers_persisted_attempt() {
-        // A persisted attempt is restored verbatim, even for flat-price rebids
-        // (rebid_price_multiplier == 1) where the price cannot encode the attempt.
-        let submission = test_submission(1, 3);
-        assert_eq!(
-            super::resume_attempt(&submission, 1, TEST_REBID_MAX_ATTEMPTS),
-            3
-        );
-        assert_eq!(
-            super::resume_attempt(
-                &submission,
-                TEST_REBID_PRICE_MULTIPLIER,
-                TEST_REBID_MAX_ATTEMPTS
-            ),
-            3
-        );
-    }
-
-    #[test]
-    fn resume_attempt_falls_back_to_price_for_legacy_records() {
-        // Legacy records predate the attempt field (attempt == 0): recover it from the escalated
-        // price when the price actually escalates...
-        let escalated = test_submission(4, 0);
-        assert_eq!(
-            super::resume_attempt(
-                &escalated,
-                TEST_REBID_PRICE_MULTIPLIER,
-                TEST_REBID_MAX_ATTEMPTS
-            ),
-            attempt_for_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS)
-        );
-        // ...but a flat-price legacy record is unrecoverable and falls back to 1 (known limitation
-        // that only affects records written before this field existed).
-        let flat = test_submission(1, 0);
-        assert_eq!(super::resume_attempt(&flat, 1, TEST_REBID_MAX_ATTEMPTS), 1);
+    fn resume_attempt_uses_persisted_attempt() {
+        // The persisted attempt is the sole source of truth.
+        assert_eq!(super::resume_attempt(&test_submission(4, 3)), 3);
+        // A legacy record without a persisted attempt (0) falls back to 1.
+        assert_eq!(super::resume_attempt(&test_submission(1, 0)), 1);
     }
 
     #[test]

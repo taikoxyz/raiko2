@@ -8,9 +8,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use raiko2_pipeline::PipelineKey;
-use raiko2_primitives::Proof;
 use std::{collections::HashSet, sync::Arc};
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 
 use super::super::proof_types::v4 as wire;
 use super::{
@@ -30,6 +30,7 @@ use crate::server::request_identity::{FingerprintSink, RequestFingerprint, Reque
 const MAX_RANGE_LEN: u64 = 100_000;
 const MAX_PROPOSALS_PER_REQUEST: usize = 1_024;
 const MAX_TOTAL_L2_BLOCKS_PER_REQUEST: u64 = MAX_RANGE_LEN;
+const PROOF_PREFIX_SCAN_LIMIT: usize = 64 * 1024;
 
 pub(crate) async fn request_proposal_proof(
     State(state): State<AppState>,
@@ -740,39 +741,255 @@ async fn artifact_matches_proof_prefix(
 }
 
 async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
-    let bytes = match fs::read(path).await {
-        Ok(bytes) => bytes,
+    let file = match fs::File::open(path).await {
+        Ok(file) => file,
         Err(err) => {
             tracing::warn!(
                 proof_path = %path,
                 error = %err,
-                "failed to read proof artifact for prefix match"
+                "failed to open proof artifact for prefix match"
             );
             return false;
         }
     };
-    let proof = match serde_json::from_slice::<Proof>(&bytes) {
-        Ok(proof) => proof,
+    let mut bytes = Vec::with_capacity(PROOF_PREFIX_SCAN_LIMIT.min(8 * 1024));
+    let mut reader = file.take(PROOF_PREFIX_SCAN_LIMIT as u64);
+    if let Err(err) = reader.read_to_end(&mut bytes).await {
+        tracing::warn!(
+            proof_path = %path,
+            scan_limit = PROOF_PREFIX_SCAN_LIMIT,
+            error = %err,
+            "failed to read proof artifact prefix window"
+        );
+        return false;
+    }
+    match proof_json_prefix_starts_with(&bytes, prefix) {
+        Ok(matches) => matches,
         Err(err) => {
             tracing::warn!(
                 proof_path = %path,
+                scan_limit = PROOF_PREFIX_SCAN_LIMIT,
                 error = %err,
-                "failed to parse proof artifact for prefix match"
+                "failed to inspect proof artifact prefix"
             );
-            return false;
+            false
         }
-    };
-    proof
-        .proof
-        .as_deref()
-        .is_some_and(|proof| proof_hex_starts_with(proof, prefix))
+    }
 }
 
-fn proof_hex_starts_with(proof: &str, prefix: &str) -> bool {
-    proof
-        .as_bytes()
-        .get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+fn proof_json_prefix_starts_with(bytes: &[u8], prefix: &str) -> Result<bool, &'static str> {
+    let mut pos = 0;
+    skip_json_ws(bytes, &mut pos);
+    if bytes.get(pos) != Some(&b'{') {
+        return Err("proof artifact is not a JSON object");
+    }
+    pos += 1;
+
+    loop {
+        skip_json_ws(bytes, &mut pos);
+        match bytes.get(pos) {
+            Some(b'}') => return Ok(false),
+            Some(b'"') => {}
+            Some(_) => return Err("expected JSON object key"),
+            None => return Err("proof field not found in prefix scan window"),
+        }
+        let key = parse_json_string(bytes, &mut pos)?;
+        skip_json_ws(bytes, &mut pos);
+        if bytes.get(pos) != Some(&b':') {
+            return Err("expected JSON object colon");
+        }
+        pos += 1;
+
+        if key == b"proof" {
+            return proof_json_string_starts_with(bytes, &mut pos, prefix);
+        }
+        skip_json_value(bytes, &mut pos)?;
+        skip_json_ws(bytes, &mut pos);
+        match bytes.get(pos) {
+            Some(b',') => pos += 1,
+            Some(b'}') => return Ok(false),
+            Some(_) => return Err("expected JSON object separator"),
+            None => return Err("proof field not found in prefix scan window"),
+        }
+    }
+}
+
+fn proof_json_string_starts_with(
+    bytes: &[u8],
+    pos: &mut usize,
+    prefix: &str,
+) -> Result<bool, &'static str> {
+    skip_json_ws(bytes, pos);
+    if bytes.get(*pos..(*pos + 4)) == Some(b"null") {
+        *pos += 4;
+        return Ok(false);
+    }
+    if bytes.get(*pos) != Some(&b'"') {
+        return Err("proof field is not a JSON string or null");
+    }
+    *pos += 1;
+    for expected in prefix.as_bytes() {
+        let Some(actual) = bytes.get(*pos).copied() else {
+            return Err("proof prefix exceeds scan window");
+        };
+        if actual == b'"' {
+            return Ok(false);
+        }
+        if actual == b'\\' {
+            return Err("proof prefix contains an escaped byte");
+        }
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Ok(false);
+        }
+        *pos += 1;
+    }
+    Ok(true)
+}
+
+fn skip_json_ws(bytes: &[u8], pos: &mut usize) {
+    while bytes
+        .get(*pos)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        *pos += 1;
+    }
+}
+
+fn parse_json_string(bytes: &[u8], pos: &mut usize) -> Result<Vec<u8>, &'static str> {
+    if bytes.get(*pos) != Some(&b'"') {
+        return Err("expected JSON string");
+    }
+    *pos += 1;
+    let mut out = Vec::new();
+    loop {
+        let Some(byte) = bytes.get(*pos).copied() else {
+            return Err("unterminated JSON string in prefix scan window");
+        };
+        *pos += 1;
+        match byte {
+            b'"' => return Ok(out),
+            b'\\' => {
+                out.push(consume_json_escape(bytes, pos)?.unwrap_or(b'?'));
+            }
+            0..=0x1f => return Err("invalid control byte in JSON string"),
+            _ => out.push(byte),
+        }
+    }
+}
+
+fn skip_json_string(bytes: &[u8], pos: &mut usize) -> Result<(), &'static str> {
+    if bytes.get(*pos) != Some(&b'"') {
+        return Err("expected JSON string");
+    }
+    *pos += 1;
+    loop {
+        let Some(byte) = bytes.get(*pos).copied() else {
+            return Err("unterminated JSON string in prefix scan window");
+        };
+        *pos += 1;
+        match byte {
+            b'"' => return Ok(()),
+            b'\\' => {
+                let _ = consume_json_escape(bytes, pos)?;
+            }
+            0..=0x1f => return Err("invalid control byte in JSON string"),
+            _ => {}
+        }
+    }
+}
+
+fn consume_json_escape(bytes: &[u8], pos: &mut usize) -> Result<Option<u8>, &'static str> {
+    let Some(escaped) = bytes.get(*pos).copied() else {
+        return Err("unterminated JSON escape in prefix scan window");
+    };
+    *pos += 1;
+    match escaped {
+        b'"' | b'\\' | b'/' => Ok(Some(escaped)),
+        b'b' => Ok(Some(0x08)),
+        b'f' => Ok(Some(0x0c)),
+        b'n' => Ok(Some(b'\n')),
+        b'r' => Ok(Some(b'\r')),
+        b't' => Ok(Some(b'\t')),
+        b'u' => {
+            if bytes.len().saturating_sub(*pos) < 4 {
+                return Err("unterminated JSON unicode escape in prefix scan window");
+            }
+            if !bytes[*pos..(*pos + 4)]
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("invalid JSON unicode escape in prefix scan");
+            }
+            *pos += 4;
+            Ok(None)
+        }
+        _ => Err("invalid JSON escape in prefix scan"),
+    }
+}
+
+fn skip_json_value(bytes: &[u8], pos: &mut usize) -> Result<(), &'static str> {
+    skip_json_ws(bytes, pos);
+    match bytes.get(*pos).copied() {
+        Some(b'"') => skip_json_string(bytes, pos),
+        Some(b'{' | b'[') => skip_nested_json(bytes, pos),
+        Some(b'n') if bytes.get(*pos..(*pos + 4)) == Some(b"null") => {
+            *pos += 4;
+            Ok(())
+        }
+        Some(b't') if bytes.get(*pos..(*pos + 4)) == Some(b"true") => {
+            *pos += 4;
+            Ok(())
+        }
+        Some(b'f') if bytes.get(*pos..(*pos + 5)) == Some(b"false") => {
+            *pos += 5;
+            Ok(())
+        }
+        Some(b'-' | b'0'..=b'9') => {
+            while bytes.get(*pos).is_some_and(|byte| {
+                !matches!(byte, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')
+            }) {
+                *pos += 1;
+            }
+            Ok(())
+        }
+        Some(_) => Err("unsupported JSON value in prefix scan"),
+        None => Err("missing JSON value in prefix scan window"),
+    }
+}
+
+fn skip_nested_json(bytes: &[u8], pos: &mut usize) -> Result<(), &'static str> {
+    let mut expected_closers = Vec::new();
+    loop {
+        let Some(byte) = bytes.get(*pos).copied() else {
+            return Err("unterminated nested JSON value in prefix scan window");
+        };
+        match byte {
+            b'"' => {
+                skip_json_string(bytes, pos)?;
+            }
+            b'{' => {
+                expected_closers.push(b'}');
+                *pos += 1;
+            }
+            b'[' => {
+                expected_closers.push(b']');
+                *pos += 1;
+            }
+            b'}' | b']' => {
+                let Some(expected) = expected_closers.pop() else {
+                    return Err("unbalanced nested JSON value");
+                };
+                if byte != expected {
+                    return Err("mismatched nested JSON closer");
+                }
+                *pos += 1;
+                if expected_closers.is_empty() {
+                    return Ok(());
+                }
+            }
+            _ => *pos += 1,
+        }
+    }
 }
 
 // Handler-level error plumbing stays here; only the v4 wire payload lives in proof_types::v4.
@@ -1271,6 +1488,7 @@ mod tests {
         ProverTaskConfig,
     };
     use raiko2_primitives::L2BlockRange;
+    use raiko2_primitives::Proof;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
         ProofArtifactRegistration, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
@@ -1517,6 +1735,94 @@ mod tests {
                 .expect("get proof artifact")
                 .is_some(),
             "proof artifact record was removed while task cleanup failed"
+        );
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_matches_large_proof_prefix() {
+        let proof = format!(
+            "0x{}{}",
+            "aa".repeat(80),
+            "bb".repeat(PROOF_PREFIX_SCAN_LIMIT)
+        );
+        let json = format!("{{\n  \"proof\": \"{proof}\",\n  \"input\": null\n}}");
+
+        assert!(
+            proof_json_prefix_starts_with(json.as_bytes(), "0xAAAA").expect("scan proof prefix")
+        );
+        assert!(
+            !proof_json_prefix_starts_with(json.as_bytes(), "0xAABB").expect("scan proof prefix")
+        );
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_skips_prior_fields() {
+        let json = br#"{"input":null,"extra_data":{"ignored":"proof"},"proof":"0xabcdef"}"#;
+
+        assert!(proof_json_prefix_starts_with(json, "0xABCD").expect("scan proof prefix"));
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_skips_large_prior_string_value() {
+        let large_input = "a".repeat(16 * 1024);
+        let json = format!(r#"{{"input":"{large_input}","proof":"0xabcdef"}}"#);
+
+        assert!(
+            proof_json_prefix_starts_with(json.as_bytes(), "0xABCD").expect("scan proof prefix")
+        );
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_rejects_invalid_unicode_escape() {
+        let err =
+            proof_json_prefix_starts_with(br#"{"input":"\u12xx","proof":"0xabcdef"}"#, "0xABCD")
+                .expect_err("invalid unicode escape should fail scan");
+
+        assert_eq!(err, "invalid JSON unicode escape in prefix scan");
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_rejects_mismatched_nested_closer() {
+        let err = proof_json_prefix_starts_with(br#"{"input":{],"proof":"0xabcdef"}"#, "0xABCD")
+            .expect_err("mismatched nested closer should fail scan");
+
+        assert_eq!(err, "mismatched nested JSON closer");
+    }
+
+    #[test]
+    fn proof_json_prefix_starts_with_treats_null_or_missing_proof_as_mismatch() {
+        assert!(
+            !proof_json_prefix_starts_with(br#"{"proof":null}"#, "0xaaaa")
+                .expect("scan null proof")
+        );
+        assert!(
+            !proof_json_prefix_starts_with(br#"{"input":null}"#, "0xaaaa")
+                .expect("scan missing proof")
+        );
+    }
+
+    #[tokio::test]
+    async fn proof_file_starts_with_matches_bounded_prefix_window() {
+        let root = test_runtime_root("proof-prefix-window");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("create temp dir");
+        let path = root.join("proof.json");
+        let proof = format!("0x{}", "aa".repeat(PROOF_PREFIX_SCAN_LIMIT));
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&Proof {
+                proof: Some(proof),
+                ..Proof::default()
+            })
+            .expect("serialize proof"),
+        )
+        .await
+        .expect("write proof file");
+
+        assert!(
+            proof_file_starts_with(path.to_str().expect("utf8 path"), "0xAAAA").await,
+            "proof prefix did not match"
         );
     }
 

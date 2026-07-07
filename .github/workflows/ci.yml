@@ -23,6 +23,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      guest_artifacts: ${{ steps.filter.outputs.guest_artifacts }}
       workflow: ${{ steps.filter.outputs.workflow }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -45,6 +46,8 @@ jobs:
               - 'config/**'
               - 'test.json'
               - 'justfile'
+            guest_artifacts:
+              - 'crates/guests/elf/**'
             workflow:
               - '.github/workflows/ci.yml'
 
@@ -226,7 +229,7 @@ jobs:
 
   rust-test-xtask:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -252,8 +255,8 @@ jobs:
         with:
           shared-key: ci-rust
 
-      - name: test xtask guest digests
-        run: cargo test -p xtask-build-guest --features digests guest_digests
+      - name: test xtask build guest
+        run: cargo test -p xtask-build-guest --features digests
 
       - name: test xtask register image
         run: cargo test -p xtask register_image

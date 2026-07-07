@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::primitives::{Address, B256, hex};
@@ -503,12 +504,12 @@ fn build_sp1_calls(
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
     let proposal_vk = verified_sp1_vk(
-        elves.proposal.as_ref(),
+        Arc::clone(&elves.proposal),
         Some(elves.proposal_vk.as_ref()),
         "sp1_shasta_proposal",
     )?;
     let aggregation_vk = verified_sp1_vk(
-        elves.aggregation.as_ref(),
+        Arc::clone(&elves.aggregation),
         Some(elves.aggregation_vk.as_ref()),
         "sp1_shasta_aggregation",
     )?;

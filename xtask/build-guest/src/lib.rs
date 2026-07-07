@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -1154,12 +1155,11 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
 }
 
 fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
-    let vk = derive_sp1_vk(&elf, &artifact_name)?;
+    let vk = derive_sp1_vk(Arc::from(elf), &artifact_name)?;
     serialize_sp1_vk(&vk, &artifact_name)
 }
 
-pub fn derive_sp1_vk(elf: &[u8], artifact_name: &str) -> Result<SP1VerifyingKey> {
-    let elf = elf.to_vec();
+pub fn derive_sp1_vk(elf: Arc<[u8]>, artifact_name: &str) -> Result<SP1VerifyingKey> {
     let artifact_name = artifact_name.to_string();
     let panic_artifact = artifact_name.clone();
     let handle = std::thread::Builder::new()
@@ -1167,7 +1167,7 @@ pub fn derive_sp1_vk(elf: &[u8], artifact_name: &str) -> Result<SP1VerifyingKey>
         .spawn(move || {
             let client = ProverClient::builder().light().build();
             let pk = client
-                .setup(elf.as_slice().into())
+                .setup(elf.as_ref().into())
                 .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;
             let vk_bytes = serialize_sp1_vk(pk.verifying_key(), &artifact_name)?;
             deserialize_sp1_vk_artifact(&artifact_name, &vk_bytes)
@@ -1180,7 +1180,7 @@ pub fn derive_sp1_vk(elf: &[u8], artifact_name: &str) -> Result<SP1VerifyingKey>
 }
 
 pub fn verified_sp1_vk(
-    elf: &[u8],
+    elf: Arc<[u8]>,
     vk_artifact: Option<&[u8]>,
     artifact_name: &str,
 ) -> Result<SP1VerifyingKey> {
@@ -1207,23 +1207,22 @@ fn ensure_sp1_vk_matches(
     derived_vk: &SP1VerifyingKey,
     artifact_vk: &SP1VerifyingKey,
 ) -> Result<()> {
-    let derived_vk_bn254 = derived_vk.bytes32();
-    let artifact_vk_bn254 = artifact_vk.bytes32();
-    let derived_vk_hash_bytes = sp1_vk_hash_bytes_hex(derived_vk);
-    let artifact_vk_hash_bytes = sp1_vk_hash_bytes_hex(artifact_vk);
+    let derived_vk_bn254 = derived_vk.hash_bn254();
+    let artifact_vk_bn254 = artifact_vk.hash_bn254();
+    let derived_vk_hash_bytes = derived_vk.hash_bytes();
+    let artifact_vk_hash_bytes = artifact_vk.hash_bytes();
 
     if derived_vk_bn254 != artifact_vk_bn254 || derived_vk_hash_bytes != artifact_vk_hash_bytes {
+        let derived_vk_hash_bytes = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
+        let artifact_vk_hash_bytes = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
+        let derived_vk_bn254 = derived_vk.bytes32();
+        let artifact_vk_bn254 = artifact_vk.bytes32();
         bail!(
             "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254}, artifact vk_bn254={artifact_vk_bn254}, derived vk_hash_bytes={derived_vk_hash_bytes}, artifact vk_hash_bytes={artifact_vk_hash_bytes}"
         );
     }
 
     Ok(())
-}
-
-fn sp1_vk_hash_bytes_hex(vk: &SP1VerifyingKey) -> String {
-    let bytes = vk.hash_bytes();
-    format!("0x{}", hex_lower(bytes.as_ref()))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

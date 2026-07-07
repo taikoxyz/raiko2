@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{B256, hex};
@@ -145,12 +146,12 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
 
 fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
     let proposal_vk = verified_sp1_vk(
-        elves.proposal.as_ref(),
+        Arc::clone(&elves.proposal),
         Some(elves.proposal_vk.as_ref()),
         "sp1_shasta_proposal",
     )?;
     let aggregation_vk = verified_sp1_vk(
-        elves.aggregation.as_ref(),
+        Arc::clone(&elves.aggregation),
         Some(elves.aggregation_vk.as_ref()),
         "sp1_shasta_aggregation",
     )?;

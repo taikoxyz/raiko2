@@ -278,6 +278,11 @@ digests). SGX registration is separate: read `mr_enclave` from the baked
 `/opt/raiko2-sgx/etc/attestation.raiko2.json` file in the built `raiko2-sgx` image and use your
 external SGX verifier tooling, such as the `taiko-mono` SGX verifier scripts, to register it.
 
+For SP1, `register-image` derives the verifier key from the paired guest ELF at runtime with
+`setup(elf)`. The checked-in `*.vk.bin` file is consistency-checked against that derived key, but
+it is not the source of the digest registered on-chain. If the check fails, rebuild the guest
+artifacts before attempting registration.
+
 ## Guest Benchmarking
 
 `bench-guest` measures execution metadata, SP1 prover gas, cycles, and wall time for guest runs.

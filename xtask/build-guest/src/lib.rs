@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -11,7 +12,7 @@ use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sp1_sdk::{
-    ProvingKey as _,
+    HashableKey, ProvingKey as _, SP1VerifyingKey,
     blocking::{Prover as _, ProverClient},
 };
 
@@ -1154,22 +1155,84 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
 }
 
 fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
+    let vk = derive_sp1_vk(Arc::from(elf), &artifact_name)?;
+    serialize_sp1_vk(&vk, &artifact_name)
+}
+
+pub fn derive_sp1_vk(elf: Arc<[u8]>, artifact_name: &str) -> Result<SP1VerifyingKey> {
+    let artifact_name = artifact_name.to_string();
     let panic_artifact = artifact_name.clone();
     let handle = std::thread::Builder::new()
         .name(format!("sp1-vk-{artifact_name}"))
         .spawn(move || {
-            let client = ProverClient::builder().cpu().build();
+            let client = ProverClient::builder().light().build();
             let pk = client
-                .setup(elf.as_slice().into())
+                .setup(elf.as_ref().into())
                 .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;
-            bincode::serialize(pk.verifying_key())
-                .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+            let vk_bytes = serialize_sp1_vk(pk.verifying_key(), &artifact_name)?;
+            deserialize_sp1_vk_artifact(&artifact_name, &vk_bytes)
         })
         .with_context(|| format!("spawn SP1 verifying key setup for {panic_artifact}"))?;
 
     handle
         .join()
         .map_err(|_| anyhow::anyhow!("SP1 verifying key setup panicked for {panic_artifact}"))?
+}
+
+pub fn verified_sp1_vk(
+    elf: Arc<[u8]>,
+    vk_artifact: Option<&[u8]>,
+    artifact_name: &str,
+) -> Result<SP1VerifyingKey> {
+    let derived_vk = derive_sp1_vk(elf, artifact_name)?;
+    if let Some(vk_artifact) = vk_artifact {
+        let artifact_vk = deserialize_sp1_vk_artifact(artifact_name, vk_artifact)?;
+        ensure_sp1_vk_matches(artifact_name, &derived_vk, &artifact_vk)?;
+    }
+    Ok(derived_vk)
+}
+
+pub fn serialize_sp1_vk(vk: &SP1VerifyingKey, artifact_name: &str) -> Result<Vec<u8>> {
+    bincode::serialize(vk)
+        .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+}
+
+fn deserialize_sp1_vk_artifact(artifact_name: &str, bytes: &[u8]) -> Result<SP1VerifyingKey> {
+    bincode::deserialize(bytes)
+        .with_context(|| format!("failed to load SP1 VK artifact for {artifact_name}"))
+}
+
+fn ensure_sp1_vk_matches(
+    artifact_name: &str,
+    derived_vk: &SP1VerifyingKey,
+    artifact_vk: &SP1VerifyingKey,
+) -> Result<()> {
+    let derived_vk_bn254 = derived_vk.hash_bn254();
+    let artifact_vk_bn254 = artifact_vk.hash_bn254();
+    let derived_vk_hash_bytes = derived_vk.hash_bytes();
+    let artifact_vk_hash_bytes = artifact_vk.hash_bytes();
+
+    if derived_vk_bn254 != artifact_vk_bn254 || derived_vk_hash_bytes != artifact_vk_hash_bytes {
+        let derived_vk_hash_bytes_hex = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
+        let artifact_vk_hash_bytes_hex = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
+        let derived_vk_bn254_hex = derived_vk.bytes32();
+        let artifact_vk_bn254_hex = artifact_vk.bytes32();
+        bail!(
+            "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254_hex}, artifact vk_bn254={artifact_vk_bn254_hex}, derived vk_hash_bytes={derived_vk_hash_bytes_hex}, artifact vk_hash_bytes={artifact_vk_hash_bytes_hex}"
+        );
+    }
+
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {
@@ -1334,6 +1397,52 @@ mod tests {
             sccache_compiler(false, "riscv64-unknown-elf-gcc"),
             "riscv64-unknown-elf-gcc"
         );
+    }
+
+    #[test]
+    fn sp1_vk_match_check_accepts_identical_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+
+        ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &proposal)
+            .expect("identical SP1 VK should match");
+    }
+
+    #[test]
+    fn sp1_vk_match_check_rejects_swapped_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+        let aggregation = read_sp1_vk_artifact("sp1_shasta_aggregation.vk.bin");
+
+        let err = ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &aggregation)
+            .expect_err("swapped SP1 VK should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("SP1 VK artifact mismatch for sp1_shasta_proposal"));
+        assert!(message.contains("derived vk_bn254="));
+        assert!(message.contains("artifact vk_bn254="));
+        assert!(message.contains("derived vk_hash_bytes="));
+        assert!(message.contains("artifact vk_hash_bytes="));
+    }
+
+    #[test]
+    fn deserialize_sp1_vk_artifact_names_malformed_artifact() {
+        let err = match deserialize_sp1_vk_artifact("sp1_shasta_proposal", b"not a verifying key") {
+            Ok(_) => panic!("malformed SP1 VK artifact should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to load SP1 VK artifact for sp1_shasta_proposal")
+        );
+    }
+
+    fn read_sp1_vk_artifact(file_name: &str) -> SP1VerifyingKey {
+        let path = repo_root().join("crates/guests/elf").join(file_name);
+        let bytes = fs::read(&path).unwrap_or_else(|err| {
+            panic!("read {}: {err}", path.display());
+        });
+        deserialize_sp1_vk_artifact(file_name.trim_end_matches(".vk.bin"), &bytes)
+            .unwrap_or_else(|err| panic!("deserialize {}: {err}", path.display()))
     }
 
     fn temp_test_dir() -> PathBuf {

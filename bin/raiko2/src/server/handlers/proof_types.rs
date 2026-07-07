@@ -163,6 +163,10 @@ pub(crate) struct TaskRuntime {
     pub(crate) evaluated_mcycles_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_price_multiplier: Option<u32>,
+    /// Exact escalated max price bid, in wei, as a decimal string (precise where the floored
+    /// `max_price_multiplier` collapses the common ×1.5 rung to `1`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_price_wei: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sp1_network_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

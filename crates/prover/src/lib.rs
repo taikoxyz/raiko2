@@ -89,11 +89,16 @@ pub struct BoundlessSubmissionProgress {
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
     pub max_price_multiplier: u32,
+    /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
+    /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
+    /// precise bid for telemetry. `None` for legacy records written before the field existed.
+    #[serde(default)]
+    pub max_price_wei: Option<String>,
     /// Rebid attempt number that produced this submission: `1`-based, or `0` when not recorded.
     /// `#[serde(default)]` supplies `0` for legacy records written before this field existed; the
-    /// resume path treats `0` as "unknown" and falls back to inferring the attempt from the price.
-    /// Persisted so a resume after restart restores the attempt count even when rebids reuse the same
-    /// price (`rebid_price_multiplier == 1`), which cannot be recovered from `max_price_multiplier`
+    /// resume path treats `0` as "unknown" and falls back to `1`. Persisted so a resume after
+    /// restart restores the attempt count even when rebids reuse the same price (a flat
+    /// `rebid_price_step_bps == 0` ladder), which cannot be recovered from `max_price_multiplier`
     /// alone.
     #[serde(default)]
     pub rebid_attempt: u32,
@@ -110,6 +115,10 @@ pub struct BoundlessSubmissionResume {
     pub lock_expires_at: u64,
     pub submitted_at: u64,
     pub max_price_multiplier: u32,
+    /// Exact escalated max price this submission bid, in wei, as a decimal string. See
+    /// [`BoundlessSubmissionProgress::max_price_wei`]. `None` for records written before the field.
+    #[serde(default)]
+    pub max_price_wei: Option<String>,
     #[serde(default)]
     pub rebid_attempt: u32,
 }

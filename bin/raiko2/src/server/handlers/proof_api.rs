@@ -56,6 +56,7 @@ use crate::server::state::{
 };
 use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
+    remove_task_children_if_unreferenced,
 };
 use crate::server::task_metadata::{
     AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,

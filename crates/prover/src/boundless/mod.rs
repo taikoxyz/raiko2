@@ -2135,7 +2135,6 @@ impl BoundlessProver {
             "zkvm": "risc0",
             "runner": "network",
             "proof_type": proof_type,
-            "mcycles_count": quoted_mcycles_count,
             "quoted_mcycles_count": quoted_mcycles_count,
             "evaluated_mcycles_count": evaluated_mcycles_count,
             "boundless": {
@@ -2145,6 +2144,7 @@ impl BoundlessProver {
                 "lock_expires_at": submission.lock_expires_at,
                 "submitted_at": submission.submitted_at,
                 "max_price_multiplier": submission.max_price_multiplier,
+                "max_price_wei": submission.max_price_wei.to_string(),
                 "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                 "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
                 "offchain": self.config.offchain,

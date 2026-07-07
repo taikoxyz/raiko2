@@ -168,7 +168,7 @@ lock_collateral = "20"
 # max_price_per_mcycle = "0.0000006"
 # min_price_per_mcycle = "0.000000010"
 # Optional in manual mode: absolute ceiling on rebid escalation (>= max_price_per_mcycle).
-# Without it, rebids escalate to max_price * rebid_price_multiplier ^ rebid_max_attempts.
+# Without it, rebids escalate max_price by rebid_price_step_bps (compounded) up to rebid_max_attempts.
 # absolute_max_price_per_mcycle = "0.0000024"
 
 [prover.boundless.offer_params.batch.timeouts]

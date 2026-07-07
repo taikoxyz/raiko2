@@ -868,9 +868,35 @@ health:
 - `raiko2_stage_tasks_inflight`
 - `raiko2_stage_task_started_total`
 - `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_failures_total`
 - `raiko2_stage_task_duration_seconds`
+- `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
 
 Import [raiko2-hosted-stage-latency.json](./grafana/raiko2-hosted-stage-latency.json) into
 Grafana for a baseline hosted-api dashboard with preflight, prove, aggregate, inflight, and
 external-submission panels.
+
+For the old log-based alert shape of "too many errors in the last 30 minutes", prefer Prometheus
+counters instead of matching the text `error` in logs. The broad equivalent is:
+
+```promql
+sum(increase(raiko2_stage_task_terminal_total{status="failed"}[30m])) > 30
+```
+
+For diagnosis, alert or dashboard by bounded failure kind:
+
+```promql
+sum by (pair, proof_type, stage, error_kind) (
+  increase(raiko2_stage_task_failures_total[30m])
+)
+```
+
+Duplicate requests that return completed cache hits are normally harmless. Duplicates against failed
+or stale tasks should be watched separately:
+
+```promql
+sum by (pair, proof_type, aggregate, runner_status) (
+  increase(raiko2_duplicate_requests_total{runner_status!="completed"}[30m])
+)
+```

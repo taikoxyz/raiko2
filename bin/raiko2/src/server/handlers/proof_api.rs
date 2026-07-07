@@ -178,17 +178,16 @@ fn duplicate_task_log_context(
 }
 
 fn duplicate_task_proposal_ids(metadata: &TaskMetadata) -> Vec<u64> {
-    metadata
-        .aggregate_request
-        .as_ref()
-        .map(|request| request.proposal_ids.clone())
-        .unwrap_or_else(|| {
+    metadata.aggregate_request.as_ref().map_or_else(
+        || {
             metadata
                 .proposals
                 .iter()
                 .map(|proposal| proposal.proposal_id)
                 .collect()
-        })
+        },
+        |request| request.proposal_ids.clone(),
+    )
 }
 
 fn format_proposal_ids(proposal_ids: &[u64]) -> String {
@@ -1065,6 +1064,15 @@ async fn handle_existing_batch_task(
         network_pair = %submission.pair.key,
         "detected duplicate shasta batch request"
     );
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            submission.aggregate_requested,
+        ),
+        existing.runner_status.as_str(),
+    );
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
@@ -1339,6 +1347,15 @@ async fn handle_existing_external_aggregate_task(
         prover_type = %prover_type_label(submission.prover_type),
         network_pair = %submission.pair.key,
         "detected duplicate shasta aggregate request"
+    );
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            true,
+        ),
+        existing.runner_status.as_str(),
     );
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)

@@ -9,6 +9,7 @@ members = [
     "crates/primitives",
     "crates/stateless",
     "crates/provider",
+    "crates/remote-poller",
     "crates/engine",
     "crates/runtime",
     "crates/prover",
@@ -65,6 +66,7 @@ raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
+raiko2-remote-poller = { path = "./crates/remote-poller" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-runtime = { path = "./crates/runtime" }
 raiko2-stateless = { path = "./crates/stateless" }
@@ -197,6 +199,7 @@ prometheus = { version = "0.13.4", features = ["process"] }
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0.17"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # rpc-proxy dependencies
 actix-web = "4"

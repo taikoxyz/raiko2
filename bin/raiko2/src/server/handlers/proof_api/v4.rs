@@ -460,23 +460,36 @@ async fn remove_invalidated_tasks(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for (record, metadata) in matched_task_ids {
-        if let Ok(engine) = resolve_engine(state, &metadata.network_pair, record.pipeline_key)
-            && let Err(err) = remove_task_children_if_unreferenced(
-                &state.runtime,
-                &engine,
-                &record.task_id,
-                record.pipeline_key,
-                &metadata,
-            )
-            .await
-        {
-            data.tasks.failed = data.tasks.failed.saturating_add(1);
-            tracing::warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to remove invalidated task children"
-            );
-            continue;
+        match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
+            Ok(engine) => {
+                if let Err(err) = remove_task_children_if_unreferenced(
+                    &state.runtime,
+                    &engine,
+                    &record.task_id,
+                    record.pipeline_key,
+                    &metadata,
+                )
+                .await
+                {
+                    data.tasks.failed = data.tasks.failed.saturating_add(1);
+                    tracing::warn!(
+                        task_id = %record.task_id,
+                        error = %err,
+                        "failed to remove invalidated task children"
+                    );
+                    continue;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    task_id = %record.task_id,
+                    network_pair = %metadata.network_pair,
+                    pipeline_key = %record.pipeline_key.as_str(),
+                    status = %err.status,
+                    error = %err.message,
+                    "skipping engine child cleanup for invalidated task"
+                );
+            }
         }
 
         match state.runtime.remove_task(&record.task_id).await {
@@ -494,15 +507,23 @@ async fn remove_invalidated_tasks(
     }
 }
 
+enum ProofArtifactFileRemoval {
+    Removed,
+    Missing,
+    Failed,
+}
+
 async fn remove_invalidated_artifacts(
     state: &AppState,
     matched_artifacts: Vec<raiko2_runtime::ProofArtifactRecord>,
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for artifact in matched_artifacts {
-        let file_removed = match fs::remove_file(&artifact.proof_path).await {
-            Ok(()) => true,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        let file_removal = match fs::remove_file(&artifact.proof_path).await {
+            Ok(()) => ProofArtifactFileRemoval::Removed,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                ProofArtifactFileRemoval::Missing
+            }
             Err(err) => {
                 data.artifacts.failed = data.artifacts.failed.saturating_add(1);
                 tracing::warn!(
@@ -510,9 +531,9 @@ async fn remove_invalidated_artifacts(
                     proof_ref = %artifact.proof_ref,
                     proof_path = %artifact.proof_path,
                     error = %err,
-                    "failed to remove invalidated proof artifact file"
+                    "failed to remove invalidated proof artifact file; removing cache record"
                 );
-                continue;
+                ProofArtifactFileRemoval::Failed
             }
         };
         match state
@@ -522,10 +543,16 @@ async fn remove_invalidated_artifacts(
         {
             Ok(Some(_record)) => {
                 data.artifacts.removed = data.artifacts.removed.saturating_add(1);
-                if file_removed {
-                    data.artifacts.files_removed = data.artifacts.files_removed.saturating_add(1);
-                } else {
-                    data.artifacts.files_missing = data.artifacts.files_missing.saturating_add(1);
+                match file_removal {
+                    ProofArtifactFileRemoval::Removed => {
+                        data.artifacts.files_removed =
+                            data.artifacts.files_removed.saturating_add(1);
+                    }
+                    ProofArtifactFileRemoval::Missing => {
+                        data.artifacts.files_missing =
+                            data.artifacts.files_missing.saturating_add(1);
+                    }
+                    ProofArtifactFileRemoval::Failed => {}
                 }
             }
             Ok(None) => {}
@@ -631,11 +658,27 @@ async fn artifact_matches_proof_prefix(
 }
 
 async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
-    let Ok(bytes) = fs::read(path).await else {
-        return false;
+    let bytes = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                proof_path = %path,
+                error = %err,
+                "failed to read proof artifact for prefix match"
+            );
+            return false;
+        }
     };
-    let Ok(proof) = serde_json::from_slice::<Proof>(&bytes) else {
-        return false;
+    let proof = match serde_json::from_slice::<Proof>(&bytes) {
+        Ok(proof) => proof,
+        Err(err) => {
+            tracing::warn!(
+                proof_path = %path,
+                error = %err,
+                "failed to parse proof artifact for prefix match"
+            );
+            return false;
+        }
     };
     proof
         .proof

@@ -999,6 +999,49 @@ async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
 }
 
 #[tokio::test]
+async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    complete_v4_sp1_proposal(&app, &engine, 12).await;
+
+    let artifacts = state
+        .runtime
+        .list_proof_artifacts()
+        .await
+        .expect("list proof artifacts");
+    let artifact = artifacts.first().expect("proof artifact").clone();
+    tokio::fs::remove_file(&artifact.proof_path)
+        .await
+        .expect("remove proof file");
+    tokio::fs::create_dir(&artifact.proof_path)
+        .await
+        .expect("replace proof file with directory");
+
+    let request = json!({
+        "proof_type": "sp1"
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["failed"], 1);
+    assert!(
+        state
+            .runtime
+            .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .await
+            .expect("get proof artifact")
+            .is_none(),
+        "stale proof artifact record remained"
+    );
+}
+
+#[tokio::test]
 async fn e2e_v4_invalidate_artifacts_range_removes_all_root_refs() {
     let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
     complete_v4_sp1_proposal(&app, &engine, 21).await;

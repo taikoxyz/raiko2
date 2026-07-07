@@ -350,6 +350,25 @@ impl RuntimeObserver {
         }
     }
 
+    async fn observe_stage_failure_metrics(&self, id: &EngineTaskId, stage: &str, error: &str) {
+        match self.load_root_record(id).await {
+            Ok(Some(record)) => match Self::metric_context(&record) {
+                Ok(context) => telemetry::record_stage_task_failure(&context, stage, error),
+                Err(err) => {
+                    tracing::warn!(task = ?id, error = %err, "failed to build telemetry context");
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    task = ?id,
+                    error = %err,
+                    "failed to load runtime task for telemetry"
+                );
+            }
+        }
+    }
+
     async fn write_final_proof_files(
         &self,
         id: &EngineTaskId,
@@ -688,6 +707,7 @@ impl EngineObserver for RuntimeObserver {
         let task_id = Self::timing_key_for_task(id, task);
         self.observe_stage_terminal_metrics(id, &task_id, stage, "failed", finished_at_ms)
             .await;
+        self.observe_stage_failure_metrics(id, stage, error).await;
         if let Err(err) = self
             .update_root_records(id, |record, updated_at, observed_at_ms| {
                 record.runner_status = RunnerStatus::Failed;
@@ -1943,6 +1963,54 @@ mod tests {
         assert!(
             !body.contains(
                 "raiko2_stage_tasks_inflight{aggregate=\"false\",pair=\"telemetry_restart/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"preflight\"} -1"
+            ),
+            "{body}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_records_failure_kind_metrics() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-failure-kind",
+        ))?);
+        let pipeline = PipelineKey::ShastaNative;
+        let request = proposal_request();
+        let proposal_task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline,
+            request: request.clone(),
+        });
+
+        register_observer_task(
+            runtime.as_ref(),
+            "task_failure_kind",
+            "metrics_failure_kind/ethereum",
+            pipeline,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+
+        let observer = RuntimeObserver::new(
+            Arc::clone(&runtime),
+            "metrics_failure_kind/ethereum".to_string(),
+        );
+        observer
+            .on_task_failed(
+                &proposal_task_id,
+                &EngineTask::ProveProposal {
+                    request,
+                    input_task: proposal_task_id.clone(),
+                },
+                "sgx INVALID_REQUEST: aggregate proof 0 SGX instance id mismatch: got 4 expected 5",
+            )
+            .await;
+
+        let (_, body) = telemetry::render().expect("render telemetry");
+        let body = String::from_utf8(body).expect("utf8 telemetry");
+        assert!(
+            body.contains(
+                "raiko2_stage_task_failures_total{aggregate=\"false\",error_kind=\"instance_id_mismatch\",pair=\"metrics_failure_kind/ethereum\",proof_type=\"native\",route=\"native/local\",stage=\"prove\"} 1"
             ),
             "{body}"
         );

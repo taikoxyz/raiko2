@@ -224,7 +224,7 @@ jobs:
           -p raiko2-queue
           -p raiko2-runtime
 
-  rust-test-xtask-digests:
+  rust-test-xtask:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -255,6 +255,9 @@ jobs:
       - name: test xtask guest digests
         run: cargo test -p xtask-build-guest --features digests guest_digests
 
+      - name: test xtask register image
+        run: cargo test -p xtask register_image
+
   # Keep the prover/engine/server stack out of the default PR gate for now; those heavier lanes
   # are covered by the manually dispatched rust-heavy workflow.
   rust:
@@ -265,7 +268,7 @@ jobs:
       - rust-test-foundation
       - rust-test-pipeline
       - rust-test-runtime
-      - rust-test-xtask-digests
+      - rust-test-xtask
     if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions: {}
@@ -277,11 +280,11 @@ jobs:
           TEST_FOUNDATION_RESULT: ${{ needs.rust-test-foundation.result }}
           TEST_PIPELINE_RESULT: ${{ needs.rust-test-pipeline.result }}
           TEST_RUNTIME_RESULT: ${{ needs.rust-test-runtime.result }}
-          TEST_XTASK_DIGESTS_RESULT: ${{ needs.rust-test-xtask-digests.result }}
+          TEST_XTASK_RESULT: ${{ needs.rust-test-xtask.result }}
         run: |
           test "${FMT_RESULT}" = "success"
           test "${CLIPPY_RESULT}" = "success"
           test "${TEST_FOUNDATION_RESULT}" = "success"
           test "${TEST_PIPELINE_RESULT}" = "success"
           test "${TEST_RUNTIME_RESULT}" = "success"
-          test "${TEST_XTASK_DIGESTS_RESULT}" = "success"
+          test "${TEST_XTASK_RESULT}" = "success"

@@ -1039,11 +1039,19 @@ All API errors use the Hoodi-style envelope:
   `rebid_price_step_bps`, and `rebid_max_attempts` per `(network, l1_network)` pair.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
-  `market` delegates price selection to the Boundless SDK price provider and optionally accepts
-  `max_price_per_mcycle` as a per-mcycle safety cap. The cap value must be positive and is
-  multiplied by the quoted mcycle count; offers whose (possibly rebid-escalated) `maxPrice`
-  exceeds that total cap are clamped to it instead of failing, with the min price lowered to the
-  cap when needed to keep the offer well-formed. `market` must omit `min_price_per_mcycle`.
+  `market` delegates price selection to the Boundless SDK price provider and optionally accepts a
+  per-mcycle safety cap spelled either `absolute_max_price_per_mcycle` (canonical) or
+  `max_price_per_mcycle` (legacy alias, same meaning) — setting both is rejected. The cap value
+  must be positive and is multiplied by the quoted mcycle count; offers whose (possibly
+  rebid-escalated) `maxPrice` exceeds that total cap are clamped to it instead of failing, with the
+  min price lowered to the cap when needed to keep the offer well-formed. `market` must omit
+  `min_price_per_mcycle`.
+- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the absolute
+  per-mcycle bid ceiling in both pricing modes: no attempt, initial or rebid-escalated, ever bids
+  above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and clamps the
+  bps rebid escalation; without it, manual escalation is unbounded by config. In `market` mode it is
+  the canonical spelling of the safety cap. Once a rebid is clamped, later rebids repeat the ceiling
+  price.
 - `prover.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the
   timeout policy. `mode = "per_mcycle"` sets `lock_timeout_ms_per_mcycle` and
   `timeout_ms_per_mcycle` (scaled by the quoted mcycle count) and, under `market` pricing only, may
@@ -1058,9 +1066,9 @@ All API errors use the Hoodi-style envelope:
   on internally-tagged enums), so double-check those tables by hand during migration.
 - Expired Boundless requests are resubmitted automatically up to the shared
   `prover.boundless.rebid_max_attempts` budget, each resubmission escalating the max price by
-  `prover.boundless.rebid_price_step_bps` (compounded); min price is unchanged. `market`
-  resubmissions are re-priced by the SDK price provider and then escalated by the same step,
-  subject to the cap.
+  `prover.boundless.rebid_price_step_bps` (compounded), clamped to `absolute_max_price_per_mcycle`
+  when it is set; min price is unchanged. `market` resubmissions are re-priced by the SDK price
+  provider and then escalated by the same step, subject to the cap.
 - `prover.sp1.cycle_limit` is the default SP1 network request cycle limit. Optional
   `prover.sp1.proposal_cycle_limit` and `prover.sp1.aggregation_cycle_limit` override it per
   stage; request-scoped `prover_args.sp1.cycle_limit` still takes precedence for compatibility.

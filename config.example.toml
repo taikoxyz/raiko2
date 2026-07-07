@@ -39,7 +39,7 @@ pairs = [
   # This only affects the `risc0/network` route. SP1 ignores it.
   # Leave fixed quote overrides unset unless the target network has stable proof sizes.
 # { network = "taiko_mainnet", l1_network = "ethereum", l1_rpc = "https://ethereum-rpc.publicnode.com", l2_rpc = "https://taiko-rpc.publicnode.com", boundless = { aggregation_quote = { strategy = "evaluated" } } },
-  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote = { strategy = "evaluated" }, rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
+  # { network = "taiko_hoodi", l1_network = "hoodi", l1_rpc = "https://ethereum-hoodi-rpc.publicnode.com", l2_rpc = "https://rpc.hoodi.taiko.xyz", boundless = { aggregation_quote = { strategy = "evaluated" }, rebid_timeout_ms = 600000, rebid_price_step_bps = 3000, rebid_max_attempts = 2, offer_params = { batch = { pricing_mode = "market", absolute_max_price_per_mcycle = "0.000000600", ramp_up_start_sec = 20, ramp_up_period_sec = 120, lock_collateral = "20", timeouts = { mode = "per_mcycle", lock_timeout_ms_per_mcycle = 300, timeout_ms_per_mcycle = 900, dynamic_pricing_timeout_modifier = 2.0 } } } } },
 ]
 
 [rpc.client]
@@ -156,7 +156,8 @@ strategy = "raiko_agent"
 pricing_mode = "market"
 # Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
 # per-mcycle safety cap instead of failing them. Must be positive when set.
-max_price_per_mcycle = "0.000000600"
+# `max_price_per_mcycle` is accepted as a legacy alias; set only one spelling.
+absolute_max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20
 # Ramp-up duration in seconds (auction price climbs from min to max over this window).
 ramp_up_period_sec = 120
@@ -166,6 +167,9 @@ lock_collateral = "20"
 # historically expired un-locked on Taiko market.
 # max_price_per_mcycle = "0.0000006"
 # min_price_per_mcycle = "0.000000010"
+# Optional in manual mode: absolute ceiling on rebid escalation (>= max_price_per_mcycle).
+# Without it, rebids escalate to max_price * rebid_price_multiplier ^ rebid_max_attempts.
+# absolute_max_price_per_mcycle = "0.0000024"
 
 [prover.boundless.offer_params.batch.timeouts]
 # Derive lock/request timeouts from the quoted mcycles (per-mcycle, ms). In market mode they are
@@ -196,6 +200,7 @@ timeout_ms_per_mcycle = 6000
 # rarely lock.
 # max_price_per_mcycle = "0.0000008"
 # min_price_per_mcycle = "0.000000006"
+# absolute_max_price_per_mcycle = "0.0000032"
 
 [queue]
 backend = "memory"

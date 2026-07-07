@@ -90,6 +90,13 @@ pub struct BoundlessOfferParams {
     pub max_price_per_mcycle: Option<String>,
     #[serde(default)]
     pub min_price_per_mcycle: Option<String>,
+    /// Absolute per-mcycle ceiling on the offer's max price: no attempt, initial or
+    /// rebid-escalated, ever bids above this value times the quoted mcycles, in either pricing
+    /// mode. In `manual` mode it bounds rebid escalation of `max_price_per_mcycle`, which is
+    /// otherwise unbounded by config. In `market` mode it is the canonical name for the price
+    /// cap and is interchangeable with — but mutually exclusive of — `max_price_per_mcycle`.
+    #[serde(default)]
+    pub absolute_max_price_per_mcycle: Option<String>,
     pub lock_collateral: String,
 }
 
@@ -236,6 +243,7 @@ pub(crate) fn default_batch_offer_params() -> BoundlessOfferParams {
         },
         max_price_per_mcycle: Some("0.0000006".to_string()),
         min_price_per_mcycle: Some("0.000000010".to_string()),
+        absolute_max_price_per_mcycle: None,
         lock_collateral: "20".to_string(),
     }
 }
@@ -252,6 +260,7 @@ fn default_aggregation_offer_params() -> BoundlessOfferParams {
         },
         max_price_per_mcycle: Some("0.0000008".to_string()),
         min_price_per_mcycle: Some("0.000000006".to_string()),
+        absolute_max_price_per_mcycle: None,
         lock_collateral: "20".to_string(),
     }
 }
@@ -344,6 +353,17 @@ fn validate_manual_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
     if min_price > max_price {
         return Err("min_price_per_mcycle cannot exceed max_price_per_mcycle".to_string());
     }
+    if let Some(ceiling_value) = offer_spec.absolute_max_price_per_mcycle.as_deref() {
+        let ceiling = parse_ether(ceiling_value).map_err(|e| {
+            format!("Failed to parse absolute_max_price_per_mcycle {ceiling_value}: {e}")
+        })?;
+        // A ceiling below the configured max would make the very first attempt overbid it.
+        if ceiling < max_price {
+            return Err(
+                "absolute_max_price_per_mcycle cannot be below max_price_per_mcycle".to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -351,15 +371,26 @@ fn validate_market_offer_prices(offer_spec: &BoundlessOfferParams) -> Result<(),
     if offer_spec.min_price_per_mcycle.is_some() {
         return Err("min_price_per_mcycle must be omitted when pricing_mode=market".to_string());
     }
-    if let Some(max_price_value) = offer_spec.max_price_per_mcycle.as_deref() {
-        let max_price_cap = parse_ether(max_price_value)
-            .map_err(|e| format!("Failed to parse max_price_per_mcycle {max_price_value}: {e}"))?;
+    let (cap_field, cap_value) = match (
+        offer_spec.absolute_max_price_per_mcycle.as_deref(),
+        offer_spec.max_price_per_mcycle.as_deref(),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err("set only one of absolute_max_price_per_mcycle and \
+                 max_price_per_mcycle when pricing_mode=market; both name the same cap"
+                .to_string());
+        }
+        (Some(value), None) => ("absolute_max_price_per_mcycle", Some(value)),
+        (None, value) => ("max_price_per_mcycle", value),
+    };
+    if let Some(cap_value) = cap_value {
+        let max_price_cap = parse_ether(cap_value)
+            .map_err(|e| format!("Failed to parse {cap_field} {cap_value}: {e}"))?;
         // Market offers are clamped to this cap, so a zero cap would silently bid 0 wei forever.
         if max_price_cap.is_zero() {
-            return Err(
-                "max_price_per_mcycle must be positive when set with pricing_mode=market"
-                    .to_string(),
-            );
+            return Err(format!(
+                "{cap_field} must be positive when set with pricing_mode=market"
+            ));
         }
     }
     Ok(())
@@ -434,6 +465,7 @@ mod tests {
         assert_eq!(batch.pricing_mode, BoundlessPricingMode::Manual);
         assert_eq!(batch.max_price_per_mcycle.as_deref(), Some("0.0000006"));
         assert_eq!(batch.min_price_per_mcycle.as_deref(), Some("0.000000010"));
+        assert_eq!(batch.absolute_max_price_per_mcycle, None);
         assert_eq!(batch.lock_collateral, "20");
     }
 
@@ -459,6 +491,7 @@ mod tests {
             aggregation.min_price_per_mcycle.as_deref(),
             Some("0.000000006")
         );
+        assert_eq!(aggregation.absolute_max_price_per_mcycle, None);
         assert_eq!(aggregation.lock_collateral, "20");
     }
 
@@ -623,5 +656,68 @@ mod tests {
 
         let err = validate_offer_spec(&offer).expect_err("manual offer without max price");
         assert!(err.contains("max_price_per_mcycle is required"));
+    }
+
+    #[test]
+    fn validate_offer_spec_accepts_manual_ceiling_at_or_above_max_price() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.absolute_max_price_per_mcycle = offer.max_price_per_mcycle.clone();
+        validate_offer_spec(&offer).expect("ceiling equal to max price");
+
+        offer.absolute_max_price_per_mcycle = Some("0.0000024".to_string());
+        validate_offer_spec(&offer).expect("ceiling above max price");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_manual_ceiling_below_max_price() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.absolute_max_price_per_mcycle = Some("0.0000001".to_string());
+
+        let err = validate_offer_spec(&offer).expect_err("ceiling below max price");
+        assert!(err.contains("cannot be below max_price_per_mcycle"));
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_unparsable_manual_ceiling() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.absolute_max_price_per_mcycle = Some("not-a-price".to_string());
+
+        let err = validate_offer_spec(&offer).expect_err("unparsable ceiling");
+        assert!(err.contains("Failed to parse absolute_max_price_per_mcycle"));
+    }
+
+    #[test]
+    fn validate_offer_spec_accepts_market_pricing_with_absolute_ceiling() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.absolute_max_price_per_mcycle = Some("0.000000060".to_string());
+
+        validate_offer_spec(&offer).expect("valid market offer with absolute ceiling");
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_market_pricing_with_both_cap_spellings() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.min_price_per_mcycle = None;
+        offer.max_price_per_mcycle = Some("0.000000060".to_string());
+        offer.absolute_max_price_per_mcycle = Some("0.000000060".to_string());
+
+        let err = validate_offer_spec(&offer).expect_err("both cap spellings");
+        assert!(err.contains("set only one of"));
+    }
+
+    #[test]
+    fn validate_offer_spec_rejects_zero_market_absolute_ceiling() {
+        let mut offer = BoundlessConfig::default().offer_params.batch;
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.absolute_max_price_per_mcycle = Some("0".to_string());
+
+        let err = validate_offer_spec(&offer).expect_err("zero absolute ceiling");
+        assert!(err.contains("absolute_max_price_per_mcycle must be positive"));
     }
 }

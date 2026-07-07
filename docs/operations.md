@@ -722,11 +722,13 @@ Operator notes:
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
   unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
   minimum is `1000` ms.
-- `prover.boundless.rebid_price_multiplier` controls the manual max-price multiplier applied on
-  each no-lock rebid. The default is `2`.
-- `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is
-  `31`, and the default allows a final manual max price of `16x` with the default multiplier
-  unless `absolute_max_price_per_mcycle` clamps it sooner.
+- `prover.boundless.rebid_price_multiplier` controls the max-price multiplier applied to each
+  replacement submission after the initial attempt. No-lock, expired, and timed-out retry paths
+  all use this multiplier. The default is `2`.
+- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path:
+  no-lock, expired, and timed-out requests all draw from the same budget. The default is `4`, the
+  maximum is `31`, and the default allows a final manual max price of `16x` with the default
+  multiplier unless `absolute_max_price_per_mcycle` clamps it sooner.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

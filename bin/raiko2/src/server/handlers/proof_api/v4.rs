@@ -214,11 +214,15 @@ async fn invalidate_artifacts_inner(
     .await?;
 
     if !req.dry_run {
-        let records = matched_tasks
-            .into_iter()
-            .map(|task| (task.record, task.metadata))
-            .collect();
-        remove_invalidated_tasks(state, records, &mut data).await;
+        let blocked_artifact_refs = remove_invalidated_tasks(state, matched_tasks, &mut data).await;
+        if !blocked_artifact_refs.is_empty() {
+            matched_artifacts.retain(|artifact| {
+                !blocked_artifact_refs.contains(&ProofArtifactIdentity {
+                    network_pair: artifact.network_pair.clone(),
+                    proof_ref: artifact.proof_ref.clone(),
+                })
+            });
+        }
         remove_invalidated_artifacts(state, matched_artifacts, &mut data).await;
     }
 
@@ -495,11 +499,20 @@ async fn collect_invalidation_artifacts(
 
 async fn remove_invalidated_tasks(
     state: &AppState,
-    matched_task_ids: Vec<(raiko2_runtime::RuntimeTaskRecord, TaskMetadata)>,
+    matched_tasks: Vec<CandidateInvalidationTask>,
     data: &mut wire::InvalidateArtifactsData,
-) {
-    for (record, metadata) in matched_task_ids {
+) -> HashSet<ProofArtifactIdentity> {
+    let mut blocked_artifact_refs = HashSet::new();
+    for task in matched_tasks {
+        let CandidateInvalidationTask {
+            record,
+            metadata,
+            artifact_refs,
+            root_artifact_refs,
+            ..
+        } = task;
         let log_context = invalidation_task_log_context(&metadata);
+        let mut cleanup_failed = false;
         match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
             Ok(engine) => {
                 if let Err(err) = remove_task_children_if_unreferenced(
@@ -524,9 +537,11 @@ async fn remove_invalidated_tasks(
                         error = %err,
                         "failed to remove invalidated task children"
                     );
+                    cleanup_failed = true;
                 }
             }
             Err(err) => {
+                data.tasks.failed = data.tasks.failed.saturating_add(1);
                 tracing::warn!(
                     task_id = %record.task_id,
                     task_kind = log_context.task_kind,
@@ -540,7 +555,13 @@ async fn remove_invalidated_tasks(
                     error = %err.message,
                     "skipping engine child cleanup for invalidated task"
                 );
+                cleanup_failed = true;
             }
+        }
+        if cleanup_failed {
+            blocked_artifact_refs.extend(artifact_refs);
+            blocked_artifact_refs.extend(root_artifact_refs);
+            continue;
         }
 
         match state.runtime.remove_task(&record.task_id).await {
@@ -560,9 +581,12 @@ async fn remove_invalidated_tasks(
                     error = %err,
                     "failed to remove invalidated runtime task"
                 );
+                blocked_artifact_refs.extend(artifact_refs);
+                blocked_artifact_refs.extend(root_artifact_refs);
             }
         }
     }
+    blocked_artifact_refs
 }
 
 enum ProofArtifactFileRemoval {
@@ -1249,7 +1273,8 @@ mod tests {
     use raiko2_primitives::L2BlockRange;
     use raiko2_queue::TaskStoreError;
     use raiko2_runtime::{
-        RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager, TaskRegistration,
+        ProofArtifactRegistration, RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager,
+        TaskRegistration,
     };
     use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
 
@@ -1326,7 +1351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_invalidated_tasks_removes_runtime_row_when_child_cleanup_fails() {
+    async fn remove_invalidated_tasks_keeps_runtime_row_when_child_cleanup_fails() {
         let mut factory = StaticPipelineFactory::default();
         factory.insert(
             "taiko_dev/taiko_dev_l1",
@@ -1359,18 +1384,139 @@ mod tests {
         record.runner_status = RuntimeTaskRunnerStatus::Completed;
         runtime.upsert_task(&record).await.expect("upsert task");
 
+        let artifact_refs = invalidation_artifact_refs(&metadata, record.pipeline_key, None);
+        let root_artifact_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let expected_blocked_refs = artifact_refs
+            .iter()
+            .chain(root_artifact_refs.iter())
+            .cloned()
+            .collect::<HashSet<_>>();
         let mut data = wire::InvalidateArtifactsData::default();
-        remove_invalidated_tasks(&state, vec![(record, metadata)], &mut data).await;
+        let blocked_refs = remove_invalidated_tasks(
+            &state,
+            vec![CandidateInvalidationTask {
+                record,
+                metadata,
+                artifact_refs,
+                root_artifact_refs,
+                root_proof_matches_prefix: false,
+            }],
+            &mut data,
+        )
+        .await;
 
         assert_eq!(data.tasks.failed, 1);
-        assert_eq!(data.tasks.removed, 1);
+        assert_eq!(data.tasks.removed, 0);
+        assert_eq!(blocked_refs, expected_blocked_refs);
         assert!(
             runtime
                 .get_task("task_child_cleanup_failure")
                 .await
                 .expect("get runtime task")
-                .is_none(),
-            "stale runtime task row remained"
+                .is_some(),
+            "runtime task row was removed before child cleanup could complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_artifacts_keeps_artifact_record_when_child_cleanup_fails() {
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaSp1,
+            Arc::new(RemoveFailEngine),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-artifact-cleanup-fails"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let mut metadata = task_log_metadata_with_requests(&[56], false);
+        metadata.requested_proof_type = Some("sp1".to_string());
+        let mut record = runtime
+            .register_task(TaskRegistration {
+                task_id: "task_artifact_cleanup_failure".to_string(),
+                pipeline_key: Some(PipelineKey::ShastaSp1),
+                route: PipelineKey::ShastaSp1.route(),
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(56),
+                proof_ids: vec![metadata.proposals[0].task_id.clone()],
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: None,
+            })
+            .await
+            .expect("register runtime task");
+        record.runner_status = RuntimeTaskRunnerStatus::Completed;
+        runtime.upsert_task(&record).await.expect("upsert task");
+
+        let root_refs = root_invalidation_artifact_refs(&metadata, record.pipeline_key);
+        let proof_ref = root_refs
+            .iter()
+            .next()
+            .expect("root proof ref")
+            .proof_ref
+            .clone();
+        let proof_path = runtime.proof_artifact_path(&metadata.network_pair, &proof_ref);
+        tokio::fs::create_dir_all(proof_path.parent().expect("proof dir"))
+            .await
+            .expect("create proof dir");
+        tokio::fs::write(
+            &proof_path,
+            serde_json::to_vec(&Proof {
+                proof: Some("0xroot".to_string()),
+                ..Proof::default()
+            })
+            .expect("serialize proof"),
+        )
+        .await
+        .expect("write proof artifact");
+        runtime
+            .upsert_proof_artifact(ProofArtifactRegistration {
+                network_pair: metadata.network_pair.clone(),
+                proof_ref: proof_ref.clone(),
+                pipeline_key: record.pipeline_key,
+                route: record.route,
+                proof_path: proof_path.display().to_string(),
+            })
+            .await
+            .expect("register proof artifact");
+
+        let data = invalidate_artifacts_inner(
+            &state,
+            &wire::InvalidateArtifactsRequest {
+                proof_type: wire::ProofType::Sp1,
+                proof_prefix: None,
+                proposal_id_start: Some(56),
+                proposal_id_end: Some(56),
+                dry_run: false,
+            },
+        )
+        .await
+        .expect("invalidate artifacts");
+
+        assert_eq!(data.tasks.failed, 1);
+        assert_eq!(data.tasks.removed, 0);
+        assert_eq!(data.artifacts.matched, 1);
+        assert_eq!(data.artifacts.removed, 0);
+        assert!(
+            runtime
+                .get_task("task_artifact_cleanup_failure")
+                .await
+                .expect("get runtime task")
+                .is_some(),
+            "runtime task row was removed before child cleanup could complete"
+        );
+        assert!(
+            runtime
+                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_some(),
+            "proof artifact record was removed while task cleanup failed"
         );
     }
 

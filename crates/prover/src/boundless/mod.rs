@@ -3,8 +3,8 @@
 pub mod aggregation;
 
 pub use crate::boundless_config::{
-    BatchQuoteStrategy, BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode,
-    DeploymentConfig, DeploymentType, MIN_REBID_TIMEOUT_MS, OfferParamsConfig, validate_offer_spec,
+    BoundlessConfig, BoundlessOfferParams, BoundlessPricingMode, DeploymentConfig, DeploymentType,
+    MIN_REBID_TIMEOUT_MS, OfferParamsConfig, QuoteSizing, TimeoutPolicy, validate_offer_spec,
 };
 
 use std::borrow::Cow;
@@ -777,45 +777,65 @@ fn user_cycles_to_mcycles(user_cycles: u64) -> u32 {
     u32::try_from(mcycles).unwrap_or(u32::MAX)
 }
 
-fn retry_price_multiplier(attempt: u64, price_multiplier: u32, max_attempts: u32) -> u32 {
-    let rebids = attempt.saturating_sub(1).min(u64::from(max_attempts));
-    let price_multiplier = price_multiplier.max(1);
-    let mut multiplier = 1_u32;
-    for _ in 0..rebids {
-        multiplier = multiplier.saturating_mul(price_multiplier);
-    }
-    multiplier
+/// Number of rebid rungs applied at 1-based `attempt`, capped at `max_attempts`.
+fn escalation_rungs(attempt: u64, max_attempts: u32) -> u64 {
+    attempt.saturating_sub(1).min(u64::from(max_attempts))
 }
 
-fn attempt_for_price_multiplier(multiplier: u32, price_multiplier: u32, max_attempts: u32) -> u64 {
-    let multiplier = multiplier.max(1);
-    if price_multiplier <= 1 {
-        return 1;
+/// Compound `base` by `step_bps` basis points per rebid rung, applied iteratively in U256 so the
+/// magnitude stays bounded. `step_bps == 0` is a flat (no-escalation) ladder.
+fn escalated_price(
+    base: U256,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
+) -> RaikoResult<U256> {
+    let rungs = escalation_rungs(attempt, max_attempts);
+    let numer = U256::from(10_000u64 + u64::from(step_bps));
+    let denom = U256::from(10_000u64);
+    let mut price = base;
+    for _ in 0..rungs {
+        price = price
+            .checked_mul(numer)
+            .ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(format!(
+                    "Boundless offer price {base} wei overflows escalating {step_bps} bps over {rungs} rebid rungs"
+                ))
+            })?
+            / denom;
     }
-    let mut attempt = 1_u64;
-    while retry_price_multiplier(attempt, price_multiplier, max_attempts) < multiplier
-        && attempt < u64::from(max_attempts).saturating_add(1)
-    {
-        attempt = attempt.saturating_add(1);
-    }
-    attempt
+    Ok(price)
 }
 
-/// Attempt number to resume at for a stored submission. Submissions written after this field was
-/// added carry the real attempt; legacy records (`attempt == 0`) fall back to inferring it from the
-/// escalated price, which is only recoverable when the price actually escalates
-/// (`price_multiplier > 1`). Persisting the attempt is what keeps a flat-price (`== 1`) rebid budget
-/// bounded across restarts instead of resetting to 1 every time.
-fn resume_attempt(submission: &Submission, price_multiplier: u32, max_attempts: u32) -> u64 {
+/// Floored effective multiplier at `attempt`, for progress/metadata display only. Never used to
+/// price an offer — pricing goes through [`escalated_price`] on the real base.
+fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) -> u32 {
+    const SCALE: u64 = 1_000_000;
+    let scaled = escalated_price(U256::from(SCALE), attempt, step_bps, max_attempts)
+        .unwrap_or(U256::from(SCALE));
+    u32::try_from(scaled / U256::from(SCALE)).unwrap_or(u32::MAX)
+}
+
+/// Attempt number to resume a stored submission at. Records carry the real 1-based attempt.
+///
+/// Records written before `rebid_attempt` was persisted deserialize with `attempt == 0`. The first
+/// release carrying that field is also the first to resume such records, so on that one upgrade
+/// every in-flight submission would otherwise reset to attempt 1 — re-granting the full rebid budget
+/// and rebidding below prices the market already declined. The reconstruction inverts the old
+/// `max_price_multiplier = base_multiplier^(attempt - 1)` ladder as `1 + log2(max_price_multiplier)`,
+/// which is exact only for the ×2 default ladder (`rebid_price_multiplier = 2`) — the multiplier
+/// every known deployment ran, as the live k8s fleet never set a custom value. A legacy record from a
+/// non-default ladder (multiplier 3, 4, …) resolves to a conservative upper bound on the attempt:
+/// `log2` over-counts the rungs, so the resumed attempt is no smaller than the real one, leaving
+/// fewer remaining rebids at higher prices — never more. Post-upgrade records always carry a real
+/// `attempt`, so this branch is dead after one deploy.
+fn resume_attempt(submission: &Submission) -> u64 {
     if submission.attempt > 0 {
-        submission.attempt
-    } else {
-        attempt_for_price_multiplier(
-            submission.max_price_multiplier,
-            price_multiplier,
-            max_attempts,
-        )
+        return submission.attempt;
     }
+    // TODO: delete this legacy branch, its tests, and this comment after one release carrying
+    // rebid_attempt has shipped — records with attempt == 0 cannot exist beyond that deploy.
+    1 + u64::from(submission.max_price_multiplier.max(1).ilog2())
 }
 
 const fn should_rebid_unlocked_request(attempt: u64, max_attempts: u32) -> bool {
@@ -989,6 +1009,18 @@ impl ElfType {
             Self::Aggregation => "aggregation",
         }
     }
+
+    /// Journal/seal/metadata discriminator: `ElfType::Batch` proves a "proposal", `Aggregation` an "aggregation".
+    const fn proof_type_str(self) -> &'static str {
+        match self {
+            Self::Batch => "proposal",
+            Self::Aggregation => "aggregation",
+        }
+    }
+
+    const fn is_proposal(self) -> bool {
+        matches!(self, Self::Batch)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -996,6 +1028,23 @@ struct UploadedProgram {
     image_id: Digest,
     url: Url,
     refresh_at: SystemTime,
+}
+
+#[derive(Clone, Debug)]
+struct UploadedInput {
+    url: Url,
+    refresh_at: SystemTime,
+}
+
+/// Refresh deadline for a presigned upload URL: `X-Amz-Expires` seconds out (default 3600),
+/// pulled back by 120s of headroom and floored at 60s so we re-upload before the URL dies.
+fn presigned_refresh_at(url: &Url) -> SystemTime {
+    let expires_secs = url
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("X-Amz-Expires"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .unwrap_or(3600);
+    SystemTime::now() + Duration::from_secs(expires_secs.saturating_sub(120).max(60))
 }
 
 #[derive(Clone, Debug)]
@@ -1008,9 +1057,16 @@ struct Submission {
     // past this time, so it bounds the payable window; `0` when resumed from a legacy record.
     lock_expires_at: u64,
     submitted_at: u64,
+    // Floored effective price multiplier at this attempt, for progress/metadata display only.
+    // Derived from `attempt` + config via `effective_price_multiplier`; never used to price offers.
     max_price_multiplier: u32,
+    // Exact escalated max price this submission bid, in wei. The floored `max_price_multiplier`
+    // renders the common attempt-2 (×1.5) rung as `1` — indistinguishable from an un-escalated bid —
+    // so this carries the precise value for telemetry. `0` when resumed from a record that predates
+    // the field.
+    max_price_wei: U256,
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
-    // rebid budget when the price is flat (`rebid_price_multiplier == 1`).
+    // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
 }
 
@@ -1026,8 +1082,10 @@ struct FreshSubmissionContext<'a> {
     observer: Option<&'a Arc<dyn ProverProgressObserver>>,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-    max_price_multiplier: u32,
     attempt: u64,
+    // Per-proof input-upload cache. Uploaded once (first attempt) and reused across rebids; a fresh
+    // presigned URL is minted only when the cached one nears expiry (see `ensure_input_uploaded`).
+    input_cache: &'a mut Option<UploadedInput>,
     // Market request id to reuse for this submission. Set on rebids so every rung of one proof
     // task shares an id: the market keys locks and paid fulfillments on the id, which makes
     // paying more than one rung impossible by construction. `None` mints a fresh id.
@@ -1052,7 +1110,6 @@ impl From<RaikoError> for BoundlessAttemptError {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn publish_boundless_progress(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     submission: &Submission,
@@ -1061,7 +1118,6 @@ async fn publish_boundless_progress(
     offchain: bool,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-    max_price_multiplier: u32,
 ) {
     if let Some(observer) = observer {
         observer
@@ -1077,7 +1133,8 @@ async fn publish_boundless_progress(
                     quoted_mcycles_count: Some(quoted_mcycles_count),
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
                     submitted_at: submission.submitted_at,
-                    max_price_multiplier,
+                    max_price_multiplier: submission.max_price_multiplier,
+                    max_price_wei: Some(submission.max_price_wei.to_string()),
                     rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
@@ -1119,6 +1176,13 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
             max_price_multiplier: value.max_price_multiplier.max(1),
+            // Display-only; `0` for records that predate the field. The next live submit overwrites
+            // it with the exact bid.
+            max_price_wei: value
+                .max_price_wei
+                .as_deref()
+                .and_then(|wei| wei.parse().ok())
+                .unwrap_or(U256::ZERO),
             attempt: u64::from(value.rebid_attempt),
         })
     }
@@ -1215,24 +1279,132 @@ fn storage_uploader_config_from_env() -> RaikoResult<StorageUploaderConfig> {
     Ok(config)
 }
 
+/// Lock the gate counter, recovering the value on poisoning. The critical sections only do
+/// saturating arithmetic on a `U256`, so they can't actually panic and poison the mutex; recovering
+/// anyway keeps [`BalanceClaim`]'s `Drop` from turning a stray poison into a double-panic abort.
+fn lock_gate(gate: &std::sync::Mutex<U256>) -> std::sync::MutexGuard<'_, U256> {
+    gate.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Serialization point for concurrent on-chain Boundless submissions that fund one market account
+/// (same market + signer). Holds the running total of the max-price claims of every in-flight
+/// on-chain submission, so each submission tops the account up to the *combined* reserved total
+/// rather than each reading the same pre-deposit balance and under-funding the others. Cloned into
+/// every [`BoundlessProver`] built for that account — one prover per network pair, all funding the
+/// same on-chain balance — so the caller builds one gate at setup and shares it across pairs.
+///
+/// Backed by a `std::sync::Mutex` (not a `tokio::Mutex`) so [`BalanceClaim`]'s `Drop` can release a
+/// reservation synchronously when a submission future is cancelled; the critical sections are tiny
+/// and never hold an `.await`.
+#[derive(Clone)]
+pub struct BoundlessBalanceGate(Arc<std::sync::Mutex<U256>>);
+
+impl Default for BoundlessBalanceGate {
+    fn default() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(U256::ZERO)))
+    }
+}
+
+impl BoundlessBalanceGate {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve `amount` on the shared total, returning an RAII claim that releases it on drop.
+    fn reserve(&self, amount: U256) -> BalanceClaim {
+        {
+            let mut reserved = lock_gate(&self.0);
+            *reserved = reserved.saturating_add(amount);
+        }
+        BalanceClaim {
+            gate: self.clone(),
+            amount,
+        }
+    }
+}
+
+/// RAII reservation on a [`BoundlessBalanceGate`]. Holds `amount` on the shared reserved total from
+/// construction until drop, so a submission future that is cancelled or errors mid-flight cannot
+/// leak a reservation (which would permanently over-deposit later requests). Normal completion drops
+/// it at the end of the submit, exactly where the old hand-paired release sites decremented.
+struct BalanceClaim {
+    gate: BoundlessBalanceGate,
+    amount: U256,
+}
+
+impl BalanceClaim {
+    /// Deposit needed to top the account up to the current combined reserved total for the given
+    /// on-chain `balance`. Reads the live reserved total (this claim plus any concurrent ones), so
+    /// concurrent submissions never each top up against the same pre-deposit balance.
+    fn deposit_topup(&self, balance: U256) -> U256 {
+        deposit_topup(balance, *lock_gate(&self.gate.0))
+    }
+}
+
+impl Drop for BalanceClaim {
+    fn drop(&mut self) {
+        let mut reserved = lock_gate(&self.gate.0);
+        *reserved = reserved.saturating_sub(self.amount);
+    }
+}
+
 pub struct BoundlessProver {
     config: BoundlessConfig,
     deployment: Deployment,
+    /// One market `Client` (provider + signer + storage uploader) built lazily on first proof and
+    /// reused across every subsequent proof, so we don't rebuild the RPC provider and signer per
+    /// proof. Lazy (rather than in `new()`) because building it is fallible and async.
+    client: tokio::sync::OnceCell<Client>,
     programs: Arc<RwLock<HashMap<ElfType, UploadedProgram>>>,
+    /// Balance gate serializing concurrent on-chain submissions that fund this market account so
+    /// they deposit against their combined in-flight claim total instead of each reading the same
+    /// pre-deposit balance. Shared across every pair's prover (they fund one account); see
+    /// [`BoundlessBalanceGate`].
+    balance_gate: BoundlessBalanceGate,
     status_tracker: OnceLock<RemoteStatusTracker>,
     status_registry: BoundlessStatusRegistry,
 }
 
 impl BoundlessProver {
+    /// Build a prover with its own private balance gate. Use [`BoundlessProver::with_balance_gate`]
+    /// in production so every pair funding the same market account shares one gate.
     #[must_use]
     pub fn new(config: BoundlessConfig) -> Self {
+        Self::with_balance_gate(config, BoundlessBalanceGate::new())
+    }
+
+    /// Build a prover sharing `balance_gate` with every other prover funding the same market account
+    /// (see [`BoundlessBalanceGate`]). Pairs share one signer/market, so the caller builds one gate
+    /// at setup and clones it into each pair's prover.
+    #[must_use]
+    pub fn with_balance_gate(config: BoundlessConfig, balance_gate: BoundlessBalanceGate) -> Self {
         Self {
             deployment: config.get_effective_deployment(),
             config,
+            client: tokio::sync::OnceCell::new(),
             programs: Arc::new(RwLock::new(HashMap::new())),
+            balance_gate,
             status_tracker: OnceLock::new(),
             status_registry: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns the shared market `Client`, building it once on first call and reusing the same
+    /// instance for every later proof. The build is wrapped in `retry_external` so a transient
+    /// storage/RPC hiccup at first use retries instead of failing the proof; on success the
+    /// `Client` is cached and later callers skip the build entirely.
+    async fn client(&self) -> RaikoResult<&Client> {
+        // `Box::pin` the init future: building the client (storage uploader + provider + signer) is
+        // a large future, and `get_or_try_init` would otherwise inline it into this frame.
+        self.client
+            .get_or_try_init(|| {
+                Box::pin(retry_external("create boundless client", || {
+                    self.create_client()
+                }))
+            })
+            .await
     }
 
     async fn create_client(&self) -> RaikoResult<Client> {
@@ -1276,14 +1448,16 @@ impl BoundlessProver {
         })
     }
 
+    /// Ensure the program for `elf_type` is uploaded with a live presigned URL, returning the cached
+    /// entry on a hit. `image_id` is passed in (computed once per proof) rather than recomputed here:
+    /// this runs every rebid rung, and hashing the multi-MB ELF on each cache hit was pure waste.
     async fn ensure_uploaded(
         &self,
         client: &Client,
         elf_type: ElfType,
         elf: &[u8],
+        image_id: Digest,
     ) -> RaikoResult<UploadedProgram> {
-        let image_id = compute_boundless_image_id(elf.to_vec(), elf_type.stage_name()).await?;
-
         if let Some(program) = self.programs.read().await.get(&elf_type).cloned()
             && program.image_id == image_id
             && SystemTime::now() < program.refresh_at
@@ -1297,16 +1471,11 @@ impl BoundlessProver {
             })
         })
         .await?;
-        let expires_secs = url
-            .query_pairs()
-            .find(|(key, _)| key.eq_ignore_ascii_case("X-Amz-Expires"))
-            .and_then(|(_, value)| value.parse::<u64>().ok())
-            .unwrap_or(3600);
+        let refresh_at = presigned_refresh_at(&url);
         let program = UploadedProgram {
             image_id,
             url,
-            refresh_at: SystemTime::now()
-                + Duration::from_secs(expires_secs.saturating_sub(120).max(60)),
+            refresh_at,
         };
         self.programs
             .write()
@@ -1315,12 +1484,43 @@ impl BoundlessProver {
         Ok(program)
     }
 
-    fn process_input(input: &[u8]) -> RaikoResult<(GuestEnv, Vec<u8>)> {
-        let guest_env = GuestEnv::builder().write_frame(input).build_env();
-        let guest_env_bytes = guest_env.encode().map_err(|e| {
-            RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
-        })?;
-        Ok((guest_env, guest_env_bytes))
+    /// Ensure the guest input is uploaded with a live presigned URL, returning the cached URL on a
+    /// hit. Building the `GuestEnv` from `input` and encoding it (both multi-MB copies) happen only
+    /// in the cache-miss branch — a rebid rung that hits the cache skips the env construction, the
+    /// encode, and the upload. The env is used solely to produce the uploaded bytes: the request
+    /// itself carries the input by URL (`with_input_url`), and every SDK layer that would otherwise
+    /// consume a `with_env(...)` value is short-circuited because raiko2 sets `request_input`,
+    /// `cycles`, and `journal` explicitly, so no `GuestEnv` is threaded into `build_request`.
+    async fn ensure_input_uploaded(
+        &self,
+        client: &Client,
+        input: &[u8],
+        cache: &mut Option<UploadedInput>,
+    ) -> RaikoResult<Url> {
+        if let Some(input) = cache.as_ref()
+            && SystemTime::now() < input.refresh_at
+        {
+            return Ok(input.url.clone());
+        }
+        let guest_env_bytes = GuestEnv::builder()
+            .write_frame(input)
+            .build_env()
+            .encode()
+            .map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to encode guest environment: {e}"))
+            })?;
+        let url = retry_external("upload boundless input", || async {
+            client.upload_input(&guest_env_bytes).await.map_err(|e| {
+                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
+            })
+        })
+        .await?;
+        let refresh_at = presigned_refresh_at(&url);
+        *cache = Some(UploadedInput {
+            url: url.clone(),
+            refresh_at,
+        });
+        Ok(url)
     }
 
     async fn evaluate_guest(
@@ -1352,14 +1552,13 @@ impl BoundlessProver {
     async fn build_request(
         &self,
         client: &Client,
-        guest_env: GuestEnv,
-        guest_env_bytes: &[u8],
         elf: &[u8],
         program: &UploadedProgram,
         offer_spec: &BoundlessOfferParams,
         mcycles_count: u32,
         journal: Vec<u8>,
-        max_price_multiplier: u32,
+        attempt: u64,
+        input_url: Url,
         reuse_request_id: Option<U256>,
     ) -> RaikoResult<ProofRequest> {
         let ValidatedOfferParams {
@@ -1371,18 +1570,31 @@ impl BoundlessProver {
             timeout,
             ramp_up_period_secs,
             bidding_start,
-        } = validate_offer_params(
-            offer_spec,
-            mcycles_count,
-            self.config.block_time_sec(),
-            max_price_multiplier,
-        )?;
-        let input_url = retry_external("upload boundless input", || async {
-            client.upload_input(guest_env_bytes).await.map_err(|e| {
-                RaikoError::InvalidRequestConfig(format!("Failed to upload boundless input: {e}"))
+        } = validate_offer_params(offer_spec, mcycles_count)?;
+        // Escalate only the manual max price on resubmissions (compounding bps per rung), then
+        // clamp it to the absolute ceiling threaded as `max_price_cap`; the min price keeps the
+        // ramp start unchanged so an idle prover still locks cheaply.
+        let max_price = max_price
+            .map(|mut amount| -> RaikoResult<_> {
+                let clamped = escalate_and_clamp_manual_max_price(
+                    amount.value,
+                    attempt,
+                    self.config.rebid_price_step_bps,
+                    self.config.rebid_max_attempts,
+                    max_price_cap.as_ref().map(|cap| cap.value),
+                )?;
+                if clamped.clamped_to_ceiling {
+                    tracing::warn!(
+                        mcycles_count,
+                        configured_max_price_wei = %amount.value,
+                        ceiling_max_price_wei = %clamped.max_price,
+                        "Boundless manual offer max price exceeds the absolute_max_price_per_mcycle ceiling; bidding at the ceiling"
+                    );
+                }
+                amount.value = clamped.max_price;
+                Ok(amount)
             })
-        })
-        .await?;
+            .transpose()?;
         let mut offer_params = OfferParams::builder();
         offer_params
             .ramp_up_period(ramp_up_period_secs)
@@ -1396,13 +1608,18 @@ impl BoundlessProver {
         if let Some(min_price) = min_price {
             offer_params.min_price(min_price);
         }
+        // No `.with_env(...)`: the input is carried by URL (`with_input_url` below), and every SDK
+        // request-builder layer that would consume a `GuestEnv` is short-circuited because
+        // `request_input`, `cycles`, and `journal` are all set — the storage layer skips env upload
+        // when `request_input` is present, and the preflight layer early-returns on set
+        // cycles+journal. `ensure_input_uploaded` already produced the uploaded bytes from the raw
+        // input, so building a second env here would just be a discarded multi-MB copy per rebid.
         let mut request_params = client
             .new_request()
             .with_program(elf.to_vec())
             .with_program_url(program.url.clone())
             .expect("with_program_url is infallible for valid URLs")
             .with_groth16_proof()
-            .with_env(guest_env)
             .with_cycles(u64::from(mcycles_count) * MILLION_CYCLES)
             .with_image_id(program.image_id)
             .with_journal(Journal::new(journal))
@@ -1434,18 +1651,48 @@ impl BoundlessProver {
         apply_market_offer_pricing(
             &mut request,
             offer_spec.pricing_mode,
-            max_price_multiplier,
+            attempt,
+            self.config.rebid_price_step_bps,
+            self.config.rebid_max_attempts,
             max_price_cap.as_ref(),
             mcycles_count,
         )?;
         Ok(request)
     }
 
+    /// Build a [`Submission`] record for a just-submitted request. Derives the provider id,
+    /// deadlines, and exact escalated max price from `request`, and the floored display multiplier
+    /// from `attempt` + config. `market_request_id` is passed separately because the offchain submit
+    /// returns the market's assigned id, which need not equal `request.id`; the onchain path passes
+    /// `request.id`. `remote_tx_hash` is set later on the onchain path once the tx is sent.
+    fn make_submission(
+        &self,
+        market_request_id: U256,
+        remote_tx_hash: Option<String>,
+        request: &ProofRequest,
+        attempt: u64,
+    ) -> Submission {
+        Submission {
+            market_request_id,
+            provider_request_id: format!("0x{market_request_id:x}"),
+            remote_tx_hash,
+            expires_at: request.expires_at(),
+            lock_expires_at: request.lock_expires_at(),
+            submitted_at: now_secs(),
+            max_price_multiplier: effective_price_multiplier(
+                attempt,
+                self.config.rebid_price_step_bps,
+                self.config.rebid_max_attempts,
+            ),
+            max_price_wei: U256::from(request.offer.maxPrice),
+            attempt,
+        }
+    }
+
     async fn submit_request_offchain(
         &self,
         client: &Client,
         request: &ProofRequest,
-        max_price_multiplier: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let market_request_id = retry_external("submit boundless offchain request", || async {
@@ -1456,16 +1703,7 @@ impl BoundlessProver {
                 .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
         })
         .await?;
-        Ok(Submission {
-            market_request_id,
-            provider_request_id: format!("0x{market_request_id:x}"),
-            remote_tx_hash: None,
-            expires_at: request.expires_at(),
-            lock_expires_at: request.lock_expires_at(),
-            submitted_at: now_secs(),
-            max_price_multiplier,
-            attempt,
-        })
+        Ok(self.make_submission(market_request_id, None, request, attempt))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1478,32 +1716,57 @@ impl BoundlessProver {
         deployment: &str,
         quoted_mcycles_count: u32,
         evaluated_mcycles_count: u32,
-        max_price_multiplier: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
         let signer = client.signer.as_ref().ok_or_else(|| {
             RaikoError::InvalidRequestConfig("Boundless signer is not configured".to_string())
         })?;
-        let balance = client
-            .boundless_market
-            .balance_of(request.client_address())
-            .await
-            .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))?;
         let max_price = U256::from(request.offer.maxPrice);
-        let value = if balance > max_price {
-            U256::ZERO
-        } else {
-            max_price - balance
-        };
+        // Sign the request before reserving on the balance gate: signing is independent of the
+        // deposit value, so there's no reason to hold a reservation across it. The chain id query
+        // and signing both retry transient RPC errors, so a hiccup here does not abort the reused-id
+        // submission and rotate to a fresh id. `get_chain_id` caches the value inside the SDK's
+        // market service after the first fetch, and the `Client` is reused across proofs, so this
+        // is effectively a single query per process despite the per-submission call.
         let chain_id =
-            client.boundless_market.get_chain_id().await.map_err(|e| {
-                RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
-            })?;
+            retry_external("query boundless chain id", || async {
+                client.boundless_market.get_chain_id().await.map_err(|e| {
+                    RaikoError::Guest(format!("Failed to query boundless chain id: {e}"))
+                })
+            })
+            .await?;
         let market_addr = *client.boundless_market.instance().address();
         let client_sig = request
             .sign_request(signer, market_addr, chain_id)
             .await
             .map_err(|e| RaikoError::Guest(format!("Failed to sign boundless request: {e}")))?;
+
+        // Reserve this request's max-price claim on the shared balance gate. `claim`'s `Drop`
+        // releases the reservation on every exit from this function — the normal return below (both
+        // send() arms converge there), an early `?`, or this future being cancelled — so a
+        // reservation can never leak and permanently over-deposit later requests. `value` has
+        // already credited the account by the time we return, so scope-end release does not
+        // over-count this request against later concurrent submissions.
+        //
+        // Depositing against the *combined* reserved total (not this request alone) is what
+        // serializes concurrent submissions funding the same market account: a second concurrent
+        // submission sees this claim in the reserved total and tops up above it, so neither
+        // under-funds the other. A stale-low balance read only over-deposits, which is safe
+        // (deposits accrue to the account); under-depositing was the concurrent-underfunding bug
+        // this closes. The guarantee spans the concurrent-submission window only — `value` credits
+        // the account now, but the market debits it later at *lock* time, so outside that window the
+        // shared account is not guaranteed to cover every submitted-but-unlocked request.
+        let claim = self.balance_gate.reserve(max_price);
+        let balance = retry_external("query boundless balance", || async {
+            client
+                .boundless_market
+                .balance_of(request.client_address())
+                .await
+                .map_err(|e| RaikoError::Guest(format!("Failed to query boundless balance: {e}")))
+        })
+        .await?;
+        let value = claim.deposit_topup(balance);
+
         let call = client
             .boundless_market
             .instance()
@@ -1511,16 +1774,7 @@ impl BoundlessProver {
             .from(client.boundless_market.caller())
             .value(value);
 
-        let mut submission = Submission {
-            market_request_id: request.id,
-            provider_request_id: format!("0x{:x}", request.id),
-            remote_tx_hash: None,
-            expires_at: request.expires_at(),
-            lock_expires_at: request.lock_expires_at(),
-            submitted_at: now_secs(),
-            max_price_multiplier,
-            attempt,
-        };
+        let mut submission = self.make_submission(request.id, None, request, attempt);
         publish_boundless_progress(
             observer,
             &submission,
@@ -1529,7 +1783,6 @@ impl BoundlessProver {
             false,
             quoted_mcycles_count,
             evaluated_mcycles_count,
-            max_price_multiplier,
         )
         .await;
 
@@ -1544,7 +1797,6 @@ impl BoundlessProver {
                     false,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                    max_price_multiplier,
                 )
                 .await;
             }
@@ -1564,29 +1816,25 @@ impl BoundlessProver {
         &self,
         context: FreshSubmissionContext<'_>,
     ) -> RaikoResult<Submission> {
-        let (guest_env, guest_env_bytes) = Self::process_input(context.input.as_ref())?;
+        let input_url = self
+            .ensure_input_uploaded(context.client, context.input.as_ref(), context.input_cache)
+            .await?;
         let request = Box::pin(self.build_request(
             context.client,
-            guest_env,
-            &guest_env_bytes,
             context.elf,
             context.program,
             context.offer_spec,
             context.quoted_mcycles_count,
             context.journal.to_vec(),
-            context.max_price_multiplier,
+            context.attempt,
+            input_url,
             context.reuse_request_id,
         ))
         .await?;
 
         if self.config.offchain {
             let submission = self
-                .submit_request_offchain(
-                    context.client,
-                    &request,
-                    context.max_price_multiplier,
-                    context.attempt,
-                )
+                .submit_request_offchain(context.client, &request, context.attempt)
                 .await?;
             publish_boundless_progress(
                 context.observer,
@@ -1596,7 +1844,6 @@ impl BoundlessProver {
                 true,
                 context.quoted_mcycles_count,
                 context.evaluated_mcycles_count,
-                context.max_price_multiplier,
             )
             .await;
             return Ok(submission);
@@ -1610,7 +1857,6 @@ impl BoundlessProver {
             context.deployment,
             context.quoted_mcycles_count,
             context.evaluated_mcycles_count,
-            context.max_price_multiplier,
             context.attempt,
         )
         .await
@@ -1621,7 +1867,7 @@ impl BoundlessProver {
         &self,
         client: &Client,
         submission: &Submission,
-        proof_type: &'static str,
+        elf_type: ElfType,
         image_id: Digest,
         block_image_id: Option<Digest>,
         expected_input_hash: B256,
@@ -1693,7 +1939,7 @@ impl BoundlessProver {
                 self.fetch_boundless_fulfillment_until(
                     client,
                     submission,
-                    proof_type,
+                    elf_type.proof_type_str(),
                     image_id,
                     block_image_id,
                     expected_input_hash,
@@ -1889,7 +2135,6 @@ impl BoundlessProver {
             "zkvm": "risc0",
             "runner": "network",
             "proof_type": proof_type,
-            "mcycles_count": quoted_mcycles_count,
             "quoted_mcycles_count": quoted_mcycles_count,
             "evaluated_mcycles_count": evaluated_mcycles_count,
             "boundless": {
@@ -1899,6 +2144,7 @@ impl BoundlessProver {
                 "lock_expires_at": submission.lock_expires_at,
                 "submitted_at": submission.submitted_at,
                 "max_price_multiplier": submission.max_price_multiplier,
+                "max_price_wei": submission.max_price_wei.to_string(),
                 "image_id": alloy_primitives::hex::encode_prefixed(image_id.as_bytes()),
                 "deployment": format!("{:?}", self.config.get_deployment_type()).to_lowercase(),
                 "offchain": self.config.offchain,
@@ -1947,25 +2193,34 @@ impl BoundlessProver {
         &self,
         elf_type: ElfType,
         offer_spec: &BoundlessOfferParams,
-        proof_type: &'static str,
         input: Bytes,
         elf: &[u8],
         block_image_id: Option<Digest>,
         proposal_carry_data: Option<ProofCarryData>,
         observer: Option<Arc<dyn ProverProgressObserver>>,
     ) -> RaikoResult<Proof> {
-        let client = retry_external("create boundless client", || self.create_client()).await?;
-        let program = self.ensure_uploaded(&client, elf_type, elf).await?;
+        let client = self.client().await?;
+        // The image id is deterministic in `elf`, so hash the multi-MB ELF once here and reuse it
+        // for every per-attempt program refresh below instead of re-hashing each rebid rung.
+        let image_id = compute_boundless_image_id(elf.to_vec(), elf_type.stage_name()).await?;
+        // Seed the program cache (and derive the stable image ref) up front; the per-attempt
+        // refresh inside the loop below shadows this and is a cache hit unless the presigned URL
+        // nears expiry.
+        let seed_program = self
+            .ensure_uploaded(client, elf_type, elf, image_id)
+            .await?;
         // Local RISC0 dry-run can take seconds to minutes for large inputs and must not
         // occupy the async runtime threads that serve health/readiness probes.
         let (evaluated_mcycles_count, journal) =
             Self::evaluate_guest(input.to_vec(), self.config.execution_po2, elf.to_vec()).await?;
-        let expected_input_hash = match proof_type {
-            "proposal" => parse_shasta_proposal_input_hash(&journal)?,
-            _ => parse_shasta_aggregation_input_hash(&journal)?,
+        let expected_input_hash = if elf_type.is_proposal() {
+            parse_shasta_proposal_input_hash(&journal)?
+        } else {
+            parse_shasta_aggregation_input_hash(&journal)?
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
-        let image_ref = alloy_primitives::hex::encode_prefixed(program.image_id.as_bytes());
+        // The image id is deterministic in `elf`, so it stays stable across program URL refreshes.
+        let image_ref = alloy_primitives::hex::encode_prefixed(seed_program.image_id.as_bytes());
         let deployment = format!("{:?}", self.config.get_deployment_type()).to_lowercase();
 
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
@@ -1984,14 +2239,21 @@ impl BoundlessProver {
         // rung impossible by construction. `None` mints a fresh id (first attempt, or after the
         // previous id became unusable).
         let mut reuse_request_id: Option<U256> = None;
+        // Per-proof input-upload cache: the guest env is uploaded once and reused across rebids,
+        // refreshed only when its presigned URL nears expiry.
+        let mut input_cache: Option<UploadedInput> = None;
 
         loop {
-            let submission = if let Some(submission) = resume_submission.take() {
-                attempt = attempt.max(resume_attempt(
-                    &submission,
-                    self.config.rebid_price_multiplier,
-                    self.config.rebid_max_attempts,
-                ));
+            // Refresh the program URL per attempt (cheap cache hit unless a refresh is due) so late
+            // rebids never carry an expired presigned program URL. The image id is unchanged.
+            let program = self
+                .ensure_uploaded(client, elf_type, elf, image_id)
+                .await?;
+            let submission = if let Some(mut submission) = resume_submission.take() {
+                attempt = attempt.max(resume_attempt(&submission));
+                // Reflect the reconstructed attempt on the record so published telemetry reports the
+                // real rebid attempt for legacy resumes (persisted attempt == 0), not 0.
+                submission.attempt = attempt;
                 // Expired records are deliberately not short-circuited: the poll below gives
                 // them one final market status read. An expired-but-fulfilled request still
                 // reports Fulfilled (the SDK checks fulfillment before expiry), recovering a
@@ -2006,7 +2268,6 @@ impl BoundlessProver {
                     self.config.offchain,
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
-                    submission.max_price_multiplier,
                 )
                 .await;
                 submission
@@ -2023,30 +2284,28 @@ impl BoundlessProver {
                         self.config.rebid_max_attempts,
                     )));
                 }
-                let max_price_multiplier = retry_price_multiplier(
+                // `input_cache` is threaded by `&mut` so the reused-id attempt and the fresh-id
+                // fallback below share a single per-proof input upload. The context is built inline
+                // (rather than via a closure) because it borrows `&mut input_cache`, whose lifetime
+                // a closure returning the borrow cannot name.
+                let first = Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                    client,
+                    input: &input,
+                    elf,
+                    program: &program,
+                    offer_spec,
+                    journal: &journal,
+                    image_ref: &image_ref,
+                    deployment: &deployment,
+                    observer: observer.as_ref(),
+                    quoted_mcycles_count,
+                    evaluated_mcycles_count,
                     attempt,
-                    self.config.rebid_price_multiplier,
-                    self.config.rebid_max_attempts,
-                );
-                let submit = |reuse_request_id: Option<U256>| {
-                    Box::pin(self.submit_fresh_request(FreshSubmissionContext {
-                        client: &client,
-                        input: &input,
-                        elf,
-                        program: &program,
-                        offer_spec,
-                        journal: &journal,
-                        image_ref: &image_ref,
-                        deployment: &deployment,
-                        observer: observer.as_ref(),
-                        quoted_mcycles_count,
-                        evaluated_mcycles_count,
-                        max_price_multiplier,
-                        attempt,
-                        reuse_request_id,
-                    }))
-                };
-                match submit(reuse_request_id).await {
+                    input_cache: &mut input_cache,
+                    reuse_request_id,
+                }))
+                .await;
+                match first {
                     Ok(submission) => submission,
                     Err(error) => {
                         // Id reuse is best-effort: an order stream or RPC may refuse a same-id
@@ -2061,15 +2320,26 @@ impl BoundlessProver {
                             error = %error,
                             "Boundless rebid under the reused request id failed; retrying once with a fresh id"
                         );
-                        submit(None).await?
+                        Box::pin(self.submit_fresh_request(FreshSubmissionContext {
+                            client,
+                            input: &input,
+                            elf,
+                            program: &program,
+                            offer_spec,
+                            journal: &journal,
+                            image_ref: &image_ref,
+                            deployment: &deployment,
+                            observer: observer.as_ref(),
+                            quoted_mcycles_count,
+                            evaluated_mcycles_count,
+                            attempt,
+                            input_cache: &mut input_cache,
+                            reuse_request_id: None,
+                        }))
+                        .await?
                     }
                 }
             };
-            attempt = attempt.max(attempt_for_price_multiplier(
-                submission.max_price_multiplier,
-                self.config.rebid_price_multiplier,
-                self.config.rebid_max_attempts,
-            ));
 
             tracing::info!(
                 provider_request_id = %submission.provider_request_id,
@@ -2086,9 +2356,9 @@ impl BoundlessProver {
 
             match self
                 .poll_until_fulfilled(
-                    &client,
+                    client,
                     &submission,
-                    proof_type,
+                    elf_type,
                     program.image_id,
                     block_image_id,
                     expected_input_hash,
@@ -2157,7 +2427,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Batch,
             &self.config.offer_params.batch,
-            "proposal",
             input,
             &elf,
             None,
@@ -2180,7 +2449,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Batch,
             &self.config.offer_params.batch,
-            "proposal",
             input,
             &elf,
             None,
@@ -2205,7 +2473,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
             &self.config.offer_params.aggregation,
-            "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -2231,7 +2498,6 @@ where
         Box::pin(self.prove_boundless(
             ElfType::Aggregation,
             &self.config.offer_params.aggregation,
-            "aggregation",
             Bytes::from(aggregation_input),
             &aggregation_elf,
             Some(proposal_image_id),
@@ -2244,32 +2510,18 @@ where
 
 impl BoundlessProver {
     // Keep boundless order pricing aligned with the legacy raiko-agent strategy.
-    fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
-        match elf_type {
-            ElfType::Batch => {
-                if let Some(batch_quoted_mcycles) = self.config.batch_quoted_mcycles {
-                    batch_quoted_mcycles
-                } else {
-                    match self.config.batch_quote_strategy.clone() {
-                        BatchQuoteStrategy::RaikoAgent => {
-                            quote_batch_mcycles(evaluated_mcycles_count)
-                        }
-                        BatchQuoteStrategy::Evaluated => evaluated_mcycles_count,
-                    }
-                }
-            }
-            ElfType::Aggregation => {
-                if let Some(aggregation_quoted_mcycles) = self.config.aggregation_quoted_mcycles {
-                    aggregation_quoted_mcycles
-                } else {
-                    match self.config.aggregation_quote_strategy.clone() {
-                        BatchQuoteStrategy::RaikoAgent => {
-                            quote_aggregation_mcycles(evaluated_mcycles_count)
-                        }
-                        BatchQuoteStrategy::Evaluated => evaluated_mcycles_count,
-                    }
-                }
-            }
+    const fn quoted_mcycles_count(&self, elf_type: ElfType, evaluated_mcycles_count: u32) -> u32 {
+        let quote = match elf_type {
+            ElfType::Batch => &self.config.batch_quote,
+            ElfType::Aggregation => &self.config.aggregation_quote,
+        };
+        match quote {
+            QuoteSizing::RaikoAgent => match elf_type {
+                ElfType::Batch => quote_batch_mcycles(evaluated_mcycles_count),
+                ElfType::Aggregation => quote_aggregation_mcycles(evaluated_mcycles_count),
+            },
+            QuoteSizing::Evaluated => evaluated_mcycles_count,
+            QuoteSizing::Fixed { mcycles } => *mcycles,
         }
     }
 }
@@ -2297,6 +2549,14 @@ fn parse_request_amount(
     Ok(amount)
 }
 
+/// Top-up needed so the on-chain balance covers the sum of all in-flight max-price claims.
+/// Depositing against the reserved total (not this request alone) closes the concurrent-submission
+/// underfunding window: two requests that each look individually covered still top up their combined
+/// shortfall. Over-deposit under RPC lag is possible and safe — deposits accrue to the account.
+const fn deposit_topup(on_chain_balance: U256, reserved_total: U256) -> U256 {
+    reserved_total.saturating_sub(on_chain_balance)
+}
+
 /// Escalated and capped market-mode offer prices derived from the SDK's autopriced offer.
 #[derive(Debug, PartialEq, Eq)]
 struct MarketOfferPrices {
@@ -2305,11 +2565,11 @@ struct MarketOfferPrices {
     clamped_to_cap: bool,
 }
 
-/// Escalate the autopriced max price by the rebid multiplier, then clamp it to the configured
+/// Escalate the autopriced max price by the rebid step (bps), then clamp it to the configured
 /// per-mcycle cap.
 ///
-/// Manual pricing escalates its configured max price in [`validate_offer_params`]; this is the
-/// market-mode counterpart, applied after the SDK autoprices the offer — without it, market-mode
+/// Manual pricing escalates its configured max price in [`BoundlessProver::build_request`]; this is
+/// the market-mode counterpart, applied after the SDK autoprices the offer — without it, market-mode
 /// rebids would just resubmit at whatever the SDK quotes again, repeating an offer the market
 /// already declined to lock. Only the max price escalates; the min price keeps the ramp start
 /// unchanged so an idle prover still locks cheaply, and is lowered only when the clamped max
@@ -2319,17 +2579,12 @@ struct MarketOfferPrices {
 fn escalate_and_cap_market_prices(
     autopriced_max: U256,
     autopriced_min: U256,
-    max_price_multiplier: u32,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
     max_price_cap: Option<&Amount>,
 ) -> RaikoResult<MarketOfferPrices> {
-    let escalated_max = autopriced_max
-        .checked_mul(U256::from(max_price_multiplier.max(1)))
-        .ok_or_else(|| {
-            RaikoError::InvalidRequestConfig(format!(
-                "Boundless market max price {autopriced_max} wei overflows when multiplied by \
-                 retry multiplier {max_price_multiplier}"
-            ))
-        })?;
+    let escalated_max = escalated_price(autopriced_max, attempt, step_bps, max_attempts)?;
     let (max_price, clamped_to_cap) = match max_price_cap {
         Some(cap) if escalated_max > cap.value => (cap.value, true),
         _ => (escalated_max, false),
@@ -2348,27 +2603,23 @@ struct ManualOfferMaxPrice {
     clamped_to_ceiling: bool,
 }
 
-/// Escalate the configured manual max price by the rebid multiplier, then clamp it to the
-/// absolute per-request ceiling when one is configured.
+/// Escalate the configured manual max price by the compounding bps rebid step, then clamp it to
+/// the absolute per-request ceiling when one is configured.
 ///
-/// Manual-mode counterpart of [`escalate_and_cap_market_prices`]: without a ceiling, rebids
-/// escalate the configured max price geometrically with no config-level bound, so the worst-case
-/// bid is `max_price_per_mcycle * rebid_price_multiplier ^ rebid_max_attempts` — derived math
-/// rather than an operator-stated budget. The ceiling makes the worst case a config value. As in
-/// market mode, hitting the ceiling clamps instead of failing: the offer bids at the operator's
-/// stated maximum and the no-lock machinery decides how long to wait there.
+/// Manual-mode counterpart of [`escalate_and_cap_market_prices`], sharing its [`escalated_price`]
+/// bps ladder: without a ceiling, rebids escalate the configured max price with no config-level
+/// bound, so the worst case is derived math rather than an operator-stated budget. The ceiling
+/// makes the worst case a config value. As in market mode, hitting the ceiling clamps instead of
+/// failing: the offer bids at the operator's stated maximum and the no-lock machinery decides how
+/// long to wait there.
 fn escalate_and_clamp_manual_max_price(
     configured_max: U256,
-    max_price_multiplier: u32,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
     ceiling: Option<U256>,
 ) -> RaikoResult<ManualOfferMaxPrice> {
-    let escalated = configured_max
-        .checked_mul(U256::from(max_price_multiplier.max(1)))
-        .ok_or_else(|| {
-            RaikoError::InvalidRequestConfig(format!(
-                "max_price_per_mcycle overflows when multiplied by retry multiplier {max_price_multiplier}"
-            ))
-        })?;
+    let escalated = escalated_price(configured_max, attempt, step_bps, max_attempts)?;
     let (max_price, clamped_to_ceiling) = match ceiling {
         Some(ceiling) if escalated > ceiling => (ceiling, true),
         _ => (escalated, false),
@@ -2382,7 +2633,9 @@ fn escalate_and_clamp_manual_max_price(
 fn apply_market_offer_pricing(
     request: &mut ProofRequest,
     pricing_mode: BoundlessPricingMode,
-    max_price_multiplier: u32,
+    attempt: u64,
+    step_bps: u32,
+    max_attempts: u32,
     max_price_cap: Option<&Amount>,
     mcycles_count: u32,
 ) -> RaikoResult<()> {
@@ -2393,22 +2646,22 @@ fn apply_market_offer_pricing(
     let prices = escalate_and_cap_market_prices(
         autopriced_max,
         request.offer.minPrice,
-        max_price_multiplier,
+        attempt,
+        step_bps,
+        max_attempts,
         max_price_cap,
     )?;
     if prices.clamped_to_cap {
         tracing::warn!(
             mcycles_count,
             autopriced_max_price_wei = %autopriced_max,
-            max_price_multiplier,
             capped_max_price_wei = %prices.max_price,
             "Boundless market offer max price exceeds the configured per-mcycle price cap; bidding at the cap"
         );
-    } else if max_price_multiplier > 1 {
+    } else if escalation_rungs(attempt, max_attempts) > 0 {
         tracing::info!(
             mcycles_count,
             autopriced_max_price_wei = %autopriced_max,
-            max_price_multiplier,
             escalated_max_price_wei = %prices.max_price,
             "Escalated Boundless market offer max price for rebid"
         );
@@ -2416,30 +2669,6 @@ fn apply_market_offer_pricing(
     request.offer.maxPrice = prices.max_price;
     request.offer.minPrice = prices.min_price;
     Ok(())
-}
-
-fn apply_dynamic_pricing_timeout_modifier(
-    offer_spec: &BoundlessOfferParams,
-    timeout: u32,
-    field: &str,
-) -> RaikoResult<u32> {
-    if offer_spec.pricing_mode != BoundlessPricingMode::Market {
-        return Ok(timeout);
-    }
-    let Some(modifier) = offer_spec.dynamic_pricing_timeout_modifier else {
-        return Ok(timeout);
-    };
-
-    let modified_timeout = scale_timeout(timeout, modifier, field)?;
-
-    tracing::debug!(
-        modifier,
-        timeout,
-        modified_timeout,
-        field,
-        "Applied Boundless dynamic-pricing timeout modifier"
-    );
-    Ok(modified_timeout)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -2457,62 +2686,6 @@ fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
         )));
     }
     Ok(scaled_timeout as u32)
-}
-
-/// Manual-mode offer prices: the (possibly rebid-escalated, ceiling-clamped) max price and the
-/// untouched min price. Escalation raises only the max price; the min price keeps the ramp start
-/// unchanged so an idle prover still locks cheaply.
-fn manual_offer_prices(
-    offer_spec: &BoundlessOfferParams,
-    mcycles_count: u32,
-    max_price_multiplier: u32,
-) -> RaikoResult<(Amount, Amount)> {
-    let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
-            "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
-        )
-    })?;
-    let mut max_price = parse_request_amount(
-        max_price_value,
-        "max_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
-    let ceiling = offer_spec
-        .absolute_max_price_per_mcycle
-        .as_deref()
-        .map(|ceiling_value| {
-            parse_request_amount(
-                ceiling_value,
-                "absolute_max_price_per_mcycle",
-                Asset::ETH,
-                mcycles_count,
-            )
-        })
-        .transpose()?;
-    let escalated = escalate_and_clamp_manual_max_price(
-        max_price.value,
-        max_price_multiplier,
-        ceiling.as_ref().map(|amount| amount.value),
-    )?;
-    if escalated.clamped_to_ceiling {
-        tracing::warn!(
-            mcycles_count,
-            max_price_multiplier,
-            configured_max_price_wei = %max_price.value,
-            ceiling_max_price_wei = %escalated.max_price,
-            "Boundless manual offer max price exceeds the absolute_max_price_per_mcycle ceiling; bidding at the ceiling"
-        );
-    }
-    max_price.value = escalated.max_price;
-    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-    let min_price = parse_request_amount(
-        min_price_value,
-        "min_price_per_mcycle",
-        Asset::ETH,
-        mcycles_count,
-    )?;
-    Ok((max_price, min_price))
 }
 
 /// Market-mode price cap from whichever cap spelling is configured. `validate_offer_spec`
@@ -2536,15 +2709,46 @@ fn market_offer_price_cap(
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
-    block_time_sec: u32,
-    max_price_multiplier: u32,
 ) -> RaikoResult<ValidatedOfferParams> {
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let (max_price, min_price, max_price_cap) = match offer_spec.pricing_mode {
         BoundlessPricingMode::Manual => {
-            let (max_price, min_price) =
-                manual_offer_prices(offer_spec, mcycles_count, max_price_multiplier)?;
-            (Some(max_price), Some(min_price), None)
+            let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
+                RaikoError::InvalidRequestConfig(
+                    "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
+                )
+            })?;
+            // The base (un-escalated) max price; `build_request` escalates it per rebid rung and
+            // clamps the result to the absolute ceiling threaded below as `max_price_cap`.
+            let max_price = parse_request_amount(
+                max_price_value,
+                "max_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+            let min_price = parse_request_amount(
+                min_price_value,
+                "min_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )?;
+            // Absolute per-request ceiling on the bps-escalated bid (config-stated worst case),
+            // threaded as the manual-mode `max_price_cap`; `build_request` clamps the escalated
+            // price to it. `None` leaves escalation unbounded.
+            let ceiling = offer_spec
+                .absolute_max_price_per_mcycle
+                .as_deref()
+                .map(|ceiling_value| {
+                    parse_request_amount(
+                        ceiling_value,
+                        "absolute_max_price_per_mcycle",
+                        Asset::ETH,
+                        mcycles_count,
+                    )
+                })
+                .transpose()?;
+            (Some(max_price), Some(min_price), ceiling)
         }
         BoundlessPricingMode::Market => (
             None,
@@ -2552,32 +2756,49 @@ fn validate_offer_params(
             market_offer_price_cap(offer_spec, mcycles_count)?,
         ),
     };
-    let derived_lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
-    let derived_timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
-    let lock_timeout = match offer_spec.lock_timeout_secs {
-        Some(lock_timeout) => lock_timeout,
-        None => apply_dynamic_pricing_timeout_modifier(
-            offer_spec,
-            derived_lock_timeout,
-            "lock_timeout",
-        )?,
-    };
-    let timeout = match offer_spec.timeout_secs {
-        Some(timeout) => timeout,
-        None => apply_dynamic_pricing_timeout_modifier(offer_spec, derived_timeout, "timeout")?,
+    let (lock_timeout, timeout) = match &offer_spec.timeouts {
+        TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle,
+            timeout_ms_per_mcycle,
+            dynamic_pricing_timeout_modifier,
+        } => {
+            // u64 intermediates: `*_ms_per_mcycle * mcycles_count` can exceed u32 at very large
+            // mcycle counts; clamp back into u32 (a ms timeout that large is already absurd).
+            let derived_lock = u32::try_from(
+                u64::from(*lock_timeout_ms_per_mcycle) * u64::from(mcycles_count) / 1000,
+            )
+            .unwrap_or(u32::MAX);
+            let derived_timeout =
+                u32::try_from(u64::from(*timeout_ms_per_mcycle) * u64::from(mcycles_count) / 1000)
+                    .unwrap_or(u32::MAX);
+            // Scale only in market mode with a configured modifier; every other case uses the
+            // per-mcycle derived timeouts unchanged.
+            if offer_spec.pricing_mode == BoundlessPricingMode::Market
+                && let Some(modifier) = dynamic_pricing_timeout_modifier
+            {
+                (
+                    scale_timeout(derived_lock, *modifier, "lock_timeout")?,
+                    scale_timeout(derived_timeout, *modifier, "timeout")?,
+                )
+            } else {
+                (derived_lock, derived_timeout)
+            }
+        }
+        TimeoutPolicy::Fixed {
+            lock_timeout_secs,
+            timeout_secs,
+        } => (*lock_timeout_secs, *timeout_secs),
     };
     if timeout <= lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
             "timeout {timeout}s must be greater than lock timeout {lock_timeout}s for {mcycles_count} mcycles"
         )));
     }
-    let ramp_up_period_secs = offer_spec
-        .ramp_up_period_blocks
-        .saturating_mul(block_time_sec);
+    let ramp_up_period_secs = offer_spec.ramp_up_period_sec;
     if ramp_up_period_secs > lock_timeout {
         return Err(RaikoError::InvalidRequestConfig(format!(
-            "ramp_up_period_blocks={} exceeds lock timeout for {} mcycles",
-            offer_spec.ramp_up_period_blocks, mcycles_count
+            "ramp_up_period_sec={} exceeds lock timeout for {} mcycles",
+            offer_spec.ramp_up_period_sec, mcycles_count
         )));
     }
 
@@ -2601,16 +2822,16 @@ fn validate_offer_params(
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchQuoteStrategy, BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode,
-        BoundlessProver, BoundlessStatusSource, BoundlessSubmissionMetadata,
-        BoundlessSubmissionState, BoundlessTerminalOutcome, BoundlessTimeoutAction,
-        DeploymentConfig, DeploymentType, ElfType, JsonRpcError, JsonRpcResponse,
-        MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction, attempt_for_price_multiplier,
-        boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
-        escalate_and_cap_market_prices, exceeds_submission_budget, no_lock_deadline_elapsed,
-        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
-        quote_batch_mcycles, retry_price_multiplier, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
+        BoundlessConfig, BoundlessPollSubmission, BoundlessPricingMode, BoundlessProver,
+        BoundlessStatusSource, BoundlessSubmissionMetadata, BoundlessSubmissionState,
+        BoundlessTerminalOutcome, BoundlessTimeoutAction, DeploymentConfig, DeploymentType,
+        ElfType, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS, NoLockTimeoutAction,
+        TimeoutPolicy, boundless_poll_error_statuses, classify_boundless_status,
+        defer_poll_timeout_while_payable, escalate_and_cap_market_prices,
+        exceeds_submission_budget, no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs,
+        parse_bool_result, parse_env_bool, parse_env_url, quote_batch_mcycles,
+        should_rebid_unlocked_request, storage_uploader_config_from_env, user_cycles_to_mcycles,
+        validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use alloy_primitives::{U256, address, utils::parse_ether};
@@ -2625,12 +2846,13 @@ mod tests {
         collections::HashMap,
         env,
         sync::{Arc, Mutex, MutexGuard},
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     };
+    use url::Url;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
-    const TEST_REBID_PRICE_MULTIPLIER: u32 = 2;
+    const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
 
     const STORAGE_ENV_VARS: &[&str] = &[
@@ -2713,13 +2935,23 @@ mod tests {
     }
 
     #[test]
+    fn elf_type_maps_to_proof_type_and_stage() {
+        assert_eq!(ElfType::Batch.proof_type_str(), "proposal");
+        assert_eq!(ElfType::Aggregation.proof_type_str(), "aggregation");
+        assert_eq!(ElfType::Batch.stage_name(), "batch");
+        assert_eq!(ElfType::Aggregation.stage_name(), "aggregation");
+        assert!(ElfType::Batch.is_proposal());
+        assert!(!ElfType::Aggregation.is_proposal());
+    }
+
+    #[test]
     fn quoted_mcycles_count_matches_raiko_agent_strategy() {
         let prover = BoundlessProver::new(BoundlessConfig::default());
         assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
     }
 
     #[test]
-    fn aggregation_quoted_mcycles_matches_raiko_agent_strategy() {
+    fn aggregation_quote_matches_raiko_agent_strategy() {
         let prover = BoundlessProver::new(BoundlessConfig::default());
         assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 0), 200);
         assert_eq!(prover.quoted_mcycles_count(ElfType::Aggregation, 123), 200);
@@ -2728,36 +2960,40 @@ mod tests {
     }
 
     #[test]
-    fn quoted_mcycles_count_can_use_evaluated_cycles_directly() {
-        let config = BoundlessConfig {
-            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
-            ..Default::default()
-        };
-        let prover = BoundlessProver::new(config);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_188);
-    }
+    fn quoted_mcycles_count_dispatches_on_quote_sizing() {
+        use super::QuoteSizing;
+        // RaikoAgent rounds (batch floor 2000, step 1000).
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_491), 2_000);
 
-    #[test]
-    fn quoted_mcycles_count_can_use_fixed_override() {
-        let config = BoundlessConfig {
-            batch_quoted_mcycles: Some(1_500),
-            batch_quote_strategy: BatchQuoteStrategy::Evaluated,
+        // Evaluated passes through.
+        let cfg = BoundlessConfig {
+            batch_quote: QuoteSizing::Evaluated,
             ..Default::default()
         };
-        let prover = BoundlessProver::new(config);
-        assert_eq!(prover.quoted_mcycles_count(ElfType::Batch, 1_188), 1_500);
-    }
-
-    #[test]
-    fn aggregation_quoted_mcycles_can_use_evaluated_cycles_directly() {
-        let config = BoundlessConfig {
-            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
-            ..Default::default()
-        };
-        let prover = BoundlessProver::new(config);
         assert_eq!(
-            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
             1_188
+        );
+
+        // Fixed pins the value.
+        let cfg = BoundlessConfig {
+            batch_quote: QuoteSizing::Fixed { mcycles: 1_500 },
+            ..Default::default()
+        };
+        assert_eq!(
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Batch, 1_188),
+            1_500
+        );
+
+        // Aggregation Fixed pins independently.
+        let cfg = BoundlessConfig {
+            aggregation_quote: QuoteSizing::Fixed { mcycles: 320 },
+            ..Default::default()
+        };
+        assert_eq!(
+            BoundlessProver::new(cfg).quoted_mcycles_count(ElfType::Aggregation, 1_188),
+            320
         );
     }
 
@@ -2779,7 +3015,7 @@ mod tests {
                     submitted_at: now.saturating_sub(30),
                     no_lock_deadline: now.saturating_add(60),
                     no_lock_timeout_action: BoundlessTimeoutAction::Rebid,
-                    poll_timeout_at: Instant::now() - Duration::from_secs(1),
+                    poll_timeout_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
                 },
                 terminal_outcome: None,
             },
@@ -3054,7 +3290,7 @@ mod tests {
             now,
             BoundlessTimeoutAction::Rebid,
             60,
-            Instant::now() - Duration::from_secs(1),
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
         );
         poll_timeout_state.metadata.expires_at = now.saturating_sub(1);
         let (status, outcome) = classify_boundless_status(
@@ -3082,20 +3318,6 @@ mod tests {
             serde_json::json!("0x0000000000000000000000000000000000000000000000000000000000000002");
 
         assert!(parse_bool_result(&encoded).expect("bool result"));
-    }
-
-    #[test]
-    fn aggregation_quoted_mcycles_can_use_fixed_override() {
-        let config = BoundlessConfig {
-            aggregation_quoted_mcycles: Some(320),
-            aggregation_quote_strategy: BatchQuoteStrategy::Evaluated,
-            ..Default::default()
-        };
-        let prover = BoundlessProver::new(config);
-        assert_eq!(
-            prover.quoted_mcycles_count(ElfType::Aggregation, 1_188),
-            320
-        );
     }
 
     #[test]
@@ -3148,75 +3370,52 @@ mod tests {
     }
 
     #[test]
-    fn retry_price_multiplier_allows_four_rebid_attempts() {
+    fn escalated_price_compounds_by_step_per_rung() {
+        let base = U256::from(100u64);
+        let bps = TEST_REBID_PRICE_STEP_BPS; // +50%
+        let max = TEST_REBID_MAX_ATTEMPTS; // 4
         assert_eq!(
-            retry_price_multiplier(0, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
+            super::escalated_price(base, 1, bps, max).unwrap(),
+            U256::from(100u64)
         );
         assert_eq!(
-            retry_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
+            super::escalated_price(base, 2, bps, max).unwrap(),
+            U256::from(150u64)
         );
         assert_eq!(
-            retry_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
+            super::escalated_price(base, 3, bps, max).unwrap(),
+            U256::from(225u64)
         );
         assert_eq!(
-            retry_price_multiplier(3, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
+            super::escalated_price(base, 4, bps, max).unwrap(),
+            U256::from(337u64)
+        ); // 337.5 truncated
         assert_eq!(
-            retry_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            8
-        );
+            super::escalated_price(base, 5, bps, max).unwrap(),
+            U256::from(505u64)
+        ); // 505.5 truncated
+        // Capped at max_attempts rungs.
         assert_eq!(
-            retry_price_multiplier(5, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
-        );
-        assert_eq!(
-            retry_price_multiplier(6, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
+            super::escalated_price(base, 6, bps, max).unwrap(),
+            super::escalated_price(base, 5, bps, max).unwrap()
         );
     }
 
     #[test]
-    fn retry_price_multiplier_uses_configured_multiplier_and_attempts() {
-        assert_eq!(retry_price_multiplier(1, 3, 2), 1);
-        assert_eq!(retry_price_multiplier(2, 3, 2), 3);
-        assert_eq!(retry_price_multiplier(3, 3, 2), 9);
-        assert_eq!(retry_price_multiplier(4, 3, 2), 9);
+    fn escalated_price_zero_step_is_flat() {
+        let base = U256::from(1000u64);
+        assert_eq!(super::escalated_price(base, 5, 0, 4).unwrap(), base);
     }
 
     #[test]
-    fn attempt_for_price_multiplier_restores_rebid_state() {
-        assert_eq!(
-            attempt_for_price_multiplier(0, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            3
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(8, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(16, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            5
-        );
-        assert_eq!(
-            attempt_for_price_multiplier(32, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            5
-        );
+    fn effective_price_multiplier_floors_the_ratio() {
+        let bps = TEST_REBID_PRICE_STEP_BPS;
+        let max = TEST_REBID_MAX_ATTEMPTS;
+        assert_eq!(super::effective_price_multiplier(1, bps, max), 1);
+        assert_eq!(super::effective_price_multiplier(2, bps, max), 1); // 1.5 -> 1
+        assert_eq!(super::effective_price_multiplier(3, bps, max), 2); // 2.25 -> 2
+        assert_eq!(super::effective_price_multiplier(4, bps, max), 3); // 3.375 -> 3
+        assert_eq!(super::effective_price_multiplier(5, bps, max), 5); // 5.06 -> 5
     }
 
     fn test_submission(max_price_multiplier: u32, attempt: u64) -> super::Submission {
@@ -3228,46 +3427,29 @@ mod tests {
             lock_expires_at: 1,
             submitted_at: 1,
             max_price_multiplier,
+            max_price_wei: U256::ZERO,
             attempt,
         }
     }
 
     #[test]
-    fn resume_attempt_prefers_persisted_attempt() {
-        // A persisted attempt is restored verbatim, even for flat-price rebids
-        // (rebid_price_multiplier == 1) where the price cannot encode the attempt.
-        let submission = test_submission(1, 3);
-        assert_eq!(
-            super::resume_attempt(&submission, 1, TEST_REBID_MAX_ATTEMPTS),
-            3
-        );
-        assert_eq!(
-            super::resume_attempt(
-                &submission,
-                TEST_REBID_PRICE_MULTIPLIER,
-                TEST_REBID_MAX_ATTEMPTS
-            ),
-            3
-        );
+    fn resume_attempt_uses_persisted_attempt() {
+        // A persisted attempt (> 0) is the sole source of truth, ignoring the multiplier.
+        assert_eq!(super::resume_attempt(&test_submission(4, 3)), 3);
+        assert_eq!(super::resume_attempt(&test_submission(1, 7)), 7);
     }
 
     #[test]
-    fn resume_attempt_falls_back_to_price_for_legacy_records() {
-        // Legacy records predate the attempt field (attempt == 0): recover it from the escalated
-        // price when the price actually escalates...
-        let escalated = test_submission(4, 0);
-        assert_eq!(
-            super::resume_attempt(
-                &escalated,
-                TEST_REBID_PRICE_MULTIPLIER,
-                TEST_REBID_MAX_ATTEMPTS
-            ),
-            attempt_for_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS)
-        );
-        // ...but a flat-price legacy record is unrecoverable and falls back to 1 (known limitation
-        // that only affects records written before this field existed).
-        let flat = test_submission(1, 0);
-        assert_eq!(super::resume_attempt(&flat, 1, TEST_REBID_MAX_ATTEMPTS), 1);
+    fn resume_attempt_reconstructs_legacy_attempt_from_multiplier() {
+        // Records predating `rebid_attempt` (attempt == 0) came from the ×2-per-rung ladder, so the
+        // attempt is recovered exactly as `1 + log2(max_price_multiplier)`.
+        assert_eq!(super::resume_attempt(&test_submission(1, 0)), 1);
+        assert_eq!(super::resume_attempt(&test_submission(2, 0)), 2);
+        assert_eq!(super::resume_attempt(&test_submission(4, 0)), 3);
+        assert_eq!(super::resume_attempt(&test_submission(8, 0)), 4);
+        assert_eq!(super::resume_attempt(&test_submission(16, 0)), 5);
+        // A malformed multiplier of 0 still resolves to attempt 1 (no ilog2(0) panic).
+        assert_eq!(super::resume_attempt(&test_submission(0, 0)), 1);
     }
 
     #[test]
@@ -3279,6 +3461,7 @@ mod tests {
             lock_expires_at: 1_500,
             submitted_at: 1_000,
             max_price_multiplier: 1,
+            max_price_wei: None,
             rebid_attempt: 1,
         };
         let submission = super::Submission::try_from(resume).expect("valid resume record");
@@ -3437,22 +3620,25 @@ mod tests {
     fn validate_offer_params_rejects_min_price_above_max_price() {
         let mut offer = sample_offer();
         offer.min_price_per_mcycle = Some("0.000001".to_string());
-        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
+        let err = validate_offer_params(&offer, 100).unwrap_err();
         assert!(err.to_string().contains("min_price_per_mcycle"));
     }
 
     #[test]
     fn validate_offer_params_rejects_timeout_not_above_lock_timeout() {
         let mut offer = sample_offer();
-        offer.lock_timeout_ms_per_mcycle = 300;
-        offer.timeout_ms_per_mcycle = 300;
-        let err = validate_offer_params(&offer, 100, 2, 1).unwrap_err();
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 300,
+            dynamic_pricing_timeout_modifier: None,
+        };
+        let err = validate_offer_params(&offer, 100).unwrap_err();
         assert!(err.to_string().contains("timeout"));
     }
 
     #[test]
     fn validate_offer_params_accepts_base_defaults() {
-        let validated = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&sample_offer(), 1_000).expect("valid offer");
         let max_price = validated.max_price.expect("manual max price");
         let min_price = validated.min_price.expect("manual min price");
         assert_eq!(max_price.asset, Asset::ETH);
@@ -3464,85 +3650,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_params_escalates_only_max_price() {
-        let base = validate_offer_params(&sample_offer(), 1_000, 2, 1).expect("valid offer");
-        let escalated = validate_offer_params(&sample_offer(), 1_000, 2, 4).expect("valid offer");
+    fn validate_offer_params_returns_unescalated_manual_max_price() {
+        // Escalation moved to `build_request`; `validate_offer_params` returns the base cap so the
+        // per-rung compounding in `escalated_price` is applied once, on the real base.
+        let validated = validate_offer_params(&sample_offer(), 1_000).expect("valid offer");
+        let base_max = validated.max_price.expect("manual max price");
+        let base_min = validated.min_price.expect("manual min price");
 
-        let base_max = base.max_price.expect("manual max price");
-        let escalated_max = escalated.max_price.expect("manual max price");
-        assert_eq!(escalated_max.value, base_max.value * U256::from(4));
-
-        let base_min = base.min_price.expect("manual min price");
-        let escalated_min = escalated.min_price.expect("manual min price");
-        assert_eq!(escalated_min.value, base_min.value);
-    }
-
-    #[test]
-    fn validate_offer_params_clamps_manual_escalation_to_absolute_ceiling() {
-        let mut offer = sample_offer();
-        offer.absolute_max_price_per_mcycle = Some("0.0000015".to_string());
-
-        let base = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
-        let escalated = validate_offer_params(&offer, 1_000, 2, 4).expect("valid offer");
-
-        // The first attempt bids the configured max untouched; the 4x rebid would exceed the
-        // ceiling and is clamped to it.
-        let base_max = base.max_price.expect("manual max price");
-        let escalated_max = escalated.max_price.expect("manual max price");
-        assert_eq!(base_max.value, parse_ether("0.0006").unwrap());
-        assert_eq!(escalated_max.value, parse_ether("0.0015").unwrap());
-
-        let escalated_min = escalated.min_price.expect("manual min price");
-        assert!(escalated_min.value < escalated_max.value);
-    }
-
-    #[test]
-    fn validate_offer_params_maps_market_absolute_ceiling_to_cap() {
-        let mut offer = sample_offer();
-        offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
-        offer.min_price_per_mcycle = None;
-        offer.absolute_max_price_per_mcycle = Some("0.00000006".to_string());
-
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
-        let max_price_cap = validated.max_price_cap.expect("market max price cap");
-
-        assert!(validated.max_price.is_none());
-        assert!(validated.min_price.is_none());
-        assert_eq!(max_price_cap.asset, Asset::ETH);
-        assert_eq!(max_price_cap.value, parse_ether("0.00006").unwrap());
-    }
-
-    #[test]
-    fn retry_price_multiplier_doubles_per_attempt_with_cap() {
+        // A fresh first attempt escalates by zero rungs, so the offer bids the base cap unchanged.
         assert_eq!(
-            super::retry_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            1
-        );
-        assert_eq!(
-            super::retry_price_multiplier(2, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            2
-        );
-        assert_eq!(
-            super::retry_price_multiplier(3, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            4
-        );
-        assert_eq!(
-            super::retry_price_multiplier(4, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            8
-        );
-        assert_eq!(
-            super::retry_price_multiplier(5, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
-            16
-        );
-        assert_eq!(
-            super::retry_price_multiplier(
-                100,
-                TEST_REBID_PRICE_MULTIPLIER,
+            super::escalated_price(
+                base_max.value,
+                1,
+                TEST_REBID_PRICE_STEP_BPS,
                 TEST_REBID_MAX_ATTEMPTS
-            ),
-            16
+            )
+            .expect("escalate base"),
+            base_max.value
         );
+        // Three rungs at +50% compound the base cap to 3.375x (truncated per rung), and the min
+        // price is never escalated (only the max cap moves on rebids).
+        let escalated_max = super::escalated_price(
+            base_max.value,
+            4,
+            TEST_REBID_PRICE_STEP_BPS,
+            TEST_REBID_MAX_ATTEMPTS,
+        )
+        .expect("escalate base");
+        assert!(escalated_max > base_max.value);
+        assert!(base_min.value < base_max.value);
     }
 
     #[test]
@@ -3552,7 +3688,7 @@ mod tests {
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
 
         assert!(validated.max_price.is_none());
         assert!(validated.min_price.is_none());
@@ -3568,7 +3704,7 @@ mod tests {
         offer.max_price_per_mcycle = Some("0.00000006".to_string());
         offer.min_price_per_mcycle = None;
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
         let max_price_cap = validated.max_price_cap.expect("market max price cap");
 
         assert!(validated.max_price.is_none());
@@ -3583,9 +3719,13 @@ mod tests {
         offer.pricing_mode = BoundlessPricingMode::Market;
         offer.max_price_per_mcycle = None;
         offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
+        offer.timeouts = TimeoutPolicy::PerMcycle {
+            lock_timeout_ms_per_mcycle: 300,
+            timeout_ms_per_mcycle: 900,
+            dynamic_pricing_timeout_modifier: Some(2.0),
+        };
 
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
+        let validated = validate_offer_params(&offer, 1_000).expect("valid market offer");
 
         assert_eq!(validated.lock_timeout, 600);
         assert_eq!(validated.timeout, 1800);
@@ -3593,13 +3733,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_params_uses_fixed_timeout_overrides() {
+    fn validate_offer_params_uses_fixed_timeout_policy() {
         let mut offer = sample_offer();
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
+        offer.timeouts = TimeoutPolicy::Fixed {
+            lock_timeout_secs: 600,
+            timeout_secs: 3600,
+        };
 
-        let small = validate_offer_params(&offer, 100, 2, 1).expect("valid small offer");
-        let large = validate_offer_params(&offer, 5_000, 2, 1).expect("valid large offer");
+        let small = validate_offer_params(&offer, 100).expect("valid small offer");
+        let large = validate_offer_params(&offer, 5_000).expect("valid large offer");
 
         assert_eq!(small.lock_timeout, 600);
         assert_eq!(small.timeout, 3600);
@@ -3608,64 +3750,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_offer_params_rejects_fixed_timeout_below_derived_lock_timeout() {
-        let mut offer = sample_offer();
-        // The derived lock timeout for 5000 mcycles is 1500s, above the fixed timeout.
-        offer.timeout_secs = Some(900);
-        let err = validate_offer_params(&offer, 5_000, 2, 1).unwrap_err();
-        assert!(err.to_string().contains("timeout"));
-    }
-
-    #[test]
-    fn validate_offer_params_ramp_up_check_uses_fixed_lock_timeout() {
-        let mut offer = sample_offer();
-        // 60 blocks at 2s block time is a 120s ramp-up, while the derived lock
-        // timeout for 100 mcycles is only 30s; the fixed override lifts it.
-        assert!(validate_offer_params(&offer, 100, 2, 1).is_err());
-
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-        let validated = validate_offer_params(&offer, 100, 2, 1).expect("valid offer");
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.ramp_up_period_secs, 120);
-    }
-
-    #[test]
-    fn validate_offer_params_market_timeout_modifier_does_not_scale_fixed_overrides() {
-        let mut offer = sample_offer();
-        offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
-        offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(2.0);
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
-
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.timeout, 3600);
-    }
-
-    #[test]
-    fn validate_offer_params_skips_timeout_modifier_overflow_for_fixed_overrides() {
-        let mut offer = sample_offer();
-        offer.pricing_mode = BoundlessPricingMode::Market;
-        offer.max_price_per_mcycle = None;
-        offer.min_price_per_mcycle = None;
-        offer.dynamic_pricing_timeout_modifier = Some(f64::from(u32::MAX));
-        offer.lock_timeout_secs = Some(600);
-        offer.timeout_secs = Some(3600);
-
-        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid market offer");
-
-        assert_eq!(validated.lock_timeout, 600);
-        assert_eq!(validated.timeout, 3600);
-    }
-
-    #[test]
     fn market_prices_escalate_only_the_max_price() {
-        let prices = escalate_and_cap_market_prices(U256::from(100), U256::from(10), 4, None)
-            .expect("escalated prices");
+        // One rung at +300% escalates the max 100 -> 400; the min price is untouched.
+        let prices =
+            escalate_and_cap_market_prices(U256::from(100), U256::from(10), 2, 30_000, 4, None)
+                .expect("escalated prices");
 
         assert_eq!(prices.max_price, U256::from(400));
         assert_eq!(prices.min_price, U256::from(10));
@@ -3673,11 +3762,60 @@ mod tests {
     }
 
     #[test]
+    fn deposit_topup_covers_all_in_flight_claims() {
+        use alloy_primitives::U256;
+        // Balance already covers all reserved claims -> no deposit.
+        assert_eq!(
+            super::deposit_topup(U256::from(30u64), U256::from(20u64)),
+            U256::ZERO
+        );
+        // Two 10-wei claims, 15 on chain -> top up the 5 shortfall (the bug case: each alone looked covered).
+        assert_eq!(
+            super::deposit_topup(U256::from(15u64), U256::from(20u64)),
+            U256::from(5u64)
+        );
+        // Empty account, one 10-wei claim -> deposit 10.
+        assert_eq!(
+            super::deposit_topup(U256::ZERO, U256::from(10u64)),
+            U256::from(10u64)
+        );
+    }
+
+    #[test]
+    fn balance_gate_tops_up_combined_reserved_total_and_releases_on_drop() {
+        use alloy_primitives::U256;
+        let gate = super::BoundlessBalanceGate::new();
+        // First in-flight submission reserves its max price; against an empty account it must
+        // deposit its full claim.
+        let claim_a = gate.reserve(U256::from(100u64));
+        assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(100u64));
+        {
+            // A second concurrent submission reserves on the SAME shared gate. Each now tops up to
+            // the COMBINED reserved total, so neither under-funds the other against the shared
+            // account (the concurrent-underfunding case this gate closes).
+            let claim_b = gate.reserve(U256::from(50u64));
+            assert_eq!(claim_b.deposit_topup(U256::ZERO), U256::from(150u64));
+            assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(150u64));
+            // An account already covering the combined total needs no deposit.
+            assert_eq!(claim_b.deposit_topup(U256::from(200u64)), U256::ZERO);
+        } // claim_b drops here, releasing its reservation.
+        // No leak on drop: with B released, A's required top-up falls back to A's claim alone.
+        assert_eq!(claim_a.deposit_topup(U256::ZERO), U256::from(100u64));
+    }
+
+    #[test]
     fn market_prices_pass_through_without_escalation_or_cap() {
-        for multiplier in [0, 1] {
-            let prices =
-                escalate_and_cap_market_prices(U256::from(100), U256::from(10), multiplier, None)
-                    .expect("flat prices");
+        // A fresh first attempt (0 rungs) and a flat 0-bps ladder both leave the max unchanged.
+        for (attempt, step_bps) in [(1u64, TEST_REBID_PRICE_STEP_BPS), (5, 0)] {
+            let prices = escalate_and_cap_market_prices(
+                U256::from(100),
+                U256::from(10),
+                attempt,
+                step_bps,
+                TEST_REBID_MAX_ATTEMPTS,
+                None,
+            )
+            .expect("flat prices");
 
             assert_eq!(prices.max_price, U256::from(100));
             assert_eq!(prices.min_price, U256::from(10));
@@ -3688,10 +3826,13 @@ mod tests {
     #[test]
     fn market_prices_accept_offers_at_or_below_cap() {
         let max_price_cap = Amount::new(U256::from(1_000), Asset::ETH);
+        // One rung at +100% escalates the max 100 -> 200, which stays under the 1000 cap.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
             2,
+            10_000,
+            4,
             Some(&max_price_cap),
         )
         .expect("uncapped prices");
@@ -3704,9 +3845,12 @@ mod tests {
     #[test]
     fn market_prices_clamp_escalated_max_to_cap() {
         let max_price_cap = Amount::new(U256::from(150), Asset::ETH);
+        // One rung at +300% would reach 400, but the 150 cap clamps it.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
+            2,
+            30_000,
             4,
             Some(&max_price_cap),
         )
@@ -3720,10 +3864,13 @@ mod tests {
     #[test]
     fn market_prices_lower_min_price_when_cap_undercuts_it() {
         let max_price_cap = Amount::new(U256::from(5), Asset::ETH);
+        // No escalation (fresh attempt), but the 5 cap sits below the autopriced max and min.
         let prices = escalate_and_cap_market_prices(
             U256::from(100),
             U256::from(10),
             1,
+            TEST_REBID_PRICE_STEP_BPS,
+            4,
             Some(&max_price_cap),
         )
         .expect("capped prices");
@@ -3735,42 +3882,93 @@ mod tests {
 
     #[test]
     fn market_price_escalation_rejects_overflow() {
-        let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, None)
+        // One rung at +100% on U256::MAX overflows the checked multiply.
+        let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, 10_000, 4, None)
             .expect_err("overflowing escalation");
         assert!(err.to_string().contains("overflows"));
     }
 
     #[test]
     fn manual_price_escalates_without_ceiling() {
-        let result = super::escalate_and_clamp_manual_max_price(U256::from(100), 4, None)
-            .expect("escalated price");
+        // 10_000 bps = +100%/rung (x2); attempt 3 -> 2 rungs -> x4.
+        let result =
+            super::escalate_and_clamp_manual_max_price(U256::from(100), 3, 10_000, 4, None)
+                .expect("escalated price");
         assert_eq!(result.max_price, U256::from(400));
         assert!(!result.clamped_to_ceiling);
     }
 
     #[test]
     fn manual_price_clamps_escalation_to_ceiling() {
-        let result =
-            super::escalate_and_clamp_manual_max_price(U256::from(100), 4, Some(U256::from(250)))
-                .expect("escalated price");
+        let result = super::escalate_and_clamp_manual_max_price(
+            U256::from(100),
+            3,
+            10_000,
+            4,
+            Some(U256::from(250)),
+        )
+        .expect("escalated price");
         assert_eq!(result.max_price, U256::from(250));
         assert!(result.clamped_to_ceiling);
     }
 
     #[test]
     fn manual_price_at_ceiling_is_not_clamped() {
-        let result =
-            super::escalate_and_clamp_manual_max_price(U256::from(100), 1, Some(U256::from(100)))
-                .expect("escalated price");
+        // Attempt 1 escalates by zero rungs, so the base bids unchanged and equals the ceiling.
+        let result = super::escalate_and_clamp_manual_max_price(
+            U256::from(100),
+            1,
+            10_000,
+            4,
+            Some(U256::from(100)),
+        )
+        .expect("escalated price");
         assert_eq!(result.max_price, U256::from(100));
         assert!(!result.clamped_to_ceiling);
     }
 
     #[test]
     fn manual_price_escalation_rejects_overflow() {
-        let err = super::escalate_and_clamp_manual_max_price(U256::MAX, 2, Some(U256::from(1)))
-            .expect_err("overflowing escalation");
+        let err = super::escalate_and_clamp_manual_max_price(
+            U256::MAX,
+            2,
+            10_000,
+            4,
+            Some(U256::from(1)),
+        )
+        .expect_err("overflowing escalation");
         assert!(err.to_string().contains("overflows"));
+    }
+
+    #[test]
+    fn validate_offer_params_threads_manual_absolute_ceiling_to_cap() {
+        let mut offer = sample_offer();
+        offer.absolute_max_price_per_mcycle = Some("0.0000015".to_string());
+
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
+
+        // Manual mode returns the base max price plus the ceiling as `max_price_cap`; the clamp of
+        // the bps-escalated bid to it happens in `build_request`.
+        assert!(validated.max_price.is_some());
+        let cap = validated.max_price_cap.expect("manual ceiling cap");
+        assert_eq!(cap.value, parse_ether("0.0015").unwrap());
+    }
+
+    #[test]
+    fn validate_offer_params_maps_market_absolute_ceiling_to_cap() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.absolute_max_price_per_mcycle = Some("0.00000006".to_string());
+
+        let validated = validate_offer_params(&offer, 1_000).expect("valid offer");
+        let max_price_cap = validated.max_price_cap.expect("market max price cap");
+
+        assert!(validated.max_price.is_none());
+        assert!(validated.min_price.is_none());
+        assert_eq!(max_price_cap.asset, Asset::ETH);
+        assert_eq!(max_price_cap.value, parse_ether("0.00006").unwrap());
     }
 
     #[test]
@@ -3937,5 +4135,17 @@ mod tests {
                 }
             }))
         );
+    }
+
+    #[test]
+    fn presigned_refresh_at_leaves_headroom_before_expiry() {
+        let url = Url::parse("https://s3.example/obj?X-Amz-Expires=3600").unwrap();
+        let before = SystemTime::now();
+        let refresh = super::presigned_refresh_at(&url);
+        let after = SystemTime::now();
+        // Refreshes 120s before the 3600s expiry, bracketed by the clock reads around
+        // presigned_refresh_at so it stays deterministic under scheduler jitter.
+        assert!(refresh >= before + Duration::from_secs(3600 - 120));
+        assert!(refresh <= after + Duration::from_secs(3600 - 120));
     }
 }

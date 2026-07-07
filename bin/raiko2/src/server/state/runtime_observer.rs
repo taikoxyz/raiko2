@@ -813,6 +813,7 @@ impl EngineObserver for RuntimeObserver {
             lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
             submitted_at: runtime.submitted_at.unwrap_or(now),
             max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
+            max_price_wei: runtime.max_price_wei.clone(),
             rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
         })
     }
@@ -1061,6 +1062,7 @@ mod tests {
                     quoted_mcycles_count: Some(6_000),
                     evaluated_mcycles_count: Some(12_345),
                     max_price_multiplier: 4,
+                    max_price_wei: Some("9000000000000".to_string()),
                     rebid_attempt: 3,
                 }),
             )
@@ -1086,6 +1088,10 @@ mod tests {
         assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
         assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
         assert_eq!(runtime_entry.max_price_multiplier, Some(4));
+        assert_eq!(
+            runtime_entry.max_price_wei.as_deref(),
+            Some("9000000000000")
+        );
         assert_eq!(runtime_entry.rebid_attempt, Some(3));
         assert_eq!(runtime_entry.lock_expires_at, Some(future_expires_at - 600));
         let mut record = runtime
@@ -1110,6 +1116,7 @@ mod tests {
         assert_eq!(resumed.lock_expires_at, future_expires_at - 600);
         assert_eq!(resumed.submitted_at, future_expires_at - 300);
         assert_eq!(resumed.max_price_multiplier, 4);
+        assert_eq!(resumed.max_price_wei.as_deref(), Some("9000000000000"));
         assert_eq!(resumed.rebid_attempt, 3);
 
         let mut record = runtime

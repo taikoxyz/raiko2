@@ -2450,6 +2450,7 @@ fn task_runtime_view(
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
         max_price_multiplier: runtime.max_price_multiplier,
+        max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),

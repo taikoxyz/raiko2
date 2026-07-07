@@ -2341,6 +2341,44 @@ fn escalate_and_cap_market_prices(
     })
 }
 
+/// Escalated and optionally ceiling-clamped manual-mode offer max price.
+#[derive(Debug, PartialEq, Eq)]
+struct ManualOfferMaxPrice {
+    max_price: U256,
+    clamped_to_ceiling: bool,
+}
+
+/// Escalate the configured manual max price by the rebid multiplier, then clamp it to the
+/// absolute per-request ceiling when one is configured.
+///
+/// Manual-mode counterpart of [`escalate_and_cap_market_prices`]: without a ceiling, rebids
+/// escalate the configured max price geometrically with no config-level bound, so the worst-case
+/// bid is `max_price_per_mcycle * rebid_price_multiplier ^ rebid_max_attempts` — derived math
+/// rather than an operator-stated budget. The ceiling makes the worst case a config value. As in
+/// market mode, hitting the ceiling clamps instead of failing: the offer bids at the operator's
+/// stated maximum and the no-lock machinery decides how long to wait there.
+fn escalate_and_clamp_manual_max_price(
+    configured_max: U256,
+    max_price_multiplier: u32,
+    ceiling: Option<U256>,
+) -> RaikoResult<ManualOfferMaxPrice> {
+    let escalated = configured_max
+        .checked_mul(U256::from(max_price_multiplier.max(1)))
+        .ok_or_else(|| {
+            RaikoError::InvalidRequestConfig(format!(
+                "max_price_per_mcycle overflows when multiplied by retry multiplier {max_price_multiplier}"
+            ))
+        })?;
+    let (max_price, clamped_to_ceiling) = match ceiling {
+        Some(ceiling) if escalated > ceiling => (ceiling, true),
+        _ => (escalated, false),
+    };
+    Ok(ManualOfferMaxPrice {
+        max_price,
+        clamped_to_ceiling,
+    })
+}
+
 fn apply_market_offer_pricing(
     request: &mut ProofRequest,
     pricing_mode: BoundlessPricingMode,
@@ -2364,7 +2402,7 @@ fn apply_market_offer_pricing(
             autopriced_max_price_wei = %autopriced_max,
             max_price_multiplier,
             capped_max_price_wei = %prices.max_price,
-            "Boundless market offer max price exceeds the max_price_per_mcycle cap; bidding at the cap"
+            "Boundless market offer max price exceeds the configured per-mcycle price cap; bidding at the cap"
         );
     } else if max_price_multiplier > 1 {
         tracing::info!(
@@ -2421,6 +2459,80 @@ fn scale_timeout(value: u32, modifier: f64, field: &str) -> RaikoResult<u32> {
     Ok(scaled_timeout as u32)
 }
 
+/// Manual-mode offer prices: the (possibly rebid-escalated, ceiling-clamped) max price and the
+/// untouched min price. Escalation raises only the max price; the min price keeps the ramp start
+/// unchanged so an idle prover still locks cheaply.
+fn manual_offer_prices(
+    offer_spec: &BoundlessOfferParams,
+    mcycles_count: u32,
+    max_price_multiplier: u32,
+) -> RaikoResult<(Amount, Amount)> {
+    let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
+        )
+    })?;
+    let mut max_price = parse_request_amount(
+        max_price_value,
+        "max_price_per_mcycle",
+        Asset::ETH,
+        mcycles_count,
+    )?;
+    let ceiling = offer_spec
+        .absolute_max_price_per_mcycle
+        .as_deref()
+        .map(|ceiling_value| {
+            parse_request_amount(
+                ceiling_value,
+                "absolute_max_price_per_mcycle",
+                Asset::ETH,
+                mcycles_count,
+            )
+        })
+        .transpose()?;
+    let escalated = escalate_and_clamp_manual_max_price(
+        max_price.value,
+        max_price_multiplier,
+        ceiling.as_ref().map(|amount| amount.value),
+    )?;
+    if escalated.clamped_to_ceiling {
+        tracing::warn!(
+            mcycles_count,
+            max_price_multiplier,
+            configured_max_price_wei = %max_price.value,
+            ceiling_max_price_wei = %escalated.max_price,
+            "Boundless manual offer max price exceeds the absolute_max_price_per_mcycle ceiling; bidding at the ceiling"
+        );
+    }
+    max_price.value = escalated.max_price;
+    let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
+    let min_price = parse_request_amount(
+        min_price_value,
+        "min_price_per_mcycle",
+        Asset::ETH,
+        mcycles_count,
+    )?;
+    Ok((max_price, min_price))
+}
+
+/// Market-mode price cap from whichever cap spelling is configured. `validate_offer_spec`
+/// rejects setting both, so at most one of the two keys carries the cap here.
+fn market_offer_price_cap(
+    offer_spec: &BoundlessOfferParams,
+    mcycles_count: u32,
+) -> RaikoResult<Option<Amount>> {
+    let (cap_field, cap_value) = match (
+        offer_spec.absolute_max_price_per_mcycle.as_deref(),
+        offer_spec.max_price_per_mcycle.as_deref(),
+    ) {
+        (Some(value), _) => ("absolute_max_price_per_mcycle", Some(value)),
+        (None, value) => ("max_price_per_mcycle", value),
+    };
+    cap_value
+        .map(|value| parse_request_amount(value, cap_field, Asset::ETH, mcycles_count))
+        .transpose()
+}
+
 fn validate_offer_params(
     offer_spec: &BoundlessOfferParams,
     mcycles_count: u32,
@@ -2430,51 +2542,15 @@ fn validate_offer_params(
     validate_offer_spec(offer_spec).map_err(RaikoError::InvalidRequestConfig)?;
     let (max_price, min_price, max_price_cap) = match offer_spec.pricing_mode {
         BoundlessPricingMode::Manual => {
-            let max_price_value = offer_spec.max_price_per_mcycle.as_deref().ok_or_else(|| {
-                RaikoError::InvalidRequestConfig(
-                    "max_price_per_mcycle is required when pricing_mode=manual".to_string(),
-                )
-            })?;
-            let mut max_price = parse_request_amount(
-                max_price_value,
-                "max_price_per_mcycle",
-                Asset::ETH,
-                mcycles_count,
-            )?;
-            // Escalate only the cap on resubmissions; the min price keeps the
-            // ramp start unchanged so an idle prover still locks cheaply.
-            max_price.value = max_price
-                .value
-                .checked_mul(U256::from(max_price_multiplier.max(1)))
-                .ok_or_else(|| {
-                    RaikoError::InvalidRequestConfig(format!(
-                        "max_price_per_mcycle overflows when multiplied by retry multiplier {max_price_multiplier}"
-                    ))
-                })?;
-            let min_price_value = offer_spec.min_price_per_mcycle.as_deref().unwrap_or("0");
-            let min_price = parse_request_amount(
-                min_price_value,
-                "min_price_per_mcycle",
-                Asset::ETH,
-                mcycles_count,
-            )?;
+            let (max_price, min_price) =
+                manual_offer_prices(offer_spec, mcycles_count, max_price_multiplier)?;
             (Some(max_price), Some(min_price), None)
         }
-        BoundlessPricingMode::Market => {
-            let max_price_cap = offer_spec
-                .max_price_per_mcycle
-                .as_deref()
-                .map(|max_price_value| {
-                    parse_request_amount(
-                        max_price_value,
-                        "max_price_per_mcycle",
-                        Asset::ETH,
-                        mcycles_count,
-                    )
-                })
-                .transpose()?;
-            (None, None, max_price_cap)
-        }
+        BoundlessPricingMode::Market => (
+            None,
+            None,
+            market_offer_price_cap(offer_spec, mcycles_count)?,
+        ),
     };
     let derived_lock_timeout = offer_spec.lock_timeout_ms_per_mcycle * mcycles_count / 1000;
     let derived_timeout = offer_spec.timeout_ms_per_mcycle * mcycles_count / 1000;
@@ -3402,6 +3478,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_offer_params_clamps_manual_escalation_to_absolute_ceiling() {
+        let mut offer = sample_offer();
+        offer.absolute_max_price_per_mcycle = Some("0.0000015".to_string());
+
+        let base = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let escalated = validate_offer_params(&offer, 1_000, 2, 4).expect("valid offer");
+
+        // The first attempt bids the configured max untouched; the 4x rebid would exceed the
+        // ceiling and is clamped to it.
+        let base_max = base.max_price.expect("manual max price");
+        let escalated_max = escalated.max_price.expect("manual max price");
+        assert_eq!(base_max.value, parse_ether("0.0006").unwrap());
+        assert_eq!(escalated_max.value, parse_ether("0.0015").unwrap());
+
+        let escalated_min = escalated.min_price.expect("manual min price");
+        assert!(escalated_min.value < escalated_max.value);
+    }
+
+    #[test]
+    fn validate_offer_params_maps_market_absolute_ceiling_to_cap() {
+        let mut offer = sample_offer();
+        offer.pricing_mode = BoundlessPricingMode::Market;
+        offer.max_price_per_mcycle = None;
+        offer.min_price_per_mcycle = None;
+        offer.absolute_max_price_per_mcycle = Some("0.00000006".to_string());
+
+        let validated = validate_offer_params(&offer, 1_000, 2, 1).expect("valid offer");
+        let max_price_cap = validated.max_price_cap.expect("market max price cap");
+
+        assert!(validated.max_price.is_none());
+        assert!(validated.min_price.is_none());
+        assert_eq!(max_price_cap.asset, Asset::ETH);
+        assert_eq!(max_price_cap.value, parse_ether("0.00006").unwrap());
+    }
+
+    #[test]
     fn retry_price_multiplier_doubles_per_attempt_with_cap() {
         assert_eq!(
             super::retry_price_multiplier(1, TEST_REBID_PRICE_MULTIPLIER, TEST_REBID_MAX_ATTEMPTS),
@@ -3624,6 +3736,39 @@ mod tests {
     #[test]
     fn market_price_escalation_rejects_overflow() {
         let err = escalate_and_cap_market_prices(U256::MAX, U256::from(10), 2, None)
+            .expect_err("overflowing escalation");
+        assert!(err.to_string().contains("overflows"));
+    }
+
+    #[test]
+    fn manual_price_escalates_without_ceiling() {
+        let result = super::escalate_and_clamp_manual_max_price(U256::from(100), 4, None)
+            .expect("escalated price");
+        assert_eq!(result.max_price, U256::from(400));
+        assert!(!result.clamped_to_ceiling);
+    }
+
+    #[test]
+    fn manual_price_clamps_escalation_to_ceiling() {
+        let result =
+            super::escalate_and_clamp_manual_max_price(U256::from(100), 4, Some(U256::from(250)))
+                .expect("escalated price");
+        assert_eq!(result.max_price, U256::from(250));
+        assert!(result.clamped_to_ceiling);
+    }
+
+    #[test]
+    fn manual_price_at_ceiling_is_not_clamped() {
+        let result =
+            super::escalate_and_clamp_manual_max_price(U256::from(100), 1, Some(U256::from(100)))
+                .expect("escalated price");
+        assert_eq!(result.max_price, U256::from(100));
+        assert!(!result.clamped_to_ceiling);
+    }
+
+    #[test]
+    fn manual_price_escalation_rejects_overflow() {
+        let err = super::escalate_and_clamp_manual_max_price(U256::MAX, 2, Some(U256::from(1)))
             .expect_err("overflowing escalation");
         assert!(err.to_string().contains("overflows"));
     }

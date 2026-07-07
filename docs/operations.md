@@ -726,9 +726,10 @@ Operator notes:
 - `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
   points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
   flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
-- `prover.boundless.rebid_max_attempts` caps no-lock rebids. The default is `4`, the maximum is
-  `31`, and the default allows a final max price of about `5x` the base at the default step, unless
-  `absolute_max_price_per_mcycle` clamps it sooner.
+- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
+  no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
+  maximum is `31`, and the default allows a final max price of about `5x` the base at the default
+  step, unless `absolute_max_price_per_mcycle` clamps it sooner.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.

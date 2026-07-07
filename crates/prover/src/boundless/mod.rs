@@ -826,7 +826,7 @@ fn effective_price_multiplier(attempt: u64, step_bps: u32, max_attempts: u32) ->
 /// which is exact only for the ×2 default ladder (`rebid_price_multiplier = 2`) — the multiplier
 /// every known deployment ran, as the live k8s fleet never set a custom value. A legacy record from a
 /// non-default ladder (multiplier 3, 4, …) resolves to a conservative upper bound on the attempt:
-/// `log2` under-counts the rungs, so the resumed attempt is no larger than the real one, leaving
+/// `log2` over-counts the rungs, so the resumed attempt is no smaller than the real one, leaving
 /// fewer remaining rebids at higher prices — never more. Post-upgrade records always carry a real
 /// `attempt`, so this branch is dead after one deploy.
 fn resume_attempt(submission: &Submission) -> u64 {

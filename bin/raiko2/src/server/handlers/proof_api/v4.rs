@@ -244,6 +244,45 @@ struct ProofArtifactIdentity {
     proof_ref: String,
 }
 
+struct InvalidationTaskLogContext {
+    task_kind: &'static str,
+    aggregate: bool,
+    proposal_ids: String,
+    proposal_count: usize,
+}
+
+fn invalidation_task_log_context(metadata: &TaskMetadata) -> InvalidationTaskLogContext {
+    let aggregate = metadata.aggregate_request.is_some() || metadata.aggregate_task_id.is_some();
+    InvalidationTaskLogContext {
+        task_kind: if aggregate {
+            "aggregate"
+        } else if metadata.proposals.len() == 1 {
+            "proposal"
+        } else {
+            "proposal_batch"
+        },
+        aggregate,
+        proposal_ids: format_invalidation_proposal_ids(metadata),
+        proposal_count: metadata.proposals.len(),
+    }
+}
+
+fn format_invalidation_proposal_ids(metadata: &TaskMetadata) -> String {
+    let ids = metadata
+        .proposals
+        .iter()
+        .map(|proposal| proposal.proposal_id)
+        .collect::<Vec<_>>();
+    match ids.as_slice() {
+        [] => "none".to_string(),
+        [id] => id.to_string(),
+        [first, .., last] if ids.windows(2).all(|window| window[1] == window[0] + 1) => {
+            format!("{first}..{last}")
+        }
+        _ => ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+    }
+}
+
 async fn collect_invalidation_task_candidates(
     state: &AppState,
     pipeline_keys: &[PipelineKey],
@@ -460,6 +499,7 @@ async fn remove_invalidated_tasks(
     data: &mut wire::InvalidateArtifactsData,
 ) {
     for (record, metadata) in matched_task_ids {
+        let log_context = invalidation_task_log_context(&metadata);
         match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
             Ok(engine) => {
                 if let Err(err) = remove_task_children_if_unreferenced(
@@ -474,6 +514,13 @@ async fn remove_invalidated_tasks(
                     data.tasks.failed = data.tasks.failed.saturating_add(1);
                     tracing::warn!(
                         task_id = %record.task_id,
+                        task_kind = log_context.task_kind,
+                        aggregate = log_context.aggregate,
+                        proposal_ids = %log_context.proposal_ids,
+                        proposal_count = log_context.proposal_count,
+                        network_pair = %metadata.network_pair,
+                        proof_type = %metadata.proof_type,
+                        pipeline_key = %record.pipeline_key.as_str(),
                         error = %err,
                         "failed to remove invalidated task children"
                     );
@@ -483,7 +530,12 @@ async fn remove_invalidated_tasks(
             Err(err) => {
                 tracing::warn!(
                     task_id = %record.task_id,
+                    task_kind = log_context.task_kind,
+                    aggregate = log_context.aggregate,
+                    proposal_ids = %log_context.proposal_ids,
+                    proposal_count = log_context.proposal_count,
                     network_pair = %metadata.network_pair,
+                    proof_type = %metadata.proof_type,
                     pipeline_key = %record.pipeline_key.as_str(),
                     status = %err.status,
                     error = %err.message,
@@ -499,6 +551,13 @@ async fn remove_invalidated_tasks(
                 data.tasks.failed = data.tasks.failed.saturating_add(1);
                 tracing::warn!(
                     task_id = %record.task_id,
+                    task_kind = log_context.task_kind,
+                    aggregate = log_context.aggregate,
+                    proposal_ids = %log_context.proposal_ids,
+                    proposal_count = log_context.proposal_count,
+                    network_pair = %metadata.network_pair,
+                    proof_type = %metadata.proof_type,
+                    pipeline_key = %record.pipeline_key.as_str(),
                     error = %err,
                     "failed to remove invalidated runtime task"
                 );
@@ -1174,6 +1233,31 @@ fn proof_status_string(status: &ProofStatus) -> String {
 mod tests {
     use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
+    use crate::server::task_metadata::ProposalTask;
+
+    #[test]
+    fn invalidation_task_log_context_describes_single_proposal() {
+        let metadata = task_log_metadata(&[21], false);
+
+        let context = invalidation_task_log_context(&metadata);
+
+        assert_eq!(context.task_kind, "proposal");
+        assert_eq!(context.proposal_ids, "21");
+        assert_eq!(context.proposal_count, 1);
+        assert!(!context.aggregate);
+    }
+
+    #[test]
+    fn invalidation_task_log_context_describes_aggregate_range() {
+        let metadata = task_log_metadata(&[31, 32], true);
+
+        let context = invalidation_task_log_context(&metadata);
+
+        assert_eq!(context.task_kind, "aggregate");
+        assert_eq!(context.proposal_ids, "31..32");
+        assert_eq!(context.proposal_count, 2);
+        assert!(context.aggregate);
+    }
 
     #[test]
     fn proof_request_error_preserves_internal_http_status() {
@@ -1469,6 +1553,35 @@ mod tests {
         );
         assert_eq!(response.proof.as_deref(), Some("0xroot"));
         assert!(response.error.is_none());
+    }
+
+    fn task_log_metadata(proposal_ids: &[u64], aggregate: bool) -> TaskMetadata {
+        TaskMetadata {
+            network_pair: "taiko_dev/taiko_dev_l1".to_string(),
+            network: "taiko_dev".to_string(),
+            l1_network: "taiko_dev_l1".to_string(),
+            proof_type: raiko2_primitives::ProofType::SgxGeth,
+            requested_proof_type: None,
+            prover_type: None,
+            execution_mode: None,
+            aggregate_requested: aggregate,
+            proposals: proposal_ids
+                .iter()
+                .map(|proposal_id| ProposalTask {
+                    proposal_id: *proposal_id,
+                    checkpoint: None,
+                    l1_inclusion_block_number: proposal_id + 100,
+                    l2_block_numbers: vec![proposal_id + 1],
+                    last_anchor_block_number: proposal_id.saturating_sub(1),
+                    task_id: format!("proposal-task-{proposal_id}"),
+                    request: None,
+                })
+                .collect(),
+            aggregate_task_id: aggregate.then(|| "aggregate-task".to_string()),
+            aggregate_request: None,
+            aggregate_input_artifacts: Vec::new(),
+            runtime: Default::default(),
+        }
     }
 }
 

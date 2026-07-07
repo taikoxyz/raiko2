@@ -11,9 +11,9 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, SP1VerifyingKey};
+use sp1_sdk::HashableKey;
 
-use crate::util;
+use crate::{util, verified_sp1_vk};
 
 #[derive(Args)]
 pub struct GuestDigestsArgs {
@@ -144,10 +144,16 @@ fn risc0_digest_entries(elves: &Risc0ShastaGuestElves) -> Result<Vec<GuestDigest
 }
 
 fn sp1_digest_entries(elves: &Sp1ShastaGuestElves) -> Result<Vec<GuestDigestEntry>> {
-    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
-        .context("failed to load SP1 proposal VK")?;
-    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
-        .context("failed to load SP1 aggregation VK")?;
+    let proposal_vk = verified_sp1_vk(
+        elves.proposal.as_ref(),
+        Some(elves.proposal_vk.as_ref()),
+        "sp1_shasta_proposal",
+    )?;
+    let aggregation_vk = verified_sp1_vk(
+        elves.aggregation.as_ref(),
+        Some(elves.aggregation_vk.as_ref()),
+        "sp1_shasta_aggregation",
+    )?;
 
     Ok(vec![
         sp1_digest_entry(
@@ -223,10 +229,16 @@ fn b256_hex(value: B256) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use raiko2_guests::DEFAULT_GUEST_ELF_DIR;
+    use raiko2_guests::{
+        DEFAULT_GUEST_ELF_DIR, RISC0_SHASTA_AGGREGATION_ELF, RISC0_SHASTA_PROPOSAL_ELF,
+        SP1_SHASTA_AGGREGATION_ELF, SP1_SHASTA_AGGREGATION_VK_BIN, SP1_SHASTA_PROPOSAL_ELF,
+        SP1_SHASTA_PROPOSAL_VK_BIN,
+    };
 
     #[test]
     fn guest_digests_cover_expected_objects_and_sources() {
@@ -315,5 +327,58 @@ mod tests {
         assert!(contents.contains(DEFAULT_GUEST_ELF_DIR));
         assert!(contents.contains("risc0_shasta_proposal"));
         assert!(contents.contains("sp1_shasta_aggregation"));
+    }
+
+    #[test]
+    fn collect_guest_digests_rejects_swapped_sp1_vk_artifact() {
+        let root = repo_root();
+        let source = root.join(DEFAULT_GUEST_ELF_DIR);
+        let temp = temp_test_dir();
+
+        for file_name in [
+            RISC0_SHASTA_PROPOSAL_ELF,
+            RISC0_SHASTA_AGGREGATION_ELF,
+            SP1_SHASTA_PROPOSAL_ELF,
+            SP1_SHASTA_AGGREGATION_ELF,
+            SP1_SHASTA_AGGREGATION_VK_BIN,
+        ] {
+            fs::copy(source.join(file_name), temp.join(file_name))
+                .unwrap_or_else(|err| panic!("copy {file_name}: {err}"));
+        }
+        fs::copy(
+            source.join(SP1_SHASTA_AGGREGATION_VK_BIN),
+            temp.join(SP1_SHASTA_PROPOSAL_VK_BIN),
+        )
+        .expect("write swapped proposal VK artifact");
+
+        let err = match super::collect_guest_digests_with_dir(&root, Some(&temp)) {
+            Ok(_) => panic!("guest-digests should reject swapped SP1 VK artifacts"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("SP1 VK artifact mismatch for sp1_shasta_proposal")
+        );
+
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("xtask-build-guest lives under xtask/")
+            .to_path_buf()
+    }
+
+    fn temp_test_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = env::temp_dir().join(format!("raiko2-guest-digests-test-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 }

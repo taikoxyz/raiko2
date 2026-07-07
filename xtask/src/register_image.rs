@@ -16,8 +16,8 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, SP1VerifyingKey};
-use xtask_build_guest::Backend;
+use sp1_sdk::HashableKey;
+use xtask_build_guest::{Backend, verified_sp1_vk};
 
 use crate::util;
 
@@ -502,10 +502,16 @@ fn build_sp1_calls(
     config: &ResolvedProfile,
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
-    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
-        .context("failed to load SP1 proposal VK")?;
-    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
-        .context("failed to load SP1 aggregation VK")?;
+    let proposal_vk = verified_sp1_vk(
+        elves.proposal.as_ref(),
+        Some(elves.proposal_vk.as_ref()),
+        "sp1_shasta_proposal",
+    )?;
+    let aggregation_vk = verified_sp1_vk(
+        elves.aggregation.as_ref(),
+        Some(elves.aggregation_vk.as_ref()),
+        "sp1_shasta_aggregation",
+    )?;
 
     Ok(vec![
         sp1_call(
@@ -810,13 +816,15 @@ mod tests {
         CheckedRegistration, ContractKind, DEFAULT_RPC_URL_DEVNET_SHASTA, DEVNET_CHAIN_ID,
         DEVNET_NETWORK, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK, MAINNET_CHAIN_ID,
         MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall,
-        Stage, backend_name, build_risc0_calls, digest_source_suffix, ensure_profile_chain_id,
-        materialize_checked_plan, profile_name, resolve_profile,
+        Stage, backend_name, build_risc0_calls, build_sp1_calls, digest_source_suffix,
+        ensure_profile_chain_id, materialize_checked_plan, profile_name, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
     use clap::ValueEnum;
-    use raiko2_guests::load_risc0_shasta_guest_elves;
-    use std::{collections::BTreeSet, path::PathBuf};
+    use raiko2_guests::{
+        Sp1ShastaGuestElves, load_risc0_shasta_guest_elves, load_sp1_shasta_guest_elves,
+    };
+    use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
     use xtask_build_guest::Backend;
 
     fn repo_root() -> PathBuf {
@@ -1062,6 +1070,36 @@ mod tests {
         assert_eq!(registrations[1].planned_action, PlannedAction::Register);
         assert!(!registrations[1].already_trusted);
         assert!(registrations[1].needs_registration);
+    }
+
+    #[test]
+    fn sp1_plan_rejects_vk_artifact_that_does_not_match_elf() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::HoodiShasta,
+            backend: Backend::Sp1,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
+        let elves = load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs");
+        let swapped = Sp1ShastaGuestElves {
+            proposal: Arc::clone(&elves.proposal),
+            aggregation: Arc::clone(&elves.aggregation),
+            proposal_vk: Arc::clone(&elves.aggregation_vk),
+            aggregation_vk: Arc::clone(&elves.aggregation_vk),
+        };
+
+        let err = build_sp1_calls(&resolved, &swapped)
+            .expect_err("SP1 plan should reject a proposal VK from another ELF");
+
+        assert!(
+            err.to_string()
+                .contains("SP1 VK artifact mismatch for sp1_shasta_proposal")
+        );
     }
 
     fn sample_call(name: &str) -> RegistrationCall {

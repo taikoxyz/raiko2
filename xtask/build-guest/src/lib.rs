@@ -1165,7 +1165,7 @@ pub fn derive_sp1_vk(elf: &[u8], artifact_name: &str) -> Result<SP1VerifyingKey>
     let handle = std::thread::Builder::new()
         .name(format!("sp1-vk-{artifact_name}"))
         .spawn(move || {
-            let client = ProverClient::builder().cpu().build();
+            let client = ProverClient::builder().light().build();
             let pk = client
                 .setup(elf.as_slice().into())
                 .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;

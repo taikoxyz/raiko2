@@ -1204,7 +1204,7 @@ async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root
 
     let request = json!({
         "proof_type": "sp1",
-        "proof_prefix": "0xaaaa",
+        "proof_prefix": "0xAAAA",
         "proposal_id_start": 41,
         "proposal_id_end": 42
     });

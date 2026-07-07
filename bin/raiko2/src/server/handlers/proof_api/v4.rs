@@ -524,7 +524,6 @@ async fn remove_invalidated_tasks(
                         error = %err,
                         "failed to remove invalidated task children"
                     );
-                    continue;
                 }
             }
             Err(err) => {
@@ -742,7 +741,14 @@ async fn proof_file_starts_with(path: &str, prefix: &str) -> bool {
     proof
         .proof
         .as_deref()
-        .is_some_and(|proof| proof.starts_with(prefix))
+        .is_some_and(|proof| proof_hex_starts_with(proof, prefix))
+}
+
+fn proof_hex_starts_with(proof: &str, prefix: &str) -> bool {
+    proof
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 // Handler-level error plumbing stays here; only the v4 wire payload lives in proof_types::v4.
@@ -1233,7 +1239,67 @@ fn proof_status_string(status: &ProofStatus) -> String {
 mod tests {
     use super::super::{AggregateStatus, ProposalStatus, RootRuntime, RuntimeRunnerStatus};
     use super::*;
+    use crate::config::Config;
+    use crate::server::state::{EngineQueueTaskView, EngineStatusView, StaticPipelineFactory};
     use crate::server::task_metadata::ProposalTask;
+    use raiko2_engine::{
+        AggregateProofInput, AggregationTaskRequest, EngineTaskId, ProposalTaskRequest,
+        ProverTaskConfig,
+    };
+    use raiko2_primitives::L2BlockRange;
+    use raiko2_queue::TaskStoreError;
+    use raiko2_runtime::{
+        RunnerStatus as RuntimeTaskRunnerStatus, RuntimeManager, TaskRegistration,
+    };
+    use std::{future::Future, path::PathBuf, pin::Pin, process, sync::Arc, time::SystemTime};
+
+    type TestBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    struct RemoveFailEngine;
+
+    impl EngineHandle for RemoveFailEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> TestBoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregate submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> TestBoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> TestBoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "engine remove failed",
+                )))
+            })
+        }
+    }
 
     #[test]
     fn invalidation_task_log_context_describes_single_proposal() {
@@ -1257,6 +1323,55 @@ mod tests {
         assert_eq!(context.proposal_ids, "31..32");
         assert_eq!(context.proposal_count, 2);
         assert!(context.aggregate);
+    }
+
+    #[tokio::test]
+    async fn remove_invalidated_tasks_removes_runtime_row_when_child_cleanup_fails() {
+        let mut factory = StaticPipelineFactory::default();
+        factory.insert(
+            "taiko_dev/taiko_dev_l1",
+            PipelineKey::ShastaSp1,
+            Arc::new(RemoveFailEngine),
+        );
+        let runtime = Arc::new(
+            RuntimeManager::new(test_runtime_root("invalidate-child-cleanup-fails"))
+                .expect("runtime manager"),
+        );
+        let state = AppState::from_parts(
+            Arc::new(Config::default()),
+            Arc::new(factory),
+            Arc::clone(&runtime),
+        );
+        let metadata = task_log_metadata_with_requests(&[55], false);
+        let mut record = runtime
+            .register_task(TaskRegistration {
+                task_id: "task_child_cleanup_failure".to_string(),
+                pipeline_key: Some(PipelineKey::ShastaSp1),
+                route: PipelineKey::ShastaSp1.route(),
+                task_kind: "hoodi_proposal".to_string(),
+                proposal_id: Some(55),
+                proof_ids: vec![metadata.proposals[0].task_id.clone()],
+                metadata: serde_json::to_value(&metadata).expect("serialize metadata"),
+                request_fingerprint: None,
+            })
+            .await
+            .expect("register runtime task");
+        record.runner_status = RuntimeTaskRunnerStatus::Completed;
+        runtime.upsert_task(&record).await.expect("upsert task");
+
+        let mut data = wire::InvalidateArtifactsData::default();
+        remove_invalidated_tasks(&state, vec![(record, metadata)], &mut data).await;
+
+        assert_eq!(data.tasks.failed, 1);
+        assert_eq!(data.tasks.removed, 1);
+        assert!(
+            runtime
+                .get_task("task_child_cleanup_failure")
+                .await
+                .expect("get runtime task")
+                .is_none(),
+            "stale runtime task row remained"
+        );
     }
 
     #[test]
@@ -1556,11 +1671,23 @@ mod tests {
     }
 
     fn task_log_metadata(proposal_ids: &[u64], aggregate: bool) -> TaskMetadata {
+        task_log_metadata_inner(proposal_ids, aggregate, false)
+    }
+
+    fn task_log_metadata_with_requests(proposal_ids: &[u64], aggregate: bool) -> TaskMetadata {
+        task_log_metadata_inner(proposal_ids, aggregate, true)
+    }
+
+    fn task_log_metadata_inner(
+        proposal_ids: &[u64],
+        aggregate: bool,
+        include_requests: bool,
+    ) -> TaskMetadata {
         TaskMetadata {
             network_pair: "taiko_dev/taiko_dev_l1".to_string(),
             network: "taiko_dev".to_string(),
             l1_network: "taiko_dev_l1".to_string(),
-            proof_type: raiko2_primitives::ProofType::SgxGeth,
+            proof_type: raiko2_primitives::ProofType::Sp1,
             requested_proof_type: None,
             prover_type: None,
             execution_mode: None,
@@ -1574,7 +1701,20 @@ mod tests {
                     l2_block_numbers: vec![proposal_id + 1],
                     last_anchor_block_number: proposal_id.saturating_sub(1),
                     task_id: format!("proposal-task-{proposal_id}"),
-                    request: None,
+                    request: include_requests.then(|| ProposalTaskRequest {
+                        proposal_id: *proposal_id,
+                        l2_block_range: Some(L2BlockRange {
+                            start: *proposal_id,
+                            end: *proposal_id,
+                        }),
+                        l1_inclusion_block_number: proposal_id + 100,
+                        last_anchor_block_number: proposal_id.saturating_sub(1),
+                        checkpoint: None,
+                        blob_proof_type: None,
+                        prover: None,
+                        graffiti: None,
+                        prover_config: ProverTaskConfig::default(),
+                    }),
                 })
                 .collect(),
             aggregate_task_id: aggregate.then(|| "aggregate-task".to_string()),
@@ -1582,6 +1722,13 @@ mod tests {
             aggregate_input_artifacts: Vec::new(),
             runtime: Default::default(),
         }
+    }
+
+    fn test_runtime_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir().join(format!("raiko2-{label}-{}-{nanos}", process::id()))
     }
 }
 

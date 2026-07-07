@@ -1213,12 +1213,12 @@ fn ensure_sp1_vk_matches(
     let artifact_vk_hash_bytes = artifact_vk.hash_bytes();
 
     if derived_vk_bn254 != artifact_vk_bn254 || derived_vk_hash_bytes != artifact_vk_hash_bytes {
-        let derived_vk_hash_bytes = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
-        let artifact_vk_hash_bytes = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
-        let derived_vk_bn254 = derived_vk.bytes32();
-        let artifact_vk_bn254 = artifact_vk.bytes32();
+        let derived_vk_hash_bytes_hex = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
+        let artifact_vk_hash_bytes_hex = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
+        let derived_vk_bn254_hex = derived_vk.bytes32();
+        let artifact_vk_bn254_hex = artifact_vk.bytes32();
         bail!(
-            "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254}, artifact vk_bn254={artifact_vk_bn254}, derived vk_hash_bytes={derived_vk_hash_bytes}, artifact vk_hash_bytes={artifact_vk_hash_bytes}"
+            "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254_hex}, artifact vk_bn254={artifact_vk_bn254_hex}, derived vk_hash_bytes={derived_vk_hash_bytes_hex}, artifact vk_hash_bytes={artifact_vk_hash_bytes_hex}"
         );
     }
 

@@ -247,6 +247,11 @@ jobs:
         with:
           toolchain: "1.94.0"
 
+      - name: install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
@@ -272,12 +277,13 @@ jobs:
       - rust-test-pipeline
       - rust-test-runtime
       - rust-test-xtask
-    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
+    if: always() && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.guest_artifacts == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: verify rust lanes
         env:
+          FULL_RUST_LANES_REQUIRED: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' }}
           FMT_RESULT: ${{ needs.rust-fmt.result }}
           CLIPPY_RESULT: ${{ needs.rust-clippy.result }}
           TEST_FOUNDATION_RESULT: ${{ needs.rust-test-foundation.result }}
@@ -285,9 +291,11 @@ jobs:
           TEST_RUNTIME_RESULT: ${{ needs.rust-test-runtime.result }}
           TEST_XTASK_RESULT: ${{ needs.rust-test-xtask.result }}
         run: |
-          test "${FMT_RESULT}" = "success"
-          test "${CLIPPY_RESULT}" = "success"
-          test "${TEST_FOUNDATION_RESULT}" = "success"
-          test "${TEST_PIPELINE_RESULT}" = "success"
-          test "${TEST_RUNTIME_RESULT}" = "success"
           test "${TEST_XTASK_RESULT}" = "success"
+          if [ "${FULL_RUST_LANES_REQUIRED}" = "true" ]; then
+            test "${FMT_RESULT}" = "success"
+            test "${CLIPPY_RESULT}" = "success"
+            test "${TEST_FOUNDATION_RESULT}" = "success"
+            test "${TEST_PIPELINE_RESULT}" = "success"
+            test "${TEST_RUNTIME_RESULT}" = "success"
+          fi

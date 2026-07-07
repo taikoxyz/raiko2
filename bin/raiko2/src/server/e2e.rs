@@ -1116,6 +1116,91 @@ async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
 }
 
 #[tokio::test]
+async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    let aggregation_payload = v4_sp1_aggregation_request(41, 42);
+    complete_v4_sp1_aggregation(&app, &engine, 41, 42).await;
+
+    let records = state.runtime.list_tasks().await.expect("list tasks");
+    let record = records
+        .iter()
+        .find(|record| {
+            let metadata: TaskMetadata =
+                serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+            metadata.aggregate_request.is_some()
+        })
+        .expect("aggregate runtime task");
+    let metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
+        .expect("aggregate root refs")
+        .refs;
+    let proposal_refs = metadata
+        .proposals
+        .iter()
+        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
+        .collect::<Vec<_>>();
+    assert!(!proposal_refs.is_empty(), "expected child proposal refs");
+
+    let child_proof = Proof {
+        proof: Some(format!("0x{}", "aa".repeat(32))),
+        input: Some(alloy_primitives::B256::ZERO),
+        ..Proof::default()
+    };
+    for proof_ref in &proposal_refs {
+        write_e2e_proof_artifact(
+            &state,
+            &metadata.network_pair,
+            proof_ref,
+            record.pipeline_key,
+            &record.route.to_string(),
+            &child_proof,
+        )
+        .await;
+    }
+
+    let request = json!({
+        "proof_type": "sp1",
+        "proof_prefix": "0xaaaa",
+        "proposal_id_start": 41,
+        "proposal_id_end": 42
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
+    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
+
+    for proof_ref in root_refs.iter().chain(proposal_refs.iter()) {
+        assert!(
+            state
+                .runtime
+                .get_proof_artifact(&metadata.network_pair, proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "stale proof ref remained: {proof_ref}"
+        );
+    }
+
+    let (status, resubmitted) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        aggregation_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resubmitted}");
+    assert_eq!(resubmitted["data"]["status"], "registered", "{resubmitted}");
+    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
+}
+
+#[tokio::test]
 async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(11_155_111).await {
         Ok(value) => value,

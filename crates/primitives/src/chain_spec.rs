@@ -1372,6 +1372,25 @@ mod tests {
     }
 
     #[test]
+    fn taiko_hoodi_shasta_verifier_addresses_cover_unzen() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        let spec = list
+            .into_iter()
+            .find(|spec| spec.name == "taiko_hoodi")
+            .ok_or_else(|| anyhow!("missing taiko_hoodi spec"))?;
+
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Sgx)?,
+            address!("7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::SgxGeth)?,
+            address!("8cF41Ee873Ca293Dc339006b0069d6337F68CCCA")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_taiko_masaya_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_masaya".to_string(),

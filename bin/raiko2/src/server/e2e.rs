@@ -2260,27 +2260,26 @@ async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
 async fn e2e_metrics_endpoint_exposes_key_metric_families() {
     let config = base_config();
     let (app, engine) = app_with_observed_risc0_fixture_engine(config);
+    let request = json!({
+        "proposals": [{
+            "proposal_id": 7,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [7],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "risc0",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
 
-    let (status, _res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 7,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [7],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "risc0",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
+    let (status, _res) = post_json(&app, "/v3/proof/batch/shasta", request.clone()).await;
     assert_eq!(status, StatusCode::OK);
 
     drive_engine_to_idle(&engine).await;
+
+    let (status, duplicate) = post_json(&app, "/v3/proof/batch/shasta", request).await;
+    assert_eq!(status, StatusCode::OK, "{duplicate}");
 
     let (status, body) = get_text(&app, "/metrics").await;
     assert_eq!(status, StatusCode::OK);
@@ -2290,6 +2289,13 @@ async fn e2e_metrics_endpoint_exposes_key_metric_families() {
     );
     assert!(
         body.contains("raiko2_stage_task_duration_seconds_bucket"),
+        "{body}"
+    );
+    assert!(body.contains("raiko2_duplicate_requests_total"), "{body}");
+    assert!(
+        body.contains(
+            "raiko2_duplicate_requests_total{aggregate=\"false\",pair=\"taiko_dev/ethereum\",proof_type=\"risc0\",route=\"risc0/local\",runner_status=\"completed\"}"
+        ),
         "{body}"
     );
     assert!(body.contains("pair=\"taiko_dev/ethereum\""), "{body}");

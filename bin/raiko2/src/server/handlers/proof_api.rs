@@ -178,17 +178,16 @@ fn duplicate_task_log_context(
 }
 
 fn duplicate_task_proposal_ids(metadata: &TaskMetadata) -> Vec<u64> {
-    metadata
-        .aggregate_request
-        .as_ref()
-        .map(|request| request.proposal_ids.clone())
-        .unwrap_or_else(|| {
+    metadata.aggregate_request.as_ref().map_or_else(
+        || {
             metadata
                 .proposals
                 .iter()
                 .map(|proposal| proposal.proposal_id)
                 .collect()
-        })
+        },
+        |request| request.proposal_ids.clone(),
+    )
 }
 
 fn format_proposal_ids(proposal_ids: &[u64]) -> String {
@@ -1068,6 +1067,15 @@ async fn handle_existing_batch_task(
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            submission.aggregate_requested,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
@@ -1343,6 +1351,15 @@ async fn handle_existing_external_aggregate_task(
     let missing_completed_artifact =
         completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
             .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            true,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
     if missing_completed_artifact
         || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
     {
@@ -2906,6 +2923,17 @@ async fn completed_root_artifact_missing(
     Ok(true)
 }
 
+const fn duplicate_runner_status_label(
+    runner_status: RuntimeRunnerStatus,
+    missing_completed_artifact: bool,
+) -> &'static str {
+    if missing_completed_artifact {
+        "completed_artifact_missing"
+    } else {
+        runner_status.as_str()
+    }
+}
+
 fn response_is_completed(response: &Response) -> bool {
     response
         .extensions()
@@ -3061,6 +3089,22 @@ mod tests {
         assert_eq!(
             format_proposal_ids(&[18498, 18500, 18503]),
             "18498,18500,18503"
+        );
+    }
+
+    #[test]
+    fn duplicate_runner_status_label_marks_missing_completed_artifacts() {
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, true),
+            "completed_artifact_missing"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, false),
+            "completed"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Failed, false),
+            "failed"
         );
     }
 

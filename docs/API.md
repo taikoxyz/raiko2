@@ -86,9 +86,10 @@ The canonical minimal metric families are:
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
 Failure counters also include a bounded `error_kind` label, such as `rpc_error`,
-`witness_error`, `instance_id_mismatch`, `stale_artifact`, or `invalid_request`.
-Duplicate-request counters include `runner_status` so cache hits and stale failed tasks can be
-alerted separately.
+`witness_error`, `instance_id_mismatch`, `proof_persistence`, `stale_artifact`, or
+`invalid_request`. Duplicate-request counters include `runner_status` so cache hits and stale
+failed tasks can be alerted separately; completed tasks whose proof artifact is missing are
+reported as `runner_status="completed_artifact_missing"`.
 
 ## Admin Ballot
 

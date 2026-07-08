@@ -526,6 +526,9 @@ Current behavior:
   `setImageIdTrusted(bytes32,bool)`.
 - `sp1` registrations derive the current proving key digests from `setup(elf)` and call
   `setProgramTrusted(bytes32,bool)`.
+- `sp1` `*.vk.bin` artifacts are checked against the ELF-derived key before dry-run or apply.
+  A mismatch means the release artifacts are inconsistent and registration stops before any
+  transaction is sent.
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 

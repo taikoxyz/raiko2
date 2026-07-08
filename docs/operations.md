@@ -893,7 +893,9 @@ sum by (pair, proof_type, stage, error_kind) (
 ```
 
 Duplicate requests that return completed cache hits are normally harmless. Duplicates against failed
-or stale tasks should be watched separately:
+tasks, non-terminal tasks, or completed tasks whose proof artifact is missing should be watched
+separately. Missing completed artifacts are reported as
+`runner_status="completed_artifact_missing"`:
 
 ```promql
 sum by (pair, proof_type, aggregate, runner_status) (

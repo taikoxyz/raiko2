@@ -94,6 +94,10 @@ pub struct PreflightOptions {
     pub rpc_client_config: Option<PreflightRpcClientConfig>,
     /// Resolved L1 chain spec for request-scoped preflight data.
     pub resolved_l1_chain_spec: Option<ChainSpec>,
+    /// Host-resolved L2 chain spec after applying config or CLI overrides.
+    ///
+    /// Guests still validate witness chain specs against their compiled default trusted list.
+    pub resolved_l2_chain_spec: Option<ChainSpec>,
 }
 
 /// RPC retry settings used by preflight-only checkpoint verification.

@@ -1,8 +1,7 @@
 use alloy_primitives::{hex, keccak256};
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use raiko2_engine::{
@@ -27,14 +26,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use super::super::auth::authorize_acl_feature;
+use super::super::auth::{
+    authorize_acl_feature_with_rate_limit, authorize_optional_acl_feature_with_rate_limit,
+};
 use super::super::errors::ApiError;
 use super::proof_route::{
     BatchProofDecision, CanonicalProofRoute, decide_batch_proof_type,
     public_task_id_from_fingerprint, route_for_proof_type, validate_hosted_proof_type,
 };
+#[path = "proof_api/v3.rs"]
+pub(crate) mod v3;
+#[path = "proof_api/v4.rs"]
+pub(crate) mod v4;
+
 use super::proof_types::{
     AggregateProofRequest, AggregateStatus, ApiData, ApiOk, BatchProofType, BatchShastaRequest,
     CanonicalProposal, ClearProverStatus, LegacyProofData, LegacyProofEnvelope, LegacyProofError,
@@ -50,6 +56,7 @@ use crate::server::state::{
 };
 use crate::server::task_cleanup::{
     cancel_registered_tasks, proposal_task_chain_ids, proposal_task_id, remove_task_children,
+    remove_task_children_if_unreferenced,
 };
 use crate::server::task_metadata::{
     AggregateInputProofArtifact, BuildTaskMetadataParams, ProposalTask, ProverType,
@@ -122,342 +129,85 @@ struct TaskLookup {
     engine: Arc<dyn EngineHandle>,
 }
 
+#[derive(Clone, Copy)]
+enum ProverTaskScope {
+    ZkAny,
+    ProofType(BatchProofType),
+}
+
+impl ProverTaskScope {
+    fn matches(self, metadata: &TaskMetadata) -> bool {
+        match self {
+            Self::ZkAny => is_zk_any_metadata(metadata),
+            Self::ProofType(proof_type) => {
+                // V4 filters by the requested concrete backend, not by any fallback that may run.
+                metadata.requested_proof_type.as_deref() == Some(proof_type.as_str())
+            }
+        }
+    }
+}
+
+struct DuplicateTaskLogContext {
+    proposal_ids: String,
+    proposal_count: usize,
+    active_stage: String,
+    last_event: String,
+    error: String,
+}
+
+fn duplicate_task_log_context(
+    existing: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> DuplicateTaskLogContext {
+    let proposal_ids = duplicate_task_proposal_ids(metadata);
+    DuplicateTaskLogContext {
+        proposal_count: proposal_ids.len(),
+        proposal_ids: format_proposal_ids(&proposal_ids),
+        active_stage: metadata
+            .runtime
+            .active_stage
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        last_event: metadata
+            .runtime
+            .last_event
+            .clone()
+            .unwrap_or_else(|| "none".to_string()),
+        error: existing.error.clone().unwrap_or_else(|| "none".to_string()),
+    }
+}
+
+fn duplicate_task_proposal_ids(metadata: &TaskMetadata) -> Vec<u64> {
+    metadata.aggregate_request.as_ref().map_or_else(
+        || {
+            metadata
+                .proposals
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect()
+        },
+        |request| request.proposal_ids.clone(),
+    )
+}
+
+fn format_proposal_ids(proposal_ids: &[u64]) -> String {
+    match proposal_ids {
+        [] => "none".to_string(),
+        [single] => single.to_string(),
+        ids if ids
+            .windows(2)
+            .all(|window| window[0].checked_add(1) == Some(window[1])) =>
+        {
+            format!("{}..{}", ids[0], ids[ids.len() - 1])
+        }
+        ids => ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+    }
+}
+
 #[derive(Clone)]
 struct ProofLocation {
     proof_ref: Option<String>,
     proof_path: Option<String>,
-}
-
-pub async fn request_batch_shasta_proof(
-    state: State<AppState>,
-    req: Result<Json<BatchShastaRequest>, JsonRejection>,
-) -> Response {
-    match request_batch_shasta_proof_inner(state, req).await {
-        Ok(response) => response,
-        Err(err) => legacy_api_error_response(err),
-    }
-}
-
-async fn request_batch_shasta_proof_inner(
-    State(state): State<AppState>,
-    req: Result<Json<BatchShastaRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let requested_proof_type = req.proof_type;
-    let requested_aggregate = req.aggregate;
-    let requested_network = req.network.clone();
-    let requested_l1_network = req.l1_network.clone();
-    let proposal_ids = req
-        .proposals
-        .iter()
-        .map(|proposal| proposal.proposal_id)
-        .collect::<Vec<_>>();
-    let not_drawn_batch_id = req.proposals.first().map(|proposal| proposal.proposal_id);
-    let Some(mut submission) = build_canonical_batch_submission(&state, req)? else {
-        info!(
-            proof_type = requested_proof_type.as_str(),
-            aggregate = requested_aggregate,
-            network = requested_network.as_deref().unwrap_or("default"),
-            l1_network = requested_l1_network.as_deref().unwrap_or("default"),
-            proposal_count = proposal_ids.len(),
-            "received hoodi shasta batch request not drawn"
-        );
-        debug!(
-            proposal_ids = ?proposal_ids,
-            "received hoodi shasta batch request not drawn proposal ids"
-        );
-        return Ok(zk_any_not_drawn_response(not_drawn_batch_id));
-    };
-    let request_fingerprint = batch_request_fingerprint(&submission)?;
-    submission.public_task_id = public_task_id_from_fingerprint(&request_fingerprint);
-    let plan =
-        build_submission_plan(state.runtime.as_ref(), &submission, &request_fingerprint).await?;
-
-    info!(
-        task_id = submission.public_task_id.as_str(),
-        proof_type = requested_proof_type.as_str(),
-        selected_proof_type = %submission.route.proof_type(),
-        prover_type = prover_type_label(submission.prover_type),
-        aggregate = submission.aggregate_requested,
-        pair = submission.pair.key.as_str(),
-        route = %submission.route.route,
-        proposal_count = proposal_ids.len(),
-        "received hoodi shasta batch request"
-    );
-    debug!(
-        task_id = submission.public_task_id.as_str(),
-        proposal_ids = ?proposal_ids,
-        "received hoodi shasta batch request proposal ids"
-    );
-    resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-
-    match register_batch_task(&state, &submission, &plan, &request_fingerprint).await? {
-        TaskRegistrationOutcome::Existing(existing) => {
-            handle_existing_batch_task(&state, &submission, existing).await
-        }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_batch_task(&state, &submission, &plan).await
-        }
-    }
-}
-
-pub async fn request_aggregation_proof(
-    state: State<AppState>,
-    req: Result<Json<AggregateProofRequest>, JsonRejection>,
-) -> Response {
-    match request_aggregation_proof_inner(state, req).await {
-        Ok(response) => response,
-        Err(err) => legacy_api_error_response(err),
-    }
-}
-
-async fn request_aggregation_proof_inner(
-    State(state): State<AppState>,
-    req: Result<Json<AggregateProofRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(req) = req.map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let requested_proof_type = req.proof_type;
-    let proof_count = req.proofs.len();
-    let aggregation_ids = req.aggregation_ids.clone();
-    let submission = build_external_aggregate_submission(&state, req).await?;
-    let engine = resolve_engine(
-        &state,
-        &submission.pair.key,
-        submission.route.pipeline_key(),
-    )?;
-    let aggregate = planned_external_aggregate_task(&submission);
-
-    info!(
-        task_id = submission.public_task_id.as_str(),
-        proof_type = requested_proof_type.as_str(),
-        selected_proof_type = %submission.route.proof_type(),
-        prover_type = prover_type_label(submission.prover_type),
-        pair = submission.pair.key.as_str(),
-        route = %submission.route.route,
-        proofs = proof_count,
-        aggregation_ids = ?aggregation_ids,
-        "received hoodi aggregate request"
-    );
-
-    match register_external_aggregate_task(&state, &submission, &aggregate).await? {
-        TaskRegistrationOutcome::Existing(existing) => {
-            handle_existing_external_aggregate_task(&state, &engine, &submission, existing).await
-        }
-        TaskRegistrationOutcome::Created(_) => {
-            handle_created_external_aggregate_task(&state, &engine, &submission, &aggregate).await
-        }
-    }
-}
-
-pub async fn get_task(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiOk<TaskData>>, ApiError> {
-    let data = load_task_data(&state, &id).await?;
-    let lookup = load_task_lookup(&state, &id).await?;
-
-    Ok(Json(ApiOk {
-        status: "ok",
-        proof_type: lookup.metadata.proof_type.to_string(),
-        data,
-    }))
-}
-
-pub async fn cancel_task(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Result<Json<ApiOk<TaskData>>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
-
-    let TaskLookup {
-        record,
-        metadata,
-        engine,
-    } = load_task_lookup(&state, &id).await?;
-
-    if matches!(
-        record.runner_status,
-        RuntimeRunnerStatus::Completed
-            | RuntimeRunnerStatus::Failed
-            | RuntimeRunnerStatus::Cancelled
-    ) {
-        return get_task(State(state), Path(id)).await;
-    }
-
-    cancel_registered_tasks(&state.runtime, &engine, &id, record.pipeline_key, &metadata)
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-    state
-        .runtime
-        .sync_status(&id, RuntimeRunnerStatus::Cancelled, None, None)
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to sync runtime cancellation: {err}")))?;
-
-    get_task(State(state), Path(id)).await
-}
-
-pub async fn get_prover_status(
-    State(state): State<AppState>,
-) -> Result<Json<ApiData<ProverStatus>>, ApiError> {
-    let (tasks, network, skipped) = collect_prover_status(&state).await?;
-    Ok(Json(ApiData {
-        status: "ok",
-        data: ProverStatus {
-            clean: tasks.is_clean() && network.is_clean() && skipped.is_clean(),
-            tasks,
-            network,
-            skipped,
-        },
-    }))
-}
-
-pub async fn clear_prover(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<ClearProverStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::ProverClear)?;
-
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-
-    let mut status = ClearProverStatus {
-        status: "ok",
-        cancelled: 0,
-        skipped: ProverSkippedStatusCounts::default(),
-        failed: 0,
-    };
-
-    for record in records {
-        if is_terminal_runtime_status(record.runner_status) {
-            continue;
-        }
-        let metadata = match parse_task_metadata(&record) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                status.skipped.invalid_metadata = status.skipped.invalid_metadata.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    error = %err.message,
-                    "skipping prover clear record with invalid metadata"
-                );
-                continue;
-            }
-        };
-        if !is_zk_any_metadata(&metadata) {
-            continue;
-        }
-        let engine = match resolve_engine(&state, &metadata.network_pair, record.pipeline_key) {
-            Ok(engine) => engine,
-            Err(err) if err.status == StatusCode::NOT_FOUND => {
-                status.skipped.unavailable_pipeline =
-                    status.skipped.unavailable_pipeline.saturating_add(1);
-                warn!(
-                    task_id = %record.task_id,
-                    network_pair = %metadata.network_pair,
-                    pipeline = %record.pipeline_key,
-                    error = %err.message,
-                    "skipping prover clear record with unavailable pipeline"
-                );
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-        if let Err(err) = cancel_registered_tasks(
-            &state.runtime,
-            &engine,
-            &record.task_id,
-            record.pipeline_key,
-            &metadata,
-        )
-        .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to cancel prover record"
-            );
-            continue;
-        }
-        if let Err(err) = state
-            .runtime
-            .sync_status(&record.task_id, RuntimeRunnerStatus::Cancelled, None, None)
-            .await
-        {
-            status.failed = status.failed.saturating_add(1);
-            warn!(
-                task_id = %record.task_id,
-                error = %err,
-                "failed to sync prover clear cancellation"
-            );
-            continue;
-        }
-        status.cancelled = status.cancelled.saturating_add(1);
-    }
-
-    Ok(Json(status))
-}
-
-pub async fn report_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
-    let tasks = load_all_task_data(&state).await?;
-    Ok(Json(tasks))
-}
-
-pub async fn list_proofs(State(state): State<AppState>) -> Result<Json<Vec<TaskData>>, ApiError> {
-    let tasks = load_all_task_data(&state)
-        .await?
-        .into_iter()
-        .filter(|task| matches!(task.status, ProofStatus::Completed) && task.proof.is_some())
-        .collect::<Vec<_>>();
-    Ok(Json(tasks))
-}
-
-pub async fn prune_proofs(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<PruneStatus>, ApiError> {
-    authorize_acl_feature(&state, &headers, ServerAclFeature::Admin)?;
-
-    let records = state
-        .runtime
-        .list_tasks()
-        .await
-        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
-    let mut removed_engine_task_ids = HashSet::new();
-
-    for record in records {
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())
-            .map_err(|err| ApiError::internal(format!("failed to parse task metadata: {err}")))?;
-        let engine = resolve_engine(&state, &metadata.network_pair, record.pipeline_key)?;
-
-        remove_task_children(
-            &engine,
-            record.pipeline_key,
-            &metadata,
-            &mut removed_engine_task_ids,
-        )
-        .await
-        .map_err(|err| ApiError::internal(err.to_string()))?;
-
-        state
-            .runtime
-            .remove_task(&record.task_id)
-            .await
-            .map_err(|err| {
-                ApiError::internal(format!("failed to prune task {}: {err}", record.task_id))
-            })?;
-    }
-
-    Ok(Json(PruneStatus { status: "ok" }))
 }
 
 fn build_canonical_batch_submission(
@@ -1101,13 +851,17 @@ async fn register_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     aggregate: &PlannedAggregateTask,
 ) -> Result<TaskRegistrationOutcome, ApiError> {
+    let requested_proof_type = submission.route.proof_type();
+    let requested_proof_type = requested_proof_type.to_string();
     let mut metadata = build_task_metadata(
         &submission.pair,
         BuildTaskMetadataParams {
             network: &submission.pair.network,
             l1_network: &submission.pair.l1_network,
             proof_type: submission.route.proof_type(),
-            requested_proof_type: None,
+            // Runtime metadata is persisted as strings, but the request path keeps
+            // proof type typed.
+            requested_proof_type: Some(&requested_proof_type),
             prover_type: submission.prover_type,
             execution_mode: None,
             aggregate_requested: true,
@@ -1287,28 +1041,57 @@ async fn handle_existing_batch_task(
     state: &AppState,
     submission: &CanonicalBatchSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
+    replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
-    info!(
-        "Detected concurrent duplicate hoodi shasta batch request: task_id={}, aggregate={}, route={}, proof_type={}, prover_type={}, pair={}",
-        existing.task_id,
-        submission.aggregate_requested,
-        submission.route.route,
-        submission.route.proof_type(),
-        prover_type_label(submission.prover_type),
-        submission.pair.key
-    );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+    let log_context = duplicate_task_log_context(&existing, &existing_metadata);
+    info!(
+        task_id = %existing.task_id,
+        aggregate = submission.aggregate_requested,
+        proposal_ids = %log_context.proposal_ids,
+        proposal_count = log_context.proposal_count,
+        runner_status = %existing.runner_status.as_str(),
+        active_stage = %log_context.active_stage,
+        last_event = %log_context.last_event,
+        error = %log_context.error,
+        updated_at = existing.updated_at,
+        route = %submission.route.route,
+        proof_type = %submission.route.proof_type(),
+        prover_type = %prover_type_label(submission.prover_type),
+        network_pair = %submission.pair.key,
+        "detected duplicate shasta batch request"
+    );
+    let missing_completed_artifact =
+        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+            .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            submission.aggregate_requested,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
+    if missing_completed_artifact
+        || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
+    {
         let response = compatibility_response_for_task(state, &existing.task_id).await?;
-        if response_is_completed(&response) {
+        if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
         if existing.pipeline_key != submission.route.pipeline_key() {
-            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
-                .await;
+            return replace_existing_batch_task(
+                state,
+                submission,
+                &existing,
+                &existing_metadata,
+                replacement_request_fingerprint,
+            )
+            .await;
         }
         if let Err(err) = recover_existing_task(state, &existing, || {
             reenqueue_existing_batch_task(state, submission, &existing, &existing_metadata)
@@ -1322,8 +1105,14 @@ async fn handle_existing_batch_task(
                 error = %err.message,
                 "failed to recover reenqueueable task; replacing from scratch"
             );
-            return replace_existing_batch_task(state, submission, &existing, &existing_metadata)
-                .await;
+            return replace_existing_batch_task(
+                state,
+                submission,
+                &existing,
+                &existing_metadata,
+                replacement_request_fingerprint,
+            )
+            .await;
         }
     }
     compatibility_response_for_task(state, &existing.task_id).await
@@ -1334,8 +1123,11 @@ async fn replace_existing_batch_task(
     submission: &CanonicalBatchSubmission,
     existing: &raiko2_runtime::RuntimeTaskRecord,
     existing_metadata: &TaskMetadata,
+    replacement_request_fingerprint: Option<&str>,
 ) -> Result<Response, ApiError> {
-    let request_fingerprint = batch_request_fingerprint(submission)?;
+    let request_fingerprint = replacement_request_fingerprint
+        .map(ToOwned::to_owned)
+        .map_or_else(|| batch_request_fingerprint(submission), Ok)?;
     let plan =
         build_submission_plan(state.runtime.as_ref(), submission, &request_fingerprint).await?;
     cleanup_stale_root_before_replacement(state, existing, existing_metadata).await;
@@ -1535,21 +1327,44 @@ async fn handle_existing_external_aggregate_task(
     submission: &ExternalAggregateSubmission,
     existing: raiko2_runtime::RuntimeTaskRecord,
 ) -> Result<Response, ApiError> {
-    info!(
-        "Detected concurrent duplicate hoodi aggregate request: task_id={}, route={}, proof_type={}, prover_type={}, pair={}",
-        existing.task_id,
-        submission.route.route,
-        submission.route.proof_type(),
-        prover_type_label(submission.prover_type),
-        submission.pair.key
-    );
     let existing_metadata: TaskMetadata = serde_json::from_value(existing.metadata.clone())
         .map_err(|err| {
             ApiError::internal(format!("failed to parse existing task metadata: {err}"))
         })?;
-    if should_reenqueue_existing_submission(state, &existing, &existing_metadata).await? {
+    let log_context = duplicate_task_log_context(&existing, &existing_metadata);
+    info!(
+        task_id = %existing.task_id,
+        aggregate = true,
+        proposal_ids = %log_context.proposal_ids,
+        proposal_count = log_context.proposal_count,
+        runner_status = %existing.runner_status.as_str(),
+        active_stage = %log_context.active_stage,
+        last_event = %log_context.last_event,
+        error = %log_context.error,
+        updated_at = existing.updated_at,
+        route = %submission.route.route,
+        proof_type = %submission.route.proof_type(),
+        prover_type = %prover_type_label(submission.prover_type),
+        network_pair = %submission.pair.key,
+        "detected duplicate shasta aggregate request"
+    );
+    let missing_completed_artifact =
+        completed_root_artifact_missing(state.runtime.as_ref(), &existing, &existing_metadata)
+            .await?;
+    telemetry::record_duplicate_request(
+        &MetricContext::new(
+            submission.route.route.to_string(),
+            submission.route.proof_type(),
+            submission.pair.key.clone(),
+            true,
+        ),
+        duplicate_runner_status_label(existing.runner_status, missing_completed_artifact),
+    );
+    if missing_completed_artifact
+        || should_reenqueue_existing_submission(state, &existing, &existing_metadata).await?
+    {
         let response = compatibility_response_for_task(state, &existing.task_id).await?;
-        if response_is_completed(&response) {
+        if response_is_completed(&response) && !missing_completed_artifact {
             return Ok(response);
         }
         recover_existing_task(state, &existing, || {
@@ -2031,6 +1846,7 @@ async fn load_all_task_data(state: &AppState) -> Result<Vec<TaskData>, ApiError>
 
 async fn collect_prover_status(
     state: &AppState,
+    scope: ProverTaskScope,
 ) -> Result<
     (
         ProverTaskStatusCounts,
@@ -2065,7 +1881,7 @@ async fn collect_prover_status(
                 continue;
             }
         };
-        if !is_zk_any_metadata(&metadata) {
+        if !scope.matches(&metadata) {
             continue;
         }
 
@@ -2102,24 +1918,127 @@ async fn collect_prover_status(
         });
     }
 
-    let mut counted_groups = HashMap::new();
+    let mut seen_groups = HashMap::new();
     for (engine_key, (engine, task_ids)) in queue_groups {
-        let counted = count_matching_queue_tasks(&engine, &task_ids, &mut tasks).await?;
-        counted_groups.insert(engine_key, counted);
+        let seen = count_matching_queue_tasks(engine.as_ref(), &task_ids, &mut tasks).await?;
+        seen_groups.insert(engine_key, seen);
     }
 
     for root in queue_roots {
-        let has_counted_task = counted_groups.get(&root.engine_key).is_some_and(|counted| {
-            root.task_ids
-                .iter()
-                .any(|task_id| counted.contains(task_id))
-        });
-        if !has_counted_task && !root.has_remote_progress {
-            tasks.pending = tasks.pending.saturating_add(1);
+        let has_queue_task = seen_groups
+            .get(&root.engine_key)
+            .is_some_and(|seen| root.task_ids.iter().any(|task_id| seen.contains(task_id)));
+        if !has_queue_task && !root.has_remote_progress {
+            tasks.orphaned = tasks.orphaned.saturating_add(1);
         }
     }
 
     Ok((tasks, network, skipped))
+}
+
+async fn clear_prover_tasks(
+    state: &AppState,
+    scope: ProverTaskScope,
+) -> Result<ClearProverStatus, ApiError> {
+    let records = state
+        .runtime
+        .list_tasks()
+        .await
+        .map_err(|err| ApiError::internal(format!("failed to list runtime tasks: {err}")))?;
+    let mut status = ClearProverStatus {
+        status: "ok",
+        cancelled: 0,
+        failed: 0,
+        skipped: ProverSkippedStatusCounts::default(),
+    };
+
+    for record in records {
+        if is_terminal_runtime_status(record.runner_status) {
+            continue;
+        }
+
+        let metadata = match parse_task_metadata(&record) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                status.skipped.invalid_metadata = status.skipped.invalid_metadata.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err.message,
+                    "skipping prover clear record with invalid metadata"
+                );
+                continue;
+            }
+        };
+
+        if !scope.matches(&metadata) {
+            continue;
+        }
+        if metadata.has_remote_submission_progress() {
+            status.skipped.remote_progress = status.skipped.remote_progress.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                "skipping prover clear record with remote submission progress"
+            );
+            continue;
+        }
+
+        let cancelled = match state
+            .runtime
+            .cancel_nonterminal_task(&record.task_id, None)
+            .await
+        {
+            Ok(cancelled) => cancelled,
+            Err(err) => {
+                status.failed = status.failed.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    error = %err,
+                    "failed to sync prover clear cancellation"
+                );
+                continue;
+            }
+        };
+        if !cancelled {
+            continue;
+        }
+        status.cancelled = status.cancelled.saturating_add(1);
+
+        let engine = match resolve_engine(state, &metadata.network_pair, record.pipeline_key) {
+            Ok(engine) => engine,
+            Err(err) if err.status == StatusCode::NOT_FOUND => {
+                status.skipped.unavailable_pipeline =
+                    status.skipped.unavailable_pipeline.saturating_add(1);
+                warn!(
+                    task_id = %record.task_id,
+                    network_pair = %metadata.network_pair,
+                    pipeline = %record.pipeline_key,
+                    error = %err.message,
+                    "skipping prover clear record with unavailable pipeline"
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+
+        if let Err(err) = cancel_registered_tasks(
+            &state.runtime,
+            &engine,
+            &record.task_id,
+            record.pipeline_key,
+            &metadata,
+        )
+        .await
+        {
+            status.failed = status.failed.saturating_add(1);
+            warn!(
+                task_id = %record.task_id,
+                error = %err,
+                "failed to cancel prover record"
+            );
+        }
+    }
+
+    Ok(status)
 }
 
 type ProverQueueKey = (String, PipelineKey);
@@ -2172,14 +2091,14 @@ fn metadata_queue_task_ids(
 }
 
 async fn count_matching_queue_tasks(
-    engine: &Arc<dyn EngineHandle>,
+    engine: &dyn EngineHandle,
     task_ids: &HashSet<EngineTaskId>,
     counts: &mut ProverTaskStatusCounts,
 ) -> Result<HashSet<EngineTaskId>, ApiError> {
     if task_ids.is_empty() {
         return Ok(HashSet::new());
     }
-    let mut counted = HashSet::new();
+    let mut seen = HashSet::new();
     for task_id in task_ids {
         let Some(view) = engine
             .get_task_state(task_id.clone())
@@ -2189,10 +2108,10 @@ async fn count_matching_queue_tasks(
             continue;
         };
         if count_queue_task_state(&view, counts) {
-            counted.insert(view.id);
+            seen.insert(view.id.clone());
         }
     }
-    Ok(counted)
+    Ok(seen)
 }
 
 const fn count_queue_task_state(
@@ -2200,15 +2119,26 @@ const fn count_queue_task_state(
     counts: &mut ProverTaskStatusCounts,
 ) -> bool {
     match view.state {
-        EngineQueueTaskState::Pending => counts.pending = counts.pending.saturating_add(1),
-        EngineQueueTaskState::Ready => counts.ready = counts.ready.saturating_add(1),
-        EngineQueueTaskState::Retrying => counts.retrying = counts.retrying.saturating_add(1),
-        EngineQueueTaskState::Running => counts.running = counts.running.saturating_add(1),
+        EngineQueueTaskState::Pending => {
+            counts.pending = counts.pending.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Ready => {
+            counts.ready = counts.ready.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Retrying => {
+            counts.retrying = counts.retrying.saturating_add(1);
+            true
+        }
+        EngineQueueTaskState::Running => {
+            counts.running = counts.running.saturating_add(1);
+            true
+        }
         EngineQueueTaskState::Succeeded
         | EngineQueueTaskState::Failed
-        | EngineQueueTaskState::Cancelled => return false,
+        | EngineQueueTaskState::Cancelled => false,
     }
-    true
 }
 
 fn count_network_inflight(
@@ -2612,6 +2542,7 @@ fn task_runtime_view(
         quoted_mcycles_count: runtime.quoted_mcycles_count,
         evaluated_mcycles_count: runtime.evaluated_mcycles_count,
         max_price_multiplier: runtime.max_price_multiplier,
+        max_price_wei: runtime.max_price_wei,
         sp1_network_mode: runtime
             .sp1_network_mode
             .map(|mode| mode.as_str().to_string()),
@@ -2963,6 +2894,46 @@ fn proposal_failed_before_remote_submission(metadata: &TaskMetadata) -> bool {
             .all(|runtime| !runtime.has_remote_submission_progress())
 }
 
+async fn completed_root_artifact_missing(
+    runtime: &RuntimeManager,
+    record: &raiko2_runtime::RuntimeTaskRecord,
+    metadata: &TaskMetadata,
+) -> Result<bool, ApiError> {
+    if record.runner_status != RuntimeRunnerStatus::Completed {
+        return Ok(false);
+    }
+    let Some(root_refs) = root_proof_artifact_refs(metadata, record.pipeline_key) else {
+        return Ok(false);
+    };
+    for proof_ref in &root_refs.refs {
+        if load_proof_artifact_material(runtime, &metadata.network_pair, proof_ref)
+            .await
+            .map_err(|err| ApiError::internal(format!("failed to load proof artifact: {err}")))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+    warn!(
+        task_id = record.task_id,
+        artifact_kind = ?root_refs.kind,
+        proof_refs = ?root_refs.refs,
+        "completed runtime task is missing proof artifact; treating it as stale"
+    );
+    Ok(true)
+}
+
+const fn duplicate_runner_status_label(
+    runner_status: RuntimeRunnerStatus,
+    missing_completed_artifact: bool,
+) -> &'static str {
+    if missing_completed_artifact {
+        "completed_artifact_missing"
+    } else {
+        runner_status.as_str()
+    }
+}
+
 fn response_is_completed(response: &Response) -> bool {
     response
         .extensions()
@@ -3077,9 +3048,13 @@ fn legacy_api_error_response(err: ApiError) -> Response {
 mod tests {
     use super::*;
     use crate::config::{BoundlessPairConfig, Config, ServerAclKey};
-    use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{EngineHandle, StaticPipelineFactory};
     use anyhow::{Result, anyhow};
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::{HeaderMap, Request},
+    };
     use http_body_util::BodyExt;
     use raiko2_engine::EngineTaskId;
     use raiko2_pipeline::{PipelineRoute, RunnerKind};
@@ -3100,6 +3075,37 @@ mod tests {
 
     fn batch_request_fingerprint_for_test(submission: &CanonicalBatchSubmission) -> Result<String> {
         batch_request_fingerprint(submission).map_err(|err| anyhow!(err.message))
+    }
+
+    #[test]
+    fn format_proposal_ids_compacts_contiguous_ranges() {
+        assert_eq!(format_proposal_ids(&[]), "none");
+        assert_eq!(format_proposal_ids(&[18504]), "18504");
+        assert_eq!(format_proposal_ids(&[18498, 18499, 18500]), "18498..18500");
+    }
+
+    #[test]
+    fn format_proposal_ids_keeps_non_contiguous_lists_explicit() {
+        assert_eq!(
+            format_proposal_ids(&[18498, 18500, 18503]),
+            "18498,18500,18503"
+        );
+    }
+
+    #[test]
+    fn duplicate_runner_status_label_marks_missing_completed_artifacts() {
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, true),
+            "completed_artifact_missing"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Completed, false),
+            "completed"
+        );
+        assert_eq!(
+            duplicate_runner_status_label(RuntimeRunnerStatus::Failed, false),
+            "failed"
+        );
     }
 
     struct NoopEngine;
@@ -3137,6 +3143,52 @@ mod tests {
 
         fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct CancelFailEngine;
+
+    impl EngineHandle for CancelFailEngine {
+        fn submit_proposal_proof_with_dependencies(
+            &self,
+            _request: ProposalTaskRequest,
+            _dependencies: Vec<EngineTaskId>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected proposal submission") })
+        }
+
+        fn submit_aggregation_proof_from_inputs(
+            &self,
+            _request: AggregationTaskRequest,
+            _inputs: Vec<AggregateProofInput>,
+        ) -> BoxFuture<'_, Result<EngineTaskId, TaskStoreError>> {
+            Box::pin(async { panic!("unexpected aggregation input submission") })
+        }
+
+        fn get_status(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineStatusView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn get_task_state(
+            &self,
+            _id: EngineTaskId,
+        ) -> BoxFuture<'_, Result<Option<EngineQueueTaskView>, TaskStoreError>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn cancel(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
+            Box::pin(async {
+                Err(TaskStoreError::backend(std::io::Error::other(
+                    "cancel failed",
+                )))
+            })
         }
 
         fn remove(&self, _id: EngineTaskId) -> BoxFuture<'_, Result<(), TaskStoreError>> {
@@ -3412,12 +3464,7 @@ mod tests {
         let config = Config::default();
         let mut factory = StaticPipelineFactory::default();
         factory.insert("taiko_dev/ethereum", PipelineKey::ShastaNative, engine);
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     fn test_state_with_engines(
@@ -3429,12 +3476,7 @@ mod tests {
         for (pipeline_key, engine) in engines {
             factory.insert("taiko_dev/ethereum", pipeline_key, engine);
         }
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     fn runtime_record(
@@ -3549,17 +3591,13 @@ mod tests {
             id: "ops".to_string(),
             key: "secret".to_string(),
             allow: vec![ServerAclFeature::ProverClear],
+            rate_limit_per_minute: None,
         });
         let mut factory = StaticPipelineFactory::default();
         for (pipeline_key, engine) in engines {
             factory.insert("taiko_dev/ethereum", pipeline_key, engine);
         }
-        AppState {
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime,
-        }
+        AppState::from_parts(Arc::new(config), Arc::new(factory), runtime)
     }
 
     #[tokio::test]
@@ -3581,7 +3619,7 @@ mod tests {
         .await?;
 
         let state = test_state_with_engines(runtime, Vec::new());
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3623,11 +3661,92 @@ mod tests {
                 Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (_, network, skipped) = collect_prover_status(&state)
+        let (_, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
         assert_eq!(network.risc0.inflight_orders, 0);
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_counts_missing_queue_task_as_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-orphaned",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "orphaned-root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(NoopEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.orphaned, 1);
+        assert!(network.is_clean());
+        assert!(skipped.is_clean());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prover_status_counts_terminal_queue_task_as_orphaned() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "prover-status-terminal-queue",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request.clone());
+        let task_id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request,
+        });
+        upsert_test_record(
+            &runtime,
+            "root",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let engine = Arc::new(ListingEngine::new(vec![EngineQueueTaskView {
+            id: task_id,
+            state: EngineQueueTaskState::Succeeded,
+        }]));
+        let state = test_state_with_engines(
+            runtime,
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::clone(&engine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
+            .await
+            .map_err(|err| anyhow!(err.message))?;
+
+        assert_eq!(tasks.orphaned, 1);
+        assert_eq!(tasks.pending, 0);
+        assert_eq!(tasks.ready, 0);
+        assert_eq!(tasks.retrying, 0);
+        assert_eq!(tasks.running, 0);
+        assert!(network.is_clean());
         assert!(skipped.is_clean());
         Ok(())
     }
@@ -3672,7 +3791,7 @@ mod tests {
                 Arc::clone(&engine) as Arc<dyn EngineHandle>,
             )],
         );
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3708,6 +3827,22 @@ mod tests {
             PipelineKey::ShastaRisc0Network,
         )
         .await?;
+        let mut remote_metadata = metadata.clone();
+        remote_metadata.runtime.proposals.insert(
+            "proposal-task".to_string(),
+            TaskRuntimeMetadata {
+                provider_request_id: Some("0xremote".to_string()),
+                ..TaskRuntimeMetadata::default()
+            },
+        );
+        upsert_test_record(
+            &runtime,
+            "remote-progress",
+            RuntimeRunnerStatus::Running,
+            &remote_metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
 
         let state = test_state_with_acl(
             Arc::clone(&runtime),
@@ -3719,14 +3854,72 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
 
-        let Json(status) = clear_prover(State(state), headers)
+        let Json(status) = v3::clear_prover(State(state), headers)
             .await
             .expect("clear prover should not fail on skipped records");
 
-        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.cancelled, 2);
         assert_eq!(status.failed, 0);
         assert_eq!(status.skipped.invalid_metadata, 1);
         assert_eq!(status.skipped.unavailable_pipeline, 1);
+        assert_eq!(status.skipped.remote_progress, 1);
+        let missing_pipeline = runtime
+            .get_task("missing-pipeline")
+            .await?
+            .expect("missing pipeline record still present");
+        assert!(matches!(
+            missing_pipeline.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let cleared = runtime
+            .get_task("clearable")
+            .await?
+            .expect("clearable record still present");
+        assert!(matches!(
+            cleared.runner_status,
+            RuntimeRunnerStatus::Cancelled
+        ));
+        let remote = runtime
+            .get_task("remote-progress")
+            .await?
+            .expect("remote progress record still present");
+        assert!(matches!(remote.runner_status, RuntimeRunnerStatus::Running));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_prover_keeps_runtime_cancelled_when_queue_cancel_fails() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "clear-prover-queue-fail",
+        ))?);
+        let request = test_proposal_request(42);
+        let mut metadata = zk_any_metadata(Some("prove"));
+        metadata.proposals[0].request = Some(request);
+        upsert_test_record(
+            &runtime,
+            "clearable",
+            RuntimeRunnerStatus::Running,
+            &metadata,
+            PipelineKey::ShastaRisc0Network,
+        )
+        .await?;
+
+        let state = test_state_with_acl(
+            Arc::clone(&runtime),
+            [(
+                PipelineKey::ShastaRisc0Network,
+                Arc::new(CancelFailEngine) as Arc<dyn EngineHandle>,
+            )],
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", axum::http::HeaderValue::from_static("secret"));
+
+        let Json(status) = v3::clear_prover(State(state), headers)
+            .await
+            .expect("clear prover should preserve runtime cancellation");
+
+        assert_eq!(status.cancelled, 1);
+        assert_eq!(status.failed, 1);
         let cleared = runtime
             .get_task("clearable")
             .await?
@@ -3750,9 +3943,8 @@ mod tests {
             axum::http::HeaderValue::from_static("secret-with-extra-bytes"),
         );
 
-        let err = match clear_prover(State(state), headers).await {
-            Ok(_) => panic!("oversized API key should fail"),
-            Err(err) => err,
+        let Err(err) = v3::clear_prover(State(state), headers).await else {
+            panic!("oversized API key should fail");
         };
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
         assert_eq!(err.message, "invalid API key");
@@ -3952,7 +4144,7 @@ mod tests {
         runtime.upsert_task(&record).await?;
         let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
 
-        let (tasks, network, skipped) = collect_prover_status(&state)
+        let (tasks, network, skipped) = collect_prover_status(&state, ProverTaskScope::ZkAny)
             .await
             .map_err(|err| anyhow!(err.message))?;
 
@@ -3990,7 +4182,7 @@ mod tests {
         .await?;
         let state = test_state(Arc::clone(&runtime), Arc::new(NoopEngine));
 
-        let response = handle_existing_batch_task(&state, &submission, record.clone())
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
             .await
             .map_err(|err| anyhow::anyhow!(err.message))?;
 
@@ -4001,6 +4193,42 @@ mod tests {
             .expect("runtime task");
         assert_eq!(stored.runner_status, RuntimeRunnerStatus::Running);
         assert_eq!(stored.error.as_deref(), Some("stale running"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_duplicate_with_missing_artifact_is_reenqueued() -> Result<()> {
+        let route = native_local_route();
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "completed-missing-artifact-reenqueue",
+        ))?);
+        let mut submission = canonical_submission(route, false);
+        let mut metadata = task_metadata_with_stage(None);
+        metadata.proof_type = ProofType::Native;
+        metadata.aggregate_requested = false;
+        metadata.proposals[0].task_id = "proposal-task".to_string();
+        let mut record = runtime_record(RuntimeRunnerStatus::Completed, &metadata);
+        record.task_id.clone_from(&submission.public_task_id);
+        record.pipeline_key = PipelineKey::ShastaNative;
+        record.route = "native/local".parse().expect("parse route");
+        record.request_fingerprint = Some(batch_request_fingerprint_for_test(&submission)?);
+        runtime.upsert_task(&record).await?;
+        submission.public_task_id.clone_from(&record.task_id);
+        let recorder = Arc::new(RecordingEngine::new(PipelineKey::ShastaNative));
+        let state = test_state(Arc::clone(&runtime), recorder.clone());
+
+        let response = handle_existing_batch_task(&state, &submission, record.clone(), None)
+            .await
+            .map_err(|err| anyhow::anyhow!(err.message))?;
+
+        assert!(!response_is_completed(&response));
+        let proposals = recorder.proposals.lock().expect("proposal submissions");
+        assert_eq!(proposals.len(), 1);
+        let stored = runtime
+            .get_task(&record.task_id)
+            .await?
+            .expect("runtime task");
+        assert_eq!(stored.runner_status, RuntimeRunnerStatus::Allocated);
         Ok(())
     }
 
@@ -4084,7 +4312,7 @@ mod tests {
         record.request_fingerprint = Some(request_fingerprint);
         runtime.upsert_task(&record).await?;
 
-        let response = handle_existing_batch_task(&state, &submission, record)
+        let response = handle_existing_batch_task(&state, &submission, record, None)
             .await
             .map_err(|err| anyhow!(err.message))?;
         let response = read_json_response(response).await;
@@ -4541,6 +4769,126 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn v4_proposal_fingerprint_ignores_server_derived_fields() {
+        // route and prover_type are both derived from server prover config. A benign config change
+        // (mock->real, local->network) must not change the v4 idempotency key, or the documented
+        // poll-by-re-POST would register duplicate root work instead of reusing the same task.
+        let mut local = canonical_submission(native_local_route(), false);
+        local.prover_type = Some(ProverType::Mock);
+        let mut remote = canonical_submission(sgx_remote_route(), false);
+        remote.prover_type = Some(ProverType::Network);
+
+        let base = v4::proposal_request_fingerprint_for_test(&local).expect("fingerprint");
+        let after_config_change =
+            v4::proposal_request_fingerprint_for_test(&remote).expect("fingerprint");
+        assert_eq!(
+            base, after_config_change,
+            "route/prover_type must not affect the v4 proposal fingerprint"
+        );
+
+        // Sanity: client-visible request data still discriminates the fingerprint.
+        let mut different_proposal = canonical_submission(native_local_route(), false);
+        different_proposal.prover_type = Some(ProverType::Mock);
+        different_proposal.proposals[0].proposal_id = 999;
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_proposal).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "client request data must still change the v4 proposal fingerprint"
+        );
+
+        let mut different_l1 = canonical_submission(native_local_route(), false);
+        different_l1.proposals[0].l1_inclusion_block_number = 999;
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_l1).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "L1 inclusion block must affect the v4 proposal fingerprint"
+        );
+
+        let mut different_checkpoint = canonical_submission(native_local_route(), false);
+        different_checkpoint.proposals[0].checkpoint = Some(raiko2_primitives::ShastaCheckpoint {
+            block_number: 7,
+            block_hash: alloy_primitives::B256::repeat_byte(0x11),
+            state_root: alloy_primitives::B256::repeat_byte(0x22),
+        });
+        let changed =
+            v4::proposal_request_fingerprint_for_test(&different_checkpoint).expect("fingerprint");
+        assert_ne!(
+            base, changed,
+            "checkpoint must affect the v4 proposal fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn v4_clear_prover_authorizes_before_parsing_body() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "v4-clear-auth-before-body",
+        ))?);
+        let state = test_state_with_acl(Arc::clone(&runtime), []);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v4/prover/clear")
+            .header("content-type", "application/json")
+            .body(Body::from("{"))?;
+
+        let Err(err) = v4::clear_prover(State(state), HeaderMap::new(), request).await else {
+            panic!("missing API key should fail before body parsing");
+        };
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.code, "unauthorized");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn v4_submit_is_open_when_submit_acl_feature_is_disabled() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_test_runtime_root(
+            "v4-submit-open-without-submit-acl",
+        ))?);
+        let state = test_state_with_acl(Arc::clone(&runtime), []);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v4/proof/proposal")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "proof_type": "risc0",
+                    "proposals": [
+                        {
+                            "proposal_id": 1,
+                            "last_anchor_block_number": 10,
+                            "l1_inclusion_block_number": 11,
+                            "l2_block_number_start": 20,
+                            "l2_block_number_end": 21
+                        }
+                    ]
+                })
+                .to_string(),
+            ))?;
+
+        let Err(err) =
+            v4::request_proposal_proof(State(state.clone()), HeaderMap::new(), request).await
+        else {
+            panic!("unavailable backend should reject after optional ACL");
+        };
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "unsupported_proof_type");
+
+        let Err(err) = v4::get_task(
+            State(state),
+            HeaderMap::new(),
+            Path("missing-task".to_string()),
+        )
+        .await
+        else {
+            panic!("missing task should reject after optional ACL");
+        };
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.code, "task_not_found");
+        Ok(())
+    }
+
     fn unique_test_runtime_root(prefix: &str) -> std::path::PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4590,16 +4938,14 @@ mod tests {
 
         let mut config = Config::default();
         config.runtime.root = unique_test_runtime_root("resolve-engine-network-config");
-        let zk_any_sampler = ZkAnySampler::from_config(&config.prover.zk_any);
-        let state = AppState {
-            config: Arc::new(config),
-            pipelines: Arc::new(factory),
-            runtime: Arc::new(
+        let state = AppState::from_parts(
+            Arc::new(config),
+            Arc::new(factory),
+            Arc::new(
                 RuntimeManager::new(unique_test_runtime_root("resolve-engine-network-runtime"))
                     .expect("runtime manager"),
             ),
-            zk_any_sampler: Arc::new(Mutex::new(zk_any_sampler)),
-        };
+        );
 
         let Err(err) = resolve_engine(&state, &pair.key, PipelineKey::ShastaRisc0Network) else {
             panic!("network pipeline should be unavailable");

@@ -1,6 +1,9 @@
 //! Shared fixture-backed local server harness.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::consensus::Header;
@@ -20,7 +23,7 @@ use raiko2_primitives::{
     Proof, ProofContext, ProofRequest, ProofType, ProverConfig, RaikoError, RaikoResult,
 };
 use raiko2_primitives_shasta::{GuestInput, encode_proof_carry_data};
-use raiko2_protocol_shasta::shasta::ShastaEventData;
+use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ShastaEventData};
 use raiko2_prover::{
     GuestInputCodec, Prover,
     native::NativeProver,
@@ -40,7 +43,6 @@ use tracing::info;
 use super::AppState;
 use super::app;
 use super::net;
-use super::sampling::ZkAnySampler;
 use super::state::{RuntimeObserver, StaticPipelineFactory};
 use crate::cli::FixtureServerArgs;
 use crate::config::{Config, GuestSystem, NetworkPairConfig, RunnerKind};
@@ -54,10 +56,13 @@ pub(crate) type Sp1FixtureEngine = Engine<Sp1FixtureSpec>;
 
 const FIXTURE_VALIDATION: NoopValidation<GuestInput> = NoopValidation::new();
 const FIXTURE_MANIFEST: NoopManifestBuilder = NoopManifestBuilder;
+static RUNTIME_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn unique_runtime_root(prefix: &str) -> std::path::PathBuf {
+    let sequence = RUNTIME_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "{prefix}-{}",
+        "{prefix}-{}-{}-{sequence}",
+        std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
@@ -380,7 +385,8 @@ where
             }
             ExecutionMode::Prove => Ok(Proof {
                 proof: Some("0xfixture-sp1-proof".to_string()),
-                input: Some(B256::ZERO),
+                input: Some(hash_shasta_subproof_input(&guest_input.proof_carry_data)),
+                uuid: Some(format!("0x{}", "00".repeat(32))),
                 extra_data: proof_carry_extra_data(&guest_input, None)?,
                 ..Default::default()
             }),
@@ -558,7 +564,7 @@ fn native_fixture_engine_with_observer(
     native_fixture_engine_for_pipeline(PipelineKey::ShastaNative, observer)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture-server"))]
 pub(crate) fn native_fixture_engine_for_pipeline(
     pipeline_key: PipelineKey,
     observer: Option<Arc<dyn EngineObserver>>,
@@ -703,16 +709,14 @@ where
 {
     let mut factory = StaticPipelineFactory::default();
     factory.insert(network_pair.to_string(), pipeline_key, Arc::new(engine));
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime: Arc::new(
+    AppState::from_parts(
+        Arc::new(config),
+        Arc::new(factory),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    }
+    )
 }
 
 #[cfg(test)]
@@ -743,13 +747,7 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
         PipelineKey::ShastaRisc0,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -771,13 +769,7 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
         PipelineKey::ShastaSp1,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (state, engine)
 }
@@ -805,13 +797,7 @@ pub(crate) fn app_with_observed_native_fixture_engine(
         PipelineKey::ShastaNative,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -839,13 +825,7 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
         PipelineKey::ShastaRisc0Network,
         Arc::new(engine.clone()),
     );
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
-        runtime,
-        zk_any_sampler,
-    };
+    let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
     (app::build_router(state), engine)
 }
@@ -890,7 +870,6 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
     let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
         "raiko2-fixture-runtime",
     ))?);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
     let observer = engine_observer(Arc::clone(&runtime));
     let maintenance_interval = Duration::from_millis(config.queue.maintenance_interval_ms);
     let workers = config.queue.workers;
@@ -928,12 +907,11 @@ fn fixture_app_state(config: Config) -> Result<AppState> {
         Arc::new(sp1_engine),
     );
 
-    Ok(AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(factory),
+    Ok(AppState::from_parts(
+        Arc::new(config),
+        Arc::new(factory),
         runtime,
-        zk_any_sampler,
-    })
+    ))
 }
 
 pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {

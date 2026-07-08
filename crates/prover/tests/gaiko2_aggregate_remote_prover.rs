@@ -4,7 +4,7 @@ use alloy_primitives::{Address, B256, Uint};
 use httpmock::Method::POST;
 use httpmock::MockServer;
 use raiko2_pipeline::NativeBackend;
-use raiko2_primitives::{AggregationGuestInput, Proof, ProverConfig};
+use raiko2_primitives::{AggregationGuestInput, Proof, ProofType, ProverConfig};
 use raiko2_primitives_shasta::{
     instance::{build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output},
     proof_carry_from_proof,
@@ -130,9 +130,63 @@ async fn gaiko2_prover_posts_shasta_aggregate_packet_and_maps_success_response()
     assert_eq!(proof.input, Some(expected_input_hash));
     let extra = proof.extra_data.expect("extra_data");
     assert_eq!(
-        extra["gaiko2"]["schema"].as_str(),
+        extra["sgxgeth"]["schema"].as_str(),
         Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
     );
+    assert!(extra.get("gaiko2").is_none());
+}
+
+#[tokio::test]
+async fn gaiko2_prover_uses_sgx_namespace_for_sgx_aggregate_lane() {
+    let server = MockServer::start();
+    let proofs = vec![fixture_aggregate_proof()];
+    let instance_address =
+        Address::from_str("0x0000777735367b36bC9B61C50022d9D0700dB4Ec").expect("instance");
+    let expected_input_hash = expected_aggregate_input(&proofs, instance_address);
+    let expected_input = format!("{expected_input_hash:#x}");
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/prove/shasta-aggregate")
+            .body_contains(RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA)
+            .body_contains("proof_carry_data");
+        then.status(200)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "schema": RAIKO2_PROOF_RESPONSE_SCHEMA,
+                "status": "ok",
+                "result": {
+                    "proof": "0xaggproof",
+                    "instance_address": format!("{instance_address:#x}"),
+                    "input": expected_input,
+                }
+            }));
+    });
+
+    let prover = Gaiko2Prover::new_for_proof_type(
+        &Gaiko2Config {
+            base_url: server.base_url(),
+            timeout_ms: 5_000,
+        },
+        ProofType::Sgx,
+    )
+    .expect("build sgx remote prover");
+
+    let proof = prover
+        .aggregate(
+            AggregationGuestInput { proofs },
+            &ProverConfig::default(),
+            &NativeBackend,
+        )
+        .await
+        .expect("remote aggregate");
+
+    mock.assert();
+    let extra = proof.extra_data.expect("extra_data");
+    assert_eq!(
+        extra["sgx"]["schema"].as_str(),
+        Some(RAIKO2_PROOF_RESPONSE_SCHEMA)
+    );
+    assert!(extra.get("sgxgeth").is_none());
 }
 
 #[tokio::test]

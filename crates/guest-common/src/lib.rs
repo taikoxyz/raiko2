@@ -24,8 +24,8 @@ use raiko2_primitives_shasta::{
         shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
-    validate_anchor_progression, verify_proposal_mode_blob_usage, GuestInput,
-    ShastaZkAggregationGuestInput,
+    validate_anchor_progression, validate_source_aware_anchor_progression,
+    verify_proposal_mode_blob_usage, AnchorSourceSpan, GuestInput, ShastaZkAggregationGuestInput,
 };
 use raiko2_protocol_shasta::libhash::{hash_proposal, hash_shasta_subproof_input};
 use raiko2_protocol_shasta::shasta::{
@@ -106,11 +106,23 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
         })?;
 
     ensure!(
-        chain_spec.max_spec_id == verified_chain_spec.max_spec_id,
+        chain_spec.is_taiko == verified_chain_spec.is_taiko,
+        "unexpected is_taiko"
+    );
+
+    let runtime_chain_spec = chain_spec
+        .align_taiko_runtime_forks()
+        .context("failed to align GuestInput chain_spec runtime forks")?;
+    let verified_runtime_chain_spec = verified_chain_spec
+        .align_taiko_runtime_forks()
+        .context("failed to align trusted chain_spec runtime forks")?;
+
+    ensure!(
+        runtime_chain_spec.max_spec_id == verified_runtime_chain_spec.max_spec_id,
         "unexpected max_spec_id"
     );
     ensure!(
-        chain_spec.hard_forks == verified_chain_spec.hard_forks,
+        runtime_chain_spec.hard_forks == verified_runtime_chain_spec.hard_forks,
         "unexpected hard_forks"
     );
     ensure!(
@@ -132,10 +144,6 @@ fn validate_known_chain_spec(chain_spec: &ChainSpec) -> Result<()> {
     ensure!(
         chain_spec.verifier_address_forks == verified_chain_spec.verifier_address_forks,
         "unexpected verifier_address_forks"
-    );
-    ensure!(
-        chain_spec.is_taiko == verified_chain_spec.is_taiko,
-        "unexpected is_taiko"
     );
 
     Ok(())
@@ -174,6 +182,7 @@ fn validate_l1_anchor_linkage(
     guest_input: &GuestInput,
     anchor_checkpoints: &[DecodedAnchorCheckpoint],
     parent_anchor_block_number: u64,
+    source_spans: Option<&[AnchorSourceSpan]>,
 ) -> Result<()> {
     let proposal = &guest_input.taiko.proposal_event.proposal;
     let origin_block_number = proposal.originBlockNumber.to::<u64>();
@@ -217,13 +226,48 @@ fn validate_l1_anchor_linkage(
         return Ok(());
     }
 
-    validate_anchor_progression(
-        &anchor_block_numbers,
-        parent_anchor_block_number,
-        origin_block_number,
-        guest_input.taiko.chain_spec.chain_id,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let l1_header_anchor_start_index = if let Some(source_spans) = source_spans {
+        let plan = validate_source_aware_anchor_progression(
+            &anchor_block_numbers,
+            source_spans,
+            parent_anchor_block_number,
+            origin_block_number,
+            guest_input.taiko.chain_spec.chain_id,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if plan.requires_parent_checkpoint {
+            let parent_checkpoint =
+                verified_parent_shasta_checkpoint(guest_input, parent_anchor_block_number)?;
+            let forced_checkpoints = anchor_checkpoints
+                .get(..plan.l1_header_anchor_start_index)
+                .context("invalid forced anchor checkpoint range")?;
+            for checkpoint in forced_checkpoints {
+                ensure!(
+                    checkpoint == &parent_checkpoint,
+                    "forced inclusion anchor checkpoint ({}, {:?}, {:?}) does not match parent checkpoint ({}, {:?}, {:?})",
+                    checkpoint.block_number,
+                    checkpoint.block_hash,
+                    checkpoint.state_root,
+                    parent_checkpoint.block_number,
+                    parent_checkpoint.block_hash,
+                    parent_checkpoint.state_root
+                );
+            }
+        }
+        plan.l1_header_anchor_start_index
+    } else {
+        validate_anchor_progression(
+            &anchor_block_numbers,
+            parent_anchor_block_number,
+            origin_block_number,
+            guest_input.taiko.chain_spec.chain_id,
+        )
+        .map_err(anyhow::Error::msg)?;
+        0
+    };
+    let header_anchor_checkpoints = anchor_checkpoints
+        .get(l1_header_anchor_start_index..)
+        .context("invalid L1 header anchor checkpoint range")?;
 
     if guest_input.taiko.l1_ancestor_headers.is_empty() {
         bail!("taiko.l1_ancestor_headers must not be empty");
@@ -251,7 +295,7 @@ fn validate_l1_anchor_linkage(
         }
 
         loop {
-            let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) else {
+            let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) else {
                 break;
             };
             if checkpoint.block_number != header.number {
@@ -284,7 +328,7 @@ fn validate_l1_anchor_linkage(
         last_header_hash == origin_block_hash,
         "taiko.l1_ancestor_headers last hash mismatch"
     );
-    if let Some(checkpoint) = anchor_checkpoints.get(checkpoint_index) {
+    if let Some(checkpoint) = header_anchor_checkpoints.get(checkpoint_index) {
         ensure!(
             false,
             "anchor checkpoint ({}, {:?}, {:?}) not found in taiko.l1_ancestor_headers",
@@ -459,11 +503,16 @@ fn derivation_source_max_blocks(chain_spec: &TaikoChainSpec, proposal_timestamp:
     }
 }
 
+struct DerivedShastaBlocks {
+    blocks: Vec<BlockManifest>,
+    source_spans: Vec<AnchorSourceSpan>,
+}
+
 fn derive_expected_shasta_blocks(
     guest_input: &GuestInput,
     runtime: &TaikoRuntime,
     parent_anchor_block_number: u64,
-) -> Result<Option<Vec<BlockManifest>>> {
+) -> Result<Option<DerivedShastaBlocks>> {
     let proposal = &guest_input.taiko.proposal_event.proposal;
     if proposal.sources.is_empty() {
         return Ok(None);
@@ -502,6 +551,7 @@ fn derive_expected_shasta_blocks(
     };
 
     let mut blocks = Vec::new();
+    let mut source_spans = Vec::with_capacity(proposal.sources.len());
     let max_blocks =
         derivation_source_max_blocks(runtime.chain_spec.as_ref(), meta.proposal_timestamp);
     for (source_index, source) in proposal.sources.iter().enumerate() {
@@ -515,6 +565,7 @@ fn derive_expected_shasta_blocks(
         )
         .with_context(|| format!("failed to prepare derivation source {source_index}"))?;
 
+        let block_count = manifest.blocks.len();
         for block in manifest.blocks {
             parent = ParentBlockContext {
                 timestamp: block.timestamp,
@@ -524,6 +575,10 @@ fn derive_expected_shasta_blocks(
             };
             blocks.push(block);
         }
+        source_spans.push(AnchorSourceSpan {
+            is_forced_inclusion: source.isForcedInclusion,
+            block_count,
+        });
     }
 
     ensure!(
@@ -533,7 +588,10 @@ fn derive_expected_shasta_blocks(
         blocks.len()
     );
 
-    Ok(Some(blocks))
+    Ok(Some(DerivedShastaBlocks {
+        blocks,
+        source_spans,
+    }))
 }
 
 fn validate_anchor_transaction_binding(
@@ -911,10 +969,16 @@ where
 
     bench_report_start("proposal_derivation");
     let parent_anchor_block_number = verified_parent_anchor_block_number(guest_input)?;
-    let expected_blocks =
+    let derived_blocks =
         derive_expected_shasta_blocks(guest_input, &runtime, parent_anchor_block_number)?;
+    let expected_blocks = derived_blocks
+        .as_ref()
+        .map(|derived_blocks| derived_blocks.blocks.as_slice());
+    let source_spans = derived_blocks
+        .as_ref()
+        .map(|derived_blocks| derived_blocks.source_spans.as_slice());
     let mut proposal_ancestor_headers = initial_proposal_ancestor_headers(guest_input)?;
-    let mut canonical_parent_header = expected_blocks.as_ref().and_then(|_| {
+    let mut canonical_parent_header = expected_blocks.and_then(|_| {
         proposal_ancestor_headers
             .last()
             .and_then(|header| header.full_header().cloned())
@@ -934,9 +998,7 @@ where
         let block = &stateless_input.block;
         validate_anchor_transaction_common(stateless_input, runtime.chain_spec.as_ref())
             .with_context(|| format!("anchor transaction validation failed at index {index}"))?;
-        let expected_block = expected_blocks
-            .as_ref()
-            .and_then(|blocks| blocks.get(index));
+        let expected_block = expected_blocks.and_then(|blocks| blocks.get(index));
         let parent_header = canonical_parent_header.as_ref();
 
         if let (Some(expected_block), Some(parent_header)) = (expected_block, parent_header) {
@@ -989,7 +1051,12 @@ where
     bench_report_end("proposal_stateless_validation");
 
     bench_report_start("proposal_anchor_linkage");
-    validate_l1_anchor_linkage(guest_input, &anchor_checkpoints, parent_anchor_block_number)?;
+    validate_l1_anchor_linkage(
+        guest_input,
+        &anchor_checkpoints,
+        parent_anchor_block_number,
+        source_spans,
+    )?;
     let first_parent_block_hash = first_parent_block_hash.expect("checked");
     let last_block_number = last_block_number.expect("checked");
     let last_block_hash = last_block_hash.expect("checked");
@@ -1198,6 +1265,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_known_chain_spec_accepts_runtime_aligned_devnet() {
+        let spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_001)
+            .expect("supported taiko devnet chain spec")
+            .align_taiko_runtime_forks()
+            .expect("runtime-aligned devnet chain spec");
+
+        validate_known_chain_spec(&spec).expect("runtime-aligned devnet chain spec must validate");
+    }
+
+    #[test]
     fn validate_known_chain_spec_rejects_tampered_field() {
         let mut spec = taiko_mainnet_chain_spec();
         spec.l2_contract = Some(Address::ZERO); // diverge from the trusted spec
@@ -1217,6 +1295,22 @@ mod tests {
             .expect_err("tampered checkpoint_store_contract must be rejected");
         assert!(
             err.to_string().contains("checkpoint_store_contract"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_known_chain_spec_rejects_tampered_verifiers() {
+        let mut spec = taiko_mainnet_chain_spec();
+        spec.verifier_address_forks
+            .values_mut()
+            .next()
+            .expect("configured verifier fork")
+            .insert(ProofType::Sgx, Some(Address::ZERO));
+        let err = validate_known_chain_spec(&spec)
+            .expect_err("tampered verifier_address_forks must be rejected");
+        assert!(
+            err.to_string().contains("verifier_address_forks"),
             "unexpected error: {err}"
         );
     }
@@ -2242,6 +2336,63 @@ mod tests {
         guest_input.proof_carry_data =
             build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
         prove_identity(&guest_input).expect("known-good stalled chain proves");
+    }
+
+    #[test]
+    fn linkage_accepts_forced_prefix_then_normal_anchor_catchup() {
+        let mut guest_input = guest_input_with_single_block();
+        let parent_checkpoint =
+            decode_anchor_checkpoint(&guest_input.witnesses[0].block).expect("fixture anchor");
+        let headers = sample_l1_header_chain(200, 205);
+        let normal_header = headers.first().expect("normal anchor header").clone();
+        let origin_header = headers.last().expect("origin header").clone();
+        let normal_checkpoint = DecodedAnchorCheckpoint {
+            block_number: normal_header.number,
+            block_hash: normal_header.hash_slow(),
+            state_root: normal_header.state_root,
+        };
+        let anchor_checkpoints = vec![
+            parent_checkpoint,
+            parent_checkpoint,
+            parent_checkpoint,
+            parent_checkpoint,
+            normal_checkpoint,
+        ];
+        let source_spans = [
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: false,
+                block_count: 1,
+            },
+        ];
+        guest_input.taiko.l1_header = origin_header.clone();
+        guest_input.taiko.l1_ancestor_headers = headers;
+        guest_input.taiko.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        guest_input.taiko.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+
+        validate_l1_anchor_linkage(
+            &guest_input,
+            &anchor_checkpoints,
+            parent_checkpoint.block_number,
+            Some(&source_spans),
+        )
+        .expect("forced prefix should validate against parent checkpoint");
     }
 
     #[test]

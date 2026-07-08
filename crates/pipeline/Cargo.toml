@@ -41,3 +41,4 @@ alloy-eips.workspace = true
 alloy-hardforks.workspace = true
 alloy-trie.workspace = true
 alloy-primitives.workspace = true
+risc0-ethereum-trie.workspace = true

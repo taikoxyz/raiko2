@@ -2,7 +2,8 @@ use alloy_primitives::Address;
 use anyhow::{Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless_config::{
-    BatchQuoteStrategy, BoundlessOfferParams, validate_offer_spec,
+    BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT,
+    validate_offer_spec,
 };
 use raiko2_provider::{
     DEFAULT_RPC_TIMEOUT_MS, L2ProviderKind, RpcClientConfig as ProviderRpcClientConfig,
@@ -110,20 +111,40 @@ pub struct ResolvedNetworkPair {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct BoundlessPairConfig {
-    pub batch_quoted_mcycles: Option<u32>,
-    pub aggregation_quoted_mcycles: Option<u32>,
-    pub aggregation_quote_strategy: Option<BatchQuoteStrategy>,
+    pub batch_quote: Option<QuoteSizing>,
+    pub aggregation_quote: Option<QuoteSizing>,
+    pub poll_interval_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub rebid_timeout_ms: Option<u64>,
+    pub rebid_price_step_bps: Option<u32>,
+    pub rebid_max_attempts: Option<u32>,
     pub offer_params: BoundlessOfferParamsOverride,
 }
 
 impl BoundlessPairConfig {
     /// Validate the optional pair-specific Boundless overrides.
     pub fn validate(&self, pair_key: &str) -> Result<()> {
-        if matches!(self.batch_quoted_mcycles, Some(0)) {
-            bail!("{pair_key}: boundless.batch_quoted_mcycles must be > 0");
+        if let Some(q) = &self.batch_quote {
+            q.validate(&format!("{pair_key}: boundless.batch_quote"))
+                .map_err(anyhow::Error::msg)?;
         }
-        if matches!(self.aggregation_quoted_mcycles, Some(0)) {
-            bail!("{pair_key}: boundless.aggregation_quoted_mcycles must be > 0");
+        if let Some(q) = &self.aggregation_quote {
+            q.validate(&format!("{pair_key}: boundless.aggregation_quote"))
+                .map_err(anyhow::Error::msg)?;
+        }
+        if matches!(self.poll_interval_ms, Some(0)) {
+            bail!("{pair_key}: boundless.poll_interval_ms must be > 0");
+        }
+        if matches!(self.timeout_ms, Some(0)) {
+            bail!("{pair_key}: boundless.timeout_ms must be > 0");
+        }
+        if matches!(self.rebid_timeout_ms, Some(value) if value < MIN_REBID_TIMEOUT_MS) {
+            bail!("{pair_key}: boundless.rebid_timeout_ms must be >= {MIN_REBID_TIMEOUT_MS}");
+        }
+        if let Some(rebid_max_attempts) = self.rebid_max_attempts
+            && rebid_max_attempts > REBID_MAX_ATTEMPTS_LIMIT
+        {
+            bail!("{pair_key}: boundless.rebid_max_attempts must be <= {REBID_MAX_ATTEMPTS_LIMIT}");
         }
         if let Some(batch) = &self.offer_params.batch {
             validate_offer_spec(batch)
@@ -410,7 +431,7 @@ mod tests {
     #[test]
     fn boundless_pair_config_rejects_zero_aggregation_quote() {
         let config = BoundlessPairConfig {
-            aggregation_quoted_mcycles: Some(0),
+            aggregation_quote: Some(QuoteSizing::Fixed { mcycles: 0 }),
             ..Default::default()
         };
 
@@ -419,7 +440,68 @@ mod tests {
                 .validate("taiko_hoodi/hoodi")
                 .expect_err("zero aggregation quote should fail")
                 .to_string()
-                .contains("aggregation_quoted_mcycles")
+                .contains("aggregation_quote")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_zero_rebid_timeout() {
+        let config = BoundlessPairConfig {
+            rebid_timeout_ms: Some(0),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("zero rebid timeout should fail")
+                .to_string()
+                .contains("rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_subsecond_rebid_timeout() {
+        let config = BoundlessPairConfig {
+            rebid_timeout_ms: Some(999),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("subsecond rebid timeout should fail")
+                .to_string()
+                .contains("rebid_timeout_ms")
+        );
+    }
+
+    #[test]
+    fn boundless_pair_config_accepts_zero_rebid_price_step_bps() {
+        let config = BoundlessPairConfig {
+            rebid_price_step_bps: Some(0),
+            ..Default::default()
+        };
+
+        // 0 bps is a valid flat (no-escalation) ladder.
+        config
+            .validate("taiko_hoodi/hoodi")
+            .expect("zero rebid price step bps should be accepted");
+    }
+
+    #[test]
+    fn boundless_pair_config_rejects_excessive_rebid_max_attempts() {
+        let config = BoundlessPairConfig {
+            rebid_max_attempts: Some(REBID_MAX_ATTEMPTS_LIMIT + 1),
+            ..Default::default()
+        };
+
+        assert!(
+            config
+                .validate("taiko_hoodi/hoodi")
+                .expect_err("excessive rebid attempts should fail")
+                .to_string()
+                .contains("rebid_max_attempts")
         );
     }
 

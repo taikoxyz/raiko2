@@ -7,17 +7,17 @@ Home / [Docs](docs/README.md) / [API](docs/API.md) /
 [Regression](scripts/regression/README.md) / [Config](config.example.toml)
 
 Raiko2 is a Shasta proof service for Taiko. It builds canonical guest inputs from RPC data,
-validates them, runs local or remote proving routes, and exposes an asynchronous,
-Hoodi-compatible v3 API.
+validates them, runs local or remote proving routes, and exposes an asynchronous
+Hoodi-compatible v3 API plus a typed v4 proposal-side proof endpoint.
 
 ## At a Glance
 
-- Asynchronous, Hoodi-compatible v3 API for Shasta proofs and aggregation
+- Asynchronous Hoodi-compatible v3 API plus a typed v4 proposal-side proof endpoint
 - Canonical routes: `native/local`, `risc0/local`, `risc0/network`, `sp1/local`, `sp1/network`
 - Default binaries include RISC Zero local/network proving and SP1 proving
 - Optional remote SGX routes for configured external prover providers
 - Shasta-first pipeline for preflight, validation, proving, and aggregation
-- Config-driven RPC pair allowlist via `rpc.pairs`
+- Config-driven RPC pair allowlist and optional L1 beacon overrides via `rpc.pairs`
 - Persisted runtime state, task workdirs, and reusable proof artifacts under `./data/runtime`
 - In-process memory queue by default, with an optional Redis-backed queue
 
@@ -48,8 +48,6 @@ route is `risc0/network`. The prover loads guest ELF files from `RAIKO2_GUEST_EL
 otherwise from `crates/guests/elf`. For unreleased testing, build ELFs locally with
 `just build-guest all`. Packaged deployments can download released ELF assets with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --dir <guest-elf-dir>`.
-When intentionally running v0.1.0 release guest ELFs with a newer host, set
-`prover.guest_input_abi = "v0_1_0"`; the default is `current`.
 
 ## Core Flow
 
@@ -105,12 +103,10 @@ flowchart LR
 
 `raiko2` owns the canonical remote prover request fixtures under:
 
-- `tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
 - `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
 
-The proposal and aggregate request fixtures are strict protocol goldens for:
+The aggregate request fixture is the strict protocol golden for:
 
-- `raiko2-shasta-request-v1`
 - `raiko2-shasta-aggregate-request-v1`
 
 Run the ignored black-box conformance harness against a provider endpoint with:
@@ -121,15 +117,13 @@ cargo test -p raiko2-prover --no-default-features \
   --test remote_prover_conformance -- --ignored --nocapture
 ```
 
-The harness posts the vendored proposal and aggregate fixtures to:
+The harness builds the proposal request from the shared Shasta `GuestInput` fixture and posts it to:
 
 - `POST /prove/shasta`
 
-This harness targets providers whose `/prove/shasta` input is the replay packet used by
-`gaiko2`/`sgxgeth`. That packet is valid provider input for gaiko2 because gaiko2 executes it
-internally, but it is not a `raiko2-sgx-prover` smoke test. `raiko2-sgx-prover` requires a complete
-`raiko2_primitives_shasta::GuestInput` envelope and runs the Shasta guest validation path before
-signing.
+This harness targets providers whose `/prove/shasta` input is the v1
+`raiko2-shasta-request-v1` packet with `payload.guest_input`. `raiko2-sgx-prover` consumes the
+same request shape and runs the Shasta guest validation path before signing.
 
 It then builds a live aggregate request from the returned proposal proof and posts that derived
 request to:

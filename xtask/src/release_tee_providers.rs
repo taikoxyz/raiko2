@@ -48,6 +48,12 @@ impl GramineSigningKey {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DockerBuildSecret<'a> {
+    id: &'a str,
+    path: &'a Path,
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct ReleaseTeeProvidersArgs {
     #[arg(long)]
@@ -148,7 +154,7 @@ fn build_external_provider_entry(
     let image_ref = local_provider_image_ref(tag, &provider.repository);
     let dockerfile = checkout_dir.join(&provider.dockerfile);
     let build_context = checkout_dir.join(&provider.context);
-    docker_build(&build_context, &dockerfile, &image_ref)?;
+    docker_build_external_tee_provider(&build_context, &dockerfile, &image_ref)?;
     let digest = if no_push {
         format!("{}:{}", provider.repository, tag)
     } else {
@@ -278,37 +284,75 @@ fn clone_provider_source(repo: &str, commit: &str, path: &Path) -> Result<()> {
     util::run(checkout_cmd)
 }
 
-fn docker_build(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
+fn docker_build_command(
+    context: &Path,
+    dockerfile: &Path,
+    image_ref: &str,
+    build_args: &[String],
+    secret: Option<DockerBuildSecret<'_>>,
+) -> Command {
     let mut cmd = Command::new("docker");
     cmd.env("DOCKER_BUILDKIT", "1");
-    cmd.arg("build")
-        .arg("-f")
+    cmd.arg("build");
+    for build_arg in build_args {
+        cmd.arg("--build-arg").arg(build_arg);
+    }
+    if let Some(secret) = secret {
+        cmd.arg("--secret")
+            .arg(format!("id={},src={}", secret.id, secret.path.display()));
+    }
+    cmd.arg("-f")
         .arg(dockerfile)
         .arg("-t")
         .arg(image_ref)
         .arg(context);
-    util::run(cmd)
+    cmd
 }
 
 fn docker_build_local_sgx(context: &Path, dockerfile: &Path, image_ref: &str) -> Result<()> {
     let secret_src = resolve_gramine_enclave_key(context)?;
     let key_sha256 = file_sha256_hex(secret_src.path())?;
-    let mut cmd = Command::new("docker");
-    cmd.env("DOCKER_BUILDKIT", "1");
-    cmd.arg("build")
-        .arg("--build-arg")
-        .arg(format!("GRAMINE_ENCLAVE_KEY_SHA256={key_sha256}"))
-        .arg("--secret")
-        .arg(format!(
-            "id=gramine_enclave_key,src={}",
-            secret_src.path().display()
-        ))
-        .arg("-f")
-        .arg(dockerfile)
-        .arg("-t")
-        .arg(image_ref)
-        .arg(context);
+    let build_args = vec![format!("GRAMINE_ENCLAVE_KEY_SHA256={key_sha256}")];
+    let cmd = docker_build_command(
+        context,
+        dockerfile,
+        image_ref,
+        &build_args,
+        Some(DockerBuildSecret {
+            id: "gramine_enclave_key",
+            path: secret_src.path(),
+        }),
+    );
     util::run(cmd)
+}
+
+fn docker_build_external_tee_provider(
+    context: &Path,
+    dockerfile: &Path,
+    image_ref: &str,
+) -> Result<()> {
+    let secret_src = resolve_gramine_enclave_key(context)?;
+    let cmd =
+        external_provider_docker_build_command(context, dockerfile, image_ref, secret_src.path());
+    util::run(cmd)
+}
+
+fn external_provider_docker_build_command(
+    context: &Path,
+    dockerfile: &Path,
+    image_ref: &str,
+    enclave_key_path: &Path,
+) -> Command {
+    docker_build_command(
+        context,
+        dockerfile,
+        image_ref,
+        &[],
+        Some(DockerBuildSecret {
+            id: "enclave_key",
+            path: enclave_key_path,
+        }),
+    )
 }
 
 fn docker_push(image_ref: &str) -> Result<()> {
@@ -521,10 +565,10 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST, external_source_checkout_dir,
-        file_sha256_hex, gcp_secret_access_command, local_gramine_enclave_key_path,
-        local_provider_image_ref, parse_attestation_json, resolve_gramine_enclave_key_from_values,
-        validate_attestation_path,
+        ENV_GCP_ENCLAVE_KEY_SECRET, ENV_RAIKO2_SGX_ENCLAVE_KEY_HOST,
+        external_provider_docker_build_command, external_source_checkout_dir, file_sha256_hex,
+        gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
+        parse_attestation_json, resolve_gramine_enclave_key_from_values, validate_attestation_path,
     };
 
     #[test]
@@ -537,10 +581,15 @@ mod tests {
 
     #[test]
     fn release_tee_providers_checkout_dir_is_tagged_and_namespaced() {
-        let root = std::path::Path::new("/tmp/raiko2");
+        let temp = tempfile::tempdir().expect("temp repo root");
+        let root = temp.path();
         assert_eq!(
             external_source_checkout_dir(root, "v1.2.3", "gaiko2"),
-            std::path::Path::new("/tmp/raiko2/target/tee-release/v1.2.3/sources/gaiko2")
+            root.join("target")
+                .join("tee-release")
+                .join("v1.2.3")
+                .join("sources")
+                .join("gaiko2")
         );
     }
 
@@ -552,7 +601,8 @@ mod tests {
 
     #[test]
     fn release_tee_providers_rejects_missing_signing_key_env() {
-        let root = std::path::Path::new("/tmp/raiko2");
+        let temp = tempfile::tempdir().expect("temp repo root");
+        let root = temp.path();
         let err = resolve_gramine_enclave_key_from_values(root, None, None)
             .expect_err("missing signing key env fails");
 
@@ -581,6 +631,31 @@ mod tests {
                 "--project",
                 "taiko-project",
             ]
+        );
+    }
+
+    #[test]
+    fn release_tee_providers_external_provider_build_uses_enclave_key_secret() {
+        let temp = tempfile::tempdir().expect("temp build paths");
+        let context = temp.path().join("provider");
+        let dockerfile = context.join("docker").join("Dockerfile.tee");
+        let enclave_key = temp.path().join("enclave-key.pem");
+        let command = external_provider_docker_build_command(
+            &context,
+            &dockerfile,
+            "us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth:v1.2.3",
+            &enclave_key,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let expected_secret = format!("id=enclave_key,src={}", enclave_key.display());
+
+        assert_eq!(command.get_program().to_string_lossy(), "docker");
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--secret".to_string(), expected_secret.clone()] })
         );
     }
 

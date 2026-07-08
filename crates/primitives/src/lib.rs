@@ -21,7 +21,7 @@ mod serde_bincode;
 mod stateless;
 
 pub use chain_spec::{
-    ChainSpec, GuestInputAbi, SHASTA_CHECKPOINT_VERSION, SupportedChainSpecs,
+    ChainSpec, SHASTA_CHECKPOINT_VERSION, SupportedChainSpecs,
     shasta_checkpoint_storage_slot_candidates, shasta_checkpoint_storage_slots,
     shasta_checkpoint_storage_slots_nested, storage_slot_key,
 };

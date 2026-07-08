@@ -9,6 +9,7 @@ members = [
     "crates/primitives",
     "crates/stateless",
     "crates/provider",
+    "crates/remote-poller",
     "crates/engine",
     "crates/runtime",
     "crates/prover",
@@ -45,8 +46,8 @@ pedantic = "warn"
 redundant_pub_crate = "warn"
 missing_const_for_fn = "warn"
 
-# Dev builds favor compile speed; use `--release` (unchanged below) when runtime
-# performance matters.
+# Dev builds favor compile speed. Release builds use Cargo's built-in defaults
+# unless a specific command overrides them for a build-only launcher.
 [profile.dev]
 opt-level = 0
 debug = "line-tables-only"
@@ -58,10 +59,6 @@ split-debuginfo = "unpacked"
 [profile.test]
 opt-level = 1
 
-[profile.release]
-debug = 1
-lto = true
-
 [workspace.dependencies]
 # Raiko2 crates
 raiko2-primitives = { path = "./crates/primitives" }
@@ -69,6 +66,7 @@ raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }
 raiko2-provider = { path = "./crates/provider" }
+raiko2-remote-poller = { path = "./crates/remote-poller" }
 raiko2-engine = { path = "./crates/engine" }
 raiko2-runtime = { path = "./crates/runtime" }
 raiko2-stateless = { path = "./crates/stateless" }
@@ -201,6 +199,7 @@ prometheus = { version = "0.13.4", features = ["process"] }
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0.17"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # rpc-proxy dependencies
 actix-web = "4"

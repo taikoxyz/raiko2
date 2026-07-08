@@ -54,8 +54,8 @@
         },
         "l1_contract": {},
         "l2_contract": null,
-        "rpc": "https://example.com",
-        "beacon_rpc": "https://beacon.example.com",
+        "rpc": "https://l1rpc.internal.taiko.xyz",
+        "beacon_rpc": "https://l1beacon.internal.taiko.xyz",
         "verifier_address_forks": {
             "FRONTIER": {
                 "SGX": "0x2Ec730f0830803A022262e46375E33023faD65e5",
@@ -63,7 +63,7 @@
                 "RISC0": null
             }
         },
-        "genesis_time": 1782220308,
+        "genesis_time": 1782879840,
         "seconds_per_slot": 12,
         "is_taiko": false
     },
@@ -90,9 +90,12 @@
     {
         "name": "taiko_dev",
         "chain_id": 167001,
-        "max_spec_id": "SHASTA",
+        "max_spec_id": "UNZEN",
         "hard_forks": {
             "SHASTA": {
+                "Timestamp": 0
+            },
+            "UNZEN": {
                 "Timestamp": 0
             }
         },
@@ -103,18 +106,18 @@
             "elasticity_multiplier": "0x2"
         },
         "l1_contract": {
-            "SHASTA": "0xb432bbe475e569B2ADef4830Ae43D587932F139C"
+            "SHASTA": "0x83e383dec6E3C2CD167E3bF6aA8c36F0e55Ad910"
         },
         "l2_contract": "0x1670010000000000000000000000000000010001",
         "checkpoint_store_contract": "0x1670010000000000000000000000000000000005",
-        "rpc": "https://example.com",
+        "rpc": "https://rpc.internal.taiko.xyz",
         "beacon_rpc": null,
         "verifier_address_forks": {
             "SHASTA": {
-                "SGX": "0x25A669bc4E405b78437B560f908bc78F8141d159",
-                "SP1": "0xCb2D625BF8C2187B180646aF4738AF5F1413Fb70",
-                "RISC0": "0x48940F7ab2C674Aa66C09eDa71614aD704E9d007",
-                "SGXGETH": "0xFCA057AB211Dfaeb01FB8a36F4231Fb4021a6641"
+                "SGX": "0x63Ec87f54cCed71B0DC879ce6cEDfA6f3D582670",
+                "SP1": "0x2546D7424F23EE0D1260C414DA3f17E295c187C6",
+                "RISC0": "0x3DA89a777B11aABa02B5C92Fab96545D05fd4cc6",
+                "SGXGETH": "0x429B4115e773a0Cf0e49c0443685dd290aE426ef"
             }
         },
         "genesis_time": 0,

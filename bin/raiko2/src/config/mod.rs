@@ -19,7 +19,7 @@ pub use queue::{QueueBackend, QueueConfig};
 pub use raiko2_pipeline::{GuestSystem, PipelineRoute, RunnerKind};
 pub use rpc::{BoundlessPairConfig, NetworkPairConfig, ResolvedNetworkPair, RpcConfig};
 pub use runtime::RuntimeConfig;
-#[cfg(any(test, feature = "fixture-server"))]
+#[cfg(test)]
 pub use server::{ServerAclConfig, ServerAclKey};
 pub use server::{ServerAclFeature, ServerConfig};
 
@@ -273,6 +273,7 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: "secret-clear-key".to_string(),
                     allow: vec![ServerAclFeature::ProverClear],
+                    rate_limit_per_minute: None,
                 }],
             },
         };
@@ -292,6 +293,7 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: String::new(),
                     allow: vec![ServerAclFeature::ProverClear],
+                    rate_limit_per_minute: None,
                 }],
             },
         };
@@ -308,10 +310,80 @@ mod tests {
                     id: "ops-clear".to_string(),
                     key: "secret-clear-key".to_string(),
                     allow: vec![],
+                    rate_limit_per_minute: None,
                 }],
             },
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_invalid_zero_acl_rate_limit() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![ServerAclKey {
+                    id: "submit".to_string(),
+                    key: "secret-submit-key".to_string(),
+                    allow: vec![ServerAclFeature::ProverSubmit],
+                    rate_limit_per_minute: Some(0),
+                }],
+            },
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_config_rejects_duplicate_acl_ids() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![
+                    ServerAclKey {
+                        id: "ops".to_string(),
+                        key: "secret-clear-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverClear],
+                        rate_limit_per_minute: None,
+                    },
+                    ServerAclKey {
+                        id: "ops".to_string(),
+                        key: "secret-submit-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverSubmit],
+                        rate_limit_per_minute: None,
+                    },
+                ],
+            },
+        };
+        let err = config.validate().expect_err("duplicate ACL id");
+        assert!(err.to_string().contains("id must be unique"));
+    }
+
+    #[test]
+    fn test_server_config_rejects_duplicate_acl_keys() {
+        let config = ServerConfig {
+            host: "localhost".to_string(),
+            port: 8080,
+            acl: ServerAclConfig {
+                keys: vec![
+                    ServerAclKey {
+                        id: "ops-clear".to_string(),
+                        key: "shared-secret-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverClear],
+                        rate_limit_per_minute: None,
+                    },
+                    ServerAclKey {
+                        id: "ops-submit".to_string(),
+                        key: "shared-secret-key".to_string(),
+                        allow: vec![ServerAclFeature::ProverSubmit],
+                        rate_limit_per_minute: None,
+                    },
+                ],
+            },
+        };
+        let err = config.validate().expect_err("duplicate ACL key");
+        assert!(err.to_string().contains("key must be unique"));
     }
 
     #[test]
@@ -482,8 +554,11 @@ mod tests {
         let mut config = Config::default();
         config.rpc.pairs[0].boundless.offer_params.batch =
             Some(raiko2_prover::boundless_config::BoundlessOfferParams {
-                timeout_ms_per_mcycle: 100,
-                lock_timeout_ms_per_mcycle: 100,
+                timeouts: raiko2_prover::boundless_config::TimeoutPolicy::PerMcycle {
+                    lock_timeout_ms_per_mcycle: 100,
+                    timeout_ms_per_mcycle: 100,
+                    dynamic_pricing_timeout_modifier: None,
+                },
                 ..config.prover.boundless.offer_params.batch.clone()
             });
 
@@ -491,7 +566,7 @@ mod tests {
         assert!(err.chain().any(|source| {
             source
                 .to_string()
-                .contains("timeout must be greater than lock_timeout")
+                .contains("timeout_ms_per_mcycle must be greater than lock_timeout_ms_per_mcycle")
         }));
     }
 

@@ -477,6 +477,13 @@ cargo run -r -p xtask -- release-image risc0 \
   --repository us-docker.pkg.dev/evmchain/images/raiko2
 ```
 
+`release-image host` automatically builds the host-only feature set. Runtime image builds use
+Cargo's default release profile unless the caller explicitly overrides Cargo profile environment
+variables.
+The root runtime `Dockerfile` uses BuildKit cache mounts, `sccache`, and `mold` by default, and
+`release-image` prints the Docker build elapsed time before pushing so release logs can compare
+cold and warm cache runs.
+
 Avoid ad-hoc `docker build` for releases. The runtime image packages the existing
 `crates/guests/elf` artifacts at `/app/crates/guests/elf`; `raiko2` loads those files when the
 process starts and does not rebuild guest sources by itself. The image sets
@@ -486,10 +493,15 @@ working directory.
 For unreleased testing, build local ELFs with `just build-guest all` before building the image. For
 released artifacts, download guest ELF/VK assets from GitHub Releases with
 `cargo run -r -p xtask -- download-guest-elves --tag <tag> --backend all --dir crates/guests/elf`.
-When running v0.1.0 release guest ELFs with a newer host, set
-`prover.guest_input_abi = "v0_1_0"`; leave the default `current` for locally built or current
-release ELFs.
 `release-image` refreshes guest ELFs for the selected non-host backend by default.
+Guest builds and refreshes skip unchanged backends by fingerprint unless `--force` or
+`--force-rebuild-guests` is used. Logs include backend elapsed time, and the repo-managed Docker
+toolchain image path uses persistent Cargo and `sccache` volumes by default. Custom toolchain images
+must opt in with `DOCKER_SCCACHE_CACHE=volume` or `DOCKER_SCCACHE_CACHE_VOLUME=<volume>` so images
+without `sccache` keep working. RISC0 and SP1 rebuild logs print `sccache --show-stats`, so release
+logs expose cache hit/miss counts as well as wall time. Use `DOCKER_CARGO_CACHE=none` or
+`DOCKER_SCCACHE_CACHE=none` only for diagnostics; disabling either cache should not be needed for
+normal releases.
 If refresh leaves tracked guest ELF artifacts dirty, it stops before publishing; review
 and commit the updated `crates/guests/elf` artifacts, then rerun the release command so image
 provenance still matches the committed repo state.
@@ -514,6 +526,9 @@ Current behavior:
   `setImageIdTrusted(bytes32,bool)`.
 - `sp1` registrations derive the current proving key digests from `setup(elf)` and call
   `setProgramTrusted(bytes32,bool)`.
+- `sp1` `*.vk.bin` artifacts are checked against the ELF-derived key before dry-run or apply.
+  A mismatch means the release artifacts are inconsistent and registration stops before any
+  transaction is sent.
 - Boundless program upload is a separate runtime concern and still happens automatically when
   `risc0/network` submits a request.
 
@@ -686,6 +701,9 @@ rpc_url = "https://base-rpc.publicnode.com"
 signer_key = "0xYOUR_PRIVATE_KEY"
 poll_interval_ms = 10000
 timeout_ms = 3600000
+rebid_timeout_ms = 300000
+rebid_price_step_bps = 5000
+rebid_max_attempts = 4
 
 [prover.boundless.deployment]
 deployment_type = "base"
@@ -700,21 +718,38 @@ Operator notes:
 - Runtime state and task workdirs are stored under `./data/runtime` by default.
 - `runtime.inactive_ttl_secs` controls automatic cleanup for terminal root tasks
   (`completed`, `failed`, `cancelled`). `0` disables cleanup; the default is `7200` seconds.
-- Proposal requests use `prover.boundless.batch_quoted_mcycles` when it is set. Otherwise,
-  `batch_quote_strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000`
-  mcycles with a `2000` mcycle floor.
-- Aggregation requests use `prover.boundless.aggregation_quoted_mcycles`.
+- Proposal requests are sized by `prover.boundless.batch_quote`. The default
+  `strategy = "raiko_agent"` rounds evaluated user cycles up to the next `1000` mcycles with a
+  `2000` mcycle floor; `"evaluated"` uses the raw dry-run count, and `"fixed"` pins a `mcycles`
+  value.
+- Aggregation requests are sized by `prover.boundless.aggregation_quote` (same strategies).
+- `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
+  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
+  minimum is `1000` ms.
+- `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
+  points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
+  flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
+- `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
+  no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
+  maximum is `31`, and the default allows a final max price of about `5x` the base at the default
+  step, unless `absolute_max_price_per_mcycle` clamps it sooner.
 - `prover.boundless.offer_params.{batch,aggregation}.pricing_mode` defaults to `manual`.
   `manual` requires `max_price_per_mcycle` and optionally accepts `min_price_per_mcycle`;
   `market` omits both price fields and lets the Boundless SDK price provider set the offer price.
-- When a Boundless request expires unfulfilled, `raiko2` resubmits it. With `manual` pricing
-  each resubmission doubles the offer's max price, capped at `4x` the configured
-  `max_price_per_mcycle`; the min price is unchanged. `market` resubmissions are re-priced by
-  the SDK price provider.
+- `prover.boundless.offer_params.{batch,aggregation}.absolute_max_price_per_mcycle` is the
+  absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
+  `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
+  `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
+  accepted, but setting both is rejected).
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
+  the offer's max price by `prover.boundless.rebid_price_step_bps` (compounded) up to
+  `prover.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is set;
+  the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider and
+  then escalated by the same step.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
-- `rpc.pairs[*].boundless` can override `batch_quoted_mcycles`,
-  `aggregation_quoted_mcycles`, and either offer param block for a specific
+- `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid
+  fields (including `rebid_price_step_bps`), and either offer param block for a specific
   `(network, l1_network)` pair. This only affects `risc0/network`; SP1 ignores it.
 - The local dry-run validates guest execution and prepares the request journal.
 
@@ -833,9 +868,37 @@ health:
 - `raiko2_stage_tasks_inflight`
 - `raiko2_stage_task_started_total`
 - `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_failures_total`
 - `raiko2_stage_task_duration_seconds`
+- `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
 
 Import [raiko2-hosted-stage-latency.json](./grafana/raiko2-hosted-stage-latency.json) into
 Grafana for a baseline hosted-api dashboard with preflight, prove, aggregate, inflight, and
 external-submission panels.
+
+For the old log-based alert shape of "too many errors in the last 30 minutes", prefer Prometheus
+counters instead of matching the text `error` in logs. The broad equivalent is:
+
+```promql
+sum(increase(raiko2_stage_task_terminal_total{status="failed"}[30m])) > 30
+```
+
+For diagnosis, alert or dashboard by bounded failure kind:
+
+```promql
+sum by (pair, proof_type, stage, error_kind) (
+  increase(raiko2_stage_task_failures_total[30m])
+)
+```
+
+Duplicate requests that return completed cache hits are normally harmless. Duplicates against failed
+tasks, non-terminal tasks, or completed tasks whose proof artifact is missing should be watched
+separately. Missing completed artifacts are reported as
+`runner_status="completed_artifact_missing"`:
+
+```promql
+sum by (pair, proof_type, aggregate, runner_status) (
+  increase(raiko2_duplicate_requests_total{runner_status!="completed"}[30m])
+)
+```

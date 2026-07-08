@@ -1,4 +1,5 @@
 use super::checkpoint_verify::verify_guest_input_checkpoint_against_l2_rpc;
+use super::host_l2_chain_spec_from_context;
 use super::manifest::ShastaManifestBuilder;
 use crate::{PipelineKey, PipelineSpec, Preflight, ProverBackend, Validation};
 use alethia_reth_block::config::TaikoEvmConfig;
@@ -8,19 +9,20 @@ use alloy_consensus::{
     Header,
     transaction::{SignerRecoverable, Transaction as _},
 };
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::{Encodable, Header as RlpHeader};
 use alloy_sol_types::{SolCall, sol};
-use futures::{StreamExt, future::try_join, stream};
+use futures::{StreamExt, stream};
 use raiko2_primitives::{
     ChainSpec, ExecutionWitness, PreflightRpcClientConfig, ProofContext, ProofType, RaikoError,
     RaikoResult, StatelessInput, SupportedChainSpecs, WitnessStateNode,
-    chain_spec::{ForkCondition, ForkId, GuestInputAbi, TaikoFork},
+    chain_spec::{ForkCondition, ForkId, TaikoFork},
     shasta_checkpoint_storage_slot_candidates, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
-    GuestInput, roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
-    validate_anchor_progression,
+    AnchorSourceSpan, GuestInput, roll_proposal_ancestor_headers_in_place,
+    should_bypass_stalled_anchor_linkage, validate_anchor_progression,
+    validate_source_aware_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
     ParentBlockContext, ProposalMetadata, ShastaEventData,
@@ -32,7 +34,9 @@ use raiko2_protocol_shasta::shasta::{
 use raiko2_provider::{
     AccountProofWitnessNodes, AccountStateMaps, Provider, RpcClientConfig, StorageProofTargets,
 };
-use raiko2_stateless::validate_block_with_witness_resources;
+use raiko2_stateless::{
+    read_parent_storage_with_witness_resources, validate_block_with_witness_resources,
+};
 use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -53,6 +57,7 @@ sol! {
 
 const DEFAULT_PREFLIGHT_CHUNK_SIZE: usize = 8;
 const DEFAULT_PREFLIGHT_CHUNK_CONCURRENCY: usize = 6;
+#[cfg(test)]
 const TAIKO_MAINNET_CHAIN_ID: u64 = 167_000;
 #[cfg(not(test))]
 const PREFLIGHT_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -119,12 +124,23 @@ where
         let (block_numbers, expected_proposal_id, proposal_event) =
             resolve_preflight_block_range_and_proposal_event(ctx, provider, &chain_spec).await?;
         let blocks = fetch_preflight_blocks(provider, &block_numbers).await?;
-        let manifest =
+        let mut manifest =
             build_preflight_manifest(ctx, provider, &chain_spec, &blocks, proposal_event).await?;
         let parent_block =
             fetch_preflight_parent_block_for_tx_lists(provider, &manifest, &blocks).await?;
-        let tx_lists =
-            derive_preflight_tx_lists(&chain_spec, &manifest, parent_block.as_ref(), &blocks)?;
+        let source_data =
+            derive_preflight_source_data(&chain_spec, &manifest, parent_block.as_ref(), &blocks)?;
+        let tx_lists = derive_preflight_tx_lists(source_data.as_ref(), &blocks)?;
+        hydrate_shasta_l1_headers(
+            provider,
+            chain_spec.chain_id,
+            &blocks,
+            &mut manifest,
+            source_data
+                .as_ref()
+                .map(|source_data| source_data.source_spans.as_slice()),
+        )
+        .await?;
         info!(
             proposal_id = ctx.request.proposal_id,
             block_count = block_numbers.len(),
@@ -144,6 +160,9 @@ where
             &chain_spec,
             &blocks,
             &manifest,
+            source_data
+                .as_ref()
+                .map(|source_data| source_data.source_spans.as_slice()),
             &mut witnesses,
         )
         .await?;
@@ -320,13 +339,12 @@ async fn fetch_preflight_blocks<P: Provider>(
 async fn build_preflight_manifest<P: Provider>(
     ctx: &ProofContext,
     provider: &P,
-    chain_spec: &ChainSpec,
+    _chain_spec: &ChainSpec,
     blocks: &[reth_ethereum_primitives::Block],
     proposal_event: ShastaEventData,
 ) -> RaikoResult<raiko2_protocol_shasta::TaikoManifest> {
     let mut manifest =
         ShastaManifestBuilder::taiko_manifest_with_event(ctx, blocks, proposal_event)?;
-    hydrate_shasta_l1_headers(provider, chain_spec.chain_id, blocks, &mut manifest).await?;
     if manifest.data_sources.is_empty() && !manifest.proposal_event.proposal.sources.is_empty() {
         let l1_chain_spec = l1_chain_spec_from_context(ctx)?;
         manifest.data_sources =
@@ -342,6 +360,12 @@ async fn build_preflight_manifest<P: Provider>(
             .await?;
     }
     Ok(manifest)
+}
+
+#[derive(Clone, Debug)]
+struct PreflightSourceData {
+    manifest_blocks: Vec<BlockManifest>,
+    source_spans: Vec<AnchorSourceSpan>,
 }
 
 fn build_preflight_guest_input(
@@ -466,8 +490,70 @@ const fn retryable_shasta_preflight_error(err: &RaikoError) -> bool {
     )
 }
 
-const fn preflight_uses_canonical_witness_for_tx_lists(chain_spec: &ChainSpec) -> bool {
-    chain_spec.chain_id == TAIKO_MAINNET_CHAIN_ID
+fn preflight_requires_tx_list_witnesses(
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> bool {
+    chain_spec
+        .hard_forks
+        .get(&ForkId::Taiko(TaikoFork::Unzen))
+        .is_some_and(|fork| {
+            blocks
+                .iter()
+                .any(|block| fork.active(block.header.number, block.header.timestamp))
+        })
+}
+
+fn tx_list_witness_unavailable(err: &RaikoError) -> bool {
+    if matches!(err, RaikoError::FeatureNotSupportedError(_)) {
+        return true;
+    }
+
+    let (RaikoError::RPC(message)
+    | RaikoError::Provider(message)
+    | RaikoError::RpcWithContext { message, .. }) = err
+    else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    lower.contains("debug_executionwitnessfortxlist")
+        && (lower.contains("method not found")
+            || lower.contains("method_not_found")
+            || lower.contains("-32601")
+            || lower.contains("unsupported")
+            || lower.contains("not available"))
+}
+
+async fn fetch_preflight_chunk_witnesses<P: Provider>(
+    provider: &P,
+    block_numbers: &[u64],
+    tx_lists: Option<&[Bytes]>,
+    requires_tx_list_witness: bool,
+) -> RaikoResult<(Vec<ExecutionWitness>, bool, u128)> {
+    let started_at = Instant::now();
+    let (witnesses, use_canonical_witness) = if let Some(tx_lists) = tx_lists {
+        match provider
+            .batch_witnesses_with_tx_lists(block_numbers, tx_lists)
+            .await
+        {
+            Ok(witnesses) => (witnesses, false),
+            Err(err) if !requires_tx_list_witness && tx_list_witness_unavailable(&err) => {
+                warn!(
+                    error = %err,
+                    "falling back to canonical Shasta witnesses before Unzen because tx-list witness API is unavailable"
+                );
+                (provider.batch_witnesses(block_numbers).await?, true)
+            }
+            Err(err) => return Err(err),
+        }
+    } else {
+        (provider.batch_witnesses(block_numbers).await?, false)
+    };
+    Ok((
+        witnesses,
+        use_canonical_witness,
+        started_at.elapsed().as_millis(),
+    ))
 }
 
 fn derived_tx_list_signers(tx_list: &Bytes) -> RaikoResult<Vec<Address>> {
@@ -533,49 +619,56 @@ fn merge_account_witness_nodes(
     }
 }
 
-async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
-    provider: &P,
-    chain_spec: &ChainSpec,
-    blocks: &[reth_ethereum_primitives::Block],
-    manifest: &raiko2_protocol_shasta::TaikoManifest,
-    witnesses: &mut [StatelessInput],
-) -> RaikoResult<()> {
-    let proposal = &manifest.proposal_event.proposal;
-    let origin_block_number = proposal.originBlockNumber.to::<u64>();
-    let anchor_checkpoints = blocks
-        .iter()
-        .map(decode_anchor_checkpoint)
-        .collect::<RaikoResult<Vec<_>>>()?;
-    let anchor_block_numbers = anchor_checkpoints
-        .iter()
-        .map(|checkpoint| checkpoint.block_number)
-        .collect::<Vec<_>>();
-    let last_anchor_block_number = manifest
-        .prover_data
-        .last_anchor_block_number
-        .unwrap_or_default();
-    if !should_bypass_stalled_anchor_linkage(
-        &anchor_block_numbers,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParentCheckpointValidationScope {
+    All,
+    ForcedPrefix(usize),
+}
+
+fn parent_checkpoint_validation_scope(
+    anchor_block_numbers: &[u64],
+    source_spans: Option<&[AnchorSourceSpan]>,
+    last_anchor_block_number: u64,
+    origin_block_number: u64,
+    chain_id: u64,
+) -> RaikoResult<Option<ParentCheckpointValidationScope>> {
+    if should_bypass_stalled_anchor_linkage(
+        anchor_block_numbers,
         last_anchor_block_number,
         origin_block_number,
-        chain_spec.chain_id,
+        chain_id,
     ) {
-        return Ok(());
+        return Ok(Some(ParentCheckpointValidationScope::All));
     }
 
-    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
-        RaikoError::InvalidRequestConfig(
-            "chain_spec.checkpoint_store_contract required for stalled Shasta anchor validation"
-                .to_string(),
-        )
-    })?;
-    let first_witness = witnesses.first_mut().ok_or_else(|| {
-        RaikoError::Preflight(
-            "cannot hydrate Shasta checkpoint proof without witnesses".to_string(),
-        )
-    })?;
-    let block_numbers = [first_witness.block.header.number];
-    let storage_keys = shasta_checkpoint_storage_slot_candidates(last_anchor_block_number)
+    let Some(source_spans) = source_spans else {
+        return Ok(None);
+    };
+    let plan = validate_source_aware_anchor_progression(
+        anchor_block_numbers,
+        source_spans,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_id,
+    )
+    .map_err(RaikoError::Preflight)?;
+    if plan.requires_parent_checkpoint {
+        Ok(Some(ParentCheckpointValidationScope::ForcedPrefix(
+            plan.l1_header_anchor_start_index,
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn fetch_parent_checkpoint_witness_nodes<P: Provider>(
+    provider: &P,
+    witness_block_number: u64,
+    checkpoint_store: Address,
+    checkpoint_block_number: u64,
+) -> RaikoResult<Vec<WitnessStateNode>> {
+    let block_numbers = [witness_block_number];
+    let storage_keys = shasta_checkpoint_storage_slot_candidates(checkpoint_block_number)
         .into_iter()
         .flat_map(|(block_hash_slot, state_root_slot)| {
             [
@@ -603,14 +696,92 @@ async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
     let nodes = checkpoint_witness_nodes.remove(0);
     if nodes.is_empty() {
         return Err(RaikoError::Provider(
-            "provider returned no checkpoint proof witness nodes for stalled Shasta anchor"
+            "provider returned no checkpoint proof witness nodes for Shasta parent checkpoint"
                 .to_string(),
         ));
     }
+    Ok(nodes)
+}
+
+async fn hydrate_shasta_parent_checkpoint_witness<P: Provider>(
+    provider: &P,
+    chain_spec: &ChainSpec,
+    blocks: &[reth_ethereum_primitives::Block],
+    manifest: &raiko2_protocol_shasta::TaikoManifest,
+    source_spans: Option<&[AnchorSourceSpan]>,
+    witnesses: &mut [StatelessInput],
+) -> RaikoResult<()> {
+    let proposal = &manifest.proposal_event.proposal;
+    let origin_block_number = proposal.originBlockNumber.to::<u64>();
+    let anchor_checkpoints = blocks
+        .iter()
+        .map(decode_anchor_checkpoint)
+        .collect::<RaikoResult<Vec<_>>>()?;
+    let anchor_block_numbers = anchor_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .collect::<Vec<_>>();
+    let last_anchor_block_number = manifest
+        .prover_data
+        .last_anchor_block_number
+        .unwrap_or_default();
+    let Some(validation_scope) = parent_checkpoint_validation_scope(
+        &anchor_block_numbers,
+        source_spans,
+        last_anchor_block_number,
+        origin_block_number,
+        chain_spec.chain_id,
+    )?
+    else {
+        return Ok(());
+    };
+
+    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.checkpoint_store_contract required for stalled Shasta anchor validation"
+                .to_string(),
+        )
+    })?;
+    let first_witness = witnesses.first_mut().ok_or_else(|| {
+        RaikoError::Preflight(
+            "cannot hydrate Shasta checkpoint proof without witnesses".to_string(),
+        )
+    })?;
+    let nodes = fetch_parent_checkpoint_witness_nodes(
+        provider,
+        first_witness.block.header.number,
+        checkpoint_store,
+        last_anchor_block_number,
+    )
+    .await?;
     first_witness.witness.state.extend(nodes);
     first_witness.witness.state = ExecutionWitness::canonicalize_state_nodes(std::mem::take(
         &mut first_witness.witness.state,
     ));
+    let parent_checkpoint =
+        parent_checkpoint_from_witness(chain_spec, first_witness, last_anchor_block_number)?;
+    match validation_scope {
+        ParentCheckpointValidationScope::All => {
+            validate_anchor_checkpoints_match_parent(
+                &anchor_checkpoints,
+                &parent_checkpoint,
+                "anchor checkpoint",
+            )?;
+        }
+        ParentCheckpointValidationScope::ForcedPrefix(forced_prefix_len) => {
+            let forced_checkpoints =
+                anchor_checkpoints.get(..forced_prefix_len).ok_or_else(|| {
+                    RaikoError::Preflight(format!(
+                        "invalid forced inclusion anchor checkpoint range {forced_prefix_len}"
+                    ))
+                })?;
+            validate_anchor_checkpoints_match_parent(
+                forced_checkpoints,
+                &parent_checkpoint,
+                "forced inclusion anchor checkpoint",
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -647,21 +818,16 @@ async fn fetch_preflight_chunk<P: Provider>(
             blocks.len()
         )));
     }
-    let use_canonical_witness =
-        tx_lists.is_some() && preflight_uses_canonical_witness_for_tx_lists(&chain_spec);
-    let witnesses = async {
-        let started_at = Instant::now();
-        let witnesses = if let Some(tx_lists) = tx_lists
-            && !use_canonical_witness
-        {
-            provider
-                .batch_witnesses_with_tx_lists(&block_numbers, tx_lists)
-                .await
-        } else {
-            provider.batch_witnesses(&block_numbers).await
-        }?;
-        Ok::<_, RaikoError>((witnesses, started_at.elapsed().as_millis()))
-    };
+    let requires_tx_list_witness =
+        tx_lists.is_some() && preflight_requires_tx_list_witnesses(&chain_spec, blocks);
+    let (mut witnesses, use_canonical_witness, witnesses_elapsed_ms) =
+        fetch_preflight_chunk_witnesses(
+            provider,
+            &block_numbers,
+            tx_lists,
+            requires_tx_list_witness,
+        )
+        .await?;
     let account_targets = blocks
         .iter()
         .enumerate()
@@ -669,16 +835,13 @@ async fn fetch_preflight_chunk<P: Provider>(
             collect_preflight_account_targets(tx_lists.map(|tx_lists| &tx_lists[index]))
         })
         .collect::<RaikoResult<Vec<_>>>()?;
-    let accounts = fetch_preflight_accounts(
+    let (accounts, account_witness_nodes, accounts_elapsed_ms) = fetch_preflight_accounts(
         provider,
         &block_numbers,
         &account_targets,
         use_canonical_witness,
-    );
-    let (
-        (mut witnesses, witnesses_elapsed_ms),
-        (accounts, account_witness_nodes, accounts_elapsed_ms),
-    ) = try_join(witnesses, accounts).await?;
+    )
+    .await?;
 
     if blocks.len() != witnesses.len()
         || blocks.len() != accounts.len()
@@ -722,12 +885,12 @@ async fn fetch_preflight_chunk<P: Provider>(
     Ok((chunk_index, witnesses))
 }
 
-fn derive_preflight_tx_lists(
+fn derive_preflight_source_data(
     chain_spec: &ChainSpec,
     manifest: &raiko2_protocol_shasta::TaikoManifest,
     parent_block: Option<&reth_ethereum_primitives::Block>,
     blocks: &[reth_ethereum_primitives::Block],
-) -> RaikoResult<Option<Vec<Bytes>>> {
+) -> RaikoResult<Option<PreflightSourceData>> {
     let sources = &manifest.proposal_event.proposal.sources;
     if sources.is_empty() {
         return Ok(None);
@@ -768,6 +931,7 @@ fn derive_preflight_tx_lists(
     };
 
     let mut manifest_blocks = Vec::new();
+    let mut source_spans = Vec::with_capacity(sources.len());
     for (source_index, source) in sources.iter().enumerate() {
         let source_manifest = prepare_source_manifest_with_max_blocks(
             source,
@@ -782,6 +946,7 @@ fn derive_preflight_tx_lists(
                 "failed to decode Shasta tx-list source {source_index}: {err}"
             ))
         })?;
+        let block_count = source_manifest.blocks.len();
         for block in source_manifest.blocks {
             parent = ParentBlockContext {
                 timestamp: block.timestamp,
@@ -791,6 +956,10 @@ fn derive_preflight_tx_lists(
             };
             manifest_blocks.push(block);
         }
+        source_spans.push(AnchorSourceSpan {
+            is_forced_inclusion: source.isForcedInclusion,
+            block_count,
+        });
     }
 
     if manifest_blocks.len() != blocks.len() {
@@ -801,9 +970,31 @@ fn derive_preflight_tx_lists(
         )));
     }
 
+    Ok(Some(PreflightSourceData {
+        manifest_blocks,
+        source_spans,
+    }))
+}
+
+fn derive_preflight_tx_lists(
+    source_data: Option<&PreflightSourceData>,
+    blocks: &[reth_ethereum_primitives::Block],
+) -> RaikoResult<Option<Vec<Bytes>>> {
+    let Some(source_data) = source_data else {
+        return Ok(None);
+    };
+
+    if source_data.manifest_blocks.len() != blocks.len() {
+        return Err(RaikoError::Preflight(format!(
+            "manifest block count ({}) does not match fetched block count ({})",
+            source_data.manifest_blocks.len(),
+            blocks.len()
+        )));
+    }
+
     blocks
         .iter()
-        .zip(manifest_blocks.iter())
+        .zip(source_data.manifest_blocks.iter())
         .map(|(block, manifest_block)| encode_replay_tx_list(block, manifest_block))
         .collect::<RaikoResult<Vec<_>>>()
         .map(Some)
@@ -945,26 +1136,9 @@ fn validate_fetched_block_numbers(
 }
 
 fn chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
-    let guest_input_abi = guest_input_abi_from_context(ctx)?;
-    let chain_spec = SupportedChainSpecs::default()
-        .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
-        .unwrap_or_else(|| ChainSpec {
-            name: "unknown".to_string(),
-            chain_id: ctx.request.l2_chain_id,
-            ..Default::default()
-        });
-    Ok(chain_spec.project_for_guest_input_abi(guest_input_abi))
-}
-
-fn guest_input_abi_from_context(ctx: &ProofContext) -> RaikoResult<GuestInputAbi> {
-    let Some(value) = ctx.config.get("guest_input_abi") else {
-        return Ok(GuestInputAbi::default());
-    };
-    if value.is_null() {
-        return Ok(GuestInputAbi::default());
-    }
-    serde_json::from_value(value.clone()).map_err(|err| {
-        RaikoError::InvalidRequestConfig(format!("invalid prover.guest_input_abi: {err}"))
+    let chain_spec = host_l2_chain_spec_from_context(ctx)?;
+    chain_spec.align_taiko_runtime_forks().map_err(|err| {
+        RaikoError::InvalidRequestConfig(format!("failed to align Taiko runtime chain spec: {err}"))
     })
 }
 
@@ -1073,6 +1247,112 @@ fn decode_anchor_checkpoint(
     })
 }
 
+fn storage_word_as_b256(word: U256) -> B256 {
+    B256::from(word.to_be_bytes::<32>())
+}
+
+fn read_checkpoint_record_from_witness(
+    checkpoint_store: Address,
+    first_witness: &StatelessInput,
+    block_hash_slot: U256,
+    state_root_slot: U256,
+) -> RaikoResult<Option<(B256, B256)>> {
+    let block_hash = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            block_hash_slot,
+            &first_witness.witness,
+            &first_witness.witness.headers,
+            &[],
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to read parent CheckpointStore blockHash: {err}"
+            ))
+        })?,
+    );
+    if block_hash == B256::ZERO {
+        return Ok(None);
+    }
+
+    let state_root = storage_word_as_b256(
+        read_parent_storage_with_witness_resources(
+            checkpoint_store,
+            state_root_slot,
+            &first_witness.witness,
+            &first_witness.witness.headers,
+            &[],
+        )
+        .map_err(|err| {
+            RaikoError::Preflight(format!(
+                "failed to read parent CheckpointStore stateRoot: {err}"
+            ))
+        })?,
+    );
+    if state_root == B256::ZERO {
+        return Err(RaikoError::Preflight(
+            "parent CheckpointStore stateRoot is zero".to_string(),
+        ));
+    }
+
+    Ok(Some((block_hash, state_root)))
+}
+
+fn parent_checkpoint_from_witness(
+    chain_spec: &ChainSpec,
+    first_witness: &StatelessInput,
+    block_number: u64,
+) -> RaikoResult<AnchorCheckpoint> {
+    let checkpoint_store = chain_spec.checkpoint_store_contract.ok_or_else(|| {
+        RaikoError::InvalidRequestConfig(
+            "chain_spec.checkpoint_store_contract required for Shasta parent checkpoint validation"
+                .to_string(),
+        )
+    })?;
+
+    for (block_hash_slot, state_root_slot) in
+        shasta_checkpoint_storage_slot_candidates(block_number)
+    {
+        if let Some((block_hash, state_root)) = read_checkpoint_record_from_witness(
+            checkpoint_store,
+            first_witness,
+            block_hash_slot,
+            state_root_slot,
+        )? {
+            return Ok(AnchorCheckpoint {
+                block_number,
+                block_hash,
+                state_root,
+            });
+        }
+    }
+
+    Err(RaikoError::Preflight(format!(
+        "parent CheckpointStore blockHash is zero for block {block_number} in all known layouts"
+    )))
+}
+
+fn validate_anchor_checkpoints_match_parent(
+    checkpoints: &[AnchorCheckpoint],
+    parent_checkpoint: &AnchorCheckpoint,
+    label: &str,
+) -> RaikoResult<()> {
+    for checkpoint in checkpoints {
+        if checkpoint != parent_checkpoint {
+            return Err(RaikoError::Preflight(format!(
+                "{label} ({}, {:?}, {:?}) does not match parent checkpoint ({}, {:?}, {:?})",
+                checkpoint.block_number,
+                checkpoint.block_hash,
+                checkpoint.state_root,
+                parent_checkpoint.block_number,
+                parent_checkpoint.block_hash,
+                parent_checkpoint.state_root
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn hydrate_stalled_shasta_origin_header<P: Provider>(
     provider: &P,
     origin_block_number: u64,
@@ -1111,11 +1391,50 @@ async fn hydrate_stalled_shasta_origin_header<P: Provider>(
     Ok(())
 }
 
+fn l1_header_anchor_checkpoints<'a>(
+    anchor_checkpoints: &'a [AnchorCheckpoint],
+    anchor_block_numbers: &[u64],
+    source_spans: Option<&[AnchorSourceSpan]>,
+    last_anchor_block_number: u64,
+    origin_block_number: u64,
+    chain_id: u64,
+) -> RaikoResult<&'a [AnchorCheckpoint]> {
+    let l1_header_anchor_start_index = if let Some(source_spans) = source_spans {
+        validate_source_aware_anchor_progression(
+            anchor_block_numbers,
+            source_spans,
+            last_anchor_block_number,
+            origin_block_number,
+            chain_id,
+        )
+        .map_err(RaikoError::Preflight)?
+        .l1_header_anchor_start_index
+    } else {
+        validate_anchor_progression(
+            anchor_block_numbers,
+            last_anchor_block_number,
+            origin_block_number,
+            chain_id,
+        )
+        .map_err(RaikoError::Preflight)?;
+        0
+    };
+
+    anchor_checkpoints
+        .get(l1_header_anchor_start_index..)
+        .ok_or_else(|| {
+            RaikoError::Preflight(format!(
+                "invalid Shasta anchor start index {l1_header_anchor_start_index}"
+            ))
+        })
+}
+
 async fn hydrate_shasta_l1_headers<P: Provider>(
     provider: &P,
     chain_id: u64,
     blocks: &[reth_ethereum_primitives::Block],
     manifest: &mut raiko2_protocol_shasta::TaikoManifest,
+    source_spans: Option<&[AnchorSourceSpan]>,
 ) -> RaikoResult<()> {
     let proposal = &manifest.proposal_event.proposal;
     let origin_block_number = proposal.originBlockNumber.to::<u64>();
@@ -1152,16 +1471,21 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
         )
         .await;
     }
-    validate_anchor_progression(
+    let header_anchor_checkpoints = l1_header_anchor_checkpoints(
+        &anchor_checkpoints,
         &anchor_block_numbers,
+        source_spans,
         last_anchor_block_number,
         origin_block_number,
         chain_id,
-    )
-    .map_err(RaikoError::Preflight)?;
-    let min_anchor_block_number = anchor_block_numbers.iter().copied().min().ok_or_else(|| {
-        RaikoError::Preflight("cannot derive Shasta anchor checkpoints".to_string())
-    })?;
+    )?;
+    let min_anchor_block_number = header_anchor_checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.block_number)
+        .min()
+        .ok_or_else(|| {
+            RaikoError::Preflight("cannot derive Shasta anchor checkpoints".to_string())
+        })?;
     let first_required_header_block_number = min_anchor_block_number.max(last_anchor_block_number);
     let l1_block_numbers =
         (first_required_header_block_number..=origin_block_number).collect::<Vec<_>>();
@@ -1180,7 +1504,7 @@ async fn hydrate_shasta_l1_headers<P: Provider>(
     validate_l1_headers(
         &l1_headers,
         &l1_block_numbers,
-        &anchor_checkpoints,
+        header_anchor_checkpoints,
         proposal.originBlockHash,
     )?;
     let origin_header = l1_headers
@@ -1524,8 +1848,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorCheckpoint, AnchorV4Checkpoint, Preflight, ShastaSpec, TAIKO_GOLDEN_TOUCH_ADDRESS,
-        anchorV4Call, validate_l1_headers,
+        AnchorCheckpoint, AnchorSourceSpan, AnchorV4Checkpoint, Preflight, ShastaSpec,
+        TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call, validate_l1_headers,
     };
     use alethia_reth_chainspec::{
         TAIKO_MAINNET,
@@ -1534,15 +1858,18 @@ mod tests {
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
     use alloy_eips::eip4844::BYTES_PER_BLOB;
     use alloy_hardforks::ForkCondition as AlethiaForkCondition;
-    use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, map::AddressMap};
+    use alloy_primitives::{
+        Address, B256, Bytes, KECCAK256_EMPTY, Signature, TxKind, U256, keccak256, map::AddressMap,
+    };
     use alloy_sol_types::SolCall;
     use alloy_trie::TrieAccount;
     use raiko2_primitives::{
         ChainSpec, ExecutionWitness, L2BlockRange, ProofContext, ProofRequest, ProofType,
-        ProverConfig, RaikoError, RaikoResult, ShastaRequest, SupportedChainSpecs,
-        WitnessStateNode,
+        ProverConfig, RaikoError, RaikoResult, ShastaRequest, StatelessInput, SupportedChainSpecs,
+        WitnessHeader, WitnessStateNode,
         chain_spec::{ForkCondition, ForkId, TaikoFork},
-        shasta_checkpoint_storage_slot_candidates, storage_slot_key,
+        shasta_checkpoint_storage_slot_candidates, shasta_checkpoint_storage_slots,
+        storage_slot_key,
     };
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{
@@ -1550,9 +1877,13 @@ mod tests {
         manifest::{BlockManifest, DerivationSourceManifest},
     };
     use raiko2_provider::{Provider, StorageProofTargets};
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use risc0_ethereum_trie::Trie;
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::{NativeBackend, PipelineKey};
@@ -1560,18 +1891,32 @@ mod tests {
     #[derive(Clone)]
     struct TestProvider {
         block: reth_ethereum_primitives::Block,
+        blocks: Vec<reth_ethereum_primitives::Block>,
         parent_block: reth_ethereum_primitives::Block,
         proposal_event: ShastaEventData,
         l1_headers: Vec<Header>,
         data_sources: Vec<InputDataSource>,
+        witnesses: Arc<Mutex<Vec<ExecutionWitness>>>,
         witness_failures: Arc<AtomicUsize>,
         witness_calls: Arc<AtomicUsize>,
+        tx_list_witness_supported: bool,
         tx_list_witness_calls: Arc<AtomicUsize>,
         tx_list_witness_inputs: Arc<Mutex<Vec<Bytes>>>,
         account_inputs: Arc<Mutex<Vec<Vec<Address>>>>,
         account_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
         storage_proof_inputs: Arc<Mutex<StorageProofTargets>>,
         storage_witness_nodes: Arc<Mutex<Vec<Vec<WitnessStateNode>>>>,
+    }
+
+    impl TestProvider {
+        fn configured_witnesses(&self, count: usize) -> Vec<ExecutionWitness> {
+            let witnesses = self.witnesses.lock().expect("witnesses lock").clone();
+            if witnesses.is_empty() {
+                vec![ExecutionWitness::default(); count]
+            } else {
+                witnesses
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -1585,6 +1930,12 @@ mod tests {
                 .map(|block_number| {
                     if *block_number == self.parent_block.header.number {
                         self.parent_block.clone()
+                    } else if let Some(block) = self
+                        .blocks
+                        .iter()
+                        .find(|block| block.header.number == *block_number)
+                    {
+                        block.clone()
                     } else {
                         self.block.clone()
                     }
@@ -1598,7 +1949,7 @@ mod tests {
             accounts: &[Vec<Address>],
         ) -> RaikoResult<Vec<AddressMap<TrieAccount>>> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            Ok(vec![AddressMap::default()])
+            Ok(vec![AddressMap::default(); accounts.len()])
         }
 
         async fn batch_accounts_with_proof_witnesses(
@@ -1607,12 +1958,15 @@ mod tests {
             accounts: &[Vec<Address>],
         ) -> RaikoResult<(Vec<AddressMap<TrieAccount>>, Vec<Vec<WitnessStateNode>>)> {
             *self.account_inputs.lock().expect("account inputs lock") = accounts.to_vec();
-            let nodes = self
+            let mut nodes = self
                 .account_witness_nodes
                 .lock()
                 .expect("account witness nodes lock")
                 .clone();
-            Ok((vec![AddressMap::default()], nodes))
+            if nodes.is_empty() {
+                nodes = vec![Vec::new(); accounts.len()];
+            }
+            Ok((vec![AddressMap::default(); accounts.len()], nodes))
         }
 
         async fn batch_storage_proof_witnesses(
@@ -1642,7 +1996,7 @@ mod tests {
             {
                 return Err(RaikoError::RPC("transient witness rpc error".to_string()));
             }
-            Ok(vec![ExecutionWitness::default()])
+            Ok(self.configured_witnesses(_blocks.len()))
         }
 
         async fn batch_witnesses_with_tx_lists(
@@ -1651,14 +2005,16 @@ mod tests {
             tx_lists: &[Bytes],
         ) -> RaikoResult<Vec<ExecutionWitness>> {
             self.tx_list_witness_calls.fetch_add(1, Ordering::SeqCst);
+            if !self.tx_list_witness_supported {
+                return Err(RaikoError::FeatureNotSupportedError(
+                    "provider does not support tx-list execution witnesses".to_string(),
+                ));
+            }
             *self
                 .tx_list_witness_inputs
                 .lock()
                 .expect("tx list witness inputs lock") = tx_lists.to_vec();
-            Ok(tx_lists
-                .iter()
-                .map(|_| ExecutionWitness::default())
-                .collect())
+            Ok(self.configured_witnesses(tx_lists.len()))
         }
 
         async fn batch_l1_headers(&self, blocks: &[u64]) -> RaikoResult<Vec<Header>> {
@@ -1775,7 +2131,8 @@ mod tests {
         let mut parent_hash = None;
         (start..=end)
             .map(|number| {
-                let mut header = sample_l1_header(number, B256::from([number as u8; 32]));
+                let number_byte = u8::try_from(number).expect("fixture header number fits in byte");
+                let mut header = sample_l1_header(number, B256::from([number_byte; 32]));
                 if let Some(hash) = parent_hash {
                     header.parent_hash = hash;
                 }
@@ -1801,6 +2158,80 @@ mod tests {
             stateRoot: anchor_state_root,
         }));
         block
+    }
+
+    fn parent_checkpoint_state_witness(
+        checkpoint_store: Address,
+        checkpoint: AnchorCheckpoint,
+    ) -> (B256, Vec<WitnessStateNode>) {
+        let (block_hash_slot, state_root_slot) =
+            shasta_checkpoint_storage_slots(checkpoint.block_number);
+        let mut checkpoint_storage_trie = Trie::default();
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(block_hash_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.block_hash.as_slice())),
+        );
+        checkpoint_storage_trie.insert(
+            keccak256(B256::from(state_root_slot.to_be_bytes::<32>())),
+            alloy_rlp::encode(U256::from_be_slice(checkpoint.state_root.as_slice())),
+        );
+
+        let mut state_trie = Trie::default();
+        state_trie.insert(
+            keccak256(checkpoint_store),
+            alloy_rlp::encode(TrieAccount {
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: checkpoint_storage_trie.hash_slow(),
+                code_hash: KECCAK256_EMPTY,
+            }),
+        );
+
+        let state_root = state_trie.hash_slow();
+        let state_nodes = state_trie
+            .rlp_nodes()
+            .into_iter()
+            .chain(checkpoint_storage_trie.rlp_nodes())
+            .map(WitnessStateNode::from_bytes)
+            .collect();
+        (
+            state_root,
+            ExecutionWitness::canonicalize_state_nodes(state_nodes),
+        )
+    }
+
+    fn expected_checkpoint_storage_keys(block_number: u64) -> Vec<B256> {
+        shasta_checkpoint_storage_slot_candidates(block_number)
+            .into_iter()
+            .flat_map(|(block_hash_slot, state_root_slot)| {
+                [
+                    storage_slot_key(block_hash_slot),
+                    storage_slot_key(state_root_slot),
+                ]
+            })
+            .collect()
+    }
+
+    fn stateless_input_with_parent_checkpoint(
+        chain_spec: &ChainSpec,
+        checkpoint: AnchorCheckpoint,
+    ) -> StatelessInput {
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (parent_state_root, _) = parent_checkpoint_state_witness(checkpoint_store, checkpoint);
+        let parent_header = Header {
+            state_root: parent_state_root,
+            ..Default::default()
+        };
+        StatelessInput {
+            chain_spec: chain_spec.clone(),
+            witness: ExecutionWitness {
+                headers: vec![WitnessHeader::from_header(parent_header)],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     fn sample_context(
@@ -1832,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_spec_from_context_defaults_to_current_guest_input_abi() {
+    fn chain_spec_from_context_uses_current_aligned_chain_spec() {
         let mut ctx = sample_context(42, 11, 9);
         ctx.request.l2_chain_id = 167_000;
         let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
@@ -1849,32 +2280,45 @@ mod tests {
     }
 
     #[test]
-    fn chain_spec_from_context_projects_v0_1_0_guest_input_abi() {
+    fn chain_spec_from_context_uses_resolved_l2_overlay() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.request.l2_chain_id = 167_000;
-        ctx.config = serde_json::json!({ "guest_input_abi": "v0_1_0" });
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        let custom_verifier = Address::repeat_byte(0x42);
+        spec.verifier_address_forks
+            .get_mut(&ForkId::Taiko(TaikoFork::Shasta))
+            .expect("devnet Shasta verifiers")
+            .insert(ProofType::Sgx, Some(custom_verifier));
+        ctx.request.l2_chain_id = spec.chain_id;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
 
-        let spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let resolved = super::chain_spec_from_context(&ctx).expect("chain spec");
 
         assert_eq!(
-            spec.hard_forks.get(&ForkId::Taiko(TaikoFork::Shasta)),
-            Some(&ForkCondition::Timestamp(alethia_mainnet_shasta_timestamp()))
+            resolved
+                .get_fork_verifier_address(0, 0, ProofType::Sgx)
+                .expect("resolved verifier"),
+            custom_verifier
         );
-        assert!(
-            spec.verifier_address_forks
-                .values()
-                .all(|verifiers| !verifiers.contains_key(&ProofType::SgxGeth))
+        assert_eq!(
+            resolved.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
     }
 
     #[test]
-    fn chain_spec_from_context_rejects_invalid_guest_input_abi() {
+    fn chain_spec_from_context_rejects_mismatched_l2_overlay() {
         let mut ctx = sample_context(42, 11, 9);
-        ctx.config = serde_json::json!({ "guest_input_abi": "legacy" });
+        let mut spec = SupportedChainSpecs::default()
+            .get_chain_spec("taiko_dev")
+            .expect("known devnet chain spec");
+        spec.chain_id += 1;
+        ctx.preflight.resolved_l2_chain_spec = Some(spec);
 
-        let err = super::chain_spec_from_context(&ctx).expect_err("invalid abi");
+        let err = super::chain_spec_from_context(&ctx).expect_err("chain id mismatch");
 
-        assert!(err.to_string().contains("invalid prover.guest_input_abi"));
+        assert!(matches!(err, RaikoError::InvalidRequestConfig(_)));
     }
 
     #[test]
@@ -1926,12 +2370,15 @@ mod tests {
 
         TestProvider {
             block,
+            blocks: Vec::new(),
             parent_block,
             proposal_event,
             l1_headers: vec![origin_header],
             data_sources: Vec::new(),
+            witnesses: Arc::new(Mutex::new(Vec::new())),
             witness_failures: Arc::new(AtomicUsize::new(0)),
             witness_calls: Arc::new(AtomicUsize::new(0)),
+            tx_list_witness_supported: true,
             tx_list_witness_calls: Arc::new(AtomicUsize::new(0)),
             tx_list_witness_inputs: Arc::new(Mutex::new(Vec::new())),
             account_inputs: Arc::new(Mutex::new(Vec::new())),
@@ -1942,6 +2389,34 @@ mod tests {
             storage_witness_nodes: Arc::new(Mutex::new(vec![vec![WitnessStateNode::from_bytes(
                 Bytes::from_static(&[0xc1, 0x80]),
             )]])),
+        }
+    }
+
+    fn empty_replay_tx_lists(provider: &TestProvider) -> Vec<Bytes> {
+        vec![
+            super::encode_replay_tx_list(
+                &provider.block,
+                &BlockManifest {
+                    timestamp: provider.block.header.timestamp,
+                    coinbase: provider.block.header.beneficiary,
+                    anchor_block_number: 10,
+                    gas_limit: provider.block.header.gas_limit,
+                    transactions: Vec::new(),
+                },
+            )
+            .expect("encode tx list"),
+        ]
+    }
+
+    fn unzen_active_chain_spec(name: &str, chain_id: u64) -> ChainSpec {
+        ChainSpec {
+            name: name.to_string(),
+            chain_id,
+            hard_forks: BTreeMap::from([(
+                ForkId::Taiko(TaikoFork::Unzen),
+                ForkCondition::Timestamp(0),
+            )]),
+            ..Default::default()
         }
     }
 
@@ -2142,11 +2617,7 @@ mod tests {
         let signers =
             super::derived_tx_list_signers(&tx_lists[0]).expect("recover derived tx list signers");
         assert!(!signers.is_empty());
-        let chain_spec = ChainSpec {
-            name: "taiko_hoodi".to_string(),
-            chain_id: 167_013,
-            ..Default::default()
-        };
+        let chain_spec = unzen_active_chain_spec("taiko_hoodi", 167_013);
 
         let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
             &provider,
@@ -2194,21 +2665,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mainnet_tx_list_preflight_uses_canonical_witness() {
+    async fn pre_unzen_tx_list_preflight_prefers_tx_list_witness_when_available() {
         let provider = sample_provider();
-        let tx_lists = vec![
-            super::encode_replay_tx_list(
-                &provider.block,
-                &BlockManifest {
-                    timestamp: provider.block.header.timestamp,
-                    coinbase: provider.block.header.beneficiary,
-                    anchor_block_number: 10,
-                    gas_limit: provider.block.header.gas_limit,
-                    transactions: Vec::new(),
-                },
-            )
-            .expect("encode tx list"),
-        ];
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = ChainSpec {
+            name: "taiko_mainnet".to_string(),
+            chain_id: super::TAIKO_MAINNET_CHAIN_ID,
+            ..Default::default()
+        };
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(witnesses[0].witness.state.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pre_unzen_tx_list_preflight_falls_back_to_canonical_when_tx_list_witness_unsupported()
+    {
+        let mut provider = sample_provider();
+        provider.tx_list_witness_supported = false;
+        let tx_lists = empty_replay_tx_lists(&provider);
         let chain_spec = ChainSpec {
             name: "taiko_mainnet".to_string(),
             chain_id: super::TAIKO_MAINNET_CHAIN_ID,
@@ -2229,8 +2718,55 @@ mod tests {
 
         assert_eq!(witnesses.len(), 1);
         assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
         assert_eq!(witnesses[0].witness.state.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unzen_tx_list_preflight_uses_tx_list_witness_even_on_mainnet_chain_id() {
+        let provider = sample_provider();
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = unzen_active_chain_spec("taiko_mainnet", super::TAIKO_MAINNET_CHAIN_ID);
+
+        let (_chunk_index, witnesses) = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect("fetch preflight chunk");
+
+        assert_eq!(witnesses.len(), 1);
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unzen_tx_list_preflight_rejects_provider_without_tx_list_witness() {
+        let mut provider = sample_provider();
+        provider.tx_list_witness_supported = false;
+        let tx_lists = empty_replay_tx_lists(&provider);
+        let chain_spec = unzen_active_chain_spec("taiko_mainnet", super::TAIKO_MAINNET_CHAIN_ID);
+
+        let err = super::fetch_preflight_chunk(
+            &provider,
+            42,
+            0,
+            1,
+            std::slice::from_ref(&provider.block),
+            Some(&tx_lists),
+            chain_spec,
+        )
+        .await
+        .expect_err("preflight should require tx-list witness support after Unzen");
+
+        assert!(err.to_string().contains("tx-list execution witnesses"));
+        assert_eq!(provider.witness_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.tx_list_witness_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -2302,7 +2838,8 @@ mod tests {
 
     #[test]
     fn preflight_chunk_operation_includes_proposal_and_block_range() {
-        let operation = super::preflight_chunk_operation(2156, 19, 48, &[10834703, 10834704], true);
+        let operation =
+            super::preflight_chunk_operation(2156, 19, 48, &[10_834_703, 10_834_704], true);
 
         assert_eq!(
             operation,
@@ -2426,14 +2963,13 @@ mod tests {
 
         ctx.request.l2_chain_id = 167_001;
         let devnet = super::chain_spec_from_context(&ctx).expect("chain spec");
-        assert!(
-            !devnet
-                .hard_forks
-                .contains_key(&ForkId::Taiko(TaikoFork::Unzen))
+        assert_eq!(
+            devnet.hard_forks.get(&ForkId::Taiko(TaikoFork::Unzen)),
+            Some(&ForkCondition::Timestamp(0))
         );
         assert_eq!(
-            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, u64::MAX),
-            super::DERIVATION_SOURCE_MAX_BLOCKS
+            super::derivation_source_max_blocks_for_chain_spec_at(&devnet, 1, 0),
+            super::UNZEN_DERIVATION_SOURCE_MAX_BLOCKS
         );
 
         ctx.request.l2_chain_id = 167_011;
@@ -2545,6 +3081,23 @@ mod tests {
         provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
         provider.l1_headers = l1_headers;
         let ctx = sample_context(42, 201, 10);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: anchor_header.number,
+            block_hash: anchor_header.hash_slow(),
+            state_root: anchor_header.state_root,
+        };
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        *provider.witnesses.lock().expect("witnesses lock") =
+            vec![stateless_input_with_parent_checkpoint(&chain_spec, parent_checkpoint).witness];
         let spec = ShastaSpec::new(
             PipelineKey::ShastaNative,
             (),
@@ -2556,27 +3109,373 @@ mod tests {
 
         assert!(input.taiko.l1_ancestor_headers.is_empty());
         assert_eq!(input.taiko.l1_header.number, origin_header.number);
-        let checkpoint_store = SupportedChainSpecs::default()
-            .get_chain_spec_with_chain_id(input.taiko.chain_spec.chain_id)
-            .expect("supported test chain")
-            .checkpoint_store_contract
-            .expect("checkpoint store");
-        let expected_keys = shasta_checkpoint_storage_slot_candidates(anchor_header.number)
-            .into_iter()
-            .flat_map(|(block_hash_slot, state_root_slot)| {
-                [
-                    storage_slot_key(block_hash_slot),
-                    storage_slot_key(state_root_slot),
-                ]
-            })
-            .collect::<Vec<_>>();
         assert_eq!(
             *provider
                 .storage_proof_inputs
                 .lock()
                 .expect("storage proof inputs lock"),
-            vec![vec![(checkpoint_store, expected_keys)]]
+            vec![vec![(
+                checkpoint_store,
+                expected_checkpoint_storage_keys(anchor_header.number)
+            )]]
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn preflight_derives_forced_prefix_from_sources_then_normal_anchor_catchup() {
+        let mut provider = sample_provider();
+        let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
+        let l1_headers = sample_l1_header_chain(200, 205);
+        let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        let mut forced_block = sample_block(
+            42,
+            parent_checkpoint.block_number,
+            parent_checkpoint.block_hash,
+            parent_checkpoint.state_root,
+        );
+        forced_block.header.number = 1;
+        forced_block.header.timestamp = 1001;
+        forced_block.header.gas_limit = 30_000_000;
+        let mut normal_block = sample_block(
+            42,
+            normal_anchor_header.number,
+            normal_anchor_header.hash_slow(),
+            normal_anchor_header.state_root,
+        );
+        normal_block.header.number = 2;
+        normal_block.header.timestamp = 1002;
+        normal_block.header.gas_limit = 30_000_000;
+        provider.block = forced_block.clone();
+        provider.blocks = vec![forced_block, normal_block.clone()];
+        provider.parent_block.header.number = 0;
+        provider.parent_block.header.timestamp = 1000;
+        provider.parent_block.header.gas_limit = 30_000_000;
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        provider.proposal_event.proposal.timestamp = 1002u64.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.sources = vec![
+            DerivationSource {
+                isForcedInclusion: true,
+                blobSlice: BlobSlice {
+                    blobHashes: Vec::new(),
+                    offset: 0usize.try_into().expect("fits in uint24"),
+                    timestamp: 0u64.try_into().expect("fits in uint48"),
+                },
+            },
+            DerivationSource {
+                isForcedInclusion: false,
+                blobSlice: BlobSlice {
+                    blobHashes: Vec::new(),
+                    offset: 0usize.try_into().expect("fits in uint24"),
+                    timestamp: 0u64.try_into().expect("fits in uint48"),
+                },
+            },
+        ];
+        let normal_manifest = DerivationSourceManifest {
+            blocks: vec![BlockManifest {
+                timestamp: normal_block.header.timestamp,
+                coinbase: normal_block.header.beneficiary,
+                anchor_block_number: normal_anchor_header.number,
+                gas_limit: normal_block.header.gas_limit,
+                transactions: Vec::new(),
+            }],
+        };
+        provider.data_sources = vec![
+            InputDataSource {
+                is_forced_inclusion: true,
+                ..Default::default()
+            },
+            InputDataSource {
+                tx_data_from_calldata: normal_manifest
+                    .encode_and_compress()
+                    .expect("encode normal manifest"),
+                is_forced_inclusion: false,
+                ..Default::default()
+            },
+        ];
+        provider.l1_headers = l1_headers;
+        let ctx = {
+            let mut ctx = sample_context(42, 205, parent_anchor_block_number);
+            ctx.request.l2_block_range = Some(L2BlockRange { start: 1, end: 2 });
+            ctx
+        };
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        *provider.witnesses.lock().expect("witnesses lock") = vec![
+            stateless_input_with_parent_checkpoint(&chain_spec, parent_checkpoint).witness,
+            ExecutionWitness::default(),
+        ];
+        let spec = ShastaSpec::new(
+            PipelineKey::ShastaNative,
+            (),
+            NativeBackend,
+            provider.clone(),
+        );
+
+        let input = spec.preflight(&ctx, &provider).await.expect("preflight");
+
+        assert_eq!(input.witnesses.len(), 2);
+        assert_eq!(input.taiko.l1_ancestor_headers.len(), 6);
+        assert_eq!(input.taiko.l1_ancestor_headers[0].number, 200);
+        assert_eq!(input.taiko.l1_header.number, origin_header.number);
+        assert_eq!(input.taiko.data_sources.len(), 2);
+        let tx_lists = provider
+            .tx_list_witness_inputs
+            .lock()
+            .expect("tx list witness inputs lock");
+        assert_eq!(tx_lists.len(), 2);
+        assert_eq!(
+            *provider
+                .storage_proof_inputs
+                .lock()
+                .expect("storage proof inputs lock"),
+            vec![vec![(
+                checkpoint_store,
+                expected_checkpoint_storage_keys(parent_anchor_block_number)
+            )]]
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn preflight_accepts_forced_prefix_then_normal_anchor_catchup() {
+        let mut provider = sample_provider();
+        let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
+        let l1_headers = sample_l1_header_chain(200, 205);
+        let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        let mut blocks = Vec::new();
+        for index in 0_u64..5 {
+            let (anchor_number, anchor_hash, anchor_state_root) = if index < 4 {
+                (
+                    parent_anchor_block_number,
+                    B256::from([0x07; 32]),
+                    B256::from([0x17; 32]),
+                )
+            } else {
+                (
+                    normal_anchor_header.number,
+                    normal_anchor_header.hash_slow(),
+                    normal_anchor_header.state_root,
+                )
+            };
+            let mut block = sample_block(42, anchor_number, anchor_hash, anchor_state_root);
+            block.header.number = 1 + index;
+            blocks.push(block);
+        }
+        let source_spans = [
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: false,
+                block_count: 1,
+            },
+        ];
+        provider.l1_headers = l1_headers;
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        let mut manifest = raiko2_protocol_shasta::TaikoManifest {
+            proposal_event: provider.proposal_event.clone(),
+            prover_data: raiko2_protocol::TaikoProverData {
+                last_anchor_block_number: Some(parent_anchor_block_number),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        super::hydrate_shasta_l1_headers(
+            &provider,
+            167_013,
+            &blocks,
+            &mut manifest,
+            Some(&source_spans),
+        )
+        .await
+        .expect("mixed forced/normal anchors should hydrate L1 headers");
+
+        assert_eq!(
+            manifest
+                .l1_ancestor_headers
+                .iter()
+                .map(|header| header.number)
+                .collect::<Vec<_>>(),
+            vec![200, 201, 202, 203, 204, 205]
+        );
+        assert_eq!(manifest.l1_header.number, origin_header.number);
+
+        let ctx = sample_context(42, 205, parent_anchor_block_number);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        let mut witnesses = vec![stateless_input_with_parent_checkpoint(
+            &chain_spec,
+            parent_checkpoint,
+        )];
+        super::hydrate_shasta_parent_checkpoint_witness(
+            &provider,
+            &chain_spec,
+            &blocks,
+            &manifest,
+            Some(&source_spans),
+            &mut witnesses,
+        )
+        .await
+        .expect("forced prefix should request parent checkpoint proof");
+
+        assert_eq!(
+            *provider
+                .storage_proof_inputs
+                .lock()
+                .expect("storage proof inputs lock"),
+            vec![vec![(
+                checkpoint_store,
+                expected_checkpoint_storage_keys(parent_anchor_block_number)
+            )]]
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_forced_prefix_parent_checkpoint_mismatch() {
+        let mut provider = sample_provider();
+        let parent_anchor_block_number = 7;
+        let parent_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x07; 32]),
+            state_root: B256::from([0x17; 32]),
+        };
+        let wrong_forced_checkpoint = AnchorCheckpoint {
+            block_number: parent_anchor_block_number,
+            block_hash: B256::from([0x99; 32]),
+            state_root: parent_checkpoint.state_root,
+        };
+        let l1_headers = sample_l1_header_chain(200, 205);
+        let normal_anchor_header = l1_headers.first().expect("normal anchor header").clone();
+        let origin_header = l1_headers.last().expect("origin header").clone();
+        let mut blocks = vec![sample_block(
+            42,
+            wrong_forced_checkpoint.block_number,
+            wrong_forced_checkpoint.block_hash,
+            wrong_forced_checkpoint.state_root,
+        )];
+        blocks[0].header.number = 1;
+        let mut normal_block = sample_block(
+            42,
+            normal_anchor_header.number,
+            normal_anchor_header.hash_slow(),
+            normal_anchor_header.state_root,
+        );
+        normal_block.header.number = 2;
+        blocks.push(normal_block);
+        let source_spans = [
+            AnchorSourceSpan {
+                is_forced_inclusion: true,
+                block_count: 1,
+            },
+            AnchorSourceSpan {
+                is_forced_inclusion: false,
+                block_count: 1,
+            },
+        ];
+        provider.l1_headers = l1_headers;
+        provider.proposal_event.proposal.originBlockNumber =
+            origin_header.number.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
+        let manifest = raiko2_protocol_shasta::TaikoManifest {
+            proposal_event: provider.proposal_event.clone(),
+            prover_data: raiko2_protocol::TaikoProverData {
+                last_anchor_block_number: Some(parent_anchor_block_number),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = sample_context(42, 205, parent_anchor_block_number);
+        let chain_spec = super::chain_spec_from_context(&ctx).expect("chain spec");
+        let checkpoint_store = chain_spec
+            .checkpoint_store_contract
+            .expect("checkpoint store");
+        let (_, parent_checkpoint_nodes) =
+            parent_checkpoint_state_witness(checkpoint_store, parent_checkpoint);
+        *provider
+            .storage_witness_nodes
+            .lock()
+            .expect("storage witness nodes lock") = vec![parent_checkpoint_nodes];
+        let mut witnesses = vec![stateless_input_with_parent_checkpoint(
+            &chain_spec,
+            parent_checkpoint,
+        )];
+
+        let err = super::hydrate_shasta_parent_checkpoint_witness(
+            &provider,
+            &chain_spec,
+            &blocks,
+            &manifest,
+            Some(&source_spans),
+            &mut witnesses,
+        )
+        .await
+        .expect_err("forced prefix checkpoint mismatch should fail in preflight");
+
+        assert!(
+            err.to_string()
+                .contains("forced inclusion anchor checkpoint")
+        );
+    }
+
+    #[test]
+    fn derive_preflight_tx_lists_rejects_manifest_block_count_mismatch() {
+        let provider = sample_provider();
+        let source_data = super::PreflightSourceData {
+            manifest_blocks: Vec::new(),
+            source_spans: Vec::new(),
+        };
+
+        let err = super::derive_preflight_tx_lists(Some(&source_data), &[provider.block])
+            .expect_err("manifest/block count mismatch should fail");
+
+        assert!(err.to_string().contains("manifest block count"));
     }
 
     #[tokio::test]

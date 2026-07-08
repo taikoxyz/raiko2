@@ -4,7 +4,7 @@ use raiko2_primitives_shasta::{GuestInput, roll_proposal_ancestor_headers_in_pla
 use crate::remote_prover::protocol::{
     RAIKO2_SHASTA_AGGREGATE_REQUEST_SCHEMA, RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2AggregateProof,
     Raiko2ReplayBlock, Raiko2ShastaAggregatePayload, Raiko2ShastaAggregateRequest,
-    Raiko2ShastaPayload, Raiko2ShastaRequest,
+    Raiko2ShastaGuestInput, Raiko2ShastaPayload, Raiko2ShastaRequest,
 };
 
 /// # Errors
@@ -12,15 +12,16 @@ use crate::remote_prover::protocol::{
 /// Returns an error when the guest input has no witnesses or the replay packet cannot be
 /// assembled from the witness state.
 pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaRequest> {
-    let chain_id = shasta_packet_chain_id(input)?;
+    shasta_packet_chain_id(input)?;
 
     let shared_state_nodes = input.proposal_state_nodes();
-    let mut ancestor_headers = input.initial_proposal_ancestor_headers();
-    let mut blocks = Vec::with_capacity(input.witnesses.len());
+    let proposal_ancestor_headers = input.initial_proposal_ancestor_headers();
+    let mut ancestor_headers = proposal_ancestor_headers.clone();
+    let mut witnesses = Vec::with_capacity(input.witnesses.len());
 
     for stateless_input in input.witnesses.iter().cloned() {
         let block_header = stateless_input.block.header.clone();
-        blocks.push(build_replay_block(
+        witnesses.push(build_replay_block(
             stateless_input,
             &ancestor_headers,
             shared_state_nodes,
@@ -35,29 +36,13 @@ pub fn build_shasta_packet(input: &GuestInput) -> RaikoResult<Raiko2ShastaReques
     Ok(Raiko2ShastaRequest {
         schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
         payload: Raiko2ShastaPayload {
-            chain_id,
-            blocks,
-            proof_carry_data: input.proof_carry_data.clone(),
-            guest_input: None,
-        },
-    })
-}
-
-/// # Errors
-///
-/// Returns an error when the guest input has no witnesses.
-pub fn build_shasta_packet_with_guest_input(
-    input: &GuestInput,
-) -> RaikoResult<Raiko2ShastaRequest> {
-    let chain_id = shasta_packet_chain_id(input)?;
-
-    Ok(Raiko2ShastaRequest {
-        schema: RAIKO2_SHASTA_REQUEST_SCHEMA.to_string(),
-        payload: Raiko2ShastaPayload {
-            chain_id,
-            blocks: Vec::new(),
-            proof_carry_data: input.proof_carry_data.clone(),
-            guest_input: Some(input.clone()),
+            guest_input: Raiko2ShastaGuestInput {
+                witnesses,
+                taiko: input.taiko.clone(),
+                proposal_ancestor_headers,
+                proposal_state_nodes: input.proposal_state_nodes.clone(),
+                proof_carry_data: input.proof_carry_data.clone(),
+            },
         },
     })
 }
@@ -107,11 +92,19 @@ fn build_replay_block(
     ancestor_headers: &[WitnessHeader],
     shared_state_nodes: &[raiko2_primitives::WitnessStateNode],
 ) -> RaikoResult<Raiko2ReplayBlock> {
-    if stateless_input.witness.headers.is_empty() && !ancestor_headers.is_empty() {
+    if !ancestor_headers.is_empty() {
         stateless_input.witness.headers = ancestor_headers.to_vec();
     }
-    stateless_input.witness.headers =
-        remote_prover_witness_headers(&stateless_input.witness.headers);
+    if stateless_input
+        .witness
+        .headers
+        .iter()
+        .any(|header| header.full_header().is_none())
+    {
+        return Err(RaikoError::InvalidRequestConfig(
+            "remote prover replay witness requires full ancestor headers".to_string(),
+        ));
+    }
 
     if stateless_input.witness.state.is_empty() && !stateless_input.witness.state_indices.is_empty()
     {
@@ -138,13 +131,4 @@ fn build_replay_block(
     }
 
     Ok(Raiko2ReplayBlock::from(stateless_input))
-}
-
-fn remote_prover_witness_headers(ancestor_headers: &[WitnessHeader]) -> Vec<WitnessHeader> {
-    let mut headers = ancestor_headers.to_vec();
-    let compact_len = headers.len().saturating_sub(1);
-    for header in headers.iter_mut().take(compact_len) {
-        header.compact_in_place();
-    }
-    headers
 }

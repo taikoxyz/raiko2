@@ -2,9 +2,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use alloy::primitives::{Address, B256, address, hex};
+use alloy::primitives::{Address, B256, hex};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
@@ -16,19 +17,25 @@ use raiko2_guests::{
 };
 use risc0_zkvm::compute_image_id;
 use serde::Serialize;
-use sp1_sdk::{HashableKey, SP1VerifyingKey};
-use xtask_build_guest::Backend;
+use sp1_sdk::HashableKey;
+use xtask_build_guest::{Backend, verified_sp1_vk};
 
 use crate::util;
 
 const DEFAULT_RPC_URL_HOODI_SHASTA: &str = "https://ethereum-hoodi-rpc.publicnode.com";
+const DEFAULT_RPC_URL_DEVNET_SHASTA: &str = "https://l1rpc.internal.taiko.xyz";
 const DEFAULT_RPC_URL_MAINNET_SHASTA: &str = "https://ethereum-rpc.publicnode.com";
 const DEFAULT_PRIVATE_KEY_ENV: &str = "PRIVATE_KEY";
 const TX_TIMEOUT: Duration = Duration::from_secs(180);
 const HOODI_NETWORK: &str = "hoodi";
 const HOODI_CHAIN_ID: u64 = 560_048;
+const HOODI_TAIKO_CHAIN_SPEC: &str = "taiko_hoodi";
+const DEVNET_NETWORK: &str = "taiko_dev_l1";
+const DEVNET_CHAIN_ID: u64 = 32_382;
+const DEVNET_TAIKO_CHAIN_SPEC: &str = "taiko_dev";
 const MAINNET_NETWORK: &str = "ethereum";
 const MAINNET_CHAIN_ID: u64 = 1;
+const MAINNET_TAIKO_CHAIN_SPEC: &str = "taiko_mainnet";
 
 sol! {
     #[sol(rpc)]
@@ -73,8 +80,13 @@ pub(crate) struct RegisterImageArgs {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "register-image profiles intentionally include the fork name for future non-Shasta profiles"
+)]
 enum RegisterImageProfile {
     HoodiShasta,
+    DevnetShasta,
     MainnetShasta,
 }
 
@@ -190,7 +202,7 @@ struct SummaryFile {
 }
 
 pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
-    let config = resolve_profile(&args);
+    let config = resolve_profile(root, &args)?;
     let output_dir = resolve_output_dir(root, args.output_dir.as_deref())?;
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
@@ -318,33 +330,97 @@ pub(crate) async fn run(root: &Path, args: RegisterImageArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_profile(args: &RegisterImageArgs) -> ResolvedProfile {
-    let (rpc_url, risc0_verifier, sp1_verifier) = match args.profile {
-        RegisterImageProfile::HoodiShasta => (
-            DEFAULT_RPC_URL_HOODI_SHASTA.to_string(),
-            address!("fa0e7dAFe9785627df034c123A9B87497EB06b41"),
-            address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7"),
-        ),
-        RegisterImageProfile::MainnetShasta => (
-            DEFAULT_RPC_URL_MAINNET_SHASTA.to_string(),
-            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"),
-            address!("73A0Db393ef87ce781ac7957bE10D6628432100F"),
-        ),
-    };
+fn resolve_profile(root: &Path, args: &RegisterImageArgs) -> Result<ResolvedProfile> {
+    let defaults = profile_defaults(args.profile);
+    let (default_risc0_verifier, default_sp1_verifier) =
+        load_shasta_verifiers_from_chain_spec(root, defaults.taiko_chain_spec)?;
 
-    let (network, expected_chain_id) = match args.profile {
-        RegisterImageProfile::HoodiShasta => (HOODI_NETWORK, HOODI_CHAIN_ID),
-        RegisterImageProfile::MainnetShasta => (MAINNET_NETWORK, MAINNET_CHAIN_ID),
-    };
-
-    ResolvedProfile {
+    Ok(ResolvedProfile {
         profile: args.profile,
-        network,
-        expected_chain_id,
-        rpc_url: args.rpc_url.clone().unwrap_or(rpc_url),
-        risc0_verifier: args.risc0_verifier.unwrap_or(risc0_verifier),
-        sp1_verifier: args.sp1_verifier.unwrap_or(sp1_verifier),
+        network: defaults.network,
+        expected_chain_id: defaults.expected_chain_id,
+        rpc_url: args
+            .rpc_url
+            .clone()
+            .unwrap_or_else(|| defaults.rpc_url.to_string()),
+        risc0_verifier: args.risc0_verifier.unwrap_or(default_risc0_verifier),
+        sp1_verifier: args.sp1_verifier.unwrap_or(default_sp1_verifier),
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProfileDefaults {
+    network: &'static str,
+    expected_chain_id: u64,
+    rpc_url: &'static str,
+    taiko_chain_spec: &'static str,
+}
+
+const fn profile_defaults(profile: RegisterImageProfile) -> ProfileDefaults {
+    match profile {
+        RegisterImageProfile::HoodiShasta => ProfileDefaults {
+            network: HOODI_NETWORK,
+            expected_chain_id: HOODI_CHAIN_ID,
+            rpc_url: DEFAULT_RPC_URL_HOODI_SHASTA,
+            taiko_chain_spec: HOODI_TAIKO_CHAIN_SPEC,
+        },
+        RegisterImageProfile::DevnetShasta => ProfileDefaults {
+            network: DEVNET_NETWORK,
+            expected_chain_id: DEVNET_CHAIN_ID,
+            rpc_url: DEFAULT_RPC_URL_DEVNET_SHASTA,
+            taiko_chain_spec: DEVNET_TAIKO_CHAIN_SPEC,
+        },
+        RegisterImageProfile::MainnetShasta => ProfileDefaults {
+            network: MAINNET_NETWORK,
+            expected_chain_id: MAINNET_CHAIN_ID,
+            rpc_url: DEFAULT_RPC_URL_MAINNET_SHASTA,
+            taiko_chain_spec: MAINNET_TAIKO_CHAIN_SPEC,
+        },
     }
+}
+
+fn load_shasta_verifiers_from_chain_spec(
+    root: &Path,
+    taiko_chain_spec: &str,
+) -> Result<(Address, Address)> {
+    let config_path = root.join("config/chain_spec_list_default.json");
+    let payload = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let specs: serde_json::Value = serde_json::from_str(&payload)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let spec = specs
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str) == Some(taiko_chain_spec)
+            })
+        })
+        .with_context(|| {
+            format!(
+                "missing chain spec {taiko_chain_spec} in {}",
+                config_path.display()
+            )
+        })?;
+
+    Ok((
+        read_shasta_verifier(spec, taiko_chain_spec, "RISC0")?,
+        read_shasta_verifier(spec, taiko_chain_spec, "SP1")?,
+    ))
+}
+
+fn read_shasta_verifier(
+    spec: &serde_json::Value,
+    taiko_chain_spec: &str,
+    proof_type: &str,
+) -> Result<Address> {
+    let address = spec
+        .pointer(&format!("/verifier_address_forks/SHASTA/{proof_type}"))
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("missing {taiko_chain_spec} SHASTA {proof_type} verifier"))?;
+
+    Address::from_str(address).with_context(|| {
+        format!("invalid {taiko_chain_spec} SHASTA {proof_type} verifier: {address}")
+    })
 }
 
 fn resolve_output_dir(root: &Path, explicit: Option<&Path>) -> Result<PathBuf> {
@@ -427,10 +503,16 @@ fn build_sp1_calls(
     config: &ResolvedProfile,
     elves: &Sp1ShastaGuestElves,
 ) -> Result<Vec<RegistrationCall>> {
-    let proposal_vk: SP1VerifyingKey = bincode::deserialize(elves.proposal_vk.as_ref())
-        .context("failed to load SP1 proposal VK")?;
-    let aggregation_vk: SP1VerifyingKey = bincode::deserialize(elves.aggregation_vk.as_ref())
-        .context("failed to load SP1 aggregation VK")?;
+    let proposal_vk = verified_sp1_vk(
+        Arc::clone(&elves.proposal),
+        Some(elves.proposal_vk.as_ref()),
+        "sp1_shasta_proposal",
+    )?;
+    let aggregation_vk = verified_sp1_vk(
+        Arc::clone(&elves.aggregation),
+        Some(elves.aggregation_vk.as_ref()),
+        "sp1_shasta_aggregation",
+    )?;
 
     Ok(vec![
         sp1_call(
@@ -699,6 +781,7 @@ fn b256_hex(value: B256) -> String {
 fn profile_name(profile: RegisterImageProfile) -> &'static str {
     match profile {
         RegisterImageProfile::HoodiShasta => "hoodi-shasta",
+        RegisterImageProfile::DevnetShasta => "devnet-shasta",
         RegisterImageProfile::MainnetShasta => "mainnet-shasta",
     }
 }
@@ -731,21 +814,55 @@ impl RegistrationCall {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckedRegistration, ContractKind, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK,
-        MAINNET_CHAIN_ID, MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile,
-        RegistrationCall, Stage, backend_name, build_risc0_calls, digest_source_suffix,
-        ensure_profile_chain_id, materialize_checked_plan, resolve_profile,
+        CheckedRegistration, ContractKind, DEFAULT_RPC_URL_DEVNET_SHASTA, DEVNET_CHAIN_ID,
+        DEVNET_NETWORK, DigestSource, HOODI_CHAIN_ID, HOODI_NETWORK, MAINNET_CHAIN_ID,
+        MAINNET_NETWORK, PlannedAction, RegisterImageArgs, RegisterImageProfile, RegistrationCall,
+        Stage, backend_name, build_risc0_calls, build_sp1_calls, digest_source_suffix,
+        ensure_profile_chain_id, materialize_checked_plan, profile_name, resolve_profile,
     };
     use alloy::primitives::{Address, B256, address};
-    use raiko2_guests::load_risc0_shasta_guest_elves;
-    use std::collections::BTreeSet;
+    use clap::ValueEnum;
+    use raiko2_guests::{
+        Sp1ShastaGuestElves, load_risc0_shasta_guest_elves, load_sp1_shasta_guest_elves,
+    };
+    use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
     use xtask_build_guest::Backend;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask crate has repository parent")
+            .to_path_buf()
+    }
 
     #[test]
     fn backend_names_match_cli_values() {
         assert_eq!(backend_name(Backend::Risc0), "risc0");
         assert_eq!(backend_name(Backend::Sp1), "sp1");
         assert_eq!(backend_name(Backend::All), "all");
+    }
+
+    #[test]
+    fn profile_names_match_cli_values() {
+        let cli_values = RegisterImageProfile::value_variants()
+            .iter()
+            .map(|profile| {
+                profile
+                    .to_possible_value()
+                    .expect("register-image profile has a CLI value")
+                    .get_name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            cli_values,
+            ["hoodi-shasta", "devnet-shasta", "mainnet-shasta"]
+        );
+        assert_eq!(
+            profile_name(RegisterImageProfile::HoodiShasta),
+            "hoodi-shasta"
+        );
     }
 
     #[test]
@@ -761,7 +878,7 @@ mod tests {
             apply: false,
         };
 
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
         assert_eq!(resolved.network, HOODI_NETWORK);
         assert_eq!(resolved.expected_chain_id, HOODI_CHAIN_ID);
         assert_eq!(resolved.rpc_url, "http://127.0.0.1:8545");
@@ -788,12 +905,39 @@ mod tests {
             apply: false,
         };
 
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
         assert_eq!(resolved.network, HOODI_NETWORK);
         assert_eq!(resolved.expected_chain_id, HOODI_CHAIN_ID);
         assert_eq!(
             resolved.rpc_url,
             "https://ethereum-hoodi-rpc.publicnode.com"
+        );
+    }
+
+    #[test]
+    fn devnet_profile_uses_l1_sp1_verifier_by_default() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::DevnetShasta,
+            backend: Backend::All,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve devnet profile");
+        assert_eq!(resolved.network, DEVNET_NETWORK);
+        assert_eq!(resolved.expected_chain_id, DEVNET_CHAIN_ID);
+        assert_eq!(resolved.rpc_url, DEFAULT_RPC_URL_DEVNET_SHASTA);
+        assert_eq!(
+            resolved.risc0_verifier,
+            address!("3DA89a777B11aABa02B5C92Fab96545D05fd4cc6")
+        );
+        assert_eq!(
+            resolved.sp1_verifier,
+            address!("2546D7424F23EE0D1260C414DA3f17E295c187C6")
         );
     }
 
@@ -810,7 +954,7 @@ mod tests {
             apply: false,
         };
 
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
         assert_eq!(resolved.network, MAINNET_NETWORK);
         assert_eq!(resolved.expected_chain_id, MAINNET_CHAIN_ID);
         assert_eq!(resolved.rpc_url, "https://ethereum-rpc.publicnode.com");
@@ -847,7 +991,7 @@ mod tests {
             apply: false,
         };
 
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
         let elves = load_risc0_shasta_guest_elves().expect("load RISC0 Shasta guest ELFs");
         let calls = build_risc0_calls(&resolved, &elves).expect("build risc0 calls");
         let keys = calls
@@ -872,7 +1016,7 @@ mod tests {
             output_dir: None,
             apply: false,
         };
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
 
         ensure_profile_chain_id(&resolved, HOODI_CHAIN_ID).expect("hoodi chain id should match");
         let err = ensure_profile_chain_id(&resolved, HOODI_CHAIN_ID + 1)
@@ -893,7 +1037,7 @@ mod tests {
             output_dir: None,
             apply: false,
         };
-        let resolved = resolve_profile(&args);
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
 
         ensure_profile_chain_id(&resolved, MAINNET_CHAIN_ID)
             .expect("mainnet chain id should match");
@@ -927,6 +1071,36 @@ mod tests {
         assert_eq!(registrations[1].planned_action, PlannedAction::Register);
         assert!(!registrations[1].already_trusted);
         assert!(registrations[1].needs_registration);
+    }
+
+    #[test]
+    fn sp1_plan_rejects_vk_artifact_that_does_not_match_elf() {
+        let args = RegisterImageArgs {
+            profile: RegisterImageProfile::HoodiShasta,
+            backend: Backend::Sp1,
+            rpc_url: None,
+            risc0_verifier: None,
+            sp1_verifier: None,
+            private_key_env: "PRIVATE_KEY".to_string(),
+            output_dir: None,
+            apply: false,
+        };
+        let resolved = resolve_profile(&repo_root(), &args).expect("resolve profile");
+        let elves = load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs");
+        let swapped = Sp1ShastaGuestElves {
+            proposal: Arc::clone(&elves.proposal),
+            aggregation: Arc::clone(&elves.aggregation),
+            proposal_vk: Arc::clone(&elves.aggregation_vk),
+            aggregation_vk: Arc::clone(&elves.aggregation_vk),
+        };
+
+        let err = build_sp1_calls(&resolved, &swapped)
+            .expect_err("SP1 plan should reject a proposal VK from another ELF");
+
+        assert!(
+            err.to_string()
+                .contains("SP1 VK artifact mismatch for sp1_shasta_proposal")
+        );
     }
 
     fn sample_call(name: &str) -> RegistrationCall {

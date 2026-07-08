@@ -25,9 +25,9 @@ use raiko2_prover::validate_external_aggregate_proofs;
 use raiko2_provider::NetworkProvider;
 use raiko2_queue::{MemoryStore, SchedulerConfig};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::fs;
 use tracing::warn;
 
@@ -48,7 +48,10 @@ use raiko2_pipeline::forks::shasta::{
 #[cfg(feature = "host")]
 use raiko2_pipeline::{Risc0ShastaBackend, Sp1ShastaBackend};
 #[cfg(feature = "host")]
-use raiko2_prover::{boundless::BoundlessProver, sp1::Sp1Prover};
+use raiko2_prover::{
+    boundless::{BoundlessBalanceGate, BoundlessProver},
+    sp1::Sp1Prover,
+};
 #[cfg(feature = "local-provers")]
 use raiko2_prover::{native::NativeProver, risc0::Risc0Prover};
 
@@ -69,6 +72,32 @@ use super::task_metadata::{
     root_proof_artifact_refs,
 };
 
+/// In-memory sliding-window limiter for ACL-protected endpoints.
+/// Buckets use config indexes so each configured ACL entry gets an independent quota.
+#[derive(Default)]
+pub(crate) struct AclRateLimiter {
+    requests: Mutex<HashMap<usize, VecDeque<Instant>>>,
+}
+
+impl AclRateLimiter {
+    pub(crate) fn allow_request(
+        &self,
+        key_index: usize,
+        limit: u32,
+        window: Duration,
+    ) -> Result<bool, ()> {
+        let now = Instant::now();
+        let mut requests = self.requests.lock().map_err(|_| ())?;
+        let key_requests = requests.entry(key_index).or_default();
+        key_requests.retain(|requested_at| now.duration_since(*requested_at) < window);
+        if key_requests.len() >= limit as usize {
+            return Ok(false);
+        }
+        key_requests.push_back(now);
+        Ok(true)
+    }
+}
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -76,6 +105,7 @@ pub struct AppState {
     pub pipelines: Arc<dyn PipelineFactory>,
     pub runtime: Arc<RuntimeManager>,
     pub zk_any_sampler: Arc<Mutex<ZkAnySampler>>,
+    pub(crate) acl_rate_limiter: Arc<AclRateLimiter>,
 }
 
 impl AppState {
@@ -119,6 +149,12 @@ impl AppState {
 
         let mut factory = StaticPipelineFactory::default();
 
+        // One balance gate shared by every pair's Boundless prover: all pairs fund the same market
+        // account (one global signer/rpc/deployment), so concurrent submissions across pairs must
+        // deposit against a single combined reserved total, not one per pair.
+        #[cfg(feature = "host")]
+        let boundless_balance_gate = BoundlessBalanceGate::new();
+
         for pair in &resolved_pairs {
             register_pair_pipelines(
                 &mut factory,
@@ -126,6 +162,8 @@ impl AppState {
                     config: &config,
                     pair,
                     runtime: Arc::clone(&runtime),
+                    #[cfg(feature = "host")]
+                    boundless_balance_gate: boundless_balance_gate.clone(),
                     #[cfg(feature = "local-provers")]
                     shasta_backends: &shasta_backends,
                     #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -144,19 +182,29 @@ impl AppState {
 
         let config = Arc::new(config);
         let pipelines: Arc<dyn PipelineFactory> = Arc::new(factory);
-        let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        let state = Self::from_parts(config, pipelines, runtime);
         spawn_runtime_cleanup_loop(
-            Arc::clone(&config),
-            Arc::clone(&runtime),
-            Arc::clone(&pipelines),
+            Arc::clone(&state.config),
+            Arc::clone(&state.runtime),
+            Arc::clone(&state.pipelines),
         );
 
-        Ok(Self {
+        Ok(state)
+    }
+
+    pub(crate) fn from_parts(
+        config: Arc<Config>,
+        pipelines: Arc<dyn PipelineFactory>,
+        runtime: Arc<RuntimeManager>,
+    ) -> Self {
+        let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
+        Self {
             config,
             pipelines,
             runtime,
             zk_any_sampler,
-        })
+            acl_rate_limiter: Arc::new(AclRateLimiter::default()),
+        }
     }
 }
 
@@ -164,6 +212,9 @@ struct PairPipelineRegistration<'a> {
     config: &'a Config,
     pair: &'a ResolvedNetworkPair,
     runtime: Arc<RuntimeManager>,
+    /// Balance gate shared across all pairs (see the construction site in `ServerState::new`).
+    #[cfg(feature = "host")]
+    boundless_balance_gate: BoundlessBalanceGate,
     #[cfg(feature = "local-provers")]
     shasta_backends: &'a ShastaBackends,
     #[cfg(all(feature = "host", not(feature = "local-provers")))]
@@ -238,6 +289,7 @@ async fn register_pair_pipelines(
                 registration.boundless_backend.clone(),
                 setup::boundless_scheduler_config(registration.config),
                 Arc::clone(&runtime_observer),
+                registration.boundless_balance_gate.clone(),
             )
             .await?;
             boundless_engine.start_workers_with_maintenance_interval(
@@ -313,6 +365,7 @@ async fn register_pair_pipelines(
             registration.shasta_backends.risc0_boundless.clone(),
             setup::boundless_scheduler_config(registration.config),
             Arc::clone(&runtime_observer),
+            registration.boundless_balance_gate.clone(),
         )
         .await?;
         boundless_engine.start_workers_with_maintenance_interval(
@@ -850,6 +903,7 @@ async fn build_boundless_engine(
     backend: Risc0ShastaBackend,
     scheduler_config: SchedulerConfig,
     observer: Arc<dyn EngineObserver>,
+    balance_gate: BoundlessBalanceGate,
 ) -> Result<Engine<BoundlessSpec>> {
     let agent_config = setup::boundless_prover_config(config, pair);
 
@@ -859,7 +913,7 @@ async fn build_boundless_engine(
             let context = setup::build_context(config, pair, ProofType::Risc0)?;
             let spec = ShastaSpec::new(
                 PipelineKey::ShastaRisc0Network,
-                BoundlessProver::new(agent_config),
+                BoundlessProver::with_balance_gate(agent_config, balance_gate),
                 backend,
                 provider,
             );
@@ -893,7 +947,7 @@ async fn build_boundless_engine(
                     .await?;
                 let spec = ShastaSpec::new(
                     PipelineKey::ShastaRisc0Network,
-                    BoundlessProver::new(agent_config),
+                    BoundlessProver::with_balance_gate(agent_config, balance_gate),
                     backend,
                     provider,
                 );
@@ -930,11 +984,7 @@ async fn build_remote_sgx_engine(
 ) -> Result<Engine<Gaiko2Spec>> {
     let gaiko2_config =
         setup::remote_sgx_prover_config(base_url, config.prover.remote_sgx.timeout_ms);
-    let gaiko2_prover = match proof_type {
-        ProofType::Sgx => Gaiko2Prover::new_for_guest_input(&gaiko2_config)?,
-        ProofType::SgxGeth => Gaiko2Prover::new(&gaiko2_config)?,
-        _ => anyhow::bail!("remote SGX engine does not support proof type {proof_type:?}"),
-    };
+    let gaiko2_prover = Gaiko2Prover::new_for_proof_type(&gaiko2_config, proof_type)?;
 
     let engine = match config.queue.backend {
         QueueBackend::Memory => {

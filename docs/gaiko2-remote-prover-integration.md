@@ -27,12 +27,14 @@ protocol, not the owner of the protocol itself.
 
 Update the protocol constants in `internal/protocol/shasta_v1.go`:
 
-- request schema: `v1` -> `raiko2-shasta-request-v1`
+- proposal request schema: `raiko2-shasta-request-v1`
 - aggregate request schema: `v1` -> `raiko2-shasta-aggregate-request-v1`
 - response schema: `gaiko2-proof-v1` -> `raiko2-proof-v1`
 
-Keep the existing request and response field layout. This integration only renames the protocol
-surface and reuses the current packet shape.
+The active proposal request sent by `raiko2` is v1 and carries a Shasta `GuestInput`-shaped payload
+under `payload.guest_input`. The witness entries are expanded replay blocks so the provider does not
+need to reconstruct compact shared witness pools. The legacy replay-packet proposal shape is removed.
+The aggregate request remains v1.
 
 Update request schema validation in:
 
@@ -49,16 +51,15 @@ Update checked-in testdata and tests that still assert the old schemas. Common t
 
 ## Canonical Fixtures
 
-`raiko2` owns the canonical remote prover request fixtures:
+`raiko2` owns the canonical remote prover aggregate request fixture:
 
-- `tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json`
 - `tests/fixtures/remote_prover/shasta_aggregate_request_v1_single_fixture_proof.json`
-
-These fixtures are the source of truth for request compatibility. A provider should match them
-byte-for-byte on the request side.
 
 The aggregate fixture is the canonical request-shape golden for adapter and serialization checks.
 Provider conformance does not post that static aggregate fixture directly.
+
+Proposal conformance is generated from the shared Shasta `GuestInput` fixture at test runtime.
+There is no checked-in legacy replay-packet proposal fixture.
 
 ## Black-Box Acceptance
 
@@ -71,7 +72,7 @@ cargo test -p raiko2-prover --no-default-features \
   --test remote_prover_conformance -- --ignored --nocapture
 ```
 
-The harness posts the vendored fixtures to:
+The harness builds a v1 proposal request from the shared Shasta `GuestInput` fixture and posts it to:
 
 - `POST /prove/shasta`
 

@@ -1,7 +1,10 @@
 use alloy_consensus::TrieAccount;
 use alloy_primitives::map::AddressMap;
-use raiko2_primitives::{ChainSpec, ExecutionWitness, Proof, StatelessInput};
+use raiko2_primitives::{
+    ChainSpec, ExecutionWitness, Proof, StatelessInput, WitnessHeader, WitnessStateNode,
+};
 use raiko2_primitives_shasta::{GuestInput, proof_carry_from_proof};
+use raiko2_protocol_shasta::TaikoManifest;
 use raiko2_protocol_shasta::{libhash::hash_shasta_subproof_input, shasta::ProofCarryData};
 use reth_ethereum_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -19,11 +22,16 @@ pub struct Raiko2ShastaRequest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Raiko2ShastaPayload {
-    pub chain_id: u64,
-    pub blocks: Vec<Raiko2ReplayBlock>,
+    pub guest_input: Raiko2ShastaGuestInput,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Raiko2ShastaGuestInput {
+    pub witnesses: Vec<Raiko2ReplayBlock>,
+    pub taiko: TaikoManifest,
+    pub proposal_ancestor_headers: Vec<WitnessHeader>,
+    pub proposal_state_nodes: Vec<WitnessStateNode>,
     pub proof_carry_data: ProofCarryData,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest_input: Option<GuestInput>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +62,29 @@ impl From<StatelessInput> for Raiko2ReplayBlock {
             chain_spec: value.chain_spec,
             witness: value.witness,
             accounts: value.accounts,
+        }
+    }
+}
+
+impl From<Raiko2ReplayBlock> for StatelessInput {
+    fn from(value: Raiko2ReplayBlock) -> Self {
+        Self {
+            block: value.block,
+            chain_spec: value.chain_spec,
+            witness: value.witness,
+            accounts: value.accounts,
+        }
+    }
+}
+
+impl From<Raiko2ShastaGuestInput> for GuestInput {
+    fn from(value: Raiko2ShastaGuestInput) -> Self {
+        Self {
+            witnesses: value.witnesses.into_iter().map(Into::into).collect(),
+            taiko: value.taiko,
+            proposal_ancestor_headers: value.proposal_ancestor_headers,
+            proposal_state_nodes: value.proposal_state_nodes,
+            proof_carry_data: value.proof_carry_data,
         }
     }
 }

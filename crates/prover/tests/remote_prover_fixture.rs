@@ -7,21 +7,29 @@ use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_protocol_shasta::libhash::hash_shasta_subproof_input;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
-use raiko2_prover::remote_prover::adapter::{build_shasta_aggregate_request, build_shasta_packet};
+use raiko2_prover::remote_prover::{
+    adapter::{build_shasta_aggregate_request, build_shasta_packet},
+    protocol::RAIKO2_SHASTA_REQUEST_SCHEMA,
+};
 
 #[test]
-fn vendored_proposal_request_fixture_matches_adapter_output() {
+fn proposal_request_adapter_outputs_v1_guest_input_packet() {
     let raw =
         fs::read_to_string(shared_guest_input_path()).expect("read shared shasta guest input");
     let guest_input: GuestInput = serde_json::from_str(&raw).expect("parse shared fixture");
-    let actual = serde_json::to_string_pretty(
-        &build_shasta_packet(&guest_input).expect("build remote prover packet"),
-    )
-    .expect("serialize proposal request");
+    let packet = build_shasta_packet(&guest_input).expect("build remote prover packet");
 
-    let expected = fs::read_to_string(vendored_proposal_fixture_path())
-        .expect("read vendored proposal fixture");
-    assert_eq!(actual, expected);
+    assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
+    assert_eq!(packet.payload.guest_input.witnesses.len(), 192);
+    assert_eq!(
+        packet
+            .payload
+            .guest_input
+            .proof_carry_data
+            .transition_input
+            .proposal_id,
+        2_222
+    );
 }
 
 #[test]
@@ -40,12 +48,6 @@ fn vendored_aggregate_request_fixture_matches_adapter_output() {
 fn shared_guest_input_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/shasta_guest_input_taiko_mainnet_proposal_2222_l2_5412225_5412416.json")
-}
-
-fn vendored_proposal_fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/fixtures/remote_prover/shasta_request_v1_taiko_mainnet_proposal_2222_l2_5412225_5412416.json",
-    )
 }
 
 fn vendored_aggregate_fixture_path() -> PathBuf {

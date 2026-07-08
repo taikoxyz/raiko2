@@ -1,24 +1,40 @@
 use axum::http::HeaderMap;
+use std::time::Duration;
 
 use super::errors::ApiError;
 use crate::config::ServerAclFeature;
 use crate::server::state::AppState;
 
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
+pub(crate) const DEFAULT_ACL_RATE_LIMIT_PER_MINUTE: u32 = 200;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
-pub(crate) fn authorize_acl_feature(
+pub(crate) fn authorize_acl_feature_with_rate_limit(
     state: &AppState,
     headers: &HeaderMap,
     feature: ServerAclFeature,
 ) -> Result<(), ApiError> {
-    let feature_enabled = state
-        .config
-        .server
-        .acl
-        .keys
-        .iter()
-        .any(|key| acl_allows_feature(&key.allow, feature));
-    if !feature_enabled {
+    let (key_index, rate_limit_per_minute) = authorize_acl_key(state, headers, feature)?;
+    enforce_rate_limit(state, key_index, rate_limit_per_minute)
+}
+
+pub(crate) fn authorize_optional_acl_feature_with_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    feature: ServerAclFeature,
+) -> Result<(), ApiError> {
+    if !acl_feature_enabled(state, feature) {
+        return Ok(());
+    }
+    authorize_acl_feature_with_rate_limit(state, headers, feature)
+}
+
+fn authorize_acl_key(
+    state: &AppState,
+    headers: &HeaderMap,
+    feature: ServerAclFeature,
+) -> Result<(usize, Option<u32>), ApiError> {
+    if !acl_feature_enabled(state, feature) {
         return Err(ApiError::not_found("ACL feature is not enabled"));
     }
 
@@ -42,15 +58,17 @@ pub(crate) fn authorize_acl_feature(
     }
 
     let mut key_known = false;
-    let mut authorized = false;
-    for key in &state.config.server.acl.keys {
+    let mut authorized = None;
+    for (key_index, key) in state.config.server.acl.keys.iter().enumerate() {
         let matches = constant_time_eq(actual_key, &key.key);
         let allows_feature = acl_allows_feature(&key.allow, feature);
         key_known |= matches;
-        authorized |= matches && allows_feature;
+        if matches && allows_feature {
+            authorized = Some((key_index, key.rate_limit_per_minute));
+        }
     }
-    if authorized {
-        return Ok(());
+    if let Some(key) = authorized {
+        return Ok(key);
     }
 
     if key_known {
@@ -60,6 +78,37 @@ pub(crate) fn authorize_acl_feature(
     }
 
     Err(ApiError::unauthorized("invalid API key"))
+}
+
+fn acl_feature_enabled(state: &AppState, feature: ServerAclFeature) -> bool {
+    state
+        .config
+        .server
+        .acl
+        .keys
+        .iter()
+        .any(|key| acl_allows_feature(&key.allow, feature))
+}
+
+fn enforce_rate_limit(
+    state: &AppState,
+    key_index: usize,
+    limit_per_minute: Option<u32>,
+) -> Result<(), ApiError> {
+    let limit_per_minute = rate_limit_or_default(limit_per_minute);
+
+    let allowed = state
+        .acl_rate_limiter
+        .allow_request(key_index, limit_per_minute, RATE_LIMIT_WINDOW)
+        .map_err(|()| ApiError::internal("failed to lock ACL rate limiter"))?;
+    if !allowed {
+        return Err(ApiError::too_many_requests("rate limit exceeded"));
+    }
+    Ok(())
+}
+
+fn rate_limit_or_default(limit_per_minute: Option<u32>) -> u32 {
+    limit_per_minute.unwrap_or(DEFAULT_ACL_RATE_LIMIT_PER_MINUTE)
 }
 
 fn acl_allows_feature(allow: &[ServerAclFeature], feature: ServerAclFeature) -> bool {
@@ -82,12 +131,19 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{DEFAULT_ACL_RATE_LIMIT_PER_MINUTE, constant_time_eq, rate_limit_or_default};
 
     #[test]
     fn constant_time_eq_matches_string_equality() {
         assert!(constant_time_eq("secret-api-key", "secret-api-key"));
         assert!(!constant_time_eq("secret-api-key", "secret-api-kex"));
         assert!(!constant_time_eq("secret-api-key", "secret-api-key-extra"));
+    }
+
+    #[test]
+    fn rate_limit_defaults_to_200_per_minute() {
+        assert_eq!(DEFAULT_ACL_RATE_LIMIT_PER_MINUTE, 200);
+        assert_eq!(rate_limit_or_default(None), 200);
+        assert_eq!(rate_limit_or_default(Some(600)), 600);
     }
 }

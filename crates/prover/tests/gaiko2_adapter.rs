@@ -5,7 +5,7 @@ use alloy_primitives::B256;
 use raiko2_primitives::{StatelessInput, WitnessHeader};
 use raiko2_primitives_shasta::GuestInput;
 use raiko2_prover::remote_prover::{
-    adapter::{build_shasta_packet, build_shasta_packet_with_guest_input},
+    adapter::build_shasta_packet,
     protocol::{RAIKO2_SHASTA_REQUEST_SCHEMA, Raiko2ReplayBlock},
 };
 
@@ -40,39 +40,49 @@ fn adapter_projects_guest_input_into_execution_packet() {
     let packet = build_shasta_packet(&input).expect("build packet");
 
     assert_eq!(packet.schema, RAIKO2_SHASTA_REQUEST_SCHEMA);
-    assert_eq!(packet.payload.blocks.len(), input.witnesses.len());
-    assert_eq!(packet.payload.chain_id, input.proof_carry_data.chain_id);
-    assert!(packet.payload.guest_input.is_none());
     assert_eq!(
-        packet.payload.proof_carry_data.transition_input.checkpoint,
+        packet.payload.guest_input.witnesses.len(),
+        input.witnesses.len()
+    );
+    assert_eq!(
+        packet.payload.guest_input.proposal_ancestor_headers.len(),
+        1
+    );
+    assert_eq!(
+        packet
+            .payload
+            .guest_input
+            .proof_carry_data
+            .transition_input
+            .checkpoint,
         input.proof_carry_data.transition_input.checkpoint
     );
-    assert_eq!(packet.payload.blocks[0].block.header.number, 42);
     assert_eq!(
-        packet.payload.blocks[0].block.header.parent_hash,
+        packet.payload.guest_input.witnesses[0].block.header.number,
+        42
+    );
+    assert_eq!(
+        packet.payload.guest_input.witnesses[0]
+            .block
+            .header
+            .parent_hash,
         B256::from([0x11; 32])
     );
-    assert_eq!(packet.payload.blocks[0].witness.headers.len(), 1);
+    assert_eq!(
+        packet.payload.guest_input.witnesses[0]
+            .witness
+            .headers
+            .len(),
+        1
+    );
 }
 
 #[test]
-fn adapter_can_embed_full_guest_input_for_sgx_runtime() {
-    let input = fixture_guest_input();
-    let packet = build_shasta_packet_with_guest_input(&input).expect("build packet");
-
-    assert!(packet.payload.blocks.is_empty());
-    let guest_input = packet.payload.guest_input.expect("guest input payload");
-    assert_eq!(guest_input.witnesses.len(), input.witnesses.len());
-    assert_eq!(guest_input.proof_carry_data, input.proof_carry_data);
-    assert_eq!(guest_input.taiko.proposal_id, input.taiko.proposal_id);
-}
-
-#[test]
-fn adapter_keeps_only_replay_parent_header_full() {
+fn adapter_keeps_replay_ancestors_full() {
     let mut input = fixture_guest_input();
     input.proposal_ancestor_headers.insert(
         0,
-        WitnessHeader::from_compact_header(&Header {
+        WitnessHeader::from_header(Header {
             number: 40,
             parent_hash: B256::from([0x55; 32]),
             timestamp: 0,
@@ -87,16 +97,37 @@ fn adapter_keeps_only_replay_parent_header_full() {
     input.witnesses.push(next_witness);
 
     let packet = build_shasta_packet(&input).expect("build packet");
-    let first_headers = &packet.payload.blocks[0].witness.headers;
-    let second_headers = &packet.payload.blocks[1].witness.headers;
+    let first_headers = &packet.payload.guest_input.witnesses[0].witness.headers;
+    let second_headers = &packet.payload.guest_input.witnesses[1].witness.headers;
 
     assert_eq!(first_headers.len(), 2);
-    assert!(first_headers[0].full_header().is_none());
+    assert!(first_headers[0].full_header().is_some());
     assert!(first_headers[1].full_header().is_some());
     assert_eq!(second_headers.len(), 3);
-    assert!(second_headers[0].full_header().is_none());
-    assert!(second_headers[1].full_header().is_none());
+    assert!(second_headers[0].full_header().is_some());
+    assert!(second_headers[1].full_header().is_some());
     assert!(second_headers[2].full_header().is_some());
+}
+
+#[test]
+fn adapter_rejects_compact_replay_ancestor_headers() {
+    let mut input = fixture_guest_input();
+    input.proposal_ancestor_headers.insert(
+        0,
+        WitnessHeader::from_compact_header(&Header {
+            number: 40,
+            parent_hash: B256::from([0x55; 32]),
+            timestamp: 0,
+            gas_limit: 30_000_000,
+            ..Default::default()
+        }),
+    );
+
+    let err = build_shasta_packet(&input).expect_err("reject compact replay ancestor");
+    assert!(
+        err.to_string()
+            .contains("remote prover replay witness requires full ancestor headers")
+    );
 }
 
 #[test]
@@ -114,10 +145,6 @@ fn adapter_rejects_unset_proof_carry_chain_id() {
     input.proof_carry_data.chain_id = 0;
 
     let err = build_shasta_packet(&input).expect_err("reject unset carry chain id");
-    assert!(err.to_string().contains("proof_carry_data.chain_id"));
-
-    let err = build_shasta_packet_with_guest_input(&input)
-        .expect_err("reject unset carry chain id with guest input");
     assert!(err.to_string().contains("proof_carry_data.chain_id"));
 }
 

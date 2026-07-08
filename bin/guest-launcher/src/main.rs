@@ -47,7 +47,7 @@ struct Args {
     /// Guest execution stage.
     #[arg(long, value_enum, default_value = "proposal")]
     stage: Stage,
-    /// Explicit guest ELF path. Required for opcode-lab.
+    /// Explicit guest ELF path. Overrides the built-in proposal ELF and is required for labs.
     #[arg(long)]
     elf: Option<PathBuf>,
     /// Proof files to aggregate.
@@ -1308,12 +1308,7 @@ async fn run_sp1_proposal(
     stdin.write(&input);
     record_memory_snapshot(&mut report, "proposal:after_stdin_write");
 
-    let backend = load_sp1_shasta_backend()
-        .map_err(anyhow::Error::msg)
-        .context("load SP1 Shasta guest ELFs")?;
-    let elf = backend
-        .elf(ProofStage::Proposal)
-        .context("load SP1 proposal ELF")?;
+    let elf = load_sp1_proposal_elf(&args)?;
     report.input = input_path.display().to_string();
     record_memory_snapshot(&mut report, "proposal:after_load_elf");
 
@@ -1322,7 +1317,7 @@ async fn run_sp1_proposal(
             let start = Instant::now();
             record_memory_snapshot(&mut report, "proposal:before_execute_run");
             let (public_values, execution_report) =
-                execute_sp1_blocking(sp1_config.prover, elf.to_vec(), stdin).await?;
+                execute_sp1_blocking(sp1_config.prover, elf.clone(), stdin).await?;
             record_memory_snapshot(&mut report, "proposal:after_execute_run");
             report.wall_time_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
             report.public_values = public_values.raw();
@@ -1344,7 +1339,7 @@ async fn run_sp1_proposal(
                 Sp1ProverMode::Mock => {
                     let prover = BlockingProverClient::builder().mock().build();
                     record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = setup_sp1_pk(&prover, elf, "proposal")?;
+                    let pk = setup_sp1_pk(&prover, &elf, "proposal")?;
                     let vkey = pk.verifying_key().clone();
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output = prove_sp1_with_pk(
@@ -1373,7 +1368,7 @@ async fn run_sp1_proposal(
                 Sp1ProverMode::Local => {
                     let prover = BlockingProverClient::builder().cpu().build();
                     record_memory_snapshot(&mut report, "proposal:before_setup");
-                    let pk = setup_sp1_pk(&prover, elf, "proposal")?;
+                    let pk = setup_sp1_pk(&prover, &elf, "proposal")?;
                     let vkey = pk.verifying_key().clone();
                     record_memory_snapshot(&mut report, "proposal:after_setup");
                     let output = prove_sp1_with_pk(
@@ -1436,6 +1431,20 @@ async fn run_sp1_proposal(
     }
 
     Ok(())
+}
+
+fn load_sp1_proposal_elf(args: &Args) -> Result<Vec<u8>> {
+    if let Some(path) = &args.elf {
+        return fs::read(path).with_context(|| format!("read {}", path.display()));
+    }
+
+    let backend = load_sp1_shasta_backend()
+        .map_err(anyhow::Error::msg)
+        .context("load SP1 Shasta guest ELFs")?;
+    backend
+        .elf(ProofStage::Proposal)
+        .context("load SP1 proposal ELF")
+        .map(ToOwned::to_owned)
 }
 
 async fn run_risc0_proposal(
@@ -1601,8 +1610,8 @@ fn write_proof_json(path: &PathBuf, proof: &Proof) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, ProofType, Stage, parse_image_id_from_uuid, read_input, read_opcode_lab_input_list,
-        risc0_padded_cycles,
+        Args, ProofType, Stage, load_sp1_proposal_elf, parse_image_id_from_uuid, read_input,
+        read_opcode_lab_input_list, risc0_padded_cycles,
     };
     use alloy_primitives::{Address, B256};
     use clap::Parser as _;
@@ -1754,6 +1763,34 @@ mod tests {
 
         assert_eq!(args.proof_type, ProofType::Risc0);
         assert_eq!(args.stage, Stage::Proposal);
+    }
+
+    #[test]
+    fn sp1_proposal_elf_uses_explicit_elf_path() {
+        let elf_path = temp_input_path("sp1-proposal-elf");
+        let expected = vec![0xde, 0xad, 0xbe, 0xef];
+        fs::write(&elf_path, &expected).expect("write elf");
+        let args = Args::try_parse_from([
+            "guest-launcher",
+            "--stage",
+            "proposal",
+            "--proof-type",
+            "sp1",
+            "--mode",
+            "execute",
+            "--sp1-prover",
+            "local",
+            "--elf",
+            elf_path.to_str().expect("utf8 path"),
+            "--input",
+            "/tmp/guest-input.json",
+        ])
+        .expect("parse args");
+
+        let elf = load_sp1_proposal_elf(&args).expect("load explicit elf");
+
+        fs::remove_file(elf_path).expect("cleanup temp elf");
+        assert_eq!(elf, expected);
     }
 
     #[test]

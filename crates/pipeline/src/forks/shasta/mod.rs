@@ -3,6 +3,8 @@ mod checkpoint_verify;
 mod manifest;
 mod spec;
 
+use raiko2_primitives::{ChainSpec, ProofContext, RaikoError, RaikoResult, SupportedChainSpecs};
+
 pub use backends::{
     ShastaBackends, load_risc0_boundless_shasta_backend, load_risc0_shasta_backend,
     load_shasta_backends, load_sp1_shasta_backend, risc0_boundless_shasta_backend_from_elves,
@@ -16,11 +18,41 @@ pub use spec::{ShastaSpec, validate_shasta_guest_input};
 
 // ELF selection is handled by the backend instance.
 
+const UNKNOWN_L2_CHAIN_SPEC_NAME: &str = "unknown";
+
+/// Host-side L2 chain spec resolution: config/CLI override first, compiled defaults second.
+///
+/// Guest programs do not trust this helper; they validate witness chain specs against their own
+/// compiled default list.
+fn host_l2_chain_spec_from_context(ctx: &ProofContext) -> RaikoResult<ChainSpec> {
+    if let Some(chain_spec) = &ctx.preflight.resolved_l2_chain_spec {
+        if chain_spec.chain_id != ctx.request.l2_chain_id {
+            return Err(RaikoError::InvalidRequestConfig(format!(
+                "preflight l2 chain spec chain_id {} does not match request l2_chain_id {}",
+                chain_spec.chain_id, ctx.request.l2_chain_id
+            )));
+        }
+        return Ok(chain_spec.clone());
+    }
+
+    Ok(SupportedChainSpecs::default()
+        .get_chain_spec_with_chain_id(ctx.request.l2_chain_id)
+        .unwrap_or_else(|| ChainSpec {
+            name: UNKNOWN_L2_CHAIN_SPEC_NAME.to_string(),
+            chain_id: ctx.request.l2_chain_id,
+            // Host/preflight fallback for ad-hoc Taiko L2 testing. Guests still reject unknown
+            // chain IDs unless they are compiled into the trusted chain-spec list.
+            is_taiko: true,
+            ..Default::default()
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ProofStage, ProverBackend};
     use raiko2_guests::load_shasta_guest_elves;
+    use raiko2_primitives::{ProofRequest, ProverConfig};
 
     #[test]
     fn shasta_backends_return_expected_elves() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,5 +78,22 @@ mod tests {
         assert_eq!(sp1_proposal, expected_sp1_proposal.as_ref());
         assert_eq!(sp1_agg, expected_sp1_agg.as_ref());
         Ok(())
+    }
+
+    #[test]
+    fn host_l2_chain_spec_unknown_fallback_is_taiko() {
+        let ctx = ProofContext::new(
+            ProofRequest {
+                l2_chain_id: 999_999,
+                ..Default::default()
+            },
+            ProverConfig::default(),
+        );
+
+        let spec = host_l2_chain_spec_from_context(&ctx).expect("fallback chain spec");
+
+        assert_eq!(spec.name, UNKNOWN_L2_CHAIN_SPEC_NAME);
+        assert_eq!(spec.chain_id, 999_999);
+        assert!(spec.is_taiko);
     }
 }

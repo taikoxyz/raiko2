@@ -77,6 +77,11 @@ pub struct BoundlessSubmissionProgress {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
+    /// Offer lock deadline (`rampUpStart + lockTimeout`), in seconds since the UNIX epoch. The
+    /// client fee is zero for fulfillments past this time, so it bounds the window in which the
+    /// request can still be paid for. `0` for legacy records written before this field existed.
+    #[serde(default)]
+    pub lock_expires_at: u64,
     pub submitted_at: u64,
     pub image_ref: String,
     pub deployment: String,
@@ -84,6 +89,19 @@ pub struct BoundlessSubmissionProgress {
     pub quoted_mcycles_count: Option<u32>,
     pub evaluated_mcycles_count: Option<u32>,
     pub max_price_multiplier: u32,
+    /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
+    /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
+    /// precise bid for telemetry. `None` for legacy records written before the field existed.
+    #[serde(default)]
+    pub max_price_wei: Option<String>,
+    /// Rebid attempt number that produced this submission: `1`-based, or `0` when not recorded.
+    /// `#[serde(default)]` supplies `0` for legacy records written before this field existed; the
+    /// resume path treats `0` as "unknown" and falls back to `1`. Persisted so a resume after
+    /// restart restores the attempt count even when rebids reuse the same price (a flat
+    /// `rebid_price_step_bps == 0` ladder), which cannot be recovered from `max_price_multiplier`
+    /// alone.
+    #[serde(default)]
+    pub rebid_attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,8 +109,18 @@ pub struct BoundlessSubmissionResume {
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
+    /// Offer lock deadline in seconds since the UNIX epoch; `0` when the stored record predates
+    /// this field. See [`BoundlessSubmissionProgress::lock_expires_at`].
+    #[serde(default)]
+    pub lock_expires_at: u64,
     pub submitted_at: u64,
     pub max_price_multiplier: u32,
+    /// Exact escalated max price this submission bid, in wei, as a decimal string. See
+    /// [`BoundlessSubmissionProgress::max_price_wei`]. `None` for records written before the field.
+    #[serde(default)]
+    pub max_price_wei: Option<String>,
+    #[serde(default)]
+    pub rebid_attempt: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

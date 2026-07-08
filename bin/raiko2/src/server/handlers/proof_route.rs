@@ -7,6 +7,7 @@ use raiko2_prover::sp1_config::{ProverMode as Sp1ProverMode, Sp1RequestContext};
 use super::super::errors::ApiError;
 use super::proof_types::{BatchProofType, BatchShastaRequest};
 use crate::config::GuestSystem;
+use crate::server::request_identity::RequestFingerprint;
 use crate::server::state::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -44,10 +45,7 @@ pub(super) enum BatchProofDecision {
 }
 
 pub(super) fn public_task_id_from_fingerprint(request_fingerprint: &str) -> String {
-    let fingerprint = request_fingerprint
-        .strip_prefix("0x")
-        .unwrap_or(request_fingerprint);
-    format!("task_{fingerprint}")
+    RequestFingerprint::from_hex(request_fingerprint).public_task_id()
 }
 
 pub(super) fn route_for_proof_type(
@@ -239,14 +237,13 @@ impl BatchProofType {
 mod tests {
     use super::{BatchProofType, default_risc0_runner_for_route, route_for_proof_type};
     use crate::config::{Config, GuestSystem, PipelineRoute, RunnerKind};
-    use crate::server::sampling::ZkAnySampler;
     use crate::server::state::{AppState, StaticPipelineFactory};
     use axum::http::StatusCode;
     use raiko2_engine::ProverTaskConfig;
     use raiko2_pipeline::PipelineKey;
     use raiko2_prover::sp1_config::Sp1RequestContext;
     use raiko2_runtime::RuntimeManager;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_state() -> AppState {
@@ -259,17 +256,16 @@ mod tests {
             .expect("time")
             .as_nanos();
         let config = Arc::new(config);
-        AppState {
-            pipelines: Arc::new(StaticPipelineFactory::default()),
-            runtime: Arc::new(
+        AppState::from_parts(
+            config,
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::new(
                 RuntimeManager::new(
                     std::env::temp_dir().join(format!("raiko2-proof-route-tests-{nanos}")),
                 )
                 .expect("runtime manager"),
             ),
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config,
-        }
+        )
     }
 
     #[test]
@@ -364,18 +360,17 @@ mod tests {
         let mut config = Config::default();
         config.prover.guest_system = GuestSystem::Sgx;
         config.prover.runner = RunnerKind::Remote;
-        let state = AppState {
-            pipelines: Arc::new(StaticPipelineFactory::default()),
-            runtime: Arc::new(
+        let state = AppState::from_parts(
+            Arc::new(config),
+            Arc::new(StaticPipelineFactory::default()),
+            Arc::new(
                 RuntimeManager::new(
                     std::env::temp_dir()
                         .join(format!("raiko2-proof-route-remote-sgx-tests-{nanos}")),
                 )
                 .expect("runtime manager"),
             ),
-            zk_any_sampler: Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any))),
-            config: Arc::new(config),
-        };
+        );
 
         let err = route_for_proof_type(
             &state,

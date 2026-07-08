@@ -3,7 +3,7 @@
 # Each attestation_path must point at a baked metadata file inside the built image.
 [providers.gaiko2]
 repo = "https://github.com/taikoxyz/gaiko2.git"
-commit = "ab633ce1cb3834741560d0ec9833caa71a76ea01"
+commit = "5d9198f43e0ba2b2469eba20b5e2e4b46b95dd2e"
 provider = "gaiko2-sgxgeth"
 lane = "sgxgeth"
 image_name = "gaiko2-sgxgeth"

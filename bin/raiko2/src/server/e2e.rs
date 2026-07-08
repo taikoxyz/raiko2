@@ -3,7 +3,7 @@
 //! These tests exercise the HTTP handlers + engine orchestration without relying on
 //! external RPC endpoints. A minimal JSON-RPC server is spun up only for `/ready`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use alloy_primitives::{hex, keccak256};
 use axum::{
@@ -27,16 +27,16 @@ use tower::ServiceExt;
 use super::app;
 use super::fixture::app_with_observed_risc0_boundless_fixture_engine;
 use super::fixture::{
-    app_with_engine, app_with_observed_native_fixture_engine,
+    Sp1FixtureEngine, app_with_engine, app_with_observed_native_fixture_engine,
     app_with_observed_risc0_fixture_engine, app_with_observed_sp1_fixture_engine,
     app_with_risc0_fixture_engine, base_config, native_fixture_engine_for_pipeline,
     risc0_fixture_engine, sp1_fixture_engine, spawn_chain_id_rpc,
     state_with_observed_sp1_fixture_engine, unique_runtime_root,
 };
-use super::sampling::ZkAnySampler;
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
-    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_task_ref,
+    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_proof_artifact_refs,
+    proposal_task_ref, root_proof_artifact_refs,
 };
 use crate::config::{GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
@@ -76,10 +76,20 @@ async fn get_json(app: &Router, uri: &str) -> (StatusCode, Value) {
 }
 
 fn acl_key(id: &str, key: &str, allow: Vec<ServerAclFeature>) -> ServerAclKey {
+    acl_key_with_rate_limit(id, key, allow, None)
+}
+
+fn acl_key_with_rate_limit(
+    id: &str,
+    key: &str,
+    allow: Vec<ServerAclFeature>,
+    rate_limit_per_minute: Option<u32>,
+) -> ServerAclKey {
     ServerAclKey {
         id: id.to_string(),
         key: key.to_string(),
         allow,
+        rate_limit_per_minute,
     }
 }
 
@@ -311,6 +321,199 @@ where
     panic!("engine did not drain after 32 steps");
 }
 
+fn v4_acl_app(keys: Vec<ServerAclKey>) -> Router {
+    let mut config = base_config();
+    config.server.acl.keys = keys;
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
+            RuntimeManager::new(unique_runtime_root("raiko2-e2e-v4-submit-acl"))
+                .expect("runtime manager"),
+        ),
+    );
+    app::build_router(state)
+}
+
+fn v4_submit_acl_app(rate_limit_per_minute: Option<u32>) -> Router {
+    v4_acl_app(vec![acl_key_with_rate_limit(
+        "submit",
+        "submit-secret",
+        vec![ServerAclFeature::ProverSubmit],
+        rate_limit_per_minute,
+    )])
+}
+
+fn v4_proposal_request() -> Value {
+    json!({
+        "proof_type": "risc0",
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 10,
+                "l1_inclusion_block_number": 11,
+                "l2_block_number_start": 20,
+                "l2_block_number_end": 21
+            }
+        ]
+    })
+}
+
+fn v4_sp1_proposal_request(proposal_id: u64) -> Value {
+    v4_sp1_batch_request(proposal_id, proposal_id, false)
+}
+
+fn v4_sp1_batch_request(proposal_id_start: u64, proposal_id_end: u64, aggregate: bool) -> Value {
+    let proposals = (proposal_id_start..=proposal_id_end)
+        .map(|proposal_id| {
+            json!({
+                "proposal_id": proposal_id,
+                "last_anchor_block_number": proposal_id.saturating_sub(1),
+                "l1_inclusion_block_number": proposal_id,
+                "l2_block_number_start": proposal_id,
+                "l2_block_number_end": proposal_id
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "proof_type": "sp1",
+        "aggregate": aggregate,
+        "proposals": proposals
+    })
+}
+
+fn v4_sp1_aggregation_request(proposal_id_start: u64, proposal_id_end: u64) -> Value {
+    v4_sp1_batch_request(proposal_id_start, proposal_id_end, true)
+}
+
+fn assert_v4_submit_data_has_root_task_only(body: &Value) -> &str {
+    let task_id = body["data"]["task_id"].as_str().expect("v4 task_id");
+    assert!(task_id.starts_with("task_"), "{body}");
+    assert_eq!(task_id.len(), "task_".len() + 64, "{body}");
+    assert!(
+        task_id["task_".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()),
+        "{body}"
+    );
+    assert!(body["data"].get("current_index").is_none(), "{body}");
+    assert!(body["data"].get("proposals").is_none(), "{body}");
+    assert!(body["data"].get("aggregate").is_none(), "{body}");
+    task_id
+}
+
+fn v4_sp1_acl_app() -> (Router, Sp1FixtureEngine) {
+    let (app, engine, _) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    (app, engine)
+}
+
+fn v4_sp1_acl_app_with_clear_rate_limit(
+    clear_rate_limit_per_minute: Option<u32>,
+) -> (Router, Sp1FixtureEngine) {
+    let (app, engine, _) = v4_sp1_acl_state_app_with_clear_rate_limit(clear_rate_limit_per_minute);
+    (app, engine)
+}
+
+fn v4_sp1_acl_state_app_with_clear_rate_limit(
+    clear_rate_limit_per_minute: Option<u32>,
+) -> (Router, Sp1FixtureEngine, AppState) {
+    let mut config = base_config();
+    config.prover.guest_system = GuestSystem::Sp1;
+    config.prover.runner = RunnerKind::Local;
+    config.prover.sp1.prover = Sp1ProverMode::Local;
+    config.server.acl.keys = vec![
+        acl_key(
+            "submit",
+            "submit-secret",
+            vec![ServerAclFeature::ProverSubmit],
+        ),
+        acl_key_with_rate_limit(
+            "clear",
+            "clear-secret",
+            vec![ServerAclFeature::ProverClear],
+            clear_rate_limit_per_minute,
+        ),
+        acl_key("admin", "admin-secret", vec![ServerAclFeature::Admin]),
+    ];
+
+    let (state, engine) = state_with_observed_sp1_fixture_engine(config);
+    (app::build_router(state.clone()), engine, state)
+}
+
+async fn complete_v4_sp1_proposal(app: &Router, engine: &Sp1FixtureEngine, proposal_id: u64) {
+    let proposal_payload = v4_sp1_proposal_request(proposal_id);
+
+    let (status, first) = post_json_with_api_key(
+        app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        proposal_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["proof_type"], "sp1");
+    assert_eq!(first["proposal_id_start"], proposal_id);
+    assert_eq!(first["proposal_id_end"], proposal_id);
+    let task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"]["proof"].is_null(), "{first}");
+
+    Box::pin(drive_engine_to_idle(engine)).await;
+
+    let (status, completed) =
+        post_json_with_api_key(app, "/v4/proof/proposal", "submit-secret", proposal_payload).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
+    );
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
+}
+
+async fn complete_v4_sp1_aggregation(
+    app: &Router,
+    engine: &Sp1FixtureEngine,
+    proposal_id_start: u64,
+    proposal_id_end: u64,
+) {
+    let aggregation_payload = v4_sp1_aggregation_request(proposal_id_start, proposal_id_end);
+
+    let (status, first) = post_json_with_api_key(
+        app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        aggregation_payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["proof_type"], "sp1");
+    assert_eq!(first["proposal_id_start"], proposal_id_start);
+    assert_eq!(first["proposal_id_end"], proposal_id_end);
+    let task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
+    assert_eq!(first["data"]["status"], "registered");
+    assert!(first["data"]["proof"].is_null(), "{first}");
+
+    Box::pin(drive_engine_to_idle(engine)).await;
+
+    let (status, completed) = post_json_with_api_key(
+        app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        aggregation_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
+    );
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
 #[tokio::test]
 async fn e2e_ready_ok_with_matching_chain_id() {
     let (l1_rpc, l1_handle) = match spawn_chain_id_rpc(1).await {
@@ -327,17 +530,14 @@ async fn e2e_ready_ok_with_matching_chain_id() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -349,6 +549,698 @@ async fn e2e_ready_ok_with_matching_chain_id() {
 
     l1_handle.abort();
     l2_handle.abort();
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_requires_submit_acl_key() {
+    let app = v4_submit_acl_app(None);
+
+    let (status, body) =
+        post_raw_json_text_with_optional_api_key(&app, "/v4/proof/proposal", None, "{not-json")
+            .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.contains("\"error\":\"unauthorized\""), "{body}");
+
+    let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unauthorized");
+
+    let (status, body) =
+        post_json(&app, "/v4/proof/proposal", v4_sp1_aggregation_request(1, 1)).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_is_open_when_acl_feature_is_disabled() {
+    let app = v4_acl_app(vec![acl_key(
+        "clear",
+        "clear-secret",
+        vec![ServerAclFeature::ProverClear],
+    )]);
+
+    let (status, body) = post_json(&app, "/v4/proof/proposal", v4_proposal_request()).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unsupported_proof_type");
+
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_rejects_unavailable_backend_without_registering_task() {
+    let app = v4_submit_acl_app(None);
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "unsupported_proof_type");
+
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_rejects_multi_proposal_without_aggregation() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_batch_request(1, 2, false),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "error", "{body}");
+    assert_eq!(body["error"], "invalid_request", "{body}");
+    assert_eq!(
+        body["message"], "aggregate=false requires exactly one proposal",
+        "{body}"
+    );
+
+    assert!(report_task_ids(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_terminal_task_accepts_corrected_resubmission() {
+    // A corrected resubmission with a different fingerprint (e.g. an L1 reorg changed
+    // l1_inclusion_block_number) must get a new root task instead of wedging the proposal range with
+    // a permanent request_conflict. The fixture engine stays quiescent until driven, so the task
+    // stays `registered` until `clear` cancels it.
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let original = json!({
+        "proof_type": "sp1",
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 1,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
+    });
+
+    // 1) Register the proposal task.
+    let (status, first) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        original.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let original_task_id = assert_v4_submit_data_has_root_task_only(&first).to_string();
+    assert_eq!(first["data"]["status"], "registered");
+
+    // 2) Cancel it via clear -> task becomes terminal (Cancelled) but is NOT removed.
+    let (status, cleared) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "clear-secret",
+        json!({ "proof_type": "sp1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    // Engine child tasks are not runtime_tasks rows, so the sp1-scoped clear cancels one root task.
+    assert_eq!(cleared["data"]["cancelled"], 1, "{cleared}");
+
+    // 3) Resubmit a corrected payload for the same slot: different l1_inclusion_block_number ->
+    //    different fingerprint and therefore a different root task id.
+    let corrected = json!({
+        "proof_type": "sp1",
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 2,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
+    });
+    let (status, replaced) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    let corrected_task_id = assert_v4_submit_data_has_root_task_only(&replaced);
+    assert_ne!(corrected_task_id, original_task_id);
+    assert_eq!(replaced["data"]["status"], "registered");
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_completed_task_accepts_corrected_resubmission_with_new_task_id() {
+    // Corrected proof input must not overwrite a completed proof, but it also must not be blocked by
+    // the old completed row. The fingerprint-derived root task id gives the corrected payload a new
+    // task while keeping the original completed task addressable.
+    let (app, engine) = v4_sp1_acl_app();
+
+    // Drive proposal (1,1) to completion (l1_inclusion_block_number = 1 in v4_sp1_proposal_request).
+    complete_v4_sp1_proposal(&app, &engine, 1).await;
+    let original_task_id = single_report_task_id(&app).await;
+
+    // Resubmit the same slot with a different l1_inclusion_block_number -> different fingerprint.
+    let corrected = json!({
+        "proof_type": "sp1",
+        "proposals": [
+            {
+                "proposal_id": 1,
+                "last_anchor_block_number": 0,
+                "l1_inclusion_block_number": 999,
+                "l2_block_number_start": 1,
+                "l2_block_number_end": 1
+            }
+        ]
+    });
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", corrected).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "ok", "{body}");
+    let corrected_task_id = assert_v4_submit_data_has_root_task_only(&body);
+    assert_ne!(corrected_task_id, original_task_id);
+    assert_eq!(body["data"]["status"], "registered");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_registers_missing_proposals_from_same_request() {
+    let (app, engine) = v4_sp1_acl_app();
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "ok");
+    let task_id = assert_v4_submit_data_has_root_task_only(&body).to_string();
+    assert_eq!(body["data"]["status"], "registered");
+
+    Box::pin(drive_engine_to_idle(&engine)).await;
+
+    let (status, completed) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(7, 7),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(
+        assert_v4_submit_data_has_root_task_only(&completed),
+        task_id
+    );
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-aggregation");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_endpoint_is_not_a_submit_route() {
+    let (app, _engine) = v4_sp1_acl_app();
+
+    let (status, _body) = post_raw_json_text_with_optional_api_key(
+        &app,
+        "/v4/proof/aggregation",
+        Some("submit-secret"),
+        &v4_sp1_aggregation_request(7, 7).to_string(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_completed_row_repeated_post_fast_returns() {
+    // Proposal-side aggregation should poll by repeating the same batch request, matching the
+    // proposal path's idempotency and requeue semantics.
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_aggregation(&app, &engine, 5, 5).await;
+
+    let (status, again) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(5, 5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_v4_submit_data_has_root_task_only(&again);
+    assert_eq!(again["data"]["status"], "completed", "{again}");
+    assert_eq!(
+        again["data"]["proof"], "0xfixture-sp1-aggregation",
+        "{again}"
+    );
+}
+
+#[tokio::test]
+async fn e2e_v4_submit_rate_limits_acl_key() {
+    let app = v4_submit_acl_app(Some(1));
+
+    let (first_status, _) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+    assert_ne!(first_status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_proposal_request(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "rate_limited");
+
+    let (status, body) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        v4_sp1_aggregation_request(1, 1),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"], "rate_limited");
+}
+
+#[tokio::test]
+async fn e2e_v4_proposal_poll_and_task_lookup_complete_from_fixture() {
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_proposal(&app, &engine, 3).await;
+    let task_id = single_report_task_id(&app).await;
+    let task_path = format!("/v4/tasks/{task_id}");
+
+    let (status, task) = get_json(&app, &task_path).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{task}");
+    assert_eq!(task["error"], "unauthorized");
+
+    let (status, task) = get_json_with_api_key(&app, &task_path, "clear-secret").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{task}");
+    assert_eq!(task["error"], "forbidden");
+
+    let (status, task) = get_json_with_api_key(&app, &task_path, "submit-secret").await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["status"], "ok");
+    assert_eq!(task["data"]["task_id"], task_id);
+    assert_eq!(task["data"]["status"], "completed");
+    assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
+
+    let (status, task) = get_json_with_api_key(&app, &task_path, "admin-secret").await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["data"]["proof"], "0xfixture-sp1-proof");
+}
+
+#[tokio::test]
+async fn e2e_v4_aggregation_status_and_clear_complete_from_fixture() {
+    let (app, engine) = v4_sp1_acl_app();
+    complete_v4_sp1_aggregation(&app, &engine, 3, 3).await;
+
+    let (status, status_body) = get_json(&app, "/v4/prover/status?proof_type=sp1").await;
+    assert_eq!(status, StatusCode::OK, "{status_body}");
+    assert_eq!(status_body["status"], "ok");
+    assert_eq!(status_body["proof_type"], "sp1");
+
+    let (status, clear_body) = post_json(
+        &app,
+        "/v4/prover/clear",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{clear_body}");
+
+    let (status, clear_body) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "submit-secret",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{clear_body}");
+
+    let (status, clear_body) = post_json_with_api_key(
+        &app,
+        "/v4/prover/clear",
+        "clear-secret",
+        json!({
+            "proof_type": "sp1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{clear_body}");
+    assert_eq!(clear_body["status"], "ok");
+    assert_eq!(clear_body["proof_type"], "sp1");
+    assert!(clear_body["data"].get("status").is_none());
+    assert_eq!(clear_body["data"]["cancelled"], 0);
+    assert_eq!(clear_body["data"]["failed"], 0);
+}
+
+#[tokio::test]
+async fn e2e_v4_clear_rate_limits_acl_key() {
+    let (app, _engine) = v4_sp1_acl_app_with_clear_rate_limit(Some(1));
+
+    let payload = json!({ "proof_type": "sp1" });
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/prover/clear", "clear-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) =
+        post_json_with_api_key(&app, "/v4/prover/clear", "clear-secret", payload).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "rate_limited");
+}
+
+#[tokio::test]
+async fn e2e_v4_invalidate_artifacts_removes_completed_cache() {
+    let (app, engine) = v4_sp1_acl_app();
+    let payload = v4_sp1_proposal_request(11);
+
+    let (status, first) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["data"]["status"], "registered");
+
+    drive_engine_to_idle(&engine).await;
+
+    let (status, completed) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["data"]["status"], "completed");
+    assert_eq!(completed["data"]["proof"], "0xfixture-sp1-proof");
+
+    let request = json!({
+        "proof_type": "sp1",
+        "dry_run": true
+    });
+    let (status, dry_run) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    assert_eq!(dry_run["status"], "ok");
+    assert_eq!(dry_run["proof_type"], "sp1");
+    assert_eq!(dry_run["data"]["dry_run"], true);
+    assert_eq!(dry_run["data"]["artifacts"]["matched"], 1);
+    assert_eq!(dry_run["data"]["artifacts"]["removed"], 0);
+    assert_eq!(dry_run["data"]["tasks"]["matched"], 1);
+    assert_eq!(dry_run["data"]["tasks"]["removed"], 0);
+
+    let request = json!({
+        "proof_type": "sp1"
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["dry_run"], false);
+    assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["files_removed"], 1);
+    assert_eq!(invalidated["data"]["tasks"]["matched"], 1);
+    assert_eq!(invalidated["data"]["tasks"]["removed"], 1);
+
+    let (status, resubmitted) =
+        post_json_with_api_key(&app, "/v4/proof/proposal", "submit-secret", payload).await;
+    assert_eq!(status, StatusCode::OK, "{resubmitted}");
+    assert_eq!(resubmitted["data"]["status"], "registered");
+    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
+}
+
+#[tokio::test]
+async fn e2e_v4_invalidate_artifacts_removes_record_when_file_delete_fails() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    complete_v4_sp1_proposal(&app, &engine, 12).await;
+
+    let artifacts = state
+        .runtime
+        .list_proof_artifacts()
+        .await
+        .expect("list proof artifacts");
+    let artifact = artifacts.first().expect("proof artifact").clone();
+    tokio::fs::remove_file(&artifact.proof_path)
+        .await
+        .expect("remove proof file");
+    tokio::fs::create_dir(&artifact.proof_path)
+        .await
+        .expect("replace proof file with directory");
+
+    let request = json!({
+        "proof_type": "sp1"
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["artifacts"]["matched"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["removed"], 1);
+    assert_eq!(invalidated["data"]["artifacts"]["failed"], 1);
+    assert!(
+        state
+            .runtime
+            .get_proof_artifact(&artifact.network_pair, &artifact.proof_ref)
+            .await
+            .expect("get proof artifact")
+            .is_none(),
+        "stale proof artifact record remained"
+    );
+}
+
+#[tokio::test]
+async fn e2e_v4_invalidate_artifacts_range_removes_all_root_refs() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    complete_v4_sp1_proposal(&app, &engine, 21).await;
+
+    let records = state.runtime.list_tasks().await.expect("list tasks");
+    let mut record = records.first().expect("runtime task").clone();
+    let mut metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    metadata.proposals[0].task_id = "legacy-proposal-proof-ref".to_string();
+    record.metadata = serde_json::to_value(&metadata).expect("serialize metadata");
+    state
+        .runtime
+        .upsert_task(&record)
+        .await
+        .expect("upsert task");
+
+    let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
+        .expect("proposal root refs")
+        .refs;
+    assert!(root_refs.len() >= 2, "expected canonical and legacy refs");
+    for proof_ref in &root_refs {
+        write_e2e_proof_artifact(
+            &state,
+            &metadata.network_pair,
+            proof_ref,
+            record.pipeline_key,
+            &record.route.to_string(),
+            &fixture_external_aggregate_proof(),
+        )
+        .await;
+    }
+
+    let request = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 21,
+        "proposal_id_end": 21
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(
+        invalidated["data"]["artifacts"]["removed"],
+        root_refs.len(),
+        "{invalidated}"
+    );
+    for proof_ref in root_refs {
+        assert!(
+            state
+                .runtime
+                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "stale root proof ref remained: {proof_ref}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn e2e_v4_invalidate_artifacts_range_removes_aggregate_child_refs() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    complete_v4_sp1_aggregation(&app, &engine, 31, 32).await;
+
+    let records = state.runtime.list_tasks().await.expect("list tasks");
+    let record = records.first().expect("runtime task");
+    let metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    let proposal_refs = metadata
+        .proposals
+        .iter()
+        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
+        .collect::<Vec<_>>();
+    assert!(!proposal_refs.is_empty(), "expected child proposal refs");
+    for proof_ref in &proposal_refs {
+        write_e2e_proof_artifact(
+            &state,
+            &metadata.network_pair,
+            proof_ref,
+            record.pipeline_key,
+            &record.route.to_string(),
+            &fixture_external_aggregate_proof(),
+        )
+        .await;
+    }
+
+    let request = json!({
+        "proof_type": "sp1",
+        "proposal_id_start": 31,
+        "proposal_id_end": 32
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    for proof_ref in proposal_refs {
+        assert!(
+            state
+                .runtime
+                .get_proof_artifact(&metadata.network_pair, &proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "stale child proposal proof ref remained: {proof_ref}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn e2e_v4_invalidate_artifacts_prefix_child_ref_invalidates_aggregate_root() {
+    let (app, engine, state) = v4_sp1_acl_state_app_with_clear_rate_limit(None);
+    let aggregation_payload = v4_sp1_aggregation_request(41, 42);
+    complete_v4_sp1_aggregation(&app, &engine, 41, 42).await;
+
+    let records = state.runtime.list_tasks().await.expect("list tasks");
+    let record = records
+        .iter()
+        .find(|record| {
+            let metadata: TaskMetadata =
+                serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+            metadata.aggregate_request.is_some()
+        })
+        .expect("aggregate runtime task");
+    let metadata: TaskMetadata =
+        serde_json::from_value(record.metadata.clone()).expect("parse task metadata");
+    let root_refs = root_proof_artifact_refs(&metadata, record.pipeline_key)
+        .expect("aggregate root refs")
+        .refs;
+    let proposal_refs = metadata
+        .proposals
+        .iter()
+        .flat_map(|proposal| proposal_proof_artifact_refs(record.pipeline_key, proposal))
+        .collect::<Vec<_>>();
+    assert!(!proposal_refs.is_empty(), "expected child proposal refs");
+
+    let child_proof = Proof {
+        proof: Some(format!("0x{}", "aa".repeat(32))),
+        input: Some(alloy_primitives::B256::ZERO),
+        ..Proof::default()
+    };
+    for proof_ref in &proposal_refs {
+        write_e2e_proof_artifact(
+            &state,
+            &metadata.network_pair,
+            proof_ref,
+            record.pipeline_key,
+            &record.route.to_string(),
+            &child_proof,
+        )
+        .await;
+    }
+
+    let request = json!({
+        "proof_type": "sp1",
+        "proof_prefix": "0xAAAA",
+        "proposal_id_start": 41,
+        "proposal_id_end": 42
+    });
+    let (status, invalidated) = post_json_with_api_key(
+        &app,
+        "/v4/prover/invalidate-artifacts",
+        "clear-secret",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{invalidated}");
+    assert_eq!(invalidated["data"]["tasks"]["matched"], 1, "{invalidated}");
+    assert_eq!(invalidated["data"]["tasks"]["removed"], 1, "{invalidated}");
+
+    for proof_ref in root_refs.iter().chain(proposal_refs.iter()) {
+        assert!(
+            state
+                .runtime
+                .get_proof_artifact(&metadata.network_pair, proof_ref)
+                .await
+                .expect("get proof artifact")
+                .is_none(),
+            "stale proof ref remained: {proof_ref}"
+        );
+    }
+
+    let (status, resubmitted) = post_json_with_api_key(
+        &app,
+        "/v4/proof/proposal",
+        "submit-secret",
+        aggregation_payload,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resubmitted}");
+    assert_eq!(resubmitted["data"]["status"], "registered", "{resubmitted}");
+    assert!(resubmitted["data"]["proof"].is_null(), "{resubmitted}");
 }
 
 #[tokio::test]
@@ -367,17 +1259,14 @@ async fn e2e_ready_fails_when_l1_chain_id_mismatches() {
     let mut config = base_config();
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-l1-mismatch-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -415,17 +1304,14 @@ async fn e2e_ready_fails_when_boundless_signer_is_invalid() {
     config.prover.runner = RunnerKind::Network;
     config.prover.boundless.rpc_url = "https://base-rpc.publicnode.com".to_string();
     config.prover.boundless.signer_key = "not-a-private-key".to_string();
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-boundless-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -467,17 +1353,14 @@ async fn e2e_ready_fails_when_l2_witness_chain_id_mismatches() {
     config.rpc.pairs[0].l1_rpc = Some(l1_rpc);
     config.rpc.pairs[0].l2_rpc = Some(l2_rpc);
     config.rpc.pairs[0].l2_witness_rpc = Some(l2_witness_rpc);
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-l2-witness-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -516,17 +1399,14 @@ async fn e2e_ready_fails_when_sp1_verification_is_disabled() {
     config.prover.runner = RunnerKind::Local;
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-sp1-verify-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -566,17 +1446,14 @@ async fn e2e_ready_checks_sp1_even_when_risc0_boundless_is_default() {
         deterministic_test_private_key("raiko2:e2e-ready-boundless");
     config.prover.sp1.prover = Sp1ProverMode::Local;
     config.prover.sp1.verify = false;
-    let zk_any_sampler = Arc::new(Mutex::new(ZkAnySampler::from_config(&config.prover.zk_any)));
-
-    let state = AppState {
-        config: Arc::new(config),
-        pipelines: Arc::new(StaticPipelineFactory::default()),
-        runtime: Arc::new(
+    let state = AppState::from_parts(
+        Arc::new(config),
+        Arc::new(StaticPipelineFactory::default()),
+        Arc::new(
             RuntimeManager::new(unique_runtime_root("raiko2-e2e-ready-multi-zk-runtime"))
                 .expect("runtime manager"),
         ),
-        zk_any_sampler,
-    };
+    );
     let app = app::build_router(state);
 
     let (status, body) = get_json(&app, "/ready").await;
@@ -1037,12 +1914,11 @@ async fn e2e_duplicate_shasta_post_recovers_stale_runtime_progress_after_restart
         PipelineKey::ShastaRisc0,
         Arc::new(restarted_engine.clone()),
     );
-    let restarted_state = AppState {
-        config: Arc::clone(&state.config),
-        pipelines: Arc::new(factory),
-        runtime: Arc::clone(&state.runtime),
-        zk_any_sampler: Arc::clone(&state.zk_any_sampler),
-    };
+    let restarted_state = AppState::from_parts(
+        Arc::clone(&state.config),
+        Arc::new(factory),
+        Arc::clone(&state.runtime),
+    );
     let restarted_app = app::build_router(restarted_state);
 
     let (status, second) = post_json(&restarted_app, "/v3/proof/batch/shasta", payload).await;
@@ -1384,27 +2260,26 @@ async fn e2e_duplicate_aggregate_shasta_post_returns_aggregate_proof() {
 async fn e2e_metrics_endpoint_exposes_key_metric_families() {
     let config = base_config();
     let (app, engine) = app_with_observed_risc0_fixture_engine(config);
+    let request = json!({
+        "proposals": [{
+            "proposal_id": 7,
+            "l1_inclusion_block_number": 1,
+            "l2_block_numbers": [7],
+            "last_anchor_block_number": 0
+        }],
+        "aggregate": false,
+        "proof_type": "risc0",
+        "network": "taiko_dev",
+        "l1_network": "ethereum"
+    });
 
-    let (status, _res) = post_json(
-        &app,
-        "/v3/proof/batch/shasta",
-        json!({
-            "proposals": [{
-                "proposal_id": 7,
-                "l1_inclusion_block_number": 1,
-                "l2_block_numbers": [7],
-                "last_anchor_block_number": 0
-            }],
-            "aggregate": false,
-            "proof_type": "risc0",
-            "network": "taiko_dev",
-            "l1_network": "ethereum"
-        }),
-    )
-    .await;
+    let (status, _res) = post_json(&app, "/v3/proof/batch/shasta", request.clone()).await;
     assert_eq!(status, StatusCode::OK);
 
     drive_engine_to_idle(&engine).await;
+
+    let (status, duplicate) = post_json(&app, "/v3/proof/batch/shasta", request).await;
+    assert_eq!(status, StatusCode::OK, "{duplicate}");
 
     let (status, body) = get_text(&app, "/metrics").await;
     assert_eq!(status, StatusCode::OK);
@@ -1414,6 +2289,13 @@ async fn e2e_metrics_endpoint_exposes_key_metric_families() {
     );
     assert!(
         body.contains("raiko2_stage_task_duration_seconds_bucket"),
+        "{body}"
+    );
+    assert!(body.contains("raiko2_duplicate_requests_total"), "{body}");
+    assert!(
+        body.contains(
+            "raiko2_duplicate_requests_total{aggregate=\"false\",pair=\"taiko_dev/ethereum\",proof_type=\"risc0\",route=\"risc0/local\",runner_status=\"completed\"}"
+        ),
         "{body}"
     );
     assert!(body.contains("pair=\"taiko_dev/ethereum\""), "{body}");
@@ -1696,6 +2578,26 @@ async fn e2e_admin_ballot_requires_key_and_updates_sampler() {
 }
 
 #[tokio::test]
+async fn e2e_admin_ballot_rate_limits_acl_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "ops-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::AdminBallotRead],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-admin-key").await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) = get_json_with_api_key(&app, "/admin/ballot", "secret-admin-key").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
+}
+
+#[tokio::test]
 async fn e2e_admin_ballot_rejects_unsupported_proof_type() {
     let mut config = base_config();
     config.server.acl.keys = vec![acl_key(
@@ -1774,6 +2676,28 @@ async fn e2e_prover_clear_requires_clear_api_key() {
         post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["status"], "ok");
+}
+
+#[tokio::test]
+async fn e2e_v3_clear_rate_limits_acl_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "ops-clear",
+        "secret-clear-key",
+        vec![ServerAclFeature::ProverClear],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/prover/clear", "secret-clear-key", json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
 }
 
 #[tokio::test]
@@ -2610,6 +3534,28 @@ async fn e2e_prune_clears_runtime_and_alias_routes() {
 }
 
 #[tokio::test]
+async fn e2e_prune_rate_limits_admin_key() {
+    let mut config = base_config();
+    config.server.acl.keys = vec![acl_key_with_rate_limit(
+        "root-admin",
+        "secret-admin-key",
+        vec![ServerAclFeature::Admin],
+        Some(1),
+    )];
+    let engine = risc0_fixture_engine(json!({}));
+    let app = app_with_risc0_fixture_engine(config, engine);
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/proof/prune", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+
+    let (status, res) =
+        post_json_with_api_key(&app, "/v3/proof/prune", "secret-admin-key", json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{res}");
+    assert_eq!(res["error"], "rate_limited");
+}
+
+#[tokio::test]
 async fn e2e_sp1_execute_rejects_aggregate_requests() {
     let config = base_config();
     let engine = risc0_fixture_engine(json!({}));
@@ -3091,6 +4037,7 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             provider_request_id: "0x1234".to_string(),
             remote_tx_hash: Some("0xabcd".to_string()),
             expires_at: 123_456,
+            lock_expires_at: 123_300,
             submitted_at: 123_000,
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),
@@ -3098,6 +4045,8 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
             max_price_multiplier: 4,
+            max_price_wei: Some("9000000000000".to_string()),
+            rebid_attempt: 2,
         },
         updated_at,
     );
@@ -3172,6 +4121,10 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["max_price_multiplier"],
         4
+    );
+    assert_eq!(
+        res["data"]["proposals"][0]["runtime"]["max_price_wei"],
+        "9000000000000"
     );
     assert_eq!(
         res["data"]["proposals"][0]["runtime"]["engine_state_present"],

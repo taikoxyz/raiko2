@@ -12,7 +12,9 @@ pub mod instance;
 mod proof;
 
 pub use anchor::{
-    anchor_max_offset_for_chain, should_bypass_stalled_anchor_linkage, validate_anchor_progression,
+    AnchorSourceSpan, SourceAwareAnchorPlan, anchor_max_offset_for_chain,
+    should_bypass_stalled_anchor_linkage, validate_anchor_progression,
+    validate_source_aware_anchor_progression,
 };
 pub use blob::verify_proposal_mode_blob_usage;
 pub use fixture::{

@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -10,7 +12,7 @@ use risc0_zkos_v1compat::V1COMPAT_ELF;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sp1_sdk::{
-    ProvingKey as _,
+    HashableKey, ProvingKey as _, SP1VerifyingKey,
     blocking::{Prover as _, ProverClient},
 };
 
@@ -34,6 +36,7 @@ const DEFAULT_SP1_AR_ENV: &str = "AR_riscv64im_succinct_zkvm_elf";
 const DEFAULT_SP1_CC: &str = "riscv64-unknown-elf-gcc -specs=picolibc.specs";
 const DEFAULT_SP1_CXX: &str = "riscv64-unknown-elf-g++ -specs=picolibcpp.specs";
 const DEFAULT_SP1_AR: &str = "riscv64-unknown-elf-ar";
+const HOST_LAUNCHER_PROFILE_OVERRIDES: &[&str] = &["CARGO_PROFILE_RELEASE_OPT_LEVEL"];
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
@@ -49,6 +52,9 @@ pub struct BuildGuestArgs {
     /// Include benchmark binaries (requires bins in Cargo.toml).
     #[arg(long)]
     pub bench: bool,
+    /// Force rebuilding even when guest inputs and checked-in outputs match.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn repo_root() -> PathBuf {
@@ -60,7 +66,7 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub fn run(root: &Path, args: BuildGuestArgs) -> Result<()> {
-    build(root, args.backend, args.bench, None)?;
+    refresh_release_guest_elves(root, args.backend, args.bench, None, args.force)?;
     println!("[INFO] Build complete!");
     Ok(())
 }
@@ -138,12 +144,24 @@ pub fn ensure_release_guest_elves(
     bench: bool,
     sp1_docker_tag: Option<&str>,
 ) -> Result<()> {
+    refresh_release_guest_elves(root, backend, bench, sp1_docker_tag, false)
+}
+
+fn refresh_release_guest_elves(
+    root: &Path,
+    backend: Backend,
+    bench: bool,
+    sp1_docker_tag: Option<&str>,
+    force: bool,
+) -> Result<()> {
     match backend {
-        Backend::Risc0 => ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag),
-        Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag),
+        Backend::Risc0 => {
+            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force)
+        }
+        Backend::Sp1 => ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force),
         Backend::All => {
-            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag)?;
-            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag)
+            ensure_release_backend(root, Backend::Risc0, bench, sp1_docker_tag, force)?;
+            ensure_release_backend(root, Backend::Sp1, bench, sp1_docker_tag, force)
         }
     }
 }
@@ -193,30 +211,47 @@ fn ensure_release_backend(
     backend: Backend,
     bench: bool,
     sp1_docker_tag: Option<&str>,
+    force: bool,
 ) -> Result<()> {
+    let started = Instant::now();
     let backend_key = match backend {
         Backend::Risc0 => "risc0",
         Backend::Sp1 => "sp1",
         Backend::All => unreachable!("release backend cache is evaluated per concrete backend"),
     };
-    let outputs_exist = guest_outputs_exist(root, backend)?;
-    let fingerprint =
-        compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
     let fingerprint_path = guest_fingerprint_path(root, backend_key);
 
-    if outputs_exist
-        && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
-    {
-        println!("[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild.");
-        return Ok(());
+    if !force {
+        let outputs_exist = guest_outputs_exist(root, backend)?;
+        let fingerprint =
+            compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
+        if outputs_exist
+            && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
+        {
+            println!(
+                "[INFO] Guest ELFs for backend `{backend_key}` are up to date; skipping rebuild after {}.",
+                util::format_duration(started.elapsed())
+            );
+            return Ok(());
+        }
     }
 
-    println!(
-        "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
-    );
+    if force {
+        println!(
+            "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because --force was passed..."
+        );
+    } else {
+        println!(
+            "[INFO] Rebuilding guest ELFs for backend `{backend_key}` because sources or build inputs changed..."
+        );
+    }
     build(root, backend, bench, sp1_docker_tag)?;
     let fingerprint = compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?;
     write_guest_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?;
+    println!(
+        "[INFO] Guest ELFs for backend `{backend_key}` refreshed in {}.",
+        util::format_duration(started.elapsed())
+    );
     Ok(())
 }
 
@@ -513,6 +548,7 @@ fn hash_tagged_bytes(hasher: &mut Sha256, tag: &str, bytes: &[u8]) {
 }
 
 fn build_risc0(root: &Path, bench: bool) -> Result<()> {
+    let started = Instant::now();
     println!("[INFO] Building RISC0 guest programs...");
     util::ensure_docker()?;
     let toolchain_image = env::var("RISC0_TOOLCHAIN_IMAGE")
@@ -550,6 +586,7 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
 
     let target_root = util::target_root(root).join("risc0");
     cmd.env("CARGO_TARGET_DIR", &target_root);
+    clear_host_launcher_profile_overrides(&mut cmd);
 
     let risc0_docker_tag = env::var("RISC0_DOCKER_CONTAINER_TAG")
         .ok()
@@ -589,12 +626,18 @@ fn build_risc0(root: &Path, bench: bool) -> Result<()> {
     println!("[INFO] Building RISC0 guest package (docker via cargo risczero)...");
     util::run(cmd)?;
 
+    let export_started = Instant::now();
     export_risc0_elves(root, &manifest, &target_root)?;
-    println!("[INFO] RISC0 guest build complete");
+    println!(
+        "[INFO] RISC0 guest build complete in {} (export {}).",
+        util::format_duration(started.elapsed()),
+        util::format_duration(export_started.elapsed())
+    );
     Ok(())
 }
 
 fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Result<()> {
+    let started = Instant::now();
     println!("[INFO] Using RISC0 toolchain image: {image}");
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
@@ -644,6 +687,13 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
             .arg(format!("CARGO_HOME={}", util::DOCKER_CARGO_HOME));
     }
 
+    let sccache_enabled = configure_docker_sccache(
+        &mut cmd,
+        root,
+        "risc0",
+        image == DEFAULT_RISC0_TOOLCHAIN_IMAGE,
+    )?;
+
     if let Some(extra_mount) = &extra_mount {
         cmd.arg("-v")
             .arg(format!("{}:/target", extra_mount.display()));
@@ -661,9 +711,15 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         .arg("-e")
         .arg("RISC0_FEATURE_bigint2=1")
         .arg("-e")
-        .arg(format!("CC_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_CC}"))
+        .arg(format!(
+            "CC_riscv32im_risc0_zkvm_elf={}",
+            sccache_compiler(sccache_enabled, DEFAULT_RISC0_CC)
+        ))
         .arg("-e")
-        .arg(format!("CXX_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_CXX}"))
+        .arg(format!(
+            "CXX_riscv32im_risc0_zkvm_elf={}",
+            sccache_compiler(sccache_enabled, DEFAULT_RISC0_CXX)
+        ))
         .arg("-e")
         .arg(format!("AR_riscv32im_risc0_zkvm_elf={DEFAULT_RISC0_AR}"));
     if let Some(tag) = risc0_docker_tag.as_deref() {
@@ -693,19 +749,32 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         println!("[INFO] RISC0_DEV_MODE enabled");
     }
 
-    cmd.arg(image)
-        .arg("cargo")
-        .arg("+risc0")
-        .arg("build")
-        .arg("--release")
-        .arg("--ignore-rust-version")
-        .arg("--locked")
-        .arg("--target")
-        .arg("riscv32im-risc0-zkvm-elf")
-        .arg("--manifest-path")
-        .arg(&container_manifest_path);
-    if bench {
-        cmd.arg("--features").arg("bench");
+    cmd.arg(image);
+    if sccache_enabled {
+        cmd.arg("sh").arg("-lc").arg(format!(
+            "sccache --zero-stats || true\n\
+             cargo +risc0 build --release --ignore-rust-version --locked \
+             --target riscv32im-risc0-zkvm-elf --manifest-path {}{}\n\
+             status=$?\n\
+             sccache --show-stats || true\n\
+             exit \"$status\"",
+            container_manifest_path.display(),
+            if bench { " --features bench" } else { "" }
+        ));
+    } else {
+        cmd.arg("cargo")
+            .arg("+risc0")
+            .arg("build")
+            .arg("--release")
+            .arg("--ignore-rust-version")
+            .arg("--locked")
+            .arg("--target")
+            .arg("riscv32im-risc0-zkvm-elf")
+            .arg("--manifest-path")
+            .arg(&container_manifest_path);
+        if bench {
+            cmd.arg("--features").arg("bench");
+        }
     }
 
     println!("[INFO] Building RISC0 guest package (toolchain image)...");
@@ -717,8 +786,13 @@ fn build_risc0_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Re
         &[target_root.as_path()],
     )?;
 
+    let export_started = Instant::now();
     export_risc0_elves(root, &manifest, &target_root)?;
-    println!("[INFO] RISC0 guest build complete");
+    println!(
+        "[INFO] RISC0 guest build complete in {} (export {}).",
+        util::format_duration(started.elapsed()),
+        util::format_duration(export_started.elapsed())
+    );
     Ok(())
 }
 
@@ -786,6 +860,7 @@ fn export_risc0_binary(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<()> {
+    let started = Instant::now();
     println!("[INFO] Building SP1 guest programs...");
     util::ensure_docker()?;
 
@@ -826,6 +901,7 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root.join("guests/sp1"));
+    clear_host_launcher_profile_overrides(&mut cmd);
     cmd.arg("prove")
         .arg("build")
         .arg("--docker")
@@ -872,13 +948,19 @@ fn build_sp1(root: &Path, bench: bool, sp1_docker_tag: Option<&str>) -> Result<(
     }
 
     util::run(cmd)?;
+    let export_started = Instant::now();
     export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
-    println!("[INFO] SP1 guest build complete");
+    println!(
+        "[INFO] SP1 guest build complete in {} (export {}).",
+        util::format_duration(started.elapsed()),
+        util::format_duration(export_started.elapsed())
+    );
     Ok(())
 }
 
 fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Result<()> {
+    let started = Instant::now();
     println!("[INFO] Using SP1 toolchain image: {image}");
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "release".to_string());
@@ -931,6 +1013,9 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
             .arg(format!("CARGO_HOME={}", util::DOCKER_CARGO_HOME));
     }
 
+    let sccache_enabled =
+        configure_docker_sccache(&mut cmd, root, "sp1", image == DEFAULT_SP1_TOOLCHAIN_IMAGE)?;
+
     if let Some(extra_mount) = &extra_mount {
         cmd.arg("-v")
             .arg(format!("{}:/target", extra_mount.display()));
@@ -944,10 +1029,14 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         .arg("-e")
         .arg(format!("{SP1_TARGET_RUSTFLAGS_ENV}={rustflags}"));
 
-    cmd.arg("-e")
-        .arg(format!("{DEFAULT_SP1_CC_ENV}={DEFAULT_SP1_CC}"));
-    cmd.arg("-e")
-        .arg(format!("{DEFAULT_SP1_CXX_ENV}={DEFAULT_SP1_CXX}"));
+    cmd.arg("-e").arg(format!(
+        "{DEFAULT_SP1_CC_ENV}={}",
+        sccache_compiler(sccache_enabled, DEFAULT_SP1_CC)
+    ));
+    cmd.arg("-e").arg(format!(
+        "{DEFAULT_SP1_CXX_ENV}={}",
+        sccache_compiler(sccache_enabled, DEFAULT_SP1_CXX)
+    ));
     cmd.arg("-e")
         .arg(format!("{DEFAULT_SP1_AR_ENV}={DEFAULT_SP1_AR}"));
 
@@ -962,7 +1051,11 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         cmd.arg("-e").arg(format!("CFLAGS={cflags}"));
     }
 
-    let mut script = String::from("set -eu\ncargo prove build --ignore-rust-version ");
+    let mut script = String::from("set -u\n");
+    if sccache_enabled {
+        script.push_str("sccache --zero-stats || true\n");
+    }
+    script.push_str("cargo prove build --ignore-rust-version ");
     if bench {
         script.push_str("--features bench ");
     }
@@ -974,6 +1067,11 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
     script.push_str("--output-directory ");
     script.push_str(container_export_dir.to_string_lossy().as_ref());
     script.push_str(" --locked --workspace-directory /work\n");
+    if sccache_enabled {
+        script.push_str("status=$?\n");
+        script.push_str("sccache --show-stats || true\n");
+        script.push_str("exit \"$status\"\n");
+    }
 
     cmd.arg(image).arg("sh").arg("-lc").arg(script);
 
@@ -985,10 +1083,50 @@ fn build_sp1_with_toolchain_image(root: &Path, bench: bool, image: &str) -> Resu
         extra_mount.as_deref(),
         &[target_root.as_path()],
     )?;
+    let export_started = Instant::now();
     export_sp1_elves(&manifest, &export_dir, &output_dir)?;
 
-    println!("[INFO] SP1 guest build complete");
+    println!(
+        "[INFO] SP1 guest build complete in {} (export {}).",
+        util::format_duration(started.elapsed()),
+        util::format_duration(export_started.elapsed())
+    );
     Ok(())
+}
+
+fn configure_docker_sccache(
+    cmd: &mut Command,
+    root: &Path,
+    backend_key: &str,
+    default_enabled: bool,
+) -> Result<bool> {
+    let Some(volume) = util::docker_sccache_cache_volume(root, backend_key, default_enabled)?
+    else {
+        println!("[INFO] Docker sccache cache disabled for backend `{backend_key}`");
+        return Ok(false);
+    };
+
+    println!("[INFO] Using docker sccache cache volume: {volume}");
+    cmd.arg("-v")
+        .arg(format!("{volume}:{}", util::DOCKER_SCCACHE_DIR));
+    cmd.arg("-e")
+        .arg(format!("SCCACHE_DIR={}", util::DOCKER_SCCACHE_DIR));
+    cmd.arg("-e").arg("SCCACHE_BASEDIRS=/work");
+    Ok(true)
+}
+
+fn sccache_compiler(enabled: bool, compiler: &str) -> String {
+    if enabled {
+        format!("sccache {compiler}")
+    } else {
+        compiler.to_string()
+    }
+}
+
+fn clear_host_launcher_profile_overrides(cmd: &mut Command) {
+    for key in HOST_LAUNCHER_PROFILE_OVERRIDES {
+        cmd.env_remove(key);
+    }
 }
 
 fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Path) -> Result<()> {
@@ -1017,16 +1155,22 @@ fn export_sp1_elves(manifest: &CargoManifest, export_dir: &Path, output_dir: &Pa
 }
 
 fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
+    let vk = derive_sp1_vk(Arc::from(elf), &artifact_name)?;
+    serialize_sp1_vk(&vk, &artifact_name)
+}
+
+pub fn derive_sp1_vk(elf: Arc<[u8]>, artifact_name: &str) -> Result<SP1VerifyingKey> {
+    let artifact_name = artifact_name.to_string();
     let panic_artifact = artifact_name.clone();
     let handle = std::thread::Builder::new()
         .name(format!("sp1-vk-{artifact_name}"))
         .spawn(move || {
-            let client = ProverClient::builder().cpu().build();
+            let client = ProverClient::builder().light().build();
             let pk = client
-                .setup(elf.as_slice().into())
+                .setup(elf.as_ref().into())
                 .with_context(|| format!("setup SP1 verifying key for {artifact_name}"))?;
-            bincode::serialize(pk.verifying_key())
-                .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+            let vk_bytes = serialize_sp1_vk(pk.verifying_key(), &artifact_name)?;
+            deserialize_sp1_vk_artifact(&artifact_name, &vk_bytes)
         })
         .with_context(|| format!("spawn SP1 verifying key setup for {panic_artifact}"))?;
 
@@ -1035,7 +1179,64 @@ fn sp1_vk_bin(elf: Vec<u8>, artifact_name: String) -> Result<Vec<u8>> {
         .map_err(|_| anyhow::anyhow!("SP1 verifying key setup panicked for {panic_artifact}"))?
 }
 
+pub fn verified_sp1_vk(
+    elf: Arc<[u8]>,
+    vk_artifact: Option<&[u8]>,
+    artifact_name: &str,
+) -> Result<SP1VerifyingKey> {
+    let derived_vk = derive_sp1_vk(elf, artifact_name)?;
+    if let Some(vk_artifact) = vk_artifact {
+        let artifact_vk = deserialize_sp1_vk_artifact(artifact_name, vk_artifact)?;
+        ensure_sp1_vk_matches(artifact_name, &derived_vk, &artifact_vk)?;
+    }
+    Ok(derived_vk)
+}
+
+pub fn serialize_sp1_vk(vk: &SP1VerifyingKey, artifact_name: &str) -> Result<Vec<u8>> {
+    bincode::serialize(vk)
+        .with_context(|| format!("serialize SP1 verifying key for {artifact_name}"))
+}
+
+fn deserialize_sp1_vk_artifact(artifact_name: &str, bytes: &[u8]) -> Result<SP1VerifyingKey> {
+    bincode::deserialize(bytes)
+        .with_context(|| format!("failed to load SP1 VK artifact for {artifact_name}"))
+}
+
+fn ensure_sp1_vk_matches(
+    artifact_name: &str,
+    derived_vk: &SP1VerifyingKey,
+    artifact_vk: &SP1VerifyingKey,
+) -> Result<()> {
+    let derived_vk_bn254 = derived_vk.hash_bn254();
+    let artifact_vk_bn254 = artifact_vk.hash_bn254();
+    let derived_vk_hash_bytes = derived_vk.hash_bytes();
+    let artifact_vk_hash_bytes = artifact_vk.hash_bytes();
+
+    if derived_vk_bn254 != artifact_vk_bn254 || derived_vk_hash_bytes != artifact_vk_hash_bytes {
+        let derived_vk_hash_bytes_hex = format!("0x{}", hex_lower(&derived_vk_hash_bytes));
+        let artifact_vk_hash_bytes_hex = format!("0x{}", hex_lower(&artifact_vk_hash_bytes));
+        let derived_vk_bn254_hex = derived_vk.bytes32();
+        let artifact_vk_bn254_hex = artifact_vk.bytes32();
+        bail!(
+            "SP1 VK artifact mismatch for {artifact_name}: derived vk_bn254={derived_vk_bn254_hex}, artifact vk_bn254={artifact_vk_bn254_hex}, derived vk_hash_bytes={derived_vk_hash_bytes_hex}, artifact vk_hash_bytes={artifact_vk_hash_bytes_hex}"
+        );
+    }
+
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> Result<()> {
+    let started = Instant::now();
     let mut inspect = Command::new("docker");
     inspect
         .arg("image")
@@ -1049,6 +1250,10 @@ fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> 
     {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if version == sp1_tag {
+            println!(
+                "[INFO] Local SP1 toolchain image is up to date; checked in {}.",
+                util::format_duration(started.elapsed())
+            );
             return Ok(());
         }
         println!(
@@ -1067,10 +1272,16 @@ fn ensure_local_sp1_toolchain_image(root: &Path, image: &str, sp1_tag: &str) -> 
         .arg("--build-arg")
         .arg(format!("SP1_DOCKER_TAG={sp1_tag}"))
         .arg(root.join("docker/sp1-toolchain"));
-    util::run(build)
+    util::run(build)?;
+    println!(
+        "[INFO] Built local SP1 toolchain image in {}.",
+        util::format_duration(started.elapsed())
+    );
+    Ok(())
 }
 
 fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
+    let started = Instant::now();
     let mut inspect = Command::new("docker");
     inspect
         .arg("image")
@@ -1086,6 +1297,10 @@ fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
     {
         let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if tag == DEFAULT_RISC0_GUEST_BUILDER_TAG {
+            println!(
+                "[INFO] Local RISC0 toolchain image is up to date; checked in {}.",
+                util::format_duration(started.elapsed())
+            );
             return Ok(());
         }
         println!(
@@ -1106,7 +1321,12 @@ fn ensure_local_risc0_toolchain_image(root: &Path, image: &str) -> Result<()> {
             "RISC0_GUEST_BUILDER_TAG={DEFAULT_RISC0_GUEST_BUILDER_TAG}"
         ))
         .arg(root.join("docker/risc0-toolchain"));
-    util::run(build)
+    util::run(build)?;
+    println!(
+        "[INFO] Built local RISC0 toolchain image in {}.",
+        util::format_duration(started.elapsed())
+    );
+    Ok(())
 }
 
 fn read_manifest(path: &Path) -> Result<CargoManifest> {
@@ -1165,6 +1385,64 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn sccache_compiler_wraps_only_when_enabled() {
+        assert_eq!(
+            sccache_compiler(true, "riscv64-unknown-elf-gcc"),
+            "sccache riscv64-unknown-elf-gcc"
+        );
+        assert_eq!(
+            sccache_compiler(false, "riscv64-unknown-elf-gcc"),
+            "riscv64-unknown-elf-gcc"
+        );
+    }
+
+    #[test]
+    fn sp1_vk_match_check_accepts_identical_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+
+        ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &proposal)
+            .expect("identical SP1 VK should match");
+    }
+
+    #[test]
+    fn sp1_vk_match_check_rejects_swapped_key() {
+        let proposal = read_sp1_vk_artifact("sp1_shasta_proposal.vk.bin");
+        let aggregation = read_sp1_vk_artifact("sp1_shasta_aggregation.vk.bin");
+
+        let err = ensure_sp1_vk_matches("sp1_shasta_proposal", &proposal, &aggregation)
+            .expect_err("swapped SP1 VK should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("SP1 VK artifact mismatch for sp1_shasta_proposal"));
+        assert!(message.contains("derived vk_bn254="));
+        assert!(message.contains("artifact vk_bn254="));
+        assert!(message.contains("derived vk_hash_bytes="));
+        assert!(message.contains("artifact vk_hash_bytes="));
+    }
+
+    #[test]
+    fn deserialize_sp1_vk_artifact_names_malformed_artifact() {
+        let err = match deserialize_sp1_vk_artifact("sp1_shasta_proposal", b"not a verifying key") {
+            Ok(_) => panic!("malformed SP1 VK artifact should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to load SP1 VK artifact for sp1_shasta_proposal")
+        );
+    }
+
+    fn read_sp1_vk_artifact(file_name: &str) -> SP1VerifyingKey {
+        let path = repo_root().join("crates/guests/elf").join(file_name);
+        let bytes = fs::read(&path).unwrap_or_else(|err| {
+            panic!("read {}: {err}", path.display());
+        });
+        deserialize_sp1_vk_artifact(file_name.trim_end_matches(".vk.bin"), &bytes)
+            .unwrap_or_else(|err| panic!("deserialize {}: {err}", path.display()))
     }
 
     fn temp_test_dir() -> PathBuf {

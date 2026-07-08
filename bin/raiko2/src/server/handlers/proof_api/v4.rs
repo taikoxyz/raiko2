@@ -914,10 +914,7 @@ fn consume_json_escape(bytes: &[u8], pos: &mut usize) -> Result<Option<u8>, &'st
             if bytes.len().saturating_sub(*pos) < 4 {
                 return Err("unterminated JSON unicode escape in prefix scan window");
             }
-            if !bytes[*pos..(*pos + 4)]
-                .iter()
-                .all(|byte| byte.is_ascii_hexdigit())
-            {
+            if !bytes[*pos..(*pos + 4)].iter().all(u8::is_ascii_hexdigit) {
                 return Err("invalid JSON unicode escape in prefix scan");
             }
             *pos += 4;

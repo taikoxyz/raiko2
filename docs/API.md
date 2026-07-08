@@ -78,11 +78,18 @@ The canonical minimal metric families are:
 - `raiko2_stage_tasks_inflight`
 - `raiko2_stage_task_started_total`
 - `raiko2_stage_task_terminal_total`
+- `raiko2_stage_task_failures_total`
 - `raiko2_stage_task_duration_seconds`
+- `raiko2_duplicate_requests_total`
 - `raiko2_external_submission_total`
 
 Stage metrics are labeled by `route`, `proof_type`, `pair`, `aggregate`, and `stage`.
 Terminal counters and duration histograms also include `status`.
+Failure counters also include a bounded `error_kind` label, such as `rpc_error`,
+`witness_error`, `instance_id_mismatch`, `proof_persistence`, `stale_artifact`, or
+`invalid_request`. Duplicate-request counters include `runner_status` so cache hits and stale
+failed tasks can be alerted separately; completed tasks whose proof artifact is missing are
+reported as `runner_status="completed_artifact_missing"`.
 
 ## Admin Ballot
 

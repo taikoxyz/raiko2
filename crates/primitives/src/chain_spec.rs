@@ -1387,6 +1387,14 @@ mod tests {
             spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::SgxGeth)?,
             address!("8cF41Ee873Ca293Dc339006b0069d6337F68CCCA")
         );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Risc0)?,
+            address!("8f2007dC3Bf34a1E4A4Ea5303EDC2D8e140934E9")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Sp1)?,
+            address!("2a872461C4629D5626Cb6852e50d75Bc7702f0e2")
+        );
         Ok(())
     }
 

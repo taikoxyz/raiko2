@@ -1828,7 +1828,7 @@ mod tests {
         TAIKO_GOLDEN_TOUCH_ADDRESS, anchorV4Call, validate_l1_headers,
     };
     use alethia_reth_chainspec::{
-        TAIKO_MAINNET,
+        TAIKO_HOODI, TAIKO_MAINNET,
         hardfork::{TaikoHardfork as AlethiaTaikoHardfork, TaikoHardforks as _},
     };
     use alloy_consensus::{Header, SignableTransaction, TxEip1559};
@@ -2222,6 +2222,13 @@ mod tests {
         match TAIKO_MAINNET.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
             AlethiaForkCondition::Timestamp(timestamp) => timestamp,
             condition => panic!("expected mainnet Shasta timestamp fork, got {condition:?}"),
+        }
+    }
+
+    fn alethia_hoodi_shasta_timestamp() -> u64 {
+        match TAIKO_HOODI.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
+            AlethiaForkCondition::Timestamp(timestamp) => timestamp,
+            condition => panic!("expected Hoodi Shasta timestamp fork, got {condition:?}"),
         }
     }
 
@@ -3108,8 +3115,9 @@ mod tests {
             parent_checkpoint.block_hash,
             parent_checkpoint.state_root,
         );
+        let shasta_timestamp = alethia_hoodi_shasta_timestamp();
         forced_block.header.number = 1;
-        forced_block.header.timestamp = 1001;
+        forced_block.header.timestamp = shasta_timestamp;
         forced_block.header.gas_limit = 30_000_000;
         let mut normal_block = sample_block(
             42,
@@ -3118,17 +3126,21 @@ mod tests {
             normal_anchor_header.state_root,
         );
         normal_block.header.number = 2;
-        normal_block.header.timestamp = 1002;
+        normal_block.header.timestamp = shasta_timestamp + 1;
         normal_block.header.gas_limit = 30_000_000;
         provider.block = forced_block.clone();
         provider.blocks = vec![forced_block, normal_block.clone()];
         provider.parent_block.header.number = 0;
-        provider.parent_block.header.timestamp = 1000;
+        provider.parent_block.header.timestamp = shasta_timestamp.saturating_sub(1);
         provider.parent_block.header.gas_limit = 30_000_000;
         provider.proposal_event.proposal.originBlockNumber =
             origin_header.number.try_into().expect("fits in uint48");
         provider.proposal_event.proposal.originBlockHash = origin_header.hash_slow();
-        provider.proposal_event.proposal.timestamp = 1002u64.try_into().expect("fits in uint48");
+        provider.proposal_event.proposal.timestamp = normal_block
+            .header
+            .timestamp
+            .try_into()
+            .expect("fits in uint48");
         provider.proposal_event.proposal.sources = vec![
             DerivationSource {
                 isForcedInclusion: true,

@@ -40,7 +40,7 @@ enum Cmd {
     #[cfg(feature = "guest-tools")]
     BenchGuest(Box<bench_guest::BenchGuestArgs>),
 
-    /// Build a `/v3/proof/batch/shasta` request for the latest onchain proposal.
+    /// Build a legacy `/v3/proof/batch/shasta` request for the latest onchain proposal.
     #[cfg(feature = "guest-tools")]
     LatestProposalRequest(latest_proposal_request::LatestProposalRequestArgs),
 

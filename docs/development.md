@@ -62,7 +62,7 @@ cargo run -p raiko2 --features fixture-server -- fixture-server --host 127.0.0.1
 This fixture-backed server is intended for:
 
 - API upgrade smoke tests that only need stable request/response behavior
-- local validation of `/v3/proof/batch/shasta` and `/v3/proof/report` wiring
+- local validation of `/v4/proof/proposal` and `/v4/tasks/{id}` wiring
 - development without live L1/L2 RPC or a real prover backend
 
 Do not use it as evidence for:
@@ -71,42 +71,38 @@ Do not use it as evidence for:
 - remote prover integration
 - end-to-end proposal regression on a real network window
 
-Submit an asynchronous v3 request:
+Submit an asynchronous v4 request:
 
 ```bash
-curl -X POST http://127.0.0.1:8087/v3/proof/batch/shasta \
+curl -X POST http://127.0.0.1:8087/v4/proof/proposal \
   -H 'content-type: application/json' \
   -d '{
+    "proof_type": "sp1",
+    "aggregate": false,
     "proposals": [{
       "proposal_id": 3,
+      "last_anchor_block_number": 0,
       "l1_inclusion_block_number": 1,
-      "l2_block_numbers": [3],
-      "last_anchor_block_number": 0
-    }],
-    "aggregate": false,
-    "proof_type": "sp1",
-    "network": "taiko_dev",
-    "l1_network": "ethereum",
-    "sp1": {
-      "mode": "execute",
-      "prover": "local"
-    }
+      "l2_block_number_start": 3,
+      "l2_block_number_end": 3
+    }]
   }'
 ```
 
 Query the resulting task:
 
 ```bash
-curl http://127.0.0.1:8087/v3/tasks/<task_id>
+curl http://127.0.0.1:8087/v4/tasks/<task_id>
 ```
 
-`sp1.mode=execute` completes without a zk proof and stores the execution report under
-`proposals[].extra_data.sp1`.
+The fixture engine returns deterministic task and proof data without live RPC or prover
+dependencies.
 
 ## Generate A Latest Proposal Request
 
-Use the new `xtask` helper to discover the latest onchain Shasta proposal and emit a ready-to-post
-`/v3/proof/batch/shasta` JSON body.
+Use the legacy `xtask` helper to discover the latest onchain Shasta proposal and emit a
+`/v3/proof/batch/shasta` JSON body. The default server router no longer mounts v3 routes, so prefer
+v4 request construction for active clients.
 
 Print a mainnet request to stdout:
 

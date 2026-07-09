@@ -109,11 +109,12 @@ pub fn build_proof_carry_data_with_chain_spec(
             "cannot build Shasta proof carry data without witnesses".to_string(),
         )
     })?;
-    let chain_id = if chain_spec.chain_id != 0 {
-        chain_spec.chain_id
-    } else {
-        input.taiko.chain_spec.chain_id
-    };
+    if chain_spec.chain_id == 0 {
+        return Err(RaikoError::InvalidRequestConfig(
+            "trusted chain_spec.chain_id must be non-zero".to_string(),
+        ));
+    }
+    let chain_id = chain_spec.chain_id;
     let verifier_proof_type = match proof_type {
         ProofType::Native => ProofType::Sgx,
         other => other,

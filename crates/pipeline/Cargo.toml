@@ -8,13 +8,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-raiko2-primitives.workspace = true
+raiko2-primitives = { workspace = true, default-features = false }
 raiko2-primitives-shasta.workspace = true
 raiko2-protocol.workspace = true
 raiko2-protocol-shasta.workspace = true
 raiko2-guests.workspace = true
 raiko2-stateless.workspace = true
-raiko2-provider.workspace = true
+raiko2-provider = { path = "../provider", default-features = false }
 
 reth-ethereum-primitives.workspace = true
 alethia-reth-block.workspace = true
@@ -42,3 +42,7 @@ alloy-hardforks.workspace = true
 alloy-trie.workspace = true
 alloy-primitives.workspace = true
 risc0-ethereum-trie.workspace = true
+
+[features]
+default = ["chain-spec-json"]
+chain-spec-json = ["raiko2-primitives/chain-spec-json", "raiko2-provider/chain-spec-json"]

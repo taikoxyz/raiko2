@@ -84,7 +84,7 @@ const fn proposal_id_from_request(
         .proposal_id
 }
 
-fn shasta_request_block_count(
+const fn shasta_request_block_count(
     request: &raiko2_prover::remote_prover::protocol::Raiko2ShastaRequest,
 ) -> usize {
     request.payload.guest_input.witnesses.len()

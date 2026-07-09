@@ -6,8 +6,7 @@ sp1_zkvm::entrypoint!(main);
 mod crypto;
 mod sys;
 
-use raiko2_guest_common::prove_shasta_proposal_for_proof_type;
-use raiko2_primitives::ProofType;
+use raiko2_guest_common::prove_shasta_proposal;
 use raiko2_primitives_shasta::GuestInput;
 use sp1_zkvm::io;
 
@@ -24,8 +23,7 @@ pub fn main() {
 
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-start: prove_shasta_proposal");
-    let subproof_input_hash = prove_shasta_proposal_for_proof_type(&guest_input, ProofType::Sp1)
-        .expect("proposal proving failed");
+    let subproof_input_hash = prove_shasta_proposal(&guest_input).expect("proposal proving failed");
     #[cfg(feature = "bench")]
     println!("cycle-tracker-report-end: prove_shasta_proposal");
 

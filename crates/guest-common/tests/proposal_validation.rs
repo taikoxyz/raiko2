@@ -350,7 +350,7 @@ fn assert_rejected_with_message(guest_input: &GuestInput, expected: &str) {
 }
 
 #[test]
-fn rejects_witness_is_taiko_mismatch() {
+fn accepts_witness_is_taiko_mismatch_when_chain_id_matches() {
     let mut guest_input = guest_input_with_single_block();
     let mut second = guest_input.witnesses[0].clone();
     second.block.header.number += 1;
@@ -360,7 +360,11 @@ fn rejects_witness_is_taiko_mismatch() {
     guest_input.proof_carry_data =
         build_proof_carry_data(&guest_input, ProofType::Native).expect("build carry data");
 
-    assert_rejected_with_message(&guest_input, "chain_spec mismatch");
+    prove_shasta_proposal_with_validator(
+        &guest_input,
+        |stateless_input, _ancestor_headers, _runtime| Ok(stateless_input.block.header.hash_slow()),
+    )
+    .expect("guest should ignore witness chain_spec.is_taiko when chain_id matches");
 }
 
 #[test]

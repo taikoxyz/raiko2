@@ -1,5 +1,5 @@
 use alloy_primitives::Address;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use raiko2_primitives::{ChainSpec, SupportedChainSpecs};
 use raiko2_prover::boundless_config::{
     BoundlessOfferParams, MIN_REBID_TIMEOUT_MS, QuoteSizing, REBID_MAX_ATTEMPTS_LIMIT,
@@ -350,6 +350,9 @@ impl RpcConfig {
             bail!("rpc.pairs must contain at least one network pair");
         }
         let known_specs = SupportedChainSpecs::default();
+        known_specs
+            .validate_host_sanity()
+            .context("default chain spec sanity check failed")?;
         self.pairs
             .iter()
             .map(|pair| resolve_pair(&known_specs, pair))

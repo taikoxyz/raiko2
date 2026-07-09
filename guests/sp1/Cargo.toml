@@ -26,7 +26,7 @@ path = "src/revm_opcode_lab.rs"
 
 [dependencies]
 raiko2-guest-common = { path = "../../crates/guest-common", default-features = false }
-raiko2-primitives = { path = "../../crates/primitives" }
+raiko2-primitives = { path = "../../crates/primitives", default-features = false }
 raiko2-primitives-shasta = { path = "../../crates/primitives-shasta" }
 raiko2-protocol-shasta = { path = "../../crates/protocol-shasta" }
 sp1-zkvm = { version = "=6.3.0", features = ["verify"] }

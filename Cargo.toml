@@ -61,7 +61,7 @@ opt-level = 1
 
 [workspace.dependencies]
 # Raiko2 crates
-raiko2-primitives = { path = "./crates/primitives" }
+raiko2-primitives = { path = "./crates/primitives", default-features = false }
 raiko2-guest-common = { path = "./crates/guest-common" }
 raiko2-prover = { path = "./crates/prover" }
 raiko2-pipeline = { path = "./crates/pipeline" }

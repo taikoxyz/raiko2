@@ -163,6 +163,12 @@
             },
             "SHASTA": {
                 "SGX": "0x7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02",
+                "RISC0": "0xfa0e7dAFe9785627df034c123A9B87497EB06b41",
+                "SP1": "0xc42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7",
+                "SGXGETH": "0x8cF41Ee873Ca293Dc339006b0069d6337F68CCCA"
+            },
+            "UNZEN": {
+                "SGX": "0x7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02",
                 "RISC0": "0x8f2007dC3Bf34a1E4A4Ea5303EDC2D8e140934E9",
                 "SP1": "0x2a872461C4629D5626Cb6852e50d75Bc7702f0e2",
                 "SGXGETH": "0x8cF41Ee873Ca293Dc339006b0069d6337F68CCCA"

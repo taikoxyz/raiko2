@@ -1372,13 +1372,21 @@ mod tests {
     }
 
     #[test]
-    fn taiko_hoodi_shasta_verifier_addresses_cover_unzen() -> Result<()> {
+    fn taiko_hoodi_unzen_uses_dedicated_verifier_addresses() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
             .find(|spec| spec.name == "taiko_hoodi")
             .ok_or_else(|| anyhow!("missing taiko_hoodi spec"))?;
 
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP - 1, ProofType::Risc0)?,
+            address!("fa0e7dAFe9785627df034c123A9B87497EB06b41")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP - 1, ProofType::Sp1)?,
+            address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7")
+        );
         assert_eq!(
             spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Sgx)?,
             address!("7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02")

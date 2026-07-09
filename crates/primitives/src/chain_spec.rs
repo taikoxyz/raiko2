@@ -74,8 +74,11 @@ pub fn shasta_checkpoint_store_address(chain_id: ChainId) -> Result<Address> {
 }
 
 fn shasta_predeploy_address(chain_id: ChainId, suffix: &str) -> Result<Address> {
+    ensure!(
+        chain_id != 0,
+        "chain_id must be non-zero to derive Shasta predeploy address"
+    );
     let prefix = chain_id.to_string();
-    let prefix = prefix.trim_start_matches('0');
     let address_nibbles = 40usize;
     let used_nibbles = prefix.len() + suffix.len();
     ensure!(

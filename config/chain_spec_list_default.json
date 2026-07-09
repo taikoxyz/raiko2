@@ -147,7 +147,6 @@
     {
         "name": "taiko_hoodi",
         "l1_contract": {
-            "PACAYA": "0xf6eA848c7d7aC83de84db45Ae28EAbf377fe0eF9",
             "SHASTA": "0xeF4bB7A442Bd68150A3aa61A6a097B86b91700BF"
         },
         "l2_contract": "0x1670130000000000000000000000000000010001",
@@ -155,12 +154,6 @@
         "rpc": "https://rpc.hoodi.taiko.xyz",
         "beacon_rpc": null,
         "verifier_address_forks": {
-            "PACAYA": {
-                "SGX": "0xd46c13B67396cD1e74Bb40e298fbABeA7DC01f11",
-                "SP1": "0x3B3bb4A1Cb8B1A0D65F96a5A93415375C039Eda3",
-                "RISC0": "0xbf285Dd2FD56BF4893D207Fba4c738D1029edFfd",
-                "SGXGETH": "0xCdBB6C1751413e78a40735b6D9Aaa7D55e8c038e"
-            },
             "SHASTA": {
                 "SGX": "0x7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02",
                 "RISC0": "0xfa0e7dAFe9785627df034c123A9B87497EB06b41",

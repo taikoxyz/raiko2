@@ -727,7 +727,7 @@ pub(crate) fn app_with_risc0_fixture_engine(config: Config, engine: Risc0Fixture
         PipelineKey::ShastaRisc0,
         engine,
     );
-    app::build_router(state)
+    app::build_router_with_legacy_v3_for_tests(state)
 }
 
 #[cfg(test)]
@@ -749,7 +749,7 @@ pub(crate) fn app_with_observed_risc0_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 #[cfg(test)]
@@ -777,7 +777,7 @@ pub(crate) fn state_with_observed_sp1_fixture_engine(
 #[cfg(test)]
 pub(crate) fn app_with_observed_sp1_fixture_engine(config: Config) -> (Router, Sp1FixtureEngine) {
     let (state, engine) = state_with_observed_sp1_fixture_engine(config);
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 #[cfg(test)]
@@ -799,7 +799,7 @@ pub(crate) fn app_with_observed_native_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 #[cfg(test)]
@@ -827,7 +827,7 @@ pub(crate) fn app_with_observed_risc0_boundless_fixture_engine(
     );
     let state = AppState::from_parts(Arc::new(config), Arc::new(factory), runtime);
 
-    (app::build_router(state), engine)
+    (app::build_router_with_legacy_v3_for_tests(state), engine)
 }
 
 pub(crate) async fn spawn_chain_id_rpc(
@@ -933,7 +933,7 @@ pub async fn run_fixture_server(args: &FixtureServerArgs) -> Result<()> {
         addr
     );
     info!(
-        "Try POST http://{}/v3/proof/batch/shasta with proof_type=sp1 and sp1.mode=execute",
+        "Try POST http://{}/v4/proof/proposal with proof_type=sp1",
         addr
     );
 

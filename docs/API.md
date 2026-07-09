@@ -2,26 +2,26 @@
 
 ## Overview
 
-Raiko2 exposes a Shasta-first `/v3` API aligned with the current upstream `raiko` proof surface,
-plus `raiko2` task-inspection extensions under `/v3/tasks/*`.
+Raiko2 exposes a Shasta-first `/v4` API for explicit proof-type proposal proving,
+aggregation, task lookup, status, and clear operations.
 
-Proof submission is asynchronous. The legacy `POST /proof/*` responses intentionally match old
-`raiko` v3 response shapes and do not expose raiko2 task IDs. Operators can:
+Proof submission is asynchronous. Legacy `/v3/*` and `/proof/*` compatibility routes are kept in
+the codebase for short-term reference, but are not mounted by the default server router. The legacy
+`POST /proof/*` responses intentionally match old `raiko` v3 response shapes and do not expose
+raiko2 task IDs. When those routes are mounted in tests or a temporary compatibility build,
+operators can:
 
 - query `GET /v3/proof/report` for all root task IDs and full root-task views
 - poll `GET /v3/tasks/{id}` for one full root-task view
 - query `GET /v3/proof/list` for completed root tasks with final proof material
 
-The proof routes are available both under `/v3/proof/*` and `/proof/*`.
-
 The public API surface is:
 
-- `POST /v3/proof/batch/shasta`
-- `POST /v3/proof/aggregate`
-- `GET /v3/proof/report`
-- `GET /v3/proof/list`
-- `GET /v3/prover/status`
-- `GET /v3/tasks/{id}` (`raiko2` extension)
+- `POST /v4/proof/proposal`
+- `GET /v4/tasks/{id}`
+- `GET /v4/prover/status`
+- `POST /v4/prover/clear`
+- `POST /v4/prover/invalidate-artifacts`
 - `GET /health`
 - `GET /metrics`
 - `GET /ready`
@@ -29,15 +29,12 @@ The public API surface is:
 ACL-protected API surface requires an `x-api-key` whose ACL allows the listed feature:
 
 - A key with `admin` is accepted for any ACL-protected endpoint.
-- `POST /v3/proof/prune` requires `admin`
-- `POST /proof/prune` requires `admin`
-- `POST /v3/tasks/{id}/cancel` requires `admin`
-- `POST /v3/prover/clear` requires `prover.clear`
 - `POST /v4/proof/proposal` requires `prover.submit` when a `prover.submit` or `admin`
   ACL key is configured
 - `GET /v4/tasks/{id}` requires `prover.submit` when a `prover.submit` or `admin` ACL
   key is configured
 - `POST /v4/prover/clear` requires `prover.clear`
+- `POST /v4/prover/invalidate-artifacts` requires `prover.clear`
 - `GET /admin/ballot` requires `admin.ballot.read`
 - `POST /admin/ballot` requires `admin.ballot.write`
 
@@ -117,6 +114,7 @@ V4 routes:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
+- `POST /v4/prover/invalidate-artifacts`
 
 Endpoint responsibilities:
 
@@ -124,6 +122,8 @@ Endpoint responsibilities:
   one proposal. `aggregate=true` accepts one or more contiguous proposals and registers the
   aggregation stage for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
+- `POST /v4/prover/invalidate-artifacts` removes terminal local runtime tasks and matching proof
+  artifacts for a concrete proof type.
 
 V4 success envelope:
 
@@ -527,7 +527,9 @@ Scope:
 - `proof_type` cancels tasks by their concrete requested backend. This includes non-terminal tasks
   submitted through the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that
   resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
-  backend, which are cleared through `POST /v3/prover/clear`.
+  backend. If a temporary legacy v3 build admits `zk_any` tasks, they remain grouped under their
+  original `zk_any` request and are cleared through the legacy `POST /v3/prover/clear` route in that
+  legacy build.
 
 ### Invalidate V4 Proof Artifacts
 
@@ -604,7 +606,9 @@ Validation:
 - `proof_prefix`, when provided, must be a non-empty `0x`-prefixed hex string no longer than 130
   characters including `0x`.
 
-## Submit Shasta Batch Proof
+## Legacy V3 Submit Shasta Batch Proof
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/proof/batch/shasta
@@ -781,7 +785,9 @@ Example not-drawn response:
 }
 ```
 
-## Submit Aggregate Proof
+## Legacy V3 Submit Aggregate Proof
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/proof/aggregate
@@ -855,7 +861,9 @@ Repeated `POST /v3/proof/aggregate` with the same logical request is idempotent.
 existing root task and returns the same legacy-compatible `registered` / `work_in_progress` /
 `proof` / stored failure status response semantics as `POST /v3/proof/batch/shasta`.
 
-## Report All Root Tasks
+## Legacy V3 Report All Root Tasks
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 GET /v3/proof/report
@@ -865,7 +873,9 @@ GET /proof/report
 Returns an array of root-task views in the same shape as `GET /v3/tasks/{id}` `data`, one entry
 per registered root task.
 
-## List Completed Root Proofs
+## Legacy V3 List Completed Root Proofs
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 GET /v3/proof/list
@@ -875,7 +885,9 @@ GET /proof/list
 Returns only root-task views whose root status is `completed` and whose final `proof` field is
 present.
 
-## Prune All Root Tasks
+## Legacy V3 Prune All Root Tasks
+
+These legacy routes are not mounted by the default server router.
 
 ```http
 POST /v3/proof/prune
@@ -896,7 +908,9 @@ directories. Reusable proof artifacts under `cache/proofs/...` are retained.
 }
 ```
 
-## Query Prover Status
+## Legacy V3 Query Prover Status
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/prover/status
@@ -944,7 +958,9 @@ remote submission progress. The runtime cleanup pass cancels stale orphaned reco
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
-## Clear Prover
+## Legacy V3 Clear Prover
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/prover/clear
@@ -973,7 +989,9 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
 }
 ```
 
-## Query Root Task
+## Legacy V3 Query Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/tasks/{id}
@@ -1060,7 +1078,9 @@ Returns the root-task view derived from the original batch request.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
-## Cancel Root Task
+## Legacy V3 Cancel Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/tasks/{id}/cancel

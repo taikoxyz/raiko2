@@ -393,6 +393,23 @@ fn rejects_taiko_proposal_id_outside_uint48() {
 }
 
 #[test]
+fn rejects_transition_timestamp_outside_uint48() {
+    let mut guest_input = guest_input_with_single_block();
+    // proposal.timestamp is sol uint48 and cannot exceed the bound; force the carry field only
+    // so we exercise the fail-closed check before u48 truncation in hashing.
+    guest_input
+        .proof_carry_data
+        .transition_input
+        .transition
+        .timestamp = SHASTA_PROPOSAL_ID_MAX + 1;
+
+    assert_rejected_with_message(
+        &guest_input,
+        "proof_carry_data.transition.timestamp does not fit in uint48",
+    );
+}
+
+#[test]
 fn rejects_proof_carry_data_actual_prover_mismatch() {
     let mut guest_input = guest_input_with_single_block();
     guest_input.proof_carry_data.transition_input.actual_prover = Address::from([0x55; 20]);

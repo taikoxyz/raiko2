@@ -20,8 +20,8 @@ use raiko2_primitives::{
 };
 use raiko2_primitives_shasta::{
     instance::{
-        build_shasta_commitment_from_proof_carry_data_vec, shasta_aggregation_output,
-        shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
+        build_shasta_commitment_from_proof_carry_data_vec, fits_shasta_uint48,
+        shasta_aggregation_output, shasta_zk_aggregation_output, SHASTA_PROPOSAL_ID_MAX,
     },
     roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
     validate_anchor_progression, validate_source_aware_anchor_progression,
@@ -910,6 +910,27 @@ where
         "taiko.proposal_id mismatch: expected {}, got {}",
         proposal_event_id,
         guest_input.taiko.proposal_id
+    );
+    // Carry fields hashed with `u48_to_b256` must fit Solidity uint48 without silent truncation.
+    ensure!(
+        fits_shasta_uint48(proof_carry_data.transition_input.transition.timestamp),
+        "proof_carry_data.transition.timestamp does not fit in uint48: {}",
+        proof_carry_data.transition_input.transition.timestamp
+    );
+    ensure!(
+        fits_shasta_uint48(
+            proof_carry_data
+                .transition_input
+                .checkpoint
+                .blockNumber
+                .to::<u64>()
+        ),
+        "proof_carry_data.checkpoint.blockNumber does not fit in uint48: {}",
+        proof_carry_data
+            .transition_input
+            .checkpoint
+            .blockNumber
+            .to::<u64>()
     );
     let expected_proposal_hash = hash_proposal(proposal);
     ensure!(

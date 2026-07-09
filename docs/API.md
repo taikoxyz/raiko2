@@ -527,7 +527,9 @@ Scope:
 - `proof_type` cancels tasks by their concrete requested backend. This includes non-terminal tasks
   submitted through the v3 API (`POST /v3/proof/batch/shasta`, `POST /v3/proof/aggregate`) that
   resolved to the same concrete `proof_type`. It excludes tasks admitted as `zk_any` and drawn to this
-  backend, which are cleared through `POST /v3/prover/clear`.
+  backend. If a temporary legacy v3 build admits `zk_any` tasks, they remain grouped under their
+  original `zk_any` request and are cleared through the legacy `POST /v3/prover/clear` route in that
+  legacy build.
 
 ### Invalidate V4 Proof Artifacts
 
@@ -906,7 +908,9 @@ directories. Reusable proof artifacts under `cache/proofs/...` are retained.
 }
 ```
 
-## Query Prover Status
+## Legacy V3 Query Prover Status
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/prover/status
@@ -954,7 +958,9 @@ remote submission progress. The runtime cleanup pass cancels stale orphaned reco
 `retrying`, `running`, or `orphaned` state, no resumable SP1 or RISC0 network submissions, and
 no skipped non-terminal roots with invalid metadata or unavailable pipelines.
 
-## Clear Prover
+## Legacy V3 Clear Prover
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/prover/clear
@@ -983,7 +989,9 @@ Already submitted upstream SP1 or RISC0/Boundless orders are protected and skipp
 }
 ```
 
-## Query Root Task
+## Legacy V3 Query Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 GET /v3/tasks/{id}
@@ -1070,7 +1078,9 @@ Returns the root-task view derived from the original batch request.
 - `engine_state_present=false` means the API is serving the last runtime snapshot even though the
   in-memory engine no longer has a live task state object for that stage.
 
-## Cancel Root Task
+## Legacy V3 Cancel Root Task
+
+This legacy route is not mounted by the default server router.
 
 ```http
 POST /v3/tasks/{id}/cancel

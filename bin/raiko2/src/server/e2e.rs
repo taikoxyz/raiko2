@@ -596,6 +596,10 @@ async fn e2e_v3_routes_are_disabled_by_default() {
         post_raw_json_text_with_optional_api_key(&app, "/v3/proof/batch/shasta", None, "{}").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 
+    let (status, body) =
+        post_raw_json_text_with_optional_api_key(&app, "/proof/batch/shasta", None, "{}").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
     let (status, body) = post_json(&app, "/v4/proof/proposal", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "error", "{body}");

@@ -114,6 +114,7 @@ V4 routes:
 - `GET /v4/tasks/{id}`
 - `GET /v4/prover/status`
 - `POST /v4/prover/clear`
+- `POST /v4/prover/invalidate-artifacts`
 
 Endpoint responsibilities:
 
@@ -121,6 +122,8 @@ Endpoint responsibilities:
   one proposal. `aggregate=true` accepts one or more contiguous proposals and registers the
   aggregation stage for that same proposal batch.
 - `GET /v4/tasks/{id}` is an inspection/debugging endpoint, not the taiko-client polling path.
+- `POST /v4/prover/invalidate-artifacts` removes terminal local runtime tasks and matching proof
+  artifacts for a concrete proof type.
 
 V4 success envelope:
 

@@ -1372,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn taiko_hoodi_shasta_verifier_addresses_cover_unzen() -> Result<()> {
+    fn taiko_hoodi_unzen_uses_dedicated_verifier_addresses() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
@@ -1380,12 +1380,28 @@ mod tests {
             .ok_or_else(|| anyhow!("missing taiko_hoodi spec"))?;
 
         assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP - 1, ProofType::Risc0)?,
+            address!("fa0e7dAFe9785627df034c123A9B87497EB06b41")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP - 1, ProofType::Sp1)?,
+            address!("c42Ef1A7A606162e144F696A07A7D3Ad98bF4EE7")
+        );
+        assert_eq!(
             spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Sgx)?,
             address!("7B6de561E26F5aB65958e5A3a1dCf807Cb91fD02")
         );
         assert_eq!(
             spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::SgxGeth)?,
             address!("8cF41Ee873Ca293Dc339006b0069d6337F68CCCA")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Risc0)?,
+            address!("8f2007dC3Bf34a1E4A4Ea5303EDC2D8e140934E9")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, HOODI_UNZEN_TIMESTAMP, ProofType::Sp1)?,
+            address!("2a872461C4629D5626Cb6852e50d75Bc7702f0e2")
         );
         Ok(())
     }

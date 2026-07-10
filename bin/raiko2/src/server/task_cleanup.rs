@@ -550,9 +550,7 @@ mod tests {
     use crate::server::state::{
         EngineHandle, EngineQueueTaskState, EngineQueueTaskView, StaticPipelineFactory,
     };
-    use crate::server::task_metadata::{
-        ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata,
-    };
+    use crate::server::task_metadata::{ProposalTask, RuntimeMetadata, TaskMetadata};
     use anyhow::{Context, Result};
     use raiko2_engine::{
         AggregateProofInput, AggregationTaskRequest, EngineTaskId, EngineTaskKey,
@@ -623,10 +621,10 @@ mod tests {
         let mut remote_metadata = metadata_for_task(&remote_task_id);
         remote_metadata.runtime.proposals.insert(
             remote_task_id.clone(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xremote".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            serde_json::from_value(serde_json::json!({
+                "provider_request_id": "0xremote"
+            }))
+            .expect("deserialize legacy runtime metadata"),
         );
         register_runtime_task_with_metadata(
             runtime.as_ref(),

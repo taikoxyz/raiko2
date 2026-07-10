@@ -44,10 +44,10 @@ use tokio::sync::RwLock;
 use url::Url;
 
 use crate::{
-    BoundlessSubmissionProgress, BoundlessSubmissionResume, ProverProgress, ProverProgressObserver,
-    encode_risc0_aggregation_seal_payload, encode_risc0_proposal_seal_payload,
-    ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
-    parse_shasta_proposal_input_hash, with_shasta_extra_data,
+    BoundlessSubmissionProgress, BoundlessSubmissionSnapshot, ProverProgress,
+    ProverProgressObserver, encode_risc0_aggregation_seal_payload,
+    encode_risc0_proposal_seal_payload, ensure_shasta_proposal_input_matches_carry,
+    parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash, with_shasta_extra_data,
 };
 use bidding::{
     BiddingSession, NoLockTimeout, NoLockTimeoutAction, RetryDirective, effective_price_multiplier,
@@ -937,29 +937,37 @@ async fn publish_boundless_progress(
         observer
             .on_progress(&ProverProgress::BoundlessSubmission(
                 BoundlessSubmissionProgress {
-                    provider_request_id: submission.provider_request_id.clone(),
-                    remote_tx_hash: submission.remote_tx_hash.clone(),
-                    expires_at: submission.expires_at,
-                    lock_expires_at: submission.lock_expires_at,
+                    snapshot: BoundlessSubmissionSnapshot::new(
+                        submission.provider_request_id.clone(),
+                        submission.remote_tx_hash.clone(),
+                        submission.expires_at,
+                        submission.lock_expires_at,
+                        submission.submitted_at,
+                        submission.max_price_multiplier,
+                        submission.max_price_wei.to_string(),
+                        u32::try_from(submission.attempt).unwrap_or(u32::MAX),
+                    ),
                     image_ref: image_ref.to_string(),
                     deployment: deployment.to_string(),
                     offchain,
                     quoted_mcycles_count: Some(quoted_mcycles_count),
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
-                    submitted_at: submission.submitted_at,
-                    max_price_multiplier: submission.max_price_multiplier,
-                    max_price_wei: Some(submission.max_price_wei.to_string()),
-                    rebid_attempt: u32::try_from(submission.attempt).unwrap_or(u32::MAX),
                 },
             ))
             .await;
     }
 }
 
-impl TryFrom<BoundlessSubmissionResume> for Submission {
+impl TryFrom<BoundlessSubmissionSnapshot> for Submission {
     type Error = RaikoError;
 
-    fn try_from(value: BoundlessSubmissionResume) -> Result<Self, Self::Error> {
+    fn try_from(value: BoundlessSubmissionSnapshot) -> Result<Self, Self::Error> {
+        if value.version != crate::BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION {
+            return Err(RaikoError::Guest(format!(
+                "Invalid stored Boundless submission: unsupported version {}",
+                value.version
+            )));
+        }
         let raw_id = value.provider_request_id.trim_start_matches("0x");
         let market_request_id = U256::from_str_radix(raw_id, 16).map_err(|e| {
             RaikoError::Guest(format!(
@@ -989,7 +997,7 @@ impl TryFrom<BoundlessSubmissionResume> for Submission {
             expires_at: value.expires_at,
             lock_expires_at: value.lock_expires_at,
             submitted_at: value.submitted_at,
-            max_price_multiplier: value.max_price_multiplier.max(1),
+            max_price_multiplier: value.max_price_multiplier.unwrap_or(1).max(1),
             // Display-only; `0` for records that predate the field. The next live submit overwrites
             // it with the exact bid.
             max_price_wei: value
@@ -3195,13 +3203,14 @@ mod tests {
 
     #[test]
     fn resumed_submission_carries_lock_deadline() {
-        let resume = crate::BoundlessSubmissionResume {
+        let resume = crate::BoundlessSubmissionSnapshot {
+            version: crate::BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION,
             provider_request_id: "0x1".to_string(),
             remote_tx_hash: None,
             expires_at: 2_000,
             lock_expires_at: 1_500,
             submitted_at: 1_000,
-            max_price_multiplier: 1,
+            max_price_multiplier: Some(1),
             max_price_wei: None,
             rebid_attempt: 1,
         };
@@ -3209,17 +3218,62 @@ mod tests {
         assert_eq!(submission.lock_expires_at, 1_500);
 
         // Legacy records deserialize with lock_expires_at == 0 and must stay accepted.
-        let legacy: crate::BoundlessSubmissionResume = serde_json::from_value(serde_json::json!({
-            "provider_request_id": "0x1",
-            "remote_tx_hash": null,
-            "expires_at": 2_000,
-            "submitted_at": 1_000,
-            "max_price_multiplier": 1,
-        }))
-        .expect("legacy record without lock_expires_at");
+        let legacy: crate::BoundlessSubmissionSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "version": crate::BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION,
+                "provider_request_id": "0x1",
+                "remote_tx_hash": null,
+                "expires_at": 2_000,
+                "submitted_at": 1_000,
+                "max_price_multiplier": 1,
+            }))
+            .expect("legacy record without lock_expires_at");
         assert_eq!(legacy.lock_expires_at, 0);
         let submission = super::Submission::try_from(legacy).expect("valid legacy record");
         assert_eq!(submission.lock_expires_at, 0);
+    }
+
+    #[test]
+    fn resumed_submission_rejects_unsupported_snapshot_versions() {
+        for version in [0, 2] {
+            let snapshot = crate::BoundlessSubmissionSnapshot {
+                version,
+                provider_request_id: "0x1".to_string(),
+                remote_tx_hash: None,
+                expires_at: 2_000,
+                lock_expires_at: 1_500,
+                submitted_at: 1_000,
+                max_price_multiplier: Some(1),
+                max_price_wei: Some("1000".to_string()),
+                rebid_attempt: 1,
+            };
+
+            let err = super::Submission::try_from(snapshot)
+                .expect_err("unsupported snapshot version must fail closed");
+            assert!(
+                err.to_string()
+                    .contains(&format!("unsupported version {version}"))
+            );
+        }
+    }
+
+    #[test]
+    fn resumed_submission_defaults_missing_price_multiplier() {
+        let snapshot: crate::BoundlessSubmissionSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "version": crate::BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION,
+                "provider_request_id": "0x1",
+                "remote_tx_hash": null,
+                "expires_at": 2_000,
+                "lock_expires_at": 1_500,
+                "submitted_at": 1_000,
+                "max_price_wei": "1000",
+                "rebid_attempt": 1,
+            }))
+            .expect("snapshot without legacy multiplier");
+
+        let submission = super::Submission::try_from(snapshot).expect("valid legacy snapshot");
+        assert_eq!(submission.max_price_multiplier, 1);
     }
 
     #[test]

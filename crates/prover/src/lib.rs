@@ -72,8 +72,17 @@ pub trait GuestInputCodec<I>: Send + Sync {
     fn encode(&self, input: &I, config: &ProverConfig) -> RaikoResult<Bytes>;
 }
 
+pub const BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION: u32 = 1;
+
+const fn missing_boundless_submission_snapshot_version() -> u32 {
+    0
+}
+
+/// Versioned state required to safely resume a Boundless market submission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoundlessSubmissionProgress {
+pub struct BoundlessSubmissionSnapshot {
+    #[serde(default = "missing_boundless_submission_snapshot_version")]
+    pub version: u32,
     pub provider_request_id: String,
     pub remote_tx_hash: Option<String>,
     pub expires_at: u64,
@@ -83,12 +92,10 @@ pub struct BoundlessSubmissionProgress {
     #[serde(default)]
     pub lock_expires_at: u64,
     pub submitted_at: u64,
-    pub image_ref: String,
-    pub deployment: String,
-    pub offchain: bool,
-    pub quoted_mcycles_count: Option<u32>,
-    pub evaluated_mcycles_count: Option<u32>,
-    pub max_price_multiplier: u32,
+    /// Floored effective price multiplier for display and legacy attempt reconstruction. `None`
+    /// when an old record did not persist it; prover conversion defaults that case to `1`.
+    #[serde(default)]
+    pub max_price_multiplier: Option<u32>,
     /// Exact escalated max price this submission bid, in wei, as a decimal string. The floored
     /// `max_price_multiplier` collapses the common attempt-2 (×1.5) rung to `1`, so this carries the
     /// precise bid for telemetry. `None` for legacy records written before the field existed.
@@ -104,23 +111,50 @@ pub struct BoundlessSubmissionProgress {
     pub rebid_attempt: u32,
 }
 
+impl BoundlessSubmissionSnapshot {
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        provider_request_id: String,
+        remote_tx_hash: Option<String>,
+        expires_at: u64,
+        lock_expires_at: u64,
+        submitted_at: u64,
+        max_price_multiplier: u32,
+        max_price_wei: String,
+        rebid_attempt: u32,
+    ) -> Self {
+        Self {
+            version: BOUNDLESS_SUBMISSION_SNAPSHOT_VERSION,
+            provider_request_id,
+            remote_tx_hash,
+            expires_at,
+            lock_expires_at,
+            submitted_at,
+            max_price_multiplier: Some(max_price_multiplier),
+            max_price_wei: Some(max_price_wei),
+            rebid_attempt,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BoundlessSubmissionResume {
-    pub provider_request_id: String,
-    pub remote_tx_hash: Option<String>,
-    pub expires_at: u64,
-    /// Offer lock deadline in seconds since the UNIX epoch; `0` when the stored record predates
-    /// this field. See [`BoundlessSubmissionProgress::lock_expires_at`].
-    #[serde(default)]
-    pub lock_expires_at: u64,
-    pub submitted_at: u64,
-    pub max_price_multiplier: u32,
-    /// Exact escalated max price this submission bid, in wei, as a decimal string. See
-    /// [`BoundlessSubmissionProgress::max_price_wei`]. `None` for records written before the field.
-    #[serde(default)]
-    pub max_price_wei: Option<String>,
-    #[serde(default)]
-    pub rebid_attempt: u32,
+pub struct BoundlessSubmissionProgress {
+    #[serde(flatten)]
+    pub snapshot: BoundlessSubmissionSnapshot,
+    pub image_ref: String,
+    pub deployment: String,
+    pub offchain: bool,
+    pub quoted_mcycles_count: Option<u32>,
+    pub evaluated_mcycles_count: Option<u32>,
+}
+
+impl std::ops::Deref for BoundlessSubmissionProgress {
+    type Target = BoundlessSubmissionSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,7 +172,7 @@ pub trait ProverProgressObserver: Send + Sync {
         None
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
+    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionSnapshot> {
         None
     }
 }
@@ -517,15 +551,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        BoundlessSubmissionSnapshot, encode_proof_carry_data,
+        ensure_shasta_proposal_input_matches_carry, parse_shasta_aggregation_input_hash,
+        parse_shasta_proposal_input_hash, validate_external_aggregate_proofs,
+    };
     #[cfg(any(feature = "risc0", feature = "boundless"))]
     use super::{
         decode_hex_payload, encode_risc0_aggregation_seal_payload,
         encode_risc0_proposal_seal_payload,
-    };
-    use super::{
-        encode_proof_carry_data, ensure_shasta_proposal_input_matches_carry,
-        parse_shasta_aggregation_input_hash, parse_shasta_proposal_input_hash,
-        validate_external_aggregate_proofs,
     };
     use alloy_primitives::B256;
     #[cfg(any(feature = "risc0", feature = "boundless"))]
@@ -533,6 +567,27 @@ mod tests {
     use raiko2_pipeline::PipelineRoute;
     use raiko2_primitives::Proof;
     use raiko2_protocol_shasta::shasta::ProofCarryData;
+
+    #[test]
+    fn boundless_snapshot_round_trips_resume_state() {
+        let snapshot = BoundlessSubmissionSnapshot::new(
+            "0x1234".to_string(),
+            Some("0xabcd".to_string()),
+            123_456,
+            123_300,
+            123_000,
+            4,
+            "9000000000000".to_string(),
+            3,
+        );
+
+        let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let decoded: BoundlessSubmissionSnapshot =
+            serde_json::from_value(encoded).expect("deserialize snapshot");
+
+        assert_eq!(snapshot.version, 1);
+        assert_eq!(decoded, snapshot);
+    }
 
     #[test]
     fn parses_shasta_proposal_input_hash_from_first_committed_word() {

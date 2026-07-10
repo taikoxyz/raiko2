@@ -28,7 +28,7 @@ use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
 use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
-use raiko2_prover::{BoundlessSubmissionResume, Prover, ProverProgress, ProverProgressObserver};
+use raiko2_prover::{BoundlessSubmissionSnapshot, Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
     MemoryStore, NewTask, Priority, RetryPolicy, Scheduler, SchedulerConfig, TaskExecutionPolicy,
@@ -103,7 +103,7 @@ pub trait EngineObserver: Send + Sync {
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
-    ) -> Option<BoundlessSubmissionResume> {
+    ) -> Option<BoundlessSubmissionSnapshot> {
         None
     }
 }
@@ -166,7 +166,7 @@ impl ProverProgressObserver for EngineProgressObserver {
             .await
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionResume> {
+    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionSnapshot> {
         self.observer
             .load_boundless_submission(&self.task_id, &self.task)
             .await

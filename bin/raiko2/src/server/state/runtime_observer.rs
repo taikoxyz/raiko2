@@ -4,7 +4,7 @@ use raiko2_engine::{
     EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
     tasks::EngineTask,
 };
-use raiko2_prover::{BoundlessSubmissionResume, ProverProgress};
+use raiko2_prover::{BoundlessSubmissionSnapshot, ProverProgress};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
@@ -819,13 +819,13 @@ impl EngineObserver for RuntimeObserver {
         match task {
             EngineTask::ProveProposal { .. } => metadata
                 .proposal_runtime(&task_id)
-                .and_then(|runtime| runtime.provider_request_id.clone()),
+                .and_then(TaskRuntimeMetadata::sp1_network_request_id),
             // Proposal and aggregation must keep distinct SP1 network requests. Reusing the
             // root-level request id causes aggregate=true flows to resume the proposal request
             // instead of creating a new aggregation request.
             EngineTask::Aggregate { .. } => metadata
                 .aggregate_runtime()
-                .and_then(|runtime| runtime.provider_request_id.clone()),
+                .and_then(TaskRuntimeMetadata::sp1_network_request_id),
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
@@ -837,7 +837,7 @@ impl EngineObserver for RuntimeObserver {
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
-    ) -> Option<BoundlessSubmissionResume> {
+    ) -> Option<BoundlessSubmissionSnapshot> {
         let record = match task {
             EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
                 .load_root_record_for_resume(id, task)
@@ -861,24 +861,12 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Proposal { .. } => None,
         }?;
 
-        let now = now_secs();
         // Expired records must still reach the prover: it gives them one final market status
         // read (an expired-but-fulfilled request still reports Fulfilled, recovering a proof
         // that is already paid for) and otherwise counts the stored attempt against the rebid
         // budget. Dropping them here would reset the budget and the price-escalation ladder on
         // every restart after expiry.
-        let expires_at = runtime.expires_at?;
-
-        Some(BoundlessSubmissionResume {
-            provider_request_id: runtime.provider_request_id.clone()?,
-            remote_tx_hash: runtime.remote_tx_hash.clone(),
-            expires_at,
-            lock_expires_at: runtime.lock_expires_at.unwrap_or(0),
-            submitted_at: runtime.submitted_at.unwrap_or(now),
-            max_price_multiplier: runtime.max_price_multiplier.unwrap_or(1),
-            max_price_wei: runtime.max_price_wei.clone(),
-            rebid_attempt: runtime.rebid_attempt.unwrap_or(0),
-        })
+        runtime.boundless_submission_for_resume(now_secs())
     }
 }
 
@@ -947,8 +935,8 @@ mod tests {
     use raiko2_pipeline::PipelineKey;
     use raiko2_primitives::ProofType;
     use raiko2_prover::{
-        BoundlessSubmissionProgress, Sp1FulfillmentStrategy, Sp1NetworkMode,
-        Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
+        BoundlessSubmissionProgress, BoundlessSubmissionSnapshot, Sp1FulfillmentStrategy,
+        Sp1NetworkMode, Sp1NetworkSubmissionProgress, sp1::ExecutionMode,
     };
     use raiko2_runtime::TaskRegistration;
 
@@ -1114,19 +1102,21 @@ mod tests {
                     input_task: proposal_task_id.clone(),
                 },
                 &ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
-                    provider_request_id: "0x1234".to_string(),
-                    remote_tx_hash: Some("0xabcd".to_string()),
-                    expires_at: future_expires_at,
-                    lock_expires_at: future_expires_at - 600,
-                    submitted_at: future_expires_at - 300,
+                    snapshot: BoundlessSubmissionSnapshot::new(
+                        "0x1234".to_string(),
+                        Some("0xabcd".to_string()),
+                        future_expires_at,
+                        future_expires_at - 600,
+                        future_expires_at - 300,
+                        4,
+                        "9000000000000".to_string(),
+                        3,
+                    ),
                     image_ref: "0ximage".to_string(),
                     deployment: "base".to_string(),
                     offchain: false,
                     quoted_mcycles_count: Some(6_000),
                     evaluated_mcycles_count: Some(12_345),
-                    max_price_multiplier: 4,
-                    max_price_wei: Some("9000000000000".to_string()),
-                    rebid_attempt: 3,
                 }),
             )
             .await;
@@ -1143,20 +1133,21 @@ mod tests {
             metadata.runtime.last_event.as_deref(),
             Some("submission_registered")
         );
-        assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0x1234"));
-        assert_eq!(runtime_entry.remote_tx_hash.as_deref(), Some("0xabcd"));
-        assert_eq!(runtime_entry.expires_at, Some(future_expires_at));
-        assert_eq!(runtime_entry.submitted_at, Some(future_expires_at - 300));
-        assert_eq!(runtime_entry.image_ref.as_deref(), Some("0ximage"));
-        assert_eq!(runtime_entry.quoted_mcycles_count, Some(6_000));
-        assert_eq!(runtime_entry.evaluated_mcycles_count, Some(12_345));
-        assert_eq!(runtime_entry.max_price_multiplier, Some(4));
-        assert_eq!(
-            runtime_entry.max_price_wei.as_deref(),
-            Some("9000000000000")
-        );
-        assert_eq!(runtime_entry.rebid_attempt, Some(3));
-        assert_eq!(runtime_entry.lock_expires_at, Some(future_expires_at - 600));
+        let snapshot = runtime_entry
+            .boundless_submission()
+            .expect("Boundless snapshot");
+        let public = runtime_entry.public_remote_submission();
+        assert_eq!(snapshot.provider_request_id, "0x1234");
+        assert_eq!(snapshot.remote_tx_hash.as_deref(), Some("0xabcd"));
+        assert_eq!(snapshot.expires_at, future_expires_at);
+        assert_eq!(snapshot.submitted_at, future_expires_at - 300);
+        assert_eq!(public.image_ref.as_deref(), Some("0ximage"));
+        assert_eq!(public.quoted_mcycles_count, Some(6_000));
+        assert_eq!(public.evaluated_mcycles_count, Some(12_345));
+        assert_eq!(snapshot.max_price_multiplier, Some(4));
+        assert_eq!(snapshot.max_price_wei.as_deref(), Some("9000000000000"));
+        assert_eq!(snapshot.rebid_attempt, 3);
+        assert_eq!(snapshot.lock_expires_at, future_expires_at - 600);
         let mut record = runtime
             .get_task("task_public")
             .await?
@@ -1178,7 +1169,7 @@ mod tests {
         assert_eq!(resumed.expires_at, future_expires_at);
         assert_eq!(resumed.lock_expires_at, future_expires_at - 600);
         assert_eq!(resumed.submitted_at, future_expires_at - 300);
-        assert_eq!(resumed.max_price_multiplier, 4);
+        assert_eq!(resumed.max_price_multiplier, Some(4));
         assert_eq!(resumed.max_price_wei.as_deref(), Some("9000000000000"));
         assert_eq!(resumed.rebid_attempt, 3);
 
@@ -1186,17 +1177,19 @@ mod tests {
             .get_task("task_public")
             .await?
             .expect("runtime task");
-        let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
-        let runtime_entry = metadata
-            .runtime
-            .proposals
-            .get_mut(&task_ref)
+        let runtime_entry = record
+            .metadata
+            .get_mut("runtime")
+            .and_then(|runtime| runtime.get_mut("proposals"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|proposals| proposals.get_mut(&task_ref))
             .expect("proposal runtime exists");
-        runtime_entry.submitted_at = None;
-        runtime_entry.max_price_multiplier = None;
-        runtime_entry.rebid_attempt = None;
-        runtime_entry.lock_expires_at = None;
-        record.metadata = serde_json::to_value(metadata)?;
+        *runtime_entry = serde_json::json!({
+            "updated_at": 123,
+            "provider_request_id": "0x1234",
+            "remote_tx_hash": "0xabcd",
+            "expires_at": future_expires_at
+        });
         runtime.upsert_task(&record).await?;
         let before_legacy_resume = now_secs();
         let resumed = observer
@@ -1214,25 +1207,24 @@ mod tests {
         assert_eq!(resumed.expires_at, future_expires_at);
         assert_eq!(resumed.lock_expires_at, 0);
         assert!((before_legacy_resume..=after_legacy_resume).contains(&resumed.submitted_at));
-        assert_eq!(resumed.max_price_multiplier, 1);
+        assert_eq!(resumed.max_price_multiplier, None);
         assert_eq!(resumed.rebid_attempt, 0);
 
         let mut record = runtime
             .get_task("task_public")
             .await?
             .expect("runtime task");
-        let mut metadata: TaskMetadata = serde_json::from_value(record.metadata.clone())?;
         let expired_at = now_secs().saturating_sub(1);
-        {
-            let runtime_entry = metadata
-                .runtime
-                .proposals
-                .get_mut(&task_ref)
-                .expect("proposal runtime exists");
-            runtime_entry.expires_at = Some(expired_at);
-            runtime_entry.rebid_attempt = Some(5);
-        }
-        record.metadata = serde_json::to_value(metadata)?;
+        let runtime_entry = record
+            .metadata
+            .get_mut("runtime")
+            .and_then(|runtime| runtime.get_mut("proposals"))
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|proposals| proposals.get_mut(&task_ref))
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("proposal runtime exists");
+        runtime_entry.insert("expires_at".to_string(), expired_at.into());
+        runtime_entry.insert("rebid_attempt".to_string(), 5.into());
         runtime.upsert_task(&record).await?;
         // Expired records still resume: the prover gives them one final status read (recovering
         // an already-paid fulfillment) and counts the stored attempt against the rebid budget.
@@ -1685,20 +1677,22 @@ mod tests {
         let runtime_entry = metadata
             .proposal_runtime(&task_ref)
             .expect("proposal runtime exists");
-        assert_eq!(runtime_entry.provider_request_id.as_deref(), Some("0xsp1"));
+        let public = runtime_entry.public_remote_submission();
+        assert_eq!(public.provider_request_id.as_deref(), Some("0xsp1"));
+        assert_eq!(public.sp1_network_mode.as_deref(), Some("reserved"));
+        assert_eq!(public.sp1_fulfillment_strategy.as_deref(), Some("reserved"));
+        assert_eq!(public.sp1_skip_simulation, Some(true));
+        assert_eq!(public.sp1_cycle_limit, Some(1_000_000_000_000));
+        assert_eq!(public.sp1_timeout_secs, Some(3_600));
+        let persisted = serde_json::to_value(runtime_entry)?;
         assert_eq!(
-            runtime_entry.sp1_network_mode,
-            Some(Sp1NetworkMode::Reserved)
+            persisted["remote_submission"]["submission"]["max_price_per_pgu"],
+            42
         );
         assert_eq!(
-            runtime_entry.sp1_fulfillment_strategy,
-            Some(Sp1FulfillmentStrategy::Reserved)
+            persisted["remote_submission"]["submission"]["auction_timeout_secs"],
+            120
         );
-        assert_eq!(runtime_entry.sp1_skip_simulation, Some(true));
-        assert_eq!(runtime_entry.sp1_cycle_limit, Some(1_000_000_000_000));
-        assert_eq!(runtime_entry.sp1_timeout_secs, Some(3_600));
-        assert_eq!(runtime_entry.sp1_max_price_per_pgu, Some(42));
-        assert_eq!(runtime_entry.sp1_auction_timeout_secs, Some(120));
         let mut record = runtime
             .get_task("task_public_sp1")
             .await?

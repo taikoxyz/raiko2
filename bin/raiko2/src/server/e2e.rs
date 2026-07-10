@@ -17,7 +17,9 @@ use raiko2_pipeline::{PipelineKey, PipelineRoute};
 use raiko2_primitives::Proof;
 use raiko2_primitives_shasta::encode_proof_carry_data;
 use raiko2_protocol_shasta::shasta::ProofCarryData;
-use raiko2_prover::{BoundlessSubmissionProgress, sp1::ProverMode as Sp1ProverMode};
+use raiko2_prover::{
+    BoundlessSubmissionProgress, BoundlessSubmissionSnapshot, sp1::ProverMode as Sp1ProverMode,
+};
 use raiko2_queue::encode_task_id;
 use raiko2_runtime::{RunnerStatus, TaskRegistration};
 use serde_json::{Value, json};
@@ -35,8 +37,8 @@ use super::fixture::{
 };
 use super::state::{AppState, StaticPipelineFactory};
 use super::task_metadata::{
-    ProposalTask, RuntimeMetadata, TaskMetadata, TaskRuntimeMetadata, proposal_proof_artifact_refs,
-    proposal_task_ref, root_proof_artifact_refs,
+    ProposalTask, RuntimeMetadata, TaskMetadata, proposal_proof_artifact_refs, proposal_task_ref,
+    root_proof_artifact_refs,
 };
 use crate::config::{Config, GuestSystem, RunnerKind, ServerAclFeature, ServerAclKey};
 use raiko2_runtime::{ProofArtifactRegistration, RuntimeManager};
@@ -3193,11 +3195,14 @@ async fn e2e_duplicate_aggregate_post_returns_work_in_progress_when_runtime_has_
         serde_json::from_value(record.metadata.clone()).expect("deserialize metadata");
     metadata.runtime.active_stage = Some("aggregate".to_string());
     metadata.runtime.last_event = Some("submission_registered".to_string());
-    metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
-        updated_at: 1,
-        provider_request_id: Some("0xsp1-aggregate".to_string()),
-        ..TaskRuntimeMetadata::default()
-    });
+    metadata.runtime.aggregate = Some(
+        serde_json::from_value(serde_json::json!({
+            "updated_at": 1,
+            "provider_request_id": "0xsp1-aggregate",
+            "sp1_network_mode": "reserved"
+        }))
+        .expect("deserialize legacy SP1 runtime metadata"),
+    );
     record.metadata = serde_json::to_value(metadata).expect("serialize metadata");
     state
         .runtime
@@ -4065,19 +4070,21 @@ async fn e2e_task_status_falls_back_to_runtime_metadata_without_mutating_runtime
     metadata.upsert_proposal_runtime(
         &encoded_task_id,
         &BoundlessSubmissionProgress {
-            provider_request_id: "0x1234".to_string(),
-            remote_tx_hash: Some("0xabcd".to_string()),
-            expires_at: 123_456,
-            lock_expires_at: 123_300,
-            submitted_at: 123_000,
+            snapshot: BoundlessSubmissionSnapshot::new(
+                "0x1234".to_string(),
+                Some("0xabcd".to_string()),
+                123_456,
+                123_300,
+                123_000,
+                4,
+                "9000000000000".to_string(),
+                2,
+            ),
             image_ref: "0ximage".to_string(),
             deployment: "base".to_string(),
             offchain: false,
             quoted_mcycles_count: Some(6_000),
             evaluated_mcycles_count: Some(12_345),
-            max_price_multiplier: 4,
-            max_price_wei: Some("9000000000000".to_string()),
-            rebid_attempt: 2,
         },
         updated_at,
     );

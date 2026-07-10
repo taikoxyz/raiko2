@@ -2163,9 +2163,9 @@ fn count_runtime_network_inflight(
     if runtime.has_sp1_network_submission_progress() {
         network.sp1.inflight_orders = network.sp1.inflight_orders.saturating_add(1);
     }
-    if runtime.provider_request_id.is_some()
-        && matches!(runtime.expires_at, Some(expires_at) if expires_at > now_secs)
-    {
+    if runtime.boundless_submission().is_some_and(|snapshot| {
+        !snapshot.provider_request_id.is_empty() && snapshot.expires_at > now_secs
+    }) {
         network.risc0.inflight_orders = network.risc0.inflight_orders.saturating_add(1);
     }
 }
@@ -2525,6 +2525,7 @@ fn task_runtime_view(
         return None;
     }
     let runtime = runtime.cloned().unwrap_or_default();
+    let remote = runtime.public_remote_submission();
     Some(TaskRuntime {
         updated_at: if runtime.updated_at == 0 {
             fallback_updated_at
@@ -2532,26 +2533,22 @@ fn task_runtime_view(
             runtime.updated_at
         },
         engine_state_present,
-        provider_request_id: runtime.provider_request_id,
-        remote_tx_hash: runtime.remote_tx_hash,
-        image_ref: runtime.image_ref,
-        deployment: runtime.deployment,
-        offchain: runtime.offchain,
-        expires_at: runtime.expires_at,
-        submitted_at: runtime.submitted_at,
-        quoted_mcycles_count: runtime.quoted_mcycles_count,
-        evaluated_mcycles_count: runtime.evaluated_mcycles_count,
-        max_price_multiplier: runtime.max_price_multiplier,
-        max_price_wei: runtime.max_price_wei,
-        sp1_network_mode: runtime
-            .sp1_network_mode
-            .map(|mode| mode.as_str().to_string()),
-        sp1_fulfillment_strategy: runtime
-            .sp1_fulfillment_strategy
-            .map(|strategy| strategy.as_str().to_string()),
-        sp1_skip_simulation: runtime.sp1_skip_simulation,
-        sp1_cycle_limit: runtime.sp1_cycle_limit,
-        sp1_timeout_secs: runtime.sp1_timeout_secs,
+        provider_request_id: remote.provider_request_id,
+        remote_tx_hash: remote.remote_tx_hash,
+        image_ref: remote.image_ref,
+        deployment: remote.deployment,
+        offchain: remote.offchain,
+        expires_at: remote.expires_at,
+        submitted_at: remote.submitted_at,
+        quoted_mcycles_count: remote.quoted_mcycles_count,
+        evaluated_mcycles_count: remote.evaluated_mcycles_count,
+        max_price_multiplier: remote.max_price_multiplier,
+        max_price_wei: remote.max_price_wei,
+        sp1_network_mode: remote.sp1_network_mode,
+        sp1_fulfillment_strategy: remote.sp1_fulfillment_strategy,
+        sp1_skip_simulation: remote.sp1_skip_simulation,
+        sp1_cycle_limit: remote.sp1_cycle_limit,
+        sp1_timeout_secs: remote.sp1_timeout_secs,
     })
 }
 
@@ -3503,6 +3500,10 @@ mod tests {
         }
     }
 
+    fn legacy_runtime_metadata(value: serde_json::Value) -> TaskRuntimeMetadata {
+        serde_json::from_value(value).expect("deserialize legacy runtime metadata")
+    }
+
     fn task_metadata_with_stage(stage: Option<&str>) -> TaskMetadata {
         TaskMetadata {
             network_pair: "taiko_dev/ethereum".to_string(),
@@ -3639,11 +3640,10 @@ mod tests {
         let mut metadata = zk_any_metadata(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xexpired".to_string()),
-                expires_at: Some(unix_now_secs().saturating_sub(1)),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xexpired",
+                "expires_at": unix_now_secs().saturating_sub(1)
+            })),
         );
         upsert_test_record(
             &runtime,
@@ -3830,10 +3830,9 @@ mod tests {
         let mut remote_metadata = metadata.clone();
         remote_metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xremote".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xremote"
+            })),
         );
         upsert_test_record(
             &runtime,
@@ -3976,10 +3975,9 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0x1234"
+            })),
         );
         let record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
 
@@ -3993,13 +3991,12 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                submitted_at: Some(123_000),
-                max_price_multiplier: Some(1),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0x1234",
+                "expires_at": 123_456,
+                "submitted_at": 123_000,
+                "max_price_multiplier": 1
+            })),
         );
 
         for pipeline_key in [
@@ -4025,11 +4022,10 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0x1234",
+                "expires_at": 123_456
+            })),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.provider_request_id = Some("0x1234".to_string());
@@ -4054,13 +4050,12 @@ mod tests {
         metadata.proof_type = ProofType::Sp1;
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xsp1".to_string()),
-                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
-                sp1_fulfillment_strategy: Some(raiko2_prover::Sp1FulfillmentStrategy::Reserved),
-                sp1_timeout_secs: Some(7_200),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xsp1",
+                "sp1_network_mode": "reserved",
+                "sp1_fulfillment_strategy": "reserved",
+                "sp1_timeout_secs": 7_200
+            })),
         );
 
         for pipeline_key in [
@@ -4111,11 +4106,10 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xsp1".to_string()),
-                sp1_network_mode: Some(raiko2_prover::Sp1NetworkMode::Reserved),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xsp1",
+                "sp1_network_mode": "reserved"
+            })),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Running, &metadata);
         record.pipeline_key = PipelineKey::ShastaSp1;
@@ -4134,11 +4128,10 @@ mod tests {
         metadata.requested_proof_type = Some("zk_any".to_string());
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0x1234".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0x1234",
+                "expires_at": 123_456
+            })),
         );
         let record = runtime_record(RuntimeRunnerStatus::Cancelled, &metadata);
         runtime.upsert_task(&record).await?;
@@ -4348,10 +4341,9 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("prove"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                remote_tx_hash: Some("0xremote".to_string()),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "remote_tx_hash": "0xremote"
+            })),
         );
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.pipeline_key = PipelineKey::ShastaNative;
@@ -4376,16 +4368,14 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xproposal".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xproposal",
+                "expires_at": 123_456
+            })),
         );
-        metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
-            provider_request_id: Some("0xaggregate".to_string()),
-            ..TaskRuntimeMetadata::default()
-        });
+        metadata.runtime.aggregate = Some(legacy_runtime_metadata(serde_json::json!({
+            "provider_request_id": "0xaggregate"
+        })));
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.provider_request_id = Some("0xproposal".to_string());
 
@@ -4399,19 +4389,17 @@ mod tests {
         let mut metadata = task_metadata_with_stage(Some("aggregate"));
         metadata.runtime.proposals.insert(
             "proposal-task".to_string(),
-            TaskRuntimeMetadata {
-                provider_request_id: Some("0xproposal".to_string()),
-                expires_at: Some(123_456),
-                ..TaskRuntimeMetadata::default()
-            },
+            legacy_runtime_metadata(serde_json::json!({
+                "provider_request_id": "0xproposal",
+                "expires_at": 123_456
+            })),
         );
-        metadata.runtime.aggregate = Some(TaskRuntimeMetadata {
-            provider_request_id: Some("0xaggregate".to_string()),
-            expires_at: Some(456_789),
-            submitted_at: Some(456_000),
-            max_price_multiplier: Some(1),
-            ..TaskRuntimeMetadata::default()
-        });
+        metadata.runtime.aggregate = Some(legacy_runtime_metadata(serde_json::json!({
+            "provider_request_id": "0xaggregate",
+            "expires_at": 456_789,
+            "submitted_at": 456_000,
+            "max_price_multiplier": 1
+        })));
         let mut record = runtime_record(RuntimeRunnerStatus::Failed, &metadata);
         record.provider_request_id = Some("0xproposal".to_string());
 

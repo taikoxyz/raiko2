@@ -28,6 +28,6 @@ pub use input::{
     roll_proposal_ancestor_headers, roll_proposal_ancestor_headers_in_place,
 };
 pub use proof::{
-    build_proof_carry_data, decode_proof_carry_data, decode_proof_carry_data_opt,
-    encode_proof_carry_data, proof_carry_from_proof,
+    build_proof_carry_data, build_proof_carry_data_with_chain_spec, decode_proof_carry_data,
+    decode_proof_carry_data_opt, encode_proof_carry_data, proof_carry_from_proof,
 };

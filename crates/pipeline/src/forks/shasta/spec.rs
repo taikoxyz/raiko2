@@ -20,9 +20,9 @@ use raiko2_primitives::{
     shasta_checkpoint_storage_slots, storage_slot_key,
 };
 use raiko2_primitives_shasta::{
-    AnchorSourceSpan, GuestInput, roll_proposal_ancestor_headers_in_place,
-    should_bypass_stalled_anchor_linkage, validate_anchor_progression,
-    validate_source_aware_anchor_progression,
+    AnchorSourceSpan, GuestInput, build_proof_carry_data_with_chain_spec,
+    roll_proposal_ancestor_headers_in_place, should_bypass_stalled_anchor_linkage,
+    validate_anchor_progression, validate_source_aware_anchor_progression,
 };
 use raiko2_protocol_shasta::shasta::{
     ParentBlockContext, ProposalMetadata, ShastaEventData,
@@ -1701,7 +1701,19 @@ pub fn validate_shasta_guest_input(input: &GuestInput) -> RaikoResult<()> {
         ));
     };
 
-    let chain_spec = &first_input.chain_spec;
+    validate_shasta_guest_input_with_chain_spec(input, &first_input.chain_spec)
+}
+
+fn validate_shasta_guest_input_with_chain_spec(
+    input: &GuestInput,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<()> {
+    if input.witnesses.is_empty() {
+        return Err(RaikoError::Preflight(
+            "GuestInput has no witnesses to validate".to_string(),
+        ));
+    }
+
     let taiko_chain_spec = chain_spec
         .to_taiko_chain_spec()
         .map_err(|e| RaikoError::Preflight(e.to_string()))?;
@@ -1765,6 +1777,32 @@ pub fn validate_shasta_guest_input(input: &GuestInput) -> RaikoResult<()> {
     Ok(())
 }
 
+fn validate_shasta_proof_carry_data_with_chain_spec(
+    input: &GuestInput,
+    proof_type: ProofType,
+    chain_spec: &ChainSpec,
+) -> RaikoResult<()> {
+    let expected =
+        build_proof_carry_data_with_chain_spec(input, proof_type, chain_spec).map_err(|err| {
+            RaikoError::InvalidRequestConfig(format!(
+                "failed to build expected Shasta proof carry data: {err}"
+            ))
+        })?;
+    if input.proof_carry_data != expected {
+        return Err(RaikoError::InvalidRequestConfig(format!(
+            "proof_carry_data mismatch for proof_type {proof_type}: expected chain_id={} verifier={:?} proposal_id={}, got chain_id={} verifier={:?} proposal_id={}",
+            expected.chain_id,
+            expected.verifier,
+            expected.transition_input.proposal_id,
+            input.proof_carry_data.chain_id,
+            input.proof_carry_data.verifier,
+            input.proof_carry_data.transition_input.proposal_id
+        )));
+    }
+
+    Ok(())
+}
+
 impl<Pr, Bk, Pv> Validation for ShastaSpec<Pr, Bk, Pv>
 where
     Pr: Send + Sync,
@@ -1773,8 +1811,11 @@ where
 {
     type Input = GuestInput;
 
-    fn validate(&self, _ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
-        validate_shasta_guest_input(input)
+    fn validate(&self, ctx: &ProofContext, input: &GuestInput) -> RaikoResult<()> {
+        let chain_spec = chain_spec_from_context(ctx)?;
+        let proof_type = proof_type_from_context(ctx);
+        validate_shasta_proof_carry_data_with_chain_spec(input, proof_type, &chain_spec)?;
+        validate_shasta_guest_input_with_chain_spec(input, &chain_spec)
     }
 }
 
@@ -1846,6 +1887,7 @@ mod tests {
         chain_spec::{ForkCondition, ForkId, TaikoFork},
         shasta_checkpoint_storage_slots, storage_slot_key,
     };
+    use raiko2_primitives_shasta::GuestInput;
     use raiko2_protocol::{BlobProofType, InputDataSource};
     use raiko2_protocol_shasta::shasta::{
         BlobSlice, DerivationSource, ShastaEventData,
@@ -2218,6 +2260,28 @@ mod tests {
         ProofContext::new(request, ProverConfig::default())
     }
 
+    fn guest_input_for_proof_carry(chain_spec: ChainSpec) -> GuestInput {
+        let mut input = GuestInput::default();
+        input.taiko.proposal_id = 7;
+        input.taiko.proposal_event.proposal.id = 7u64.try_into().expect("fits in uint48");
+        input.taiko.prover_data.actual_prover = Address::from([0x11; 20]);
+        input.taiko.proposal_event.proposal.proposer = Address::from([0x22; 20]);
+        input.taiko.proposal_event.proposal.timestamp =
+            123u64.try_into().expect("timestamp fits in uint48");
+        input.taiko.proposal_event.proposal.parentProposalHash = B256::from([0x33; 32]);
+
+        let mut witness = StatelessInput {
+            chain_spec,
+            ..Default::default()
+        };
+        witness.block.header.number = 42;
+        witness.block.header.timestamp = u64::MAX / 2;
+        witness.block.header.parent_hash = B256::from([0x44; 32]);
+        witness.block.header.state_root = B256::from([0x55; 32]);
+        input.witnesses.push(witness);
+        input
+    }
+
     fn alethia_mainnet_shasta_timestamp() -> u64 {
         match TAIKO_MAINNET.taiko_fork_activation(AlethiaTaikoHardfork::Shasta) {
             AlethiaForkCondition::Timestamp(timestamp) => timestamp,
@@ -2485,6 +2549,32 @@ mod tests {
                 .get_chain_spec_with_chain_id(167_013)
                 .expect("supported chain")
         );
+    }
+
+    #[test]
+    fn host_carry_validation_rejects_witness_chain_spec_verifier_tampering() {
+        let trusted_spec = SupportedChainSpecs::default()
+            .get_chain_spec_with_chain_id(167_013)
+            .expect("supported Hoodi chain spec");
+        let mut input = guest_input_for_proof_carry(trusted_spec.clone());
+
+        let mut tampered_spec = trusted_spec.clone();
+        for verifier_map in tampered_spec.verifier_address_forks.values_mut() {
+            verifier_map.insert(ProofType::Sgx, Some(Address::from([0x99; 20])));
+        }
+        input.witnesses[0].chain_spec = tampered_spec;
+        input.proof_carry_data =
+            raiko2_primitives_shasta::build_proof_carry_data(&input, ProofType::Native)
+                .expect("build tampered carry data");
+
+        let err = super::validate_shasta_proof_carry_data_with_chain_spec(
+            &input,
+            ProofType::Native,
+            &trusted_spec,
+        )
+        .expect_err("trusted host validation should reject tampered verifier");
+
+        assert!(err.to_string().contains("proof_carry_data mismatch"));
     }
 
     #[tokio::test]

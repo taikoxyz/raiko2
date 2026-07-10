@@ -6,15 +6,20 @@ use alethia_reth_chainspec::{
 };
 use alloy_hardforks::{EthereumHardfork, ForkCondition as AlethiaForkCondition};
 use alloy_primitives::{Address, B256, BlockNumber, ChainId, U256, keccak256, map::HashMap, uint};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use reth_chainspec::{ChainSpec as RethChainSpec, HOODI as RETH_HOODI, MAINNET as RETH_MAINNET};
 use reth_revm::primitives::hardfork::SpecId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr, sync::Arc};
 
+#[cfg(feature = "chain-spec-json")]
 const DEFAULT_CHAIN_SPECS: &str = include_str!("../../../config/chain_spec_list_default.json");
+#[cfg(not(feature = "chain-spec-json"))]
+const DEFAULT_CHAIN_SPECS: &str = "[]";
 pub const SHASTA_SIGNAL_SERVICE_CHECKPOINTS_SLOT: u64 = 254;
+const SHASTA_TAIKO_L2_ADDRESS_SUFFIX: &str = "10001";
+const SHASTA_CHECKPOINT_STORE_ADDRESS_SUFFIX: &str = "5";
 
 #[must_use]
 pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
@@ -31,6 +36,64 @@ pub fn shasta_checkpoint_storage_slots(block_number: u64) -> (U256, U256) {
 #[must_use]
 pub fn storage_slot_key(slot: U256) -> B256 {
     B256::from(slot.to_be_bytes::<32>())
+}
+
+/// Returns the built-in Alethia Taiko runtime chain spec for a supported Taiko chain ID.
+///
+/// # Errors
+///
+/// Returns an error when the chain ID is not one of the built-in Taiko networks.
+pub fn builtin_taiko_chain_spec(chain_id: ChainId) -> Result<Arc<TaikoChainSpec>> {
+    match chain_id {
+        167_000 => Ok(TAIKO_MAINNET.clone()),
+        167_001 => Ok(TAIKO_DEVNET.clone()),
+        167_011 => Ok(TAIKO_MASAYA.clone()),
+        167_013 => Ok(TAIKO_HOODI.clone()),
+        other => bail!(
+            "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
+        ),
+    }
+}
+
+/// Derives the Shasta `TaikoL2` predeploy address from a Taiko chain ID.
+///
+/// # Errors
+///
+/// Returns an error if the chain ID cannot fit in the predeploy address format.
+pub fn shasta_taiko_l2_address(chain_id: ChainId) -> Result<Address> {
+    shasta_predeploy_address(chain_id, SHASTA_TAIKO_L2_ADDRESS_SUFFIX)
+}
+
+/// Derives the Shasta `CheckpointStore` predeploy address from a Taiko chain ID.
+///
+/// # Errors
+///
+/// Returns an error if the chain ID cannot fit in the predeploy address format.
+pub fn shasta_checkpoint_store_address(chain_id: ChainId) -> Result<Address> {
+    shasta_predeploy_address(chain_id, SHASTA_CHECKPOINT_STORE_ADDRESS_SUFFIX)
+}
+
+fn shasta_predeploy_address(chain_id: ChainId, suffix: &str) -> Result<Address> {
+    ensure!(
+        chain_id != 0,
+        "chain_id must be non-zero to derive Shasta predeploy address"
+    );
+    let prefix = chain_id.to_string();
+    let address_nibbles = 40usize;
+    let used_nibbles = prefix.len() + suffix.len();
+    ensure!(
+        used_nibbles <= address_nibbles,
+        "chain_id {chain_id} is too long to derive Shasta predeploy address"
+    );
+
+    let address = format!(
+        "0x{}{}{}",
+        prefix,
+        "0".repeat(address_nibbles - used_nibbles),
+        suffix
+    );
+    Address::from_str(&address)
+        .map_err(|err| anyhow!("failed to derive Shasta predeploy address: {err}"))
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +149,89 @@ impl SupportedChainSpecs {
             .values()
             .find(|spec| spec.chain_id == chain_id)
             .cloned()
+    }
+
+    /// Validates host-side chain-spec JSON against compiled-in Taiko chain rules.
+    ///
+    /// This check is intentionally host-only policy: zk/SGX guests use compiled-in runtime rules
+    /// keyed by `chain_id` and must not depend on this JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the list is empty, when a Taiko chain ID is not supported by
+    /// Alethia's built-in specs, or when Shasta predeploy/fork overlays are inconsistent.
+    pub fn validate_host_sanity(&self) -> Result<()> {
+        ensure!(
+            !self.0.is_empty(),
+            "chain spec list is empty; host builds must enable chain-spec-json or provide specs"
+        );
+
+        let mut taiko_count = 0usize;
+        let mut taiko_chain_ids = BTreeMap::<ChainId, String>::new();
+        for spec in self.0.values().filter(|spec| spec.is_taiko) {
+            taiko_count += 1;
+            if let Some(previous) = taiko_chain_ids.insert(spec.chain_id, spec.name.clone()) {
+                bail!(
+                    "duplicate Taiko chain_id {} in chain specs: {} and {}",
+                    spec.chain_id,
+                    previous,
+                    spec.name
+                );
+            }
+
+            let builtin_spec = builtin_taiko_chain_spec(spec.chain_id).map_err(|err| {
+                anyhow!(
+                    "{}: unsupported Taiko chain_id {} in host chain spec: {err}",
+                    spec.name,
+                    spec.chain_id
+                )
+            })?;
+            let canonical = canonical_taiko_chain_spec(builtin_spec.as_ref());
+
+            ensure!(
+                spec.max_spec_id == canonical.max_spec_id,
+                "{}: max_spec_id mismatch with built-in Taiko runtime: expected {:?}, got {:?}",
+                spec.name,
+                canonical.max_spec_id,
+                spec.max_spec_id
+            );
+            ensure!(
+                spec.hard_forks == canonical.hard_forks,
+                "{}: hard_forks mismatch with built-in Taiko runtime: expected {:?}, got {:?}",
+                spec.name,
+                canonical.hard_forks,
+                spec.hard_forks
+            );
+            ensure!(
+                spec.eip_1559_constants == canonical.eip_1559_constants,
+                "{}: eip_1559_constants mismatch with built-in Taiko runtime: expected {:?}, got {:?}",
+                spec.name,
+                canonical.eip_1559_constants,
+                spec.eip_1559_constants
+            );
+
+            let expected_l2_contract = shasta_taiko_l2_address(spec.chain_id)?;
+            ensure!(
+                spec.l2_contract == Some(expected_l2_contract),
+                "{}: l2_contract mismatch: expected {expected_l2_contract:?}, got {:?}",
+                spec.name,
+                spec.l2_contract
+            );
+
+            let expected_checkpoint_store = shasta_checkpoint_store_address(spec.chain_id)?;
+            ensure!(
+                spec.checkpoint_store_contract == Some(expected_checkpoint_store),
+                "{}: checkpoint_store_contract mismatch: expected {expected_checkpoint_store:?}, got {:?}",
+                spec.name,
+                spec.checkpoint_store_contract
+            );
+        }
+
+        ensure!(
+            taiko_count > 0,
+            "chain spec list does not contain any Taiko networks"
+        );
+        Ok(())
     }
 }
 
@@ -516,7 +662,7 @@ fn canonical_chain_spec(name: &str) -> Option<CanonicalChainSpec> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "chain-spec-json"))]
 fn canonical_taiko_fork_condition(name: &str, fork: TaikoFork) -> Option<ForkCondition> {
     canonical_chain_spec(name)?
         .hard_forks
@@ -603,14 +749,14 @@ where
         .chain_id
         .or_else(|| canonical.as_ref().map(|spec| spec.chain_id))
         .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "chain_id"))?;
-    let max_spec_id = helper
-        .max_spec_id
-        .or_else(|| canonical.as_ref().map(|spec| spec.max_spec_id))
-        .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "max_spec_id"))?;
     let hard_forks = helper
         .hard_forks
         .or_else(|| canonical.as_ref().map(|spec| spec.hard_forks.clone()))
         .ok_or_else(|| missing_chain_spec_field::<E>(&helper.name, "hard_forks"))?;
+    let max_spec_id = helper
+        .max_spec_id
+        .or_else(|| canonical.as_ref().map(|spec| spec.max_spec_id))
+        .unwrap_or_else(|| max_spec_id(&hard_forks));
     let eip_1559_constants = helper
         .eip_1559_constants
         .or_else(|| canonical.as_ref().map(|spec| spec.eip_1559_constants))
@@ -904,15 +1050,7 @@ impl ChainSpec {
             );
         }
 
-        let base = match self.chain_id {
-            167_000 => TAIKO_MAINNET.clone(),
-            167_001 => TAIKO_DEVNET.clone(),
-            167_011 => TAIKO_MASAYA.clone(),
-            167_013 => TAIKO_HOODI.clone(),
-            other => bail!(
-                "unsupported Taiko chain_id={other}; no built-in genesis is available for conversion"
-            ),
-        };
+        let base = builtin_taiko_chain_spec(self.chain_id)?;
 
         let mut spec = self.base_taiko_chain_spec_with_configured_devnet_unzen(base.as_ref())?;
         self.apply_configured_taiko_forks(&mut spec);
@@ -997,15 +1135,19 @@ fn apply_unzen_eth_forks(spec: &mut TaikoChainSpec, condition: AlethiaForkCondit
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "chain-spec-json")]
+    use alethia_reth_chainspec::hardfork::{TaikoHardfork, TaikoHardforks as _};
     use alethia_reth_chainspec::{
         TAIKO_DEVNET_GENESIS_HASH, TAIKO_HOODI_GENESIS_HASH, TAIKO_MAINNET_GENESIS_HASH,
         TAIKO_MASAYA_GENESIS_HASH,
-        hardfork::{TaikoHardfork, TaikoHardforks as _},
     };
+    #[cfg(feature = "chain-spec-json")]
     use alloy_primitives::address;
 
+    #[cfg(feature = "chain-spec-json")]
     const HOODI_UNZEN_TIMESTAMP: u64 = 1_781_787_600;
 
+    #[cfg(feature = "chain-spec-json")]
     fn mainnet_shasta_timestamp() -> u64 {
         match canonical_taiko_fork_condition("taiko_mainnet", TaikoFork::Shasta)
             .expect("taiko mainnet Shasta fork")
@@ -1015,6 +1157,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn chain_spec_json_to_bincode_roundtrip_default_list() -> Result<()> {
         // Parse the shipped default config list (JSON), then ensure the resulting ChainSpec is
@@ -1041,6 +1184,93 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn shasta_predeploy_addresses_match_configured_taiko_addresses() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        for spec in list.iter().filter(|spec| spec.is_taiko) {
+            assert_eq!(
+                Some(shasta_taiko_l2_address(spec.chain_id)?),
+                spec.l2_contract
+            );
+            assert_eq!(
+                shasta_checkpoint_store_address(spec.chain_id)?,
+                spec.checkpoint_store_contract.expect("checkpoint store")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn default_chain_specs_pass_host_sanity_check() -> Result<()> {
+        SupportedChainSpecs::default().validate_host_sanity()
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn host_sanity_check_rejects_mismatched_taiko_l2_predeploy() -> Result<()> {
+        let mut specs = SupportedChainSpecs::default();
+        let mut spec = specs
+            .get_chain_spec_with_chain_id(167_000)
+            .ok_or_else(|| anyhow!("missing Taiko mainnet spec"))?;
+        spec.l2_contract = Some(Address::ZERO);
+        specs.0.insert(spec.name.clone(), spec);
+
+        let err = specs
+            .validate_host_sanity()
+            .expect_err("mismatched TaikoL2 predeploy must fail host sanity");
+        assert!(
+            err.to_string().contains("l2_contract"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn host_sanity_check_rejects_mismatched_checkpoint_store_predeploy() -> Result<()> {
+        let mut specs = SupportedChainSpecs::default();
+        let mut spec = specs
+            .get_chain_spec_with_chain_id(167_000)
+            .ok_or_else(|| anyhow!("missing Taiko mainnet spec"))?;
+        spec.checkpoint_store_contract = Some(Address::ZERO);
+        specs.0.insert(spec.name.clone(), spec);
+
+        let err = specs
+            .validate_host_sanity()
+            .expect_err("mismatched CheckpointStore predeploy must fail host sanity");
+        assert!(
+            err.to_string().contains("checkpoint_store_contract"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn host_sanity_check_rejects_taiko_fork_overlay_mismatch() -> Result<()> {
+        let mut specs = SupportedChainSpecs::default();
+        let mut spec = specs
+            .get_chain_spec_with_chain_id(167_013)
+            .ok_or_else(|| anyhow!("missing Taiko Hoodi spec"))?;
+        spec.hard_forks.insert(
+            ForkId::Taiko(TaikoFork::Unzen),
+            ForkCondition::Timestamp(HOODI_UNZEN_TIMESTAMP + 1),
+        );
+        specs.0.insert(spec.name.clone(), spec);
+
+        let err = specs
+            .validate_host_sanity()
+            .expect_err("mismatched Taiko fork overlay must fail host sanity");
+        assert!(
+            err.to_string().contains("hard_forks"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn l1_specs_hydrate_reth_execution_forks() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1078,6 +1308,66 @@ mod tests {
     }
 
     #[test]
+    fn custom_json_spec_derives_max_spec_id_from_hard_forks() -> Result<()> {
+        let raw = r#"[
+            {
+                "name": "custom_l1",
+                "chain_id": 12345,
+                "hard_forks": {
+                    "FRONTIER": {
+                        "Block": 0
+                    },
+                    "SHANGHAI": {
+                        "Timestamp": 0
+                    },
+                    "CANCUN": {
+                        "Timestamp": 0
+                    }
+                },
+                "eip_1559_constants": {
+                    "base_fee_change_denominator": "0x8",
+                    "base_fee_max_increase_denominator": "0x8",
+                    "base_fee_max_decrease_denominator": "0x8",
+                    "elasticity_multiplier": "0x2"
+                },
+                "l1_contract": {},
+                "l2_contract": null,
+                "rpc": "http://localhost:8545",
+                "beacon_rpc": null,
+                "verifier_address_forks": {
+                    "FRONTIER": {
+                        "SGX": null,
+                        "SP1": null,
+                        "RISC0": null
+                    }
+                },
+                "genesis_time": 0,
+                "seconds_per_slot": 12,
+                "is_taiko": false
+            }
+        ]"#;
+
+        let list: Vec<ChainSpec> = serde_json::from_str(raw)?;
+
+        assert_eq!(list[0].max_spec_id, SpecId::CANCUN);
+        Ok(())
+    }
+
+    #[cfg(feature = "chain-spec-json")]
+    #[test]
+    fn default_chain_spec_json_omits_derived_max_spec_id() -> Result<()> {
+        let raw_list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+        for spec in raw_list {
+            assert!(
+                spec.get("max_spec_id").is_none(),
+                "{} should not store derived max_spec_id",
+                spec["name"].as_str().unwrap_or("<unnamed>")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn converts_taiko_mainnet_to_alethia_taiko_chain_spec() -> Result<()> {
         let spec = ChainSpec::new_single(
             "taiko_mainnet".to_string(),
@@ -1093,6 +1383,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_mainnet_hydrates_alethia_hardforks_from_overlay() -> Result<()> {
         let raw_list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1156,6 +1447,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_mainnet_raw_spec_keeps_sgx_geth_shasta_verifier() -> Result<()> {
         let list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1171,6 +1463,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_masaya_unzen_inherits_shasta_contracts() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1212,6 +1505,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_dev_default_spec_matches_sanitized_shasta_devnet() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1266,6 +1560,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_shasta_helper_maps_to_shanghai_until_unzen() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1281,6 +1576,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_devnet_to_alethia_chain_spec_enables_shasta_at_genesis() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1305,6 +1601,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn aligns_taiko_runtime_forks_from_alethia_runtime_spec() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1350,6 +1647,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_hoodi_default_spec_sets_unzen_timestamp() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1371,6 +1669,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_hoodi_unzen_uses_dedicated_verifier_addresses() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
@@ -1422,6 +1721,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "chain-spec-json")]
     #[test]
     fn taiko_masaya_default_spec_uses_verified_shasta_inbox() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;

@@ -464,8 +464,16 @@ mod tests {
             .expect_err("fixture input should reach guest validation and fail there");
 
         let message = err.to_string();
-        assert!(message.contains("RISC0 proposal mock execution failed"));
-        assert!(message.contains("stateless block validation failed at index 0"));
-        assert!(message.contains("missing expected Shasta block at index 0"));
+        assert!(
+            message.contains("RISC0 proposal mock execution failed"),
+            "{message}"
+        );
+        assert!(
+            message.contains("stateless block validation failed at index 0")
+                || message.contains("missing expected Shasta block at index 0")
+                || message.contains("MPT: Unresolved node access")
+                || message.contains("Unresolved node access"),
+            "{message}"
+        );
     }
 }

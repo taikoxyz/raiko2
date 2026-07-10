@@ -34,7 +34,6 @@
     {
         "name": "taiko_dev_l1",
         "chain_id": 32382,
-        "max_spec_id": "CANCUN",
         "hard_forks": {
             "FRONTIER": {
                 "Block": 0
@@ -89,22 +88,6 @@
     },
     {
         "name": "taiko_dev",
-        "chain_id": 167001,
-        "max_spec_id": "UNZEN",
-        "hard_forks": {
-            "SHASTA": {
-                "Timestamp": 0
-            },
-            "UNZEN": {
-                "Timestamp": 0
-            }
-        },
-        "eip_1559_constants": {
-            "base_fee_change_denominator": "0x8",
-            "base_fee_max_increase_denominator": "0x8",
-            "base_fee_max_decrease_denominator": "0x8",
-            "elasticity_multiplier": "0x2"
-        },
         "l1_contract": {
             "SHASTA": "0x83e383dec6E3C2CD167E3bF6aA8c36F0e55Ad910"
         },
@@ -121,8 +104,7 @@
             }
         },
         "genesis_time": 0,
-        "seconds_per_slot": 1,
-        "is_taiko": true
+        "seconds_per_slot": 1
     },
     {
         "name": "taiko_masaya",

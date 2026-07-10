@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-raiko2-primitives = { path = "../primitives" }
+raiko2-primitives = { path = "../primitives", default-features = false }
 raiko2-primitives-shasta = { path = "../primitives-shasta" }
 raiko2-protocol = { path = "../protocol" }
 raiko2-protocol-shasta = { path = "../protocol-shasta" }
@@ -28,6 +28,7 @@ reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = 
 ] }
 
 [dev-dependencies]
+raiko2-primitives = { path = "../primitives", features = ["chain-spec-json"] }
 alloy-signer = { version = "2.0", default-features = false }
 alloy-signer-local = { version = "2.0", default-features = false }
 risc0-ethereum-trie.workspace = true

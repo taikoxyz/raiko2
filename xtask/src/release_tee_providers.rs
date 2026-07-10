@@ -160,7 +160,31 @@ fn build_local_provider_entries(
         ));
     }
 
+    validate_local_sgx_entries(&entries, no_push)?;
     Ok(entries)
+}
+
+fn validate_local_sgx_entries(entries: &[TeeProviderManifestEntry], no_push: bool) -> Result<()> {
+    if entries.len() != 2 {
+        bail!("local SGX variant invariant violated: expected exactly two entries");
+    }
+
+    let non_edmm = &entries[0];
+    let edmm = &entries[1];
+    if non_edmm.image.tag == edmm.image.tag {
+        bail!("local SGX variant invariant violated: image tags must differ");
+    }
+    if non_edmm.attestation.mr_enclave == edmm.attestation.mr_enclave {
+        bail!("local SGX variant invariant violated: MRENCLAVE values must differ");
+    }
+    if non_edmm.attestation.mr_signer != edmm.attestation.mr_signer {
+        bail!("local SGX variant invariant violated: MRSIGNER values must match");
+    }
+    if !no_push && non_edmm.image.digest == edmm.image.digest {
+        bail!("local SGX variant invariant violated: pushed image digests must differ");
+    }
+
+    Ok(())
 }
 
 fn local_sgx_variant_tag(release_tag: &str, edmm: bool) -> String {
@@ -688,13 +712,36 @@ mod tests {
         gcp_secret_access_command, local_gramine_enclave_key_path, local_provider_image_ref,
         local_sgx_docker_build_command, local_sgx_manifest_entry, local_sgx_variant_tag,
         parse_attestation_json, resolve_gramine_enclave_key_from_values, validate_attestation_path,
+        validate_local_sgx_entries,
     };
-    use crate::release_tee_manifest::TeeProviderAttestation;
+    use crate::release_tee_manifest::{TeeProviderAttestation, TeeProviderManifestEntry};
 
     fn command_args(command: &Command) -> Vec<String> {
         command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn valid_local_sgx_entries() -> Vec<TeeProviderManifestEntry> {
+        LOCAL_SGX_VARIANTS
+            .map(|variant| {
+                let tag = local_sgx_variant_tag("v1.2.3", variant.edmm);
+                local_sgx_manifest_entry(
+                    variant,
+                    &tag,
+                    format!("example.invalid/raiko2-sgx@sha256:{tag}"),
+                    "source-commit",
+                    TeeProviderAttestation {
+                        mr_enclave: format!("mr-enclave-{tag}"),
+                        mr_signer: "shared-mr-signer".to_string(),
+                        isv_prod_id: Some(0),
+                        isv_svn: Some(0),
+                        debug_enclave: Some(false),
+                    },
+                )
+            })
+            .into_iter()
             .collect()
     }
 
@@ -746,22 +793,7 @@ mod tests {
 
     #[test]
     fn release_tee_providers_local_sgx_manifest_entries_are_ordered_and_explicit() {
-        let entries = LOCAL_SGX_VARIANTS.map(|variant| {
-            let tag = local_sgx_variant_tag("v1.2.3", variant.edmm);
-            local_sgx_manifest_entry(
-                variant,
-                &tag,
-                format!("example.invalid/raiko2-sgx@sha256:{tag}"),
-                "source-commit",
-                TeeProviderAttestation {
-                    mr_enclave: format!("mr-enclave-{tag}"),
-                    mr_signer: "shared-mr-signer".to_string(),
-                    isv_prod_id: Some(0),
-                    isv_svn: Some(0),
-                    debug_enclave: Some(false),
-                },
-            )
-        });
+        let entries = valid_local_sgx_entries();
 
         assert_eq!(entries[0].provider, "raiko2-sgx");
         assert_eq!(entries[1].provider, "raiko2-sgx-edmm");
@@ -771,6 +803,69 @@ mod tests {
         assert_eq!(entries[1].image.tag, "v1.2.3-edmm");
         assert_eq!(entries[0].image.sgx_edmm, Some(false));
         assert_eq!(entries[1].image.sgx_edmm, Some(true));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_accept_valid_pair() {
+        validate_local_sgx_entries(&valid_local_sgx_entries(), false)
+            .expect("valid local SGX variants");
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_require_exactly_two_entries() {
+        let entries = valid_local_sgx_entries();
+        let err = validate_local_sgx_entries(&entries[..1], false)
+            .expect_err("missing variant must fail");
+
+        assert!(err.to_string().contains("expected exactly two entries"));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_require_distinct_tags() {
+        let mut entries = valid_local_sgx_entries();
+        entries[1].image.tag = entries[0].image.tag.clone();
+        let err = validate_local_sgx_entries(&entries, false)
+            .expect_err("matching variant tags must fail");
+
+        assert!(err.to_string().contains("image tags must differ"));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_require_distinct_mrenclave() {
+        let mut entries = valid_local_sgx_entries();
+        entries[1].attestation.mr_enclave = entries[0].attestation.mr_enclave.clone();
+        let err = validate_local_sgx_entries(&entries, false)
+            .expect_err("matching MRENCLAVE values must fail");
+
+        assert!(err.to_string().contains("MRENCLAVE values must differ"));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_require_matching_mrsigner() {
+        let mut entries = valid_local_sgx_entries();
+        entries[1].attestation.mr_signer = "different-mr-signer".to_string();
+        let err = validate_local_sgx_entries(&entries, false)
+            .expect_err("different MRSIGNER values must fail");
+
+        assert!(err.to_string().contains("MRSIGNER values must match"));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_require_distinct_pushed_digests() {
+        let mut entries = valid_local_sgx_entries();
+        entries[1].image.digest = entries[0].image.digest.clone();
+        let err = validate_local_sgx_entries(&entries, false)
+            .expect_err("matching pushed digests must fail");
+
+        assert!(err.to_string().contains("pushed image digests must differ"));
+    }
+
+    #[test]
+    fn release_tee_providers_local_sgx_invariants_skip_digest_check_without_push() {
+        let mut entries = valid_local_sgx_entries();
+        entries[1].image.digest = entries[0].image.digest.clone();
+
+        validate_local_sgx_entries(&entries, true).expect("no-push values are image tag refs");
     }
 
     #[test]

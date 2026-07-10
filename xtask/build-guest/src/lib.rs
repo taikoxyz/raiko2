@@ -328,6 +328,8 @@ fn compute_backend_fingerprint(
     }
     hash_backend_env(hasher, backend_key);
 
+    // Prefer the provenance module's cargo-metadata closure so fingerprint and
+    // checked-in provenance stay on one source of truth for guest inputs.
     let paths = provenance::build_input_paths(
         root,
         match backend_key {
@@ -1262,6 +1264,7 @@ fn read_manifest(path: &Path) -> Result<CargoManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
     use clap::Parser;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1289,6 +1292,203 @@ mod tests {
         let v1 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.4")).unwrap();
         let v2 = compute_guest_fingerprint(&root, Backend::Sp1, false, Some("v5.2.5")).unwrap();
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn guest_fingerprint_inputs_include_transitive_local_crates() {
+        let root = repo_root();
+        let paths = provenance::build_input_paths(&root, Backend::Risc0, false).unwrap();
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        for required in [
+            "crates/guest-common/src",
+            "crates/primitives/src",
+            "crates/primitives-shasta/src",
+            "crates/protocol/src",
+            "crates/protocol-shasta/src",
+            "crates/stateless/src",
+            "guests/risc0/src",
+        ] {
+            assert!(
+                rendered.iter().any(
+                    |path| path.starts_with(required) || path.contains(&format!("{required}/"))
+                ),
+                "fingerprint inputs missing local guest crate path prefix {required}; got {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_and_guest_share_alethia_and_protocol_revs() {
+        let root = repo_root();
+        let workspace = parse_git_revs(&root.join("Cargo.toml")).unwrap();
+        let guest_common = parse_git_revs(&root.join("crates/guest-common/Cargo.toml")).unwrap();
+        let risc0_lock = parse_lock_git_revs(&root.join("guests/risc0/Cargo.lock")).unwrap();
+        let sp1_lock = parse_lock_git_revs(&root.join("guests/sp1/Cargo.lock")).unwrap();
+
+        let workspace_alethia = workspace
+            .get("alethia-reth")
+            .expect("workspace Cargo.toml must pin alethia-reth");
+        let workspace_protocol = workspace
+            .get("taiko-mono")
+            .expect("workspace Cargo.toml must pin taiko-mono protocol");
+
+        assert_eq!(
+            guest_common.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guest-common alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            risc0_lock.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guests/risc0 lock alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            sp1_lock.get("alethia-reth"),
+            Some(workspace_alethia),
+            "guests/sp1 lock alethia-reth rev must match workspace"
+        );
+        assert_eq!(
+            risc0_lock.get("taiko-mono"),
+            Some(workspace_protocol),
+            "guests/risc0 lock taiko-mono rev must match workspace"
+        );
+        assert_eq!(
+            sp1_lock.get("taiko-mono"),
+            Some(workspace_protocol),
+            "guests/sp1 lock taiko-mono rev must match workspace"
+        );
+    }
+
+    fn parse_git_revs(manifest_path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let contents = fs::read_to_string(manifest_path)?;
+        let mut revs = std::collections::BTreeMap::new();
+        for line in contents.lines() {
+            let Some(repo) = git_repo_name_from_line(line) else {
+                continue;
+            };
+            if let Some(rev) = line
+                .split("rev = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+            {
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev.to_string(),
+                    &format!("manifest {}", manifest_path.display()),
+                )?;
+            }
+        }
+        Ok(revs)
+    }
+
+    fn parse_lock_git_revs(lock_path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let contents = fs::read_to_string(lock_path)?;
+        let mut revs = std::collections::BTreeMap::new();
+        for line in contents.lines() {
+            let Some(source) = line.strip_prefix("source = \"git+") else {
+                continue;
+            };
+            let source = source.trim_end_matches('"');
+            let Some(repo) = git_repo_name_from_source(source) else {
+                continue;
+            };
+            if let Some(rev) = source
+                .split("rev=")
+                .nth(1)
+                .and_then(|rest| rest.split(['#', '&']).next().map(str::to_owned))
+            {
+                insert_unique_rev(
+                    &mut revs,
+                    repo,
+                    rev,
+                    &format!("lockfile {}", lock_path.display()),
+                )?;
+            }
+        }
+        Ok(revs)
+    }
+
+    fn insert_unique_rev(
+        revs: &mut std::collections::BTreeMap<String, String>,
+        repo: String,
+        rev: String,
+        source: &str,
+    ) -> Result<()> {
+        if let Some(existing) = revs.get(&repo) {
+            ensure!(
+                existing == &rev,
+                "inconsistent git rev pins for {repo} in {source}: {existing} vs {rev}"
+            );
+            return Ok(());
+        }
+        revs.insert(repo, rev);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let manifest = temp.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            r#"
+alethia-reth-block = { git = "https://github.com/taikoxyz/alethia-reth", rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+alethia-reth-chainspec = { git = "https://github.com/taikoxyz/alethia-reth", rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+"#,
+        )
+        .unwrap();
+        let err = parse_git_revs(&manifest).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parse_lock_git_revs_rejects_conflicting_pins_for_same_repo() {
+        let temp = temp_test_dir();
+        let lock = temp.join("Cargo.lock");
+        fs::write(
+            &lock,
+            r#"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+source = "git+https://github.com/taikoxyz/alethia-reth?rev=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb#bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+"#,
+        )
+        .unwrap();
+        let err = parse_lock_git_revs(&lock).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent git rev pins for alethia-reth"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    fn git_repo_name_from_line(line: &str) -> Option<String> {
+        let marker = "git = \"https://github.com/taikoxyz/";
+        let rest = line.split(marker).nth(1)?;
+        let name = rest.split('"').next()?;
+        Some(name.trim_end_matches(".git").to_string())
+    }
+
+    fn git_repo_name_from_source(source: &str) -> Option<String> {
+        let marker = "https://github.com/taikoxyz/";
+        let rest = source.split(marker).nth(1)?;
+        let name = rest.split(['?', '#']).next()?;
+        Some(name.trim_end_matches(".git").to_string())
     }
 
     #[test]

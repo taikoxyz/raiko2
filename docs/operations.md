@@ -307,8 +307,10 @@ runtime for `sgx`. Historical `sgxgeth` compatibility is expected to come from a
 
 ## Source Releases
 
-Use this flow when cutting a versioned ZK/runtime source release such as
-`vX.Y.Z`. Keep TEE provider metadata in its separate release flow below.
+Use this flow as the ZK/runtime portion of a versioned release such as `vX.Y.Z`. The commands for
+TEE provider metadata remain separate, but the current default full release runs both flows and
+combines their manifests and release-note sections. A ZK-only release must be explicitly scoped as
+such and must not claim to contain TEE provider metadata.
 
 Release prerequisites:
 
@@ -377,7 +379,9 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes from the ZK source release template:
+5. Write release notes from the ZK source release template, then append the TEE Provider Release
+   Notes Template below for the default full profile. The final notes must include both reproduce
+   sections.
 
    ```bash
    cat > "${RELEASE_DIR}/release-notes-${TAG}.md" <<'EOF'
@@ -408,6 +412,7 @@ See `docs/operations.md#reproduce-zk-guest-digests`.
 
 - `release-manifest-vX.Y.Z.json`
 - `guest-digests-summary.json`
+- `tee-attestation-manifest-vX.Y.Z.json` (full profile)
 - `risc0_shasta_*.elf`
 - `sp1_shasta_*.elf`
 - `sp1_shasta_*.vk.bin`
@@ -426,6 +431,7 @@ EOF
      --notes-file "${RELEASE_DIR}/release-notes-${TAG}.md" \
      "${RELEASE_DIR}/release-manifest-${TAG}.json" \
      "${RELEASE_DIR}/guest-digests-summary.json" \
+     "target/releases/${TAG}/tee-attestation-manifest-${TAG}.json" \
      crates/guests/elf/risc0_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.elf \
      crates/guests/elf/sp1_shasta_*.vk.bin
@@ -438,6 +444,7 @@ Expected release outputs:
 - release notes file: `release-notes-${TAG}.md`
 - release manifest file: `release-manifest-${TAG}.json`
 - guest digest export file: `guest-digests-summary.json`
+- TEE attestation manifest file: `tee-attestation-manifest-${TAG}.json` (full profile)
 - Shasta guest artifact assets:
   - `risc0_shasta_*.elf`
   - `sp1_shasta_*.elf`

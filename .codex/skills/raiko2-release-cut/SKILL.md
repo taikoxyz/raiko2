@@ -1,18 +1,20 @@
 ---
 name: raiko2-release-cut
-description: Use when cutting a versioned raiko2 ZK/runtime source release from this repository, including git tag creation, publishing the runtime image, exporting guest digests, and creating a GitHub Release with release notes and manifest artifacts. TEE provider metadata is a separate optional flow. Use when the workflow must stop before deployment or register-image --apply.
+description: Use when cutting a versioned raiko2 release from this repository, including the full ZK/runtime and TEE provider outputs, git tag creation, release notes, manifest assets, and GitHub Release creation. The current default profile is full; narrower profiles are documented for future configuration. Use when the workflow must stop before deployment or register-image --apply.
 ---
 
 # Raiko2 Release Cut
 
 ## Overview
 
-Use this skill for source releases such as `vX.Y.Z`.
+Use this skill for versioned releases such as `vX.Y.Z`. The current default release profile is
+`full`: publish the ZK/runtime image and guest digest assets, then publish both local SGX variants
+and every pinned external TEE provider from `release/providers.toml`.
 
 Public source of truth:
 
 - `docs/operations.md` -> `Source Releases`
-- `docs/operations.md` -> `Release TEE Provider Metadata`, only when TEE output is explicitly requested
+- `docs/operations.md` -> `Release TEE Provider Metadata`
 
 Follow the runbook instead of reconstructing an ad-hoc release process.
 
@@ -24,7 +26,7 @@ Use this skill when the user asks to:
 - publish the versioned runtime image with both `risc0` and `sp1` guest ELFs
 - collect runtime image digest and guest digests
 - create release notes and a GitHub Release
-- collect TEE provider image digests and attestation metadata, only when explicitly requested
+- collect TEE provider image digests and attestation metadata for the default full profile
 
 Do not use this skill for:
 
@@ -33,6 +35,13 @@ Do not use this skill for:
 - automatic `register-image --apply`
 
 For image-only publication, use `$raiko2-image-release`.
+
+## Release Profiles
+
+The current default is `full` and must include all outputs in this document. A future implementation
+may add explicit `zk-only` and `tee-only` configuration, but no such CLI switch exists yet. Until
+then, an agent must treat an ordinary release-cut request as `full`; if the user explicitly asks for
+only one lane, confirm that narrowed scope before omitting the other lane.
 
 ## Required ZK Runtime Outputs
 
@@ -58,15 +67,19 @@ Release notes must include human-readable ZK guest digests:
 - `sp1` proposal and aggregation `vk_bn254`
 - `sp1` proposal and aggregation `vk_hash_bytes`
 
-TEE provider metadata must not be included in a ZK/runtime-only release.
+For the current `full` profile, the release notes also include the TEE provider section below. A
+deliberately narrowed `zk-only` release must say so in its notes and must not claim to contain TEE
+provider metadata.
 
-## Optional TEE Outputs
+## Required TEE Outputs For Full Profile
 
-Only when explicitly requested, run the TEE provider metadata flow and upload:
+For the default `full` profile, run the TEE provider metadata flow and upload:
 
 - `tee-attestation-manifest-vX.Y.Z.json`
-- `raiko2-sgx` pushed image digest
+- `raiko2-sgx` non-EDMM pushed image digest at `:vX.Y.Z`
+- `raiko2-sgx-edmm` EDMM pushed image digest at `:vX.Y.Z-edmm`
 - `raiko2-sgx` `mr_enclave` and `mr_signer`
+- `raiko2-sgx-edmm` `mr_enclave` and `mr_signer`
 - each pinned external TEE provider pushed image digest
 - each pinned external TEE provider source commit, `mr_enclave`, and `mr_signer`
 
@@ -75,14 +88,16 @@ Only when explicitly requested, run the TEE provider metadata flow and upload:
 Do not create the GitHub Release before requested release paths complete:
 
 1. Run source runtime release flow from `docs/operations.md` -> `Source Releases`.
-2. If TEE output was explicitly requested, run:
+2. For the default `full` profile, run:
    `cargo run -r -p xtask -- release-tee-providers --tag vX.Y.Z`
    with `GCP_ENCLAVE_KEY_*` set as documented in `docs/operations.md`.
 3. Verify requested image refs exist in registry:
    - `us-docker.pkg.dev/evmchain/images/raiko2:vX.Y.Z`
-   - TEE only when requested: `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`
-   - TEE only when requested: every provider repository listed in `release/providers.toml` at `:vX.Y.Z`
-4. Build release notes from fresh runtime digest and guest digest summary.
+   - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z`
+   - `us-docker.pkg.dev/evmchain/images/raiko2-sgx:vX.Y.Z-edmm`
+   - every external provider repository listed in `release/providers.toml` at `:vX.Y.Z`
+4. Build one release note from the fresh runtime digest, guest digest summary, and TEE
+   attestation manifest. Include both reproduce sections from `docs/operations.md`.
 
 ## Guardrails
 
@@ -91,7 +106,7 @@ Do not create the GitHub Release before requested release paths complete:
 - Record immutable digest references, not just mutable image tags.
 - Use `scripts/release/write_release_manifest.py` for the ZK/runtime release manifest.
 - Upload `release-manifest-*.json` and `guest-digests-summary.json` to the GitHub Release.
-- Upload `tee-attestation-manifest-*.json` only for explicit TEE provider metadata releases.
+- Upload `tee-attestation-manifest-*.json` for the default `full` profile.
 - Do not assume `release-image` publishes SGX provider images; it only publishes the main runtime image.
 - Stop before rollout or `register-image --apply` unless the user explicitly asks for a separate task.
 
@@ -104,5 +119,6 @@ The user does not need raw command output. Always summarize:
 - runtime image tag and digest
 - release manifest asset location
 - guest digest asset location
-- TEE attestation manifest asset location, only when TEE output was requested
+- TEE attestation manifest asset location for the `full` profile
+- the ZK and TEE reproduce commands or documentation anchors used in the release notes
 - whether the GitHub Release was created successfully

@@ -724,11 +724,14 @@ Operator notes:
   value.
 - Aggregation requests are sized by `prover.boundless.aggregation_quote` (same strategies).
 - `prover.boundless.rebid_timeout_ms` controls how long an unlocked market request can remain
-  unclaimed before `raiko2` resubmits at a higher max price. The default is `300000` ms, and the
-  minimum is `1000` ms.
+  unclaimed before `raiko2` resubmits at a same-or-higher max price. The default is `300000` ms,
+  and the minimum is `1000` ms.
 - `prover.boundless.rebid_price_step_bps` controls the per-rebid max-price escalation, in basis
   points, compounded over the base max price. The default is `5000` (+50% per rung). `0` is a valid
-  flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion.
+  flat ladder; values in `1..100` are rejected as a likely basis-points/multiplier confusion. In
+  `market` mode the SDK dynamically reprices every attempt, the configured rung is applied, and the
+  result is floored at the previous exact submitted max. Market maximum bids therefore never
+  decrease, including after a persisted request is resumed.
 - `prover.boundless.rebid_max_attempts` caps replacement submissions across every retry path —
   no-lock, expired, and poll-timeout requests all draw from the same budget. The default is `4`, the
   maximum is `31`, and the default allows a final max price of about `5x` the base at the default
@@ -740,12 +743,17 @@ Operator notes:
   absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
   `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
-  accepted, but setting both is rejected).
-- When a Boundless request expires unfulfilled, `raiko2` resubmits it. Each resubmission escalates
-  the offer's max price by `prover.boundless.rebid_price_step_bps` (compounded) up to
-  `prover.boundless.rebid_max_attempts`, clamped to `absolute_max_price_per_mcycle` when it is set;
-  the min price is unchanged. `market` resubmissions are re-priced by the SDK price provider and
-  then escalated by the same step.
+  accepted, but setting both is rejected). Ordinary SDK/autoprice spikes clamp to the ceiling. If
+  an operator lowers the ceiling below an in-progress market request's previous exact max, the
+  proof attempt aborts before either offchain or onchain submission rather than lowering the bid
+  or exceeding the ceiling.
+- When a Boundless request expires unfulfilled, `raiko2` resubmits it up to
+  `prover.boundless.rebid_max_attempts`. In `manual` mode, the configured max price escalates by
+  `prover.boundless.rebid_price_step_bps` (compounded), clamps to
+  `absolute_max_price_per_mcycle` when set, and the configured min price remains unchanged. In
+  `market` mode, each attempt gets a fresh SDK max and min; the max is escalated by the same step,
+  floored at the prior exact max, and finally capped, while the finalized min is
+  `min(current SDK min, finalized max)`.
 - `prover.boundless.deployment.deployment_type` selects the Boundless market deployment. Supported
   values are `base`, `sepolia`, and `taiko`; use `taiko` for Taiko mainnet market submissions.
 - `rpc.pairs[*].boundless` can override `batch_quote`, `aggregation_quote`, runtime timeout/rebid

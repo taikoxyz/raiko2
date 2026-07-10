@@ -104,7 +104,8 @@ timeout_ms = 3600000
 rebid_timeout_ms = 300000
 # Each rebid escalates the offer max price by this many basis points, compounding per attempt
 # (5000 = +50%/attempt: 1x, 1.5x, 2.25x, 3.375x, 5.06x ...). 0 = flat rebids. The base is the
-# configured max price in manual mode, the SDK autopriced max price in market mode.
+# configured max price in manual mode. Market mode gets a fresh SDK quote on every attempt, applies
+# the rung, then floors the result at the previous exact submitted max so market bids never decrease.
 rebid_price_step_bps = 5000
 # Maximum number of rebids across all retry paths (no-lock, expired, and timed-out
 # requests share one budget); the proof task fails once it is exhausted. The default
@@ -154,8 +155,9 @@ strategy = "raiko_agent"
 
 [prover.boundless.offer_params.batch]
 pricing_mode = "market"
-# Optional in market mode: clamp autopriced (and rebid-escalated) offers to this
-# per-mcycle safety cap instead of failing them. Must be positive when set.
+# Optional in market mode: clamp ordinary autoprice/rebid spikes to this per-mcycle safety cap.
+# Must be positive when set. Lowering it below an in-progress proof's previous exact market bid
+# aborts that proof attempt before offchain or onchain submission; the bid is never lowered.
 # `max_price_per_mcycle` is accepted as a legacy alias; set only one spelling.
 absolute_max_price_per_mcycle = "0.000000600"
 ramp_up_start_sec = 20

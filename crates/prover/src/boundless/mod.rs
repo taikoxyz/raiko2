@@ -52,7 +52,7 @@ use crate::{
 use bidding::{
     BiddingSession, NoLockTimeout, NoLockTimeoutAction, RetryDirective, effective_price_multiplier,
     escalated_price, escalation_rungs, no_lock_deadline, resume_attempt,
-    retry_directive_for_expiry,
+    retry_directive_for_unconfirmed_failure,
 };
 
 #[cfg(test)]
@@ -550,7 +550,7 @@ fn classify_boundless_status(
     } else if Instant::now() >= metadata.poll_timeout_at
         && !should_defer_boundless_poll_timeout(metadata, local_now)
     {
-        let retry = retry_directive_for_expiry(local_now, metadata.expires_at);
+        let retry = retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at);
         (
             RemoteStatus::Failed,
             Some(RemoteStatusReason::new(format!(
@@ -669,7 +669,7 @@ fn boundless_single_poll_error_status(
     if Instant::now() >= metadata.poll_timeout_at
         && !should_defer_boundless_poll_timeout(&metadata, local_now)
     {
-        let retry = retry_directive_for_expiry(local_now, metadata.expires_at);
+        let retry = retry_directive_for_unconfirmed_failure(local_now, metadata.expires_at);
         let _ = record_boundless_terminal_outcome(
             registry,
             submission.id,
@@ -1805,11 +1805,8 @@ impl BoundlessProver {
                 )
                 .await
             }
-            RemoteTerminalResult::Expired { reason, .. } => Err(BoundlessAttemptError::Retryable {
-                reason: reason.message,
-                retry: RetryDirective::RotateRequestId,
-            }),
-            RemoteTerminalResult::Failed { reason, .. } => {
+            RemoteTerminalResult::Expired { reason, .. }
+            | RemoteTerminalResult::Failed { reason, .. } => {
                 let terminal_outcome =
                     boundless_terminal_outcome(&self.status_registry, submission_id)?;
                 Self::boundless_failed_terminal(
@@ -1822,7 +1819,10 @@ impl BoundlessProver {
             RemoteTerminalResult::TimedOut { reason, .. } => {
                 Err(BoundlessAttemptError::Retryable {
                     reason: reason.message,
-                    retry: retry_directive_for_expiry(now_secs(), submission.expires_at),
+                    retry: retry_directive_for_unconfirmed_failure(
+                        now_secs(),
+                        submission.expires_at,
+                    ),
                 })
             }
             RemoteTerminalResult::Unrecoverable { reason, .. } => Err(
@@ -1952,7 +1952,7 @@ impl BoundlessProver {
         .await
         .map_err(|err| BoundlessAttemptError::Retryable {
             reason: err.to_string(),
-            retry: retry_directive_for_expiry(now_secs(), submission.expires_at),
+            retry: retry_directive_for_unconfirmed_failure(now_secs(), submission.expires_at),
         })?;
         let fulfillment_data = fulfillment.data().map_err(|e| {
             BoundlessAttemptError::Fatal(RaikoError::Guest(format!(
@@ -2794,7 +2794,7 @@ mod tests {
     }
 
     #[test]
-    fn boundless_poll_errors_return_terminal_status_after_poll_timeout() {
+    fn boundless_poll_errors_reuse_request_id_after_local_expiry() {
         let now = now_secs();
         let submission = RemoteSubmission {
             id: RemoteSubmissionId::new(),
@@ -2806,7 +2806,7 @@ mod tests {
             submission.id,
             BoundlessSubmissionState {
                 metadata: BoundlessSubmissionMetadata {
-                    expires_at: now.saturating_add(300),
+                    expires_at: now.saturating_sub(1),
                     lock_expires_at: now.saturating_add(300),
                     submitted_at: now.saturating_sub(30),
                     no_lock_deadline: now.saturating_add(60),
@@ -3019,7 +3019,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_boundless_status_covers_timeout_actions_and_retry_boundary() {
+    fn classify_boundless_status_covers_timeout_actions() {
         let now = now_secs();
         let submission_id = RemoteSubmissionId::new();
         let request_id = U256::from(1);
@@ -3103,7 +3103,7 @@ mod tests {
         assert_eq!(
             outcome,
             Some(BoundlessTerminalOutcome::PollTimeout {
-                retry: RetryDirective::RotateRequestId
+                retry: RetryDirective::ReuseRequestId
             })
         );
     }

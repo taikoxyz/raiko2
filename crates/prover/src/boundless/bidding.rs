@@ -86,12 +86,11 @@ impl BiddingSession {
     }
 }
 
-pub(super) const fn retry_directive_for_expiry(now_secs: u64, expires_at: u64) -> RetryDirective {
-    if now_secs >= expires_at {
-        RetryDirective::RotateRequestId
-    } else {
-        RetryDirective::ReuseRequestId
-    }
+pub(super) const fn retry_directive_for_unconfirmed_failure(
+    _now_secs: u64,
+    _expires_at: u64,
+) -> RetryDirective {
+    RetryDirective::ReuseRequestId
 }
 
 /// Number of rebid rungs applied at 1-based `attempt`, capped at `max_attempts`.
@@ -253,7 +252,7 @@ pub(super) const fn defer_poll_timeout_while_payable(
 mod tests {
     use alloy_primitives::U256;
 
-    use super::{BiddingSession, RetryDirective};
+    use super::{BiddingSession, RetryDirective, retry_directive_for_unconfirmed_failure};
     use crate::boundless::Submission;
 
     fn test_submission(attempt: u64, max_price_wei: u64) -> Submission {
@@ -290,6 +289,14 @@ mod tests {
         session.record_retry(&submitted, RetryDirective::RotateRequestId, "expired");
         assert_eq!(session.next_request_id(), None);
         assert_eq!(session.attempt(), 2);
+    }
+
+    #[test]
+    fn timeout_and_read_errors_reuse_request_id_after_local_expiry() {
+        assert_eq!(
+            retry_directive_for_unconfirmed_failure(101, 100),
+            RetryDirective::ReuseRequestId
+        );
     }
 
     #[test]

@@ -379,7 +379,21 @@ Recommended sequence:
      --output "${RELEASE_DIR}/release-manifest-${TAG}.json"
    ```
 
-5. Write release notes from the ZK source release template, then append the TEE Provider Release
+5. For the default full profile, build and validate the TEE provider images before creating the
+   release notes or GitHub Release:
+
+   ```bash
+   GCP_ENCLAVE_KEY_SECRET=<secret-name> \
+   GCP_ENCLAVE_KEY_VERSION=latest \
+   GCP_ENCLAVE_KEY_PROJECT=<gcp-project> \
+   cargo run -r -p xtask -- release-tee-providers --tag "${TAG}"
+   ```
+
+   This must produce `target/releases/${TAG}/tee-attestation-manifest-${TAG}.json`. Record the
+   immutable image digests and attestation values from that manifest. The command validates both
+   local SGX variants before publishing their final tags.
+
+6. Write release notes from the ZK source release template, then append the TEE Provider Release
    Notes Template below for the default full profile. The final notes must include both reproduce
    sections.
 
@@ -419,7 +433,7 @@ See `docs/operations.md#reproduce-zk-guest-digests`.
 EOF
 ```
 
-6. Create the tag and GitHub Release:
+7. Create the tag and GitHub Release:
 
    ```bash
    git tag "${TAG}" "${RELEASE_SHA}"

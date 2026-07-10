@@ -144,23 +144,29 @@ fn build_local_provider_entries(
             &key_sha256,
             variant,
         )?;
-        let digest = if no_push {
-            image_ref.clone()
-        } else {
-            docker_push(&image_ref)?;
-            resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?
-        };
         let attestation = read_attestation_json(&image_ref, DEFAULT_LOCAL_ATTESTATION_PATH)?;
         entries.push(local_sgx_manifest_entry(
             variant,
             &variant_tag,
-            digest,
+            image_ref,
             &source_commit,
             attestation,
         ));
     }
 
-    validate_local_sgx_entries(&entries, no_push)?;
+    // Validate both variants while they are still local. Final release tags are only
+    // published after the cross-variant attestation checks pass.
+    validate_local_sgx_entries(&entries, true)?;
+
+    if !no_push {
+        for entry in &mut entries {
+            let image_ref = local_provider_image_ref(&entry.image.tag, DEFAULT_LOCAL_REPOSITORY);
+            docker_push(&image_ref)?;
+            entry.image.digest = resolve_repo_digest(&image_ref, DEFAULT_LOCAL_REPOSITORY)?;
+        }
+        validate_local_sgx_entries(&entries, false)?;
+    }
+
     Ok(entries)
 }
 

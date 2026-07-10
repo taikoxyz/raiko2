@@ -129,8 +129,14 @@ mod tests {
             crypto().bn254_g1_mul(&[0u8; 64], &scalar_two).unwrap(),
             [0u8; 64]
         );
-        assert!(crypto().bn254_g1_add(&[0x11u8; 64], &[0u8; 64]).is_err());
-        assert!(crypto().bn254_g1_add(&[0xffu8; 64], &[0u8; 64]).is_err());
+        assert_eq!(
+            crypto().bn254_g1_add(&[0x11u8; 64], &[0u8; 64]),
+            Err(PrecompileHalt::Bn254AffineGFailedToCreate)
+        );
+        assert_eq!(
+            crypto().bn254_g1_add(&[0xffu8; 64], &[0u8; 64]),
+            Err(PrecompileHalt::Bn254FieldPointNotAMember)
+        );
 
         let doubled = crypto()
             .bn254_g1_add(&p1, &p1)

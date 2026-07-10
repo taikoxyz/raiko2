@@ -4,7 +4,7 @@ use kzg_rs::kzg_proof::{
     evaluate_polynomial_in_evaluation_form, safe_g1_affine_from_bytes, scalar_from_bytes_unchecked,
     verify_kzg_proof_impl,
 };
-use kzg_rs::{Blob as KzgBlob, Bytes32, Bytes48, KzgProof, KzgSettings};
+use kzg_rs::{Blob as KzgBlob, Bytes48, KzgProof, KzgSettings};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "kzg-host")]
@@ -199,41 +199,6 @@ pub fn verify_blob_kzg_proof(
         ));
     }
     Ok(())
-}
-
-/// Verify an EIP-4844 **point evaluation** proof via kzg-rs.
-///
-/// **Not used for EVM precompile `0x0a` in guests.** zkVM lab measurements showed
-/// routing `Crypto::verify_kzg_proof` through kzg-rs (BLS syscalls) is much more
-/// expensive than revm's arkworks default on both SP1 and RISC0. Keep EVM `0x0a`
-/// on arkworks; use this helper only when a caller explicitly wants the kzg-rs
-/// point-evaluation path (e.g. experiments).
-///
-/// Blob proof-of-equivalence still uses [`verify_blob_kzg_proof`] /
-/// `verify_kzg_proof_impl`, which benefit from patched `bls12_381` on RISC0.
-///
-/// Returns `true` only when the proof is valid; malformed inputs return `false`.
-#[must_use]
-pub fn verify_kzg_point_evaluation_proof(
-    z: &[u8; 32],
-    y: &[u8; 32],
-    commitment: &[u8; 48],
-    proof: &[u8; 48],
-) -> bool {
-    let Ok(commitment) = Bytes48::from_slice(commitment) else {
-        return false;
-    };
-    let Ok(z) = Bytes32::from_slice(z) else {
-        return false;
-    };
-    let Ok(y) = Bytes32::from_slice(y) else {
-        return false;
-    };
-    let Ok(proof) = Bytes48::from_slice(proof) else {
-        return false;
-    };
-    let settings = kzg_rs::get_kzg_settings();
-    KzgProof::verify_kzg_proof(&commitment, &z, &y, &proof, &settings).unwrap_or(false)
 }
 
 /// Verify the point-evaluation proof used by Raiko's proof-of-equivalence strategy.

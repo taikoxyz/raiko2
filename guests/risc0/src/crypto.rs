@@ -3,13 +3,13 @@
 //! Cycle-sensitive paths use `risc0-crypto-evm` and Cargo-patched crates.
 //!
 //! - BN254 / ecrecover / modexp / p256: `risc0-crypto-evm` (pairing via trait default → substrate-bn).
-//! - EVM BLS12-381 (EIP-2537): revm-precompile `blst` feature + official `risc0/blst` patch
+//! - EVM BLS12-381 (EIP-2537, `0x0b..=0x11`): revm-precompile `blst` + official `risc0/blst` patch
 //!   (no Crypto overrides; trait defaults call the blst crypto_backend).
-//! - EVM `0x0a` point evaluation: revm default arkworks. Do **not** override with kzg-rs for
-//!   this precompile without re-benchmarking — lab KZG vectors were ~28× more user cycles via
-//!   kzg-rs/BLS syscalls than arkworks.
-//! - Blob proof-of-equivalence (proposal path) still uses kzg-rs in primitives; accelerate that
-//!   stack with the crates-io `bls12_381` RISC0 patch (not via Crypto::verify_kzg_proof).
+//! - EVM `0x0a` point evaluation: revm trait default selects **blst** when the `blst` feature is
+//!   enabled (`c-kzg` > `blst` > arkworks). We do **not** enable `c-kzg` and do **not** override
+//!   with kzg-rs — lab KZG vectors via kzg-rs were far more expensive than revm's path.
+//! - Blob proof-of-equivalence (proposal path) uses kzg-rs in primitives; accelerate that stack
+//!   with the crates-io `bls12_381` RISC0 patch (separate from Crypto::verify_kzg_proof).
 
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
@@ -53,7 +53,7 @@ impl Crypto for Risc0GuestCrypto {
     }
 
     // bn254_pairing_check uses the trait default → patched substrate-bn.
-    // verify_kzg_proof uses the trait default (arkworks) — see module docs.
+    // verify_kzg_proof uses the trait default → revm blst KZG (feature = blst) — see module docs.
 }
 
 fn fallback_modexp(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {
@@ -95,7 +95,7 @@ mod tests {
 
         assert_eq!(format!("{:?}", crypto()), "Risc0GuestCrypto");
 
-        // Host: trait-default arkworks point evaluation (EVM 0x0a path).
+        // Host: trait-default revm blst point evaluation (EVM 0x0a with features=blst).
         let commitment = hex!("8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7");
         let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
         let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");

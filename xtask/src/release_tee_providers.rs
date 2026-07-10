@@ -332,8 +332,14 @@ fn docker_build_external_tee_provider(
     image_ref: &str,
 ) -> Result<()> {
     let secret_src = resolve_gramine_enclave_key(context)?;
-    let cmd =
-        external_provider_docker_build_command(context, dockerfile, image_ref, secret_src.path());
+    let key_public_sha256 = rsa_public_key_sha256_hex(secret_src.path())?;
+    let cmd = external_provider_docker_build_command(
+        context,
+        dockerfile,
+        image_ref,
+        secret_src.path(),
+        &key_public_sha256,
+    );
     util::run(cmd)
 }
 
@@ -342,12 +348,15 @@ fn external_provider_docker_build_command(
     dockerfile: &Path,
     image_ref: &str,
     enclave_key_path: &Path,
+    enclave_key_public_sha256: &str,
 ) -> Command {
     docker_build_command(
         context,
         dockerfile,
         image_ref,
-        &[],
+        &[format!(
+            "ENCLAVE_KEY_PUBLIC_SHA256={enclave_key_public_sha256}"
+        )],
         Some(DockerBuildSecret {
             id: "enclave_key",
             path: enclave_key_path,
@@ -523,6 +532,30 @@ fn file_sha256_hex(path: &Path) -> Result<String> {
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+fn rsa_public_key_sha256_hex(path: &Path) -> Result<String> {
+    let output = Command::new("openssl")
+        .arg("rsa")
+        .arg("-in")
+        .arg(path)
+        .arg("-pubout")
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to derive enclave signing public key from {}",
+                path.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "openssl failed to derive enclave signing public key from {}",
+            path.display()
+        );
+    }
+
+    let digest = Sha256::digest(output.stdout);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn parse_attestation_json(raw: &str) -> Result<TeeProviderAttestation> {
     let value: serde_json::Value = serde_json::from_str(raw).context("parse attestation json")?;
     let mr_enclave = string_field(&value, &["mr_enclave", "unique_id"])?;
@@ -640,22 +673,29 @@ mod tests {
         let context = temp.path().join("provider");
         let dockerfile = context.join("docker").join("Dockerfile.tee");
         let enclave_key = temp.path().join("enclave-key.pem");
+        std::fs::write(&enclave_key, b"test-key").expect("write test key");
         let command = external_provider_docker_build_command(
             &context,
             &dockerfile,
             "us-docker.pkg.dev/evmchain/images/gaiko2-sgxgeth:v1.2.3",
             &enclave_key,
+            "public-key-sha256",
         );
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         let expected_secret = format!("id=enclave_key,src={}", enclave_key.display());
+        let expected_build_arg = "ENCLAVE_KEY_PUBLIC_SHA256=public-key-sha256".to_string();
 
         assert_eq!(command.get_program().to_string_lossy(), "docker");
         assert!(
             args.windows(2)
                 .any(|pair| { pair == ["--secret".to_string(), expected_secret.clone()] })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--build-arg".to_string(), expected_build_arg.clone()] })
         );
     }
 

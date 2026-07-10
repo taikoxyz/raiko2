@@ -18,6 +18,7 @@ use sp1_sdk::{
 
 #[cfg(feature = "digests")]
 pub mod guest_digests;
+mod provenance;
 mod util;
 
 const DEFAULT_RISC0_RUSTFLAGS: &str = "-C passes=lower-atomic -C link-arg=-Ttext=0x00200800 -C link-arg=--fatal-warnings -C panic=abort --cfg getrandom_backend=\"custom\"";
@@ -223,8 +224,11 @@ fn ensure_release_backend(
 
     if !force {
         let outputs_exist = guest_outputs_exist(root, backend)?;
-        let fingerprint =
-            compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, outputs_exist)?;
+        let fingerprint = if outputs_exist {
+            compute_guest_fingerprint(root, backend, bench, sp1_docker_tag, true)?
+        } else {
+            provenance::source_fingerprint(root, backend, bench, sp1_docker_tag)?
+        };
         if outputs_exist
             && matches_existing_fingerprint(&fingerprint_path, backend_key, bench, &fingerprint)?
         {
@@ -323,15 +327,12 @@ fn expected_guest_outputs(root: &Path, backend: Backend) -> Result<Vec<PathBuf>>
 }
 
 fn expected_backend_outputs(root: &Path, backend_key: &str) -> Result<Vec<PathBuf>> {
-    let manifest = read_manifest(&root.join(format!("guests/{backend_key}/Cargo.toml")))?;
-    Ok(manifest
-        .bin
-        .iter()
-        .map(|bin| {
-            root.join("crates/guests/elf")
-                .join(format!("{}.elf", bin.name.replace('-', "_")))
-        })
-        .collect())
+    let backend = match backend_key {
+        "risc0" => Backend::Risc0,
+        "sp1" => Backend::Sp1,
+        _ => bail!("unsupported guest backend `{backend_key}`"),
+    };
+    provenance::expected_artifacts(root, backend)
 }
 
 fn compute_guest_fingerprint(
@@ -346,12 +347,13 @@ fn compute_guest_fingerprint(
 
     match backend {
         Backend::Risc0 => {
-            compute_backend_fingerprint(root, &mut hasher, "risc0", None, include_outputs)?
+            compute_backend_fingerprint(root, &mut hasher, "risc0", bench, None, include_outputs)?
         }
         Backend::Sp1 => compute_backend_fingerprint(
             root,
             &mut hasher,
             "sp1",
+            bench,
             Some(resolve_sp1_docker_tag(root, sp1_docker_tag)),
             include_outputs,
         )?,
@@ -365,6 +367,7 @@ fn compute_backend_fingerprint(
     root: &Path,
     hasher: &mut Sha256,
     backend_key: &str,
+    bench: bool,
     sp1_tag: Option<String>,
     include_outputs: bool,
 ) -> Result<()> {
@@ -387,7 +390,17 @@ fn compute_backend_fingerprint(
     ];
     collect_files_recursively(&root.join("crates/guest-common/src"), &mut paths)?;
     collect_files_recursively(&root.join(format!("guests/{backend_key}/src")), &mut paths)?;
+    paths.extend(provenance::guest_source_paths(
+        root,
+        match backend_key {
+            "risc0" => Backend::Risc0,
+            "sp1" => Backend::Sp1,
+            _ => bail!("unsupported guest backend `{backend_key}`"),
+        },
+        bench,
+    )?);
     paths.sort();
+    paths.dedup();
 
     for path in paths {
         hash_file(root, hasher, &path)?;

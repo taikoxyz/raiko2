@@ -30,5 +30,6 @@ default = []
 net = ["taiko-client-protocol/net"]
 
 [dev-dependencies]
-alloy-rpc-types-engine.workspace = true
+alloy-rlp.workspace = true
+flate2.workspace = true
 tracing-subscriber.workspace = true

@@ -14281,6 +14281,7 @@ dependencies = [
  "alloy-primitives",
  "anyhow",
  "bincode",
+ "cargo_metadata 0.19.2",
  "clap",
  "raiko2-guests",
  "risc0-binfmt",

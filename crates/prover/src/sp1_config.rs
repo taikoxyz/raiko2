@@ -118,7 +118,7 @@ pub struct Sp1Config {
     /// Skip local simulation before submitting a network prove request.
     #[serde(default = "default_true")]
     pub skip_simulation: bool,
-    /// Cycle limit to attach to network prove requests.
+    /// Cycle limit to attach to prove requests (network, local, and mock).
     #[serde(default = "default_cycle_limit")]
     pub cycle_limit: u64,
     /// Optional proposal-stage cycle limit. Falls back to `cycle_limit`.

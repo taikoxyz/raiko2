@@ -199,6 +199,14 @@ local toolchain images:
   target compilers through `sccache`. Guest Rust compilation is not wrapped because the measured
   clean-target path had Rust cache misses that outweighed the native C/C++ cache hits.
 
+Native C crates in the guest graph (notably RISC0 `blst` for EVM BLS12-381, and any future
+`c-kzg` path) compile through `CC_riscv32im_risc0_zkvm_elf` /
+`CC_riscv64im_succinct_zkvm_elf` and therefore land in the sccache layer above. After changing
+`blst`/`c-kzg` patches, tags, or `portable` features, expect a cold C rebuild on the first
+`just build-guest` (watch `sccache --show-stats` in the log); subsequent forced rebuilds should
+show C/C++ cache hits if the sccache volume is retained. Do not disable
+`DOCKER_SCCACHE_CACHE` for routine guest packaging — cold `blst` compiles dominate wall time.
+
 Custom `RISC0_TOOLCHAIN_IMAGE` or `SP1_TOOLCHAIN_IMAGE` values do not enable `sccache` by default,
 because the image may not contain the `sccache` binary. Set `DOCKER_SCCACHE_CACHE=volume` or
 `DOCKER_SCCACHE_CACHE_VOLUME=<volume>` to opt in for custom images that provide it.

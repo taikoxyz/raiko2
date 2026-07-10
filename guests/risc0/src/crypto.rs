@@ -1,8 +1,11 @@
 //! Guest-specific crypto hooks for RISC Zero proofs.
 //!
 //! Cycle-sensitive paths use `risc0-crypto-evm` and Cargo-patched crates.
-//! KZG point evaluation is routed through kzg-rs so the BLS12-381 backend can
-//! be accelerated via the official `bls12_381` patch (instead of revm arkworks).
+//!
+//! - BN254 / ecrecover / modexp / p256: `risc0-crypto-evm` (and trait defaults for pairing).
+//! - EVM BLS12-381 (EIP-2537): revm-precompile `blst` feature + official `risc0/blst` patch
+//!   (no Crypto overrides needed; trait defaults call the blst crypto_backend).
+//! - EIP-4844 point evaluation: kzg-rs + patched `bls12_381` (not c-kzg).
 
 use kzg_rs::{get_kzg_settings, Bytes32, Bytes48, KzgProof};
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};

@@ -731,6 +731,7 @@ where
                             setup,
                             guest_input,
                             proof_mode,
+                            effective_config.cycle_limit,
                             effective_config.verify,
                         )
                         .await
@@ -789,6 +790,7 @@ where
                     input,
                     aggregation_input,
                     proof_mode,
+                    effective_config.cycle_limit,
                     effective_config.verify,
                 )
                 .await
@@ -845,6 +847,7 @@ where
                     input,
                     aggregation_input,
                     proof_mode,
+                    effective_config.cycle_limit,
                     effective_config.verify,
                 )
                 .await
@@ -1124,16 +1127,19 @@ impl LocalSp1Client {
         pk: &SP1ProvingKey,
         stdin: SP1Stdin,
         proof_mode: SP1ProofMode,
+        cycle_limit: u64,
     ) -> Result<SP1ProofWithPublicValues, String> {
         match self {
             Self::Mock(client) => client
                 .prove(pk, stdin)
                 .mode(proof_mode)
+                .cycle_limit(cycle_limit)
                 .run()
                 .map_err(|err| err.to_string()),
             Self::Cpu(client) => client
                 .prove(pk, stdin)
                 .mode(proof_mode)
+                .cycle_limit(cycle_limit)
                 .run()
                 .map_err(|err| err.to_string()),
         }
@@ -1203,6 +1209,7 @@ async fn prove_proposal_with_local_client(
     setup: Arc<Sp1ProgramSetup>,
     guest_input: GuestInput,
     proof_mode: SP1ProofMode,
+    cycle_limit: u64,
     verify: bool,
 ) -> RaikoResult<Proof> {
     tokio::task::spawn_blocking(move || {
@@ -1215,6 +1222,7 @@ async fn prove_proposal_with_local_client(
             setup.as_ref(),
             stdin,
             proof_mode,
+            cycle_limit,
             verify,
             &guest_input,
         )
@@ -1228,13 +1236,16 @@ fn prove_proposal_with_client(
     setup: &Sp1ProgramSetup,
     stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
+    cycle_limit: u64,
     verify: bool,
     guest_input: &GuestInput,
 ) -> RaikoResult<Proof> {
-    let proof = client.prove(&setup.pk, stdin, proof_mode).map_err(|e| {
-        tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
-        RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
-    })?;
+    let proof = client
+        .prove(&setup.pk, stdin, proof_mode, cycle_limit)
+        .map_err(|e| {
+            tracing::error!("Failed to generate SP1 proposal proof: {:?}", e);
+            RaikoError::Guest(format!("SP1 proposal proof generation failed: {e}"))
+        })?;
 
     if verify {
         client.verify(&proof, &setup.vk).map_err(|e| {
@@ -1309,6 +1320,7 @@ async fn prove_proposal_with_network_client(
     .into())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn aggregate_with_local_client(
     prover_mode: ProverMode,
     proposal_setup: Arc<Sp1ProgramSetup>,
@@ -1316,6 +1328,7 @@ async fn aggregate_with_local_client(
     input: AggregationGuestInput,
     aggregation_input: ShastaZkAggregationGuestInput,
     proof_mode: SP1ProofMode,
+    cycle_limit: u64,
     verify: bool,
 ) -> RaikoResult<Proof> {
     tokio::task::spawn_blocking(move || {
@@ -1330,6 +1343,7 @@ async fn aggregate_with_local_client(
             &input,
             stdin,
             proof_mode,
+            cycle_limit,
             verify,
         )
     })
@@ -1337,6 +1351,7 @@ async fn aggregate_with_local_client(
     .map_err(|err| blocking_sp1_join_error("aggregation proof", &err))?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn aggregate_with_client(
     client: &LocalSp1Client,
     proposal_setup: &Sp1ProgramSetup,
@@ -1344,6 +1359,7 @@ fn aggregate_with_client(
     input: &AggregationGuestInput,
     mut stdin: SP1Stdin,
     proof_mode: SP1ProofMode,
+    cycle_limit: u64,
     verify: bool,
 ) -> RaikoResult<Proof> {
     for proof in &input.proofs {
@@ -1360,7 +1376,7 @@ fn aggregate_with_client(
     }
 
     let proof = client
-        .prove(&aggregation_setup.pk, stdin, proof_mode)
+        .prove(&aggregation_setup.pk, stdin, proof_mode, cycle_limit)
         .map_err(|e| {
             tracing::error!("Failed to generate SP1 aggregation proof: {:?}", e);
             RaikoError::Guest(format!("SP1 aggregation proof generation failed: {e}"))

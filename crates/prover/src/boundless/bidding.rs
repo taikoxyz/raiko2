@@ -81,20 +81,16 @@ impl BiddingSession {
         self.attempt = self.attempt.max(submission.attempt).saturating_add(1);
     }
 
-    pub(super) fn no_lock_timeout(
-        &self,
-        rebid_timeout_ms: u64,
-        price_pinned_at_ceiling: bool,
-    ) -> NoLockTimeout {
+    /// `final_rung` forces Abort semantics regardless of the remaining attempt budget. The caller
+    /// decides finality (`submission_rung_is_final`): the bid is pinned at the configured ceiling —
+    /// so a rebid would resubmit the identical price while restarting the offer's ramp and, on the
+    /// onchain path, paying gas per rung — AND the submission's delivery was positively
+    /// acknowledged, so the same-id resubmission is not needed as a delivery retry. Such a rung
+    /// waits out the payable window, then gives up.
+    pub(super) fn no_lock_timeout(&self, rebid_timeout_ms: u64, final_rung: bool) -> NoLockTimeout {
         let mut timeout =
             no_lock_timeout_for_attempt(self.attempt, rebid_timeout_ms, self.max_attempts);
-        if price_pinned_at_ceiling {
-            // A ceiling-pinned bid cannot be raised by any later rung: the previous-max floor
-            // keeps rebid prices at or above this bid and the ceiling clamps them back to exactly
-            // it. Rebidding would resubmit the identical price while restarting the offer's ramp
-            // (temporarily offering the market less than the live request already does) and, on
-            // the onchain path, pay gas per rung. Treat the rung as final instead: wait out the
-            // payable window, then give up.
+        if final_rung {
             timeout.action = NoLockTimeoutAction::Abort;
         }
         timeout
@@ -302,6 +298,7 @@ mod tests {
             max_price_multiplier: 1,
             max_price_wei: U256::from(max_price_wei),
             attempt,
+            delivery_confirmed: false,
         }
     }
 

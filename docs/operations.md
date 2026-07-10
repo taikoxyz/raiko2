@@ -813,10 +813,15 @@ Operator notes:
   absolute per-mcycle bid ceiling: no attempt in either pricing mode ever bids above it. In
   `manual` mode it bounds the bps rebid escalation and must be at least `max_price_per_mcycle`; in
   `market` mode it is the canonical spelling of the safety cap (`max_price_per_mcycle` remains
-  accepted, but setting both is rejected). Ordinary SDK/autoprice spikes clamp to the ceiling. If
-  an operator lowers the ceiling below an in-progress market request's previous exact max, the
-  proof attempt aborts before either offchain or onchain submission rather than lowering the bid
-  or exceeding the ceiling.
+  accepted, but setting both is rejected). Ordinary SDK/autoprice spikes clamp to the ceiling. A
+  bid pinned at the ceiling whose dispatch was positively acknowledged makes its rung final: no
+  same-price resubmission follows (a rebid could only repeat the price while restarting the offer
+  ramp and, onchain, paying gas), and the request waits out its lock deadline instead. Unconfirmed
+  dispatches and resumed submissions keep rebidding at the ceiling so the same-id resubmission
+  doubles as the delivery retry; explicit flat ladders (`rebid_price_step_bps = 0`) always keep
+  their same-price rebids. If an operator lowers the ceiling below an in-progress market request's
+  previous exact max, the proof attempt aborts before either offchain or onchain submission rather
+  than lowering the bid or exceeding the ceiling.
 - When a Boundless request expires unfulfilled, `raiko2` resubmits it up to
   `prover.boundless.rebid_max_attempts`. In `manual` mode, the configured max price escalates by
   `prover.boundless.rebid_price_step_bps` (compounded), clamps to

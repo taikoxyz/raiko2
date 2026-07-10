@@ -887,6 +887,13 @@ struct Submission {
     // 1-based rebid attempt that produced this submission; persisted so restarts don't reset the
     // rebid budget when the price is flat (`rebid_price_step_bps == 0`).
     attempt: u64,
+    // Whether an external acknowledgement proved this exact submission reached its dispatch
+    // target (the order stream echoed the finalized id, or the RPC accepted the transaction).
+    // `false` for uncertain dispatch errors and for resumed records — deliberately in-memory
+    // only, so a restart conservatively assumes unconfirmed. An unconfirmed submission must keep
+    // its rebid rungs even when the price is ceiling-pinned: the same-id resubmission is also
+    // the only delivery retry for a request the market may never have seen.
+    delivery_confirmed: bool,
 }
 
 /// A request that passed the shared market-pricing finalizer. Both submission paths accept only
@@ -985,6 +992,17 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
+    // Dispatch moves funds, so it strictly requires a durable snapshot of the request id first.
+    // A missing observer is not "nothing to persist" — it is an inability to persist, and
+    // allowing dispatch anyway would silently drop the crash/retry protection for library
+    // callers that never wired one up.
+    if observer.is_none() {
+        return Err(RaikoError::InvalidRequestConfig(
+            "Boundless network dispatch requires a progress observer to durably persist the \
+             request id before funds are committed; refusing to submit without one"
+                .to_string(),
+        ));
+    }
     publish_boundless_progress(
         observer,
         submission,
@@ -1046,6 +1064,10 @@ impl TryFrom<BoundlessSubmissionSnapshot> for Submission {
                 .and_then(|wei| wei.parse().ok())
                 .unwrap_or(U256::ZERO),
             attempt: u64::from(value.rebid_attempt),
+            // Resumes never trust a persisted delivery acknowledgement: assuming unconfirmed only
+            // costs a possible same-price redelivery, while assuming confirmed could strand an
+            // undelivered ceiling-pinned request in the final-rung wait.
+            delivery_confirmed: false,
         })
     }
 }
@@ -1549,6 +1571,7 @@ impl BoundlessProver {
             ),
             max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
+            delivery_confirmed: false,
         })
     }
 
@@ -1568,7 +1591,7 @@ impl BoundlessProver {
         F: FnOnce() -> Fut,
         Fut: Future<Output = RaikoResult<U256>>,
     {
-        let submission = self.make_submission(request.as_request(), attempt)?;
+        let mut submission = self.make_submission(request.as_request(), attempt)?;
         let dispatch_result = dispatch_after_boundless_progress_ack(
             observer,
             &submission,
@@ -1582,7 +1605,10 @@ impl BoundlessProver {
         .await?;
 
         match dispatch_result {
-            Ok(returned_id) if returned_id == submission.market_request_id => Ok(submission),
+            Ok(returned_id) if returned_id == submission.market_request_id => {
+                submission.delivery_confirmed = true;
+                Ok(submission)
+            }
             Ok(returned_id) => Err(RaikoError::Guest(format!(
                 "Boundless order stream returned request id 0x{returned_id:x}, expected finalized request id 0x{:x}",
                 submission.market_request_id
@@ -1719,6 +1745,10 @@ impl BoundlessProver {
         match send_result {
             Ok(pending_tx) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
+                // The RPC accepted the transaction; a later mempool drop is still possible but
+                // recovers through the bounded MarketExpired → rotate path, unlike the
+                // uncertain-error arm below where the request may never have left this process.
+                submission.delivery_confirmed = true;
                 publish_boundless_progress(
                     observer,
                     &submission,
@@ -2138,10 +2168,9 @@ impl BoundlessProver {
         };
         let quoted_mcycles_count = self.quoted_mcycles_count(elf_type, evaluated_mcycles_count);
         // Absolute per-proof price ceiling (market cap / manual ceiling) at this quote size, used
-        // to detect rungs whose bid is already pinned at it. Such a rung is final: the
-        // previous-max floor plus the ceiling make every later rung bid the identical price, so
-        // rebidding only restarts the offer ramp and, onchain, burns gas. Pure config-derived
-        // computation; `build_request` re-derives the same cap per attempt for the actual offer.
+        // by `submission_rung_is_final` to detect rungs whose bid is already pinned at it. Pure
+        // config-derived computation; `build_request` re-derives the same cap per attempt for the
+        // actual offer.
         let price_ceiling_wei = validate_offer_params(offer_spec, quoted_mcycles_count)?
             .max_price_cap
             .map(|cap| cap.value);
@@ -2225,21 +2254,21 @@ impl BoundlessProver {
                 max_price_multiplier = submission.max_price_multiplier,
                 "Using Boundless market submission"
             );
-            let price_pinned = price_pinned_at_ceiling(
-                submission.max_price_wei,
+            let rung_is_final = submission_rung_is_final(
+                &submission,
                 price_ceiling_wei,
                 self.config.rebid_price_step_bps,
             );
-            if price_pinned {
+            if rung_is_final {
                 tracing::info!(
                     provider_request_id = %submission.provider_request_id,
                     max_price_wei = %submission.max_price_wei,
-                    "Boundless bid is pinned at the configured price ceiling; \
-                     treating this rung as final instead of rebidding the same price"
+                    "Boundless bid is pinned at the configured price ceiling and its delivery is \
+                     acknowledged; treating this rung as final instead of rebidding the same price"
                 );
             }
             let no_lock_timeout =
-                bidding.no_lock_timeout(self.config.rebid_timeout_ms, price_pinned);
+                bidding.no_lock_timeout(self.config.rebid_timeout_ms, rung_is_final);
 
             match self
                 .poll_until_fulfilled(
@@ -2535,6 +2564,24 @@ fn escalate_and_clamp_manual_max_price(
     })
 }
 
+/// Whether a submission's no-lock rung should be treated as final (Abort semantics: wait out the
+/// payable window, never resubmit).
+///
+/// Two conditions must BOTH hold. The bid is pinned at the configured absolute ceiling — the
+/// previous-max floor plus the ceiling make every later rung bid the identical price, so a
+/// resubmission only restarts the offer ramp and, onchain, burns gas. AND the submission's
+/// delivery was positively acknowledged — for an unconfirmed dispatch (uncertain error, or any
+/// resumed record) the same-id resubmission is also the only delivery retry, and aborting instead
+/// would strand a request the market may never have seen until its task-level retry.
+fn submission_rung_is_final(
+    submission: &Submission,
+    ceiling_wei: Option<U256>,
+    step_bps: u32,
+) -> bool {
+    submission.delivery_confirmed
+        && price_pinned_at_ceiling(submission.max_price_wei, ceiling_wei, step_bps)
+}
+
 /// Shared gate before either offchain or onchain submission. It consumes the live bidding session
 /// directly, finalizes market pricing, and yields the only request type accepted by submit paths.
 fn finalize_request_for_submission(
@@ -2764,7 +2811,7 @@ mod tests {
         exceeds_submission_budget, finalize_request_for_submission, no_lock_deadline_elapsed,
         no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
         quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
-        user_cycles_to_mcycles, validate_offer_params,
+        submission_rung_is_final, user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
     use crate::{ProverProgress, ProverProgressObserver};
@@ -3416,6 +3463,7 @@ mod tests {
             max_price_multiplier,
             max_price_wei: U256::ZERO,
             attempt,
+            delivery_confirmed: false,
         }
     }
 
@@ -4053,6 +4101,7 @@ mod tests {
             max_price_multiplier: 1,
             max_price_wei: U256::from(100),
             attempt: 1,
+            delivery_confirmed: false,
         };
         bidding.record_retry(
             &prior_submission,
@@ -4159,6 +4208,14 @@ mod tests {
         assert_eq!(submission.lock_expires_at, expected_lock_expires_at);
         assert_eq!(submission.max_price_wei, U256::from(777));
         assert_eq!(submission.attempt, 3);
+        // Uncertain delivery must stay unconfirmed: even a ceiling-pinned price keeps its rebid
+        // rungs so the same-id resubmission can act as the delivery retry.
+        assert!(!submission.delivery_confirmed);
+        assert!(!submission_rung_is_final(
+            &submission,
+            Some(submission.max_price_wei),
+            TEST_REBID_PRICE_STEP_BPS,
+        ));
 
         let writes = recorder.writes.lock().expect("progress writes lock");
         assert_eq!(writes.len(), 1);
@@ -4170,6 +4227,76 @@ mod tests {
         assert_eq!(progress.lock_expires_at, expected_lock_expires_at);
         assert_eq!(progress.max_price_wei.as_deref(), Some("777"));
         assert_eq!(progress.rebid_attempt, 3);
+    }
+
+    #[tokio::test]
+    async fn offchain_matching_ack_confirms_delivery_and_finalizes_pinned_rung() {
+        let prover = BoundlessProver::new(BoundlessConfig {
+            rebid_price_step_bps: TEST_REBID_PRICE_STEP_BPS,
+            rebid_max_attempts: TEST_REBID_MAX_ATTEMPTS,
+            ..BoundlessConfig::default()
+        });
+        let request = market_request(777, 7);
+        let expected_id = request.id;
+        let finalized = FinalizedProofRequest(request);
+        let recorder = Arc::new(RecordingProgressObserver::default());
+        let observer: Arc<dyn ProverProgressObserver> = recorder.clone();
+
+        let submission = prover
+            .submit_request_offchain_with(
+                &finalized,
+                Some(&observer),
+                "0ximage",
+                "base",
+                6_000,
+                12_345,
+                2,
+                || async { Ok(expected_id) },
+            )
+            .await
+            .expect("matching order-stream acknowledgement");
+
+        assert!(submission.delivery_confirmed);
+        // Acknowledged + pinned at the ceiling => the rung is final; below the ceiling it is not.
+        assert!(submission_rung_is_final(
+            &submission,
+            Some(submission.max_price_wei),
+            TEST_REBID_PRICE_STEP_BPS,
+        ));
+        assert!(!submission_rung_is_final(
+            &submission,
+            Some(submission.max_price_wei.saturating_add(U256::from(1))),
+            TEST_REBID_PRICE_STEP_BPS,
+        ));
+    }
+
+    #[tokio::test]
+    async fn observerless_boundless_dispatch_is_refused() {
+        let submission = test_submission(1, 1);
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let dispatch_flag = Arc::clone(&dispatched);
+
+        let err = dispatch_after_boundless_progress_ack(
+            None,
+            &submission,
+            "0ximage",
+            "base",
+            true,
+            6_000,
+            12_345,
+            move || async move {
+                dispatch_flag.store(true, Ordering::SeqCst);
+                Ok::<_, RaikoError>(())
+            },
+        )
+        .await
+        .expect_err("dispatch without a durable observer must be refused");
+
+        assert!(
+            err.to_string().contains("requires a progress observer"),
+            "{err}"
+        );
+        assert!(!dispatched.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

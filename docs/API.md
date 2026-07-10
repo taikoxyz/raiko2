@@ -1158,9 +1158,14 @@ All API errors use the Hoodi-style envelope:
   per-mcycle bid ceiling in both pricing modes: no attempt, initial or rebid-escalated, ever bids
   above it. In `manual` mode it is optional, must be at least `max_price_per_mcycle`, and clamps the
   bps rebid escalation; without it, manual escalation is unbounded by config. In `market` mode it is
-  the canonical spelling of the safety cap. Once a rebid is clamped, later rebids repeat the ceiling
-  price unless the configured ceiling is lowered below the persisted previous bid, which aborts
-  the proof attempt without submission.
+  the canonical spelling of the safety cap. Once a bid is pinned at the ceiling and its dispatch was
+  positively acknowledged (order stream echoed the id, or the RPC accepted the transaction), the
+  rung is treated as final: no same-price resubmission follows, and the request instead waits out
+  its lock deadline before the task gives up. When the dispatch outcome is uncertain (or the
+  submission was resumed after a restart), ceiling-pinned rungs still resubmit at the ceiling price
+  so the same-id resubmission doubles as the delivery retry. Explicit flat ladders
+  (`rebid_price_step_bps = 0`) always keep their same-price rebids. Lowering the configured ceiling
+  below the persisted previous bid aborts the proof attempt without submission.
 - `prover.boundless.offer_params.{batch,aggregation}.timeouts` is a tagged table selecting the
   timeout policy. `mode = "per_mcycle"` sets `lock_timeout_ms_per_mcycle` and
   `timeout_ms_per_mcycle` (scaled by the quoted mcycle count) and, under `market` pricing only, may

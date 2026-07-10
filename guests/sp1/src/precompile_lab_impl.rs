@@ -64,6 +64,7 @@ pub fn execute_precompile(input: &PrecompileLabInput) -> u64 {
                 &mut accumulator,
                 kzg_point_evaluation::run(&input.input, gas_limit).expect("kzg point eval failed"),
             ),
+            // EIP-2537 / revm-precompile addresses (contiguous 0x0b..=0x11).
             0x0B => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g1_add::g1_add(&input.input, gas_limit).expect("bls12 g1add failed"),
@@ -72,24 +73,24 @@ pub fn execute_precompile(input: &PrecompileLabInput) -> u64 {
                 &mut accumulator,
                 bls12_381::g1_msm::g1_msm(&input.input, gas_limit).expect("bls12 g1msm failed"),
             ),
-            0x0E => fold_precompile_output(
+            0x0D => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g2_add::g2_add(&input.input, gas_limit).expect("bls12 g2add failed"),
             ),
-            0x0F => fold_precompile_output(
+            0x0E => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::g2_msm::g2_msm(&input.input, gas_limit).expect("bls12 g2msm failed"),
             ),
-            0x11 => fold_precompile_output(
+            0x0F => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::pairing::pairing(&input.input, gas_limit).expect("bls12 pairing failed"),
             ),
-            0x12 => fold_precompile_output(
+            0x10 => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::map_fp_to_g1::map_fp_to_g1(&input.input, gas_limit)
                     .expect("bls12 map fp to g1 failed"),
             ),
-            0x13 => fold_precompile_output(
+            0x11 => fold_precompile_output(
                 &mut accumulator,
                 bls12_381::map_fp2_to_g2::map_fp2_to_g2(&input.input, gas_limit)
                     .expect("bls12 map fp2 to g2 failed"),
@@ -163,11 +164,11 @@ mod tests {
             ("point_evaluation", 0x0a, 50_000, kzg_input()),
             ("bls12_g1add", 0x0b, 375, vec![0u8; 256]),
             ("bls12_g1msm", 0x0c, 12_000, vec![0u8; 160]),
-            ("bls12_g2add", 0x0e, 600, vec![0u8; 512]),
-            ("bls12_g2msm", 0x0f, 22_500, vec![0u8; 288]),
-            ("bls12_pairing", 0x11, 70_300, vec![0u8; 384]),
-            ("bls12_map_fp_to_g1", 0x12, 5_500, vec![0u8; 64]),
-            ("bls12_map_fp2_to_g2", 0x13, 23_800, vec![0u8; 128]),
+            ("bls12_g2add", 0x0d, 600, vec![0u8; 512]),
+            ("bls12_g2msm", 0x0e, 22_500, vec![0u8; 288]),
+            ("bls12_pairing", 0x0f, 70_300, vec![0u8; 384]),
+            ("bls12_map_fp_to_g1", 0x10, 5_500, vec![0u8; 64]),
+            ("bls12_map_fp2_to_g2", 0x11, 23_800, vec![0u8; 128]),
         ] {
             let input = PrecompileLabInput {
                 case: case.to_string(),

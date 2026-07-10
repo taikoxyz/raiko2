@@ -184,6 +184,9 @@ docker compose --env-file docker/.env.sgx -f docker/docker-compose.sgx.yml up ra
 Operator notes:
 
 - The compose stack mounts SGX devices and passes the enclave signing key as a build secret.
+- `Dockerfile.sgx` and the local Compose stacks default to a non-EDMM enclave for compatibility
+  with hosts that do not support EDMM. Set `SGX_EDMM_ENABLE=true` in the Compose env file to build
+  an EDMM-enabled local image explicitly.
 - Set `RAIKO2_SGX_ENCLAVE_KEY_HOST` to a local Gramine enclave signing key. Release builds fetch the
   signing key from GCP Secret Manager through `release-tee-providers`; do not commit signing keys.
 - `raiko2-sgx-init` is a one-shot bootstrap job.
@@ -586,14 +589,27 @@ This flow:
 - reads exact external provider pins from `release/providers.toml`
 - fetches the local `raiko2-sgx` Gramine enclave signing key from GCP Secret Manager when
   `GCP_ENCLAVE_KEY_SECRET` is set
-- builds the local `raiko2-sgx` provider image with the signing key passed as a Docker BuildKit
-  secret
+- builds two local `raiko2-sgx` provider images from the same source revision and signing key, with
+  the key passed as a Docker BuildKit secret:
+  - `<tag>` is the non-EDMM compatibility/default image
+  - `<tag>-edmm` is the explicitly EDMM-enabled image
 - clones and builds each pinned external TEE provider image
 - pushes provider images unless `--no-push` is set
 - records immutable image digests
 - reads baked attestation metadata from each image
-- emits one handoff artifact:
-  - `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+- emits one handoff artifact at
+  `target/releases/<tag>/tee-attestation-manifest-<tag>.json`
+
+The two local images have distinct image digests and `mr_enclave` values, while their `mr_signer`
+values match because they use the same signing key. The handoff manifest records them as separate
+local provider entries:
+
+- `raiko2-sgx` with `image.sgx_edmm = false`
+- `raiko2-sgx-edmm` with `image.sgx_edmm = true`
+
+The command fails closed before writing the handoff manifest if the local `mr_enclave` values are
+equal, the local `mr_signer` values differ, or the pushed image digests are equal. External TEE
+providers keep their existing single-image build behavior and do not emit `image.sgx_edmm`.
 
 Use this manifest to hand off:
 
@@ -620,13 +636,16 @@ ZK/runtime-only release notes.
 
 ## TEE Provider Images
 
-- `raiko2-sgx`: us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx` (non-EDMM, `<release>`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
+- `raiko2-sgx-edmm` (EDMM, `<release>-edmm`): us-docker.pkg.dev/evmchain/images/raiko2-sgx@sha256:...
 - `<provider>`: <provider image digest ref>
 
 ## TEE Attestation Metadata
 
 - `raiko2-sgx` `mr_enclave`: ...
 - `raiko2-sgx` `mr_signer`: ...
+- `raiko2-sgx-edmm` `mr_enclave`: ...
+- `raiko2-sgx-edmm` `mr_signer`: ...
 - `<provider>` `mr_enclave`: ...
 - `<provider>` `mr_signer`: ...
 

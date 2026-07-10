@@ -166,14 +166,14 @@ pub enum ProverProgress {
 
 #[async_trait::async_trait]
 pub trait ProverProgressObserver: Send + Sync {
-    async fn on_progress(&self, progress: &ProverProgress);
+    async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()>;
 
     async fn load_sp1_network_request_id(&self) -> Option<String> {
         None
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionSnapshot> {
-        None
+    async fn load_boundless_submission(&self) -> RaikoResult<Option<BoundlessSubmissionSnapshot>> {
+        Ok(None)
     }
 }
 

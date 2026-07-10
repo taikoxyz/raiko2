@@ -943,7 +943,7 @@ async fn publish_boundless_progress(
     offchain: bool,
     quoted_mcycles_count: u32,
     evaluated_mcycles_count: u32,
-) {
+) -> RaikoResult<()> {
     if let Some(observer) = observer {
         observer
             .on_progress(&ProverProgress::BoundlessSubmission(
@@ -965,8 +965,37 @@ async fn publish_boundless_progress(
                     evaluated_mcycles_count: Some(evaluated_mcycles_count),
                 },
             ))
-            .await;
+            .await?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_after_boundless_progress_ack<T, F, Fut>(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    submission: &Submission,
+    image_ref: &str,
+    deployment: &str,
+    offchain: bool,
+    quoted_mcycles_count: u32,
+    evaluated_mcycles_count: u32,
+    dispatch: F,
+) -> RaikoResult<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    publish_boundless_progress(
+        observer,
+        submission,
+        image_ref,
+        deployment,
+        offchain,
+        quoted_mcycles_count,
+        evaluated_mcycles_count,
+    )
+    .await?;
+    Ok(dispatch().await)
 }
 
 impl TryFrom<BoundlessSubmissionSnapshot> for Submission {
@@ -1494,22 +1523,22 @@ impl BoundlessProver {
         )
     }
 
-    /// Build a [`Submission`] record for a just-submitted request. Derives the provider id,
+    /// Build the pre-dispatch [`Submission`] record from a finalized request. Derives the provider id,
     /// deadlines, and exact escalated max price from `request`, and the floored display multiplier
-    /// from `attempt` + config. `market_request_id` is passed separately because the offchain submit
-    /// returns the market's assigned id, which need not equal `request.id`; the onchain path passes
-    /// `request.id`. `remote_tx_hash` is set later on the onchain path once the tx is sent.
-    fn make_submission(
-        &self,
-        market_request_id: U256,
-        remote_tx_hash: Option<String>,
-        request: &ProofRequest,
-        attempt: u64,
-    ) -> Submission {
-        Submission {
+    /// from `attempt` + config. Both submission paths acknowledge this exact request id before
+    /// dispatch; a zero id is rejected rather than allowing the SDK to mint one after persistence.
+    /// `remote_tx_hash` is set later on the onchain path once the tx is sent.
+    fn make_submission(&self, request: &ProofRequest, attempt: u64) -> RaikoResult<Submission> {
+        let market_request_id = request.id;
+        if market_request_id == U256::ZERO {
+            return Err(RaikoError::InvalidRequestConfig(
+                "Finalized Boundless request id must be nonzero before submission".to_string(),
+            ));
+        }
+        Ok(Submission {
             market_request_id,
             provider_request_id: format!("0x{market_request_id:x}"),
-            remote_tx_hash,
+            remote_tx_hash: None,
             expires_at: request.expires_at(),
             lock_expires_at: request.lock_expires_at(),
             submitted_at: now_secs(),
@@ -1520,24 +1549,89 @@ impl BoundlessProver {
             ),
             max_price_wei: U256::from(request.offer.maxPrice),
             attempt,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_request_offchain_with<F, Fut>(
+        &self,
+        request: &FinalizedProofRequest,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+        image_ref: &str,
+        deployment: &str,
+        quoted_mcycles_count: u32,
+        evaluated_mcycles_count: u32,
+        attempt: u64,
+        dispatch: F,
+    ) -> RaikoResult<Submission>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = RaikoResult<U256>>,
+    {
+        let submission = self.make_submission(request.as_request(), attempt)?;
+        let dispatch_result = dispatch_after_boundless_progress_ack(
+            observer,
+            &submission,
+            image_ref,
+            deployment,
+            true,
+            quoted_mcycles_count,
+            evaluated_mcycles_count,
+            dispatch,
+        )
+        .await?;
+
+        match dispatch_result {
+            Ok(returned_id) if returned_id == submission.market_request_id => Ok(submission),
+            Ok(returned_id) => Err(RaikoError::Guest(format!(
+                "Boundless order stream returned request id 0x{returned_id:x}, expected finalized request id 0x{:x}",
+                submission.market_request_id
+            ))),
+            Err(error) => {
+                tracing::warn!(
+                    provider_request_id = %submission.provider_request_id,
+                    error = %error,
+                    "Boundless offchain submission returned an uncertain error; polling acknowledged request id"
+                );
+                Ok(submission)
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit_request_offchain(
         &self,
         client: &Client,
         request: &FinalizedProofRequest,
+        observer: Option<&Arc<dyn ProverProgressObserver>>,
+        image_ref: &str,
+        deployment: &str,
+        quoted_mcycles_count: u32,
+        evaluated_mcycles_count: u32,
         attempt: u64,
     ) -> RaikoResult<Submission> {
-        let market_request_id = retry_external("submit boundless offchain request", || async {
-            client
-                .submit_request_offchain(request.as_request())
+        self.submit_request_offchain_with(
+            request,
+            observer,
+            image_ref,
+            deployment,
+            quoted_mcycles_count,
+            evaluated_mcycles_count,
+            attempt,
+            || async {
+                retry_external("submit boundless offchain request", || async {
+                    client
+                        .submit_request_offchain(request.as_request())
+                        .await
+                        .map(|(id, _)| id)
+                        .map_err(|e| {
+                            RaikoError::Guest(format!("Failed to submit boundless request: {e}"))
+                        })
+                })
                 .await
-                .map(|(id, _)| id)
-                .map_err(|e| RaikoError::Guest(format!("Failed to submit boundless request: {e}")))
-        })
-        .await?;
-        Ok(self.make_submission(market_request_id, None, request.as_request(), attempt))
+            },
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1609,8 +1703,8 @@ impl BoundlessProver {
             .from(client.boundless_market.caller())
             .value(value);
 
-        let mut submission = self.make_submission(request.id, None, request, attempt);
-        publish_boundless_progress(
+        let mut submission = self.make_submission(request, attempt)?;
+        let send_result = dispatch_after_boundless_progress_ack(
             observer,
             &submission,
             image_ref,
@@ -1618,10 +1712,11 @@ impl BoundlessProver {
             false,
             quoted_mcycles_count,
             evaluated_mcycles_count,
+            move || async move { call.send().await },
         )
-        .await;
+        .await?;
 
-        match call.send().await {
+        match send_result {
             Ok(pending_tx) => {
                 submission.remote_tx_hash = Some(format!("0x{:x}", pending_tx.tx_hash()));
                 publish_boundless_progress(
@@ -1633,7 +1728,7 @@ impl BoundlessProver {
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
                 )
-                .await;
+                .await?;
             }
             Err(error) => {
                 tracing::warn!(
@@ -1667,20 +1762,18 @@ impl BoundlessProver {
         .await?;
 
         if self.config.offchain {
-            let submission = self
-                .submit_request_offchain(context.client, &request, context.bidding.attempt())
-                .await?;
-            publish_boundless_progress(
-                context.observer,
-                &submission,
-                context.image_ref,
-                context.deployment,
-                true,
-                context.quoted_mcycles_count,
-                context.evaluated_mcycles_count,
-            )
-            .await;
-            return Ok(submission);
+            return self
+                .submit_request_offchain(
+                    context.client,
+                    &request,
+                    context.observer,
+                    context.image_ref,
+                    context.deployment,
+                    context.quoted_mcycles_count,
+                    context.evaluated_mcycles_count,
+                    context.bidding.attempt(),
+                )
+                .await;
         }
 
         self.submit_request_onchain(
@@ -2051,7 +2144,7 @@ impl BoundlessProver {
         let mut resume_submission = if let Some(observer) = observer.as_ref() {
             observer
                 .load_boundless_submission()
-                .await
+                .await?
                 .map(Submission::try_from)
                 .transpose()?
         } else {
@@ -2095,7 +2188,7 @@ impl BoundlessProver {
                     quoted_mcycles_count,
                     evaluated_mcycles_count,
                 )
-                .await;
+                .await?;
                 submission
             } else {
                 bidding.ensure_submission_budget()?;
@@ -2645,12 +2738,14 @@ mod tests {
         ElfType, FinalizedProofRequest, JsonRpcError, JsonRpcResponse, MIN_REBID_TIMEOUT_MS,
         NoLockTimeoutAction, RetryDirective, Submission, TimeoutPolicy,
         boundless_poll_error_statuses, classify_boundless_status, defer_poll_timeout_while_payable,
-        escalate_and_cap_market_prices, exceeds_submission_budget, finalize_request_for_submission,
-        no_lock_deadline_elapsed, no_lock_timeout_for_attempt, now_secs, parse_bool_result,
-        parse_env_bool, parse_env_url, quote_proposal_mcycles, should_rebid_unlocked_request,
-        storage_uploader_config_from_env, user_cycles_to_mcycles, validate_offer_params,
+        dispatch_after_boundless_progress_ack, escalate_and_cap_market_prices,
+        exceeds_submission_budget, finalize_request_for_submission, no_lock_deadline_elapsed,
+        no_lock_timeout_for_attempt, now_secs, parse_bool_result, parse_env_bool, parse_env_url,
+        quote_proposal_mcycles, should_rebid_unlocked_request, storage_uploader_config_from_env,
+        user_cycles_to_mcycles, validate_offer_params,
     };
     use crate::boundless_config::default_batch_offer_params;
+    use crate::{ProverProgress, ProverProgressObserver};
     use alloy_primitives::{Bytes, U256, address, utils::parse_ether};
     use boundless_market::{
         Offer, ProofRequest, RequestInput, Requirements,
@@ -2658,13 +2753,15 @@ mod tests {
         price_oracle::{Amount, Asset},
         storage::StorageUploaderType,
     };
-    use raiko2_primitives::Proof;
-    use raiko2_primitives::ProofType;
+    use raiko2_primitives::{Proof, ProofType, RaikoError, RaikoResult};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmission, RemoteSubmissionId};
     use std::{
         collections::HashMap,
         env,
-        sync::{Arc, Mutex, MutexGuard},
+        sync::{
+            Arc, Mutex, MutexGuard,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant, SystemTime},
     };
     use url::Url;
@@ -2673,6 +2770,28 @@ mod tests {
     const TEST_REBID_TIMEOUT_MS: u64 = 300_000;
     const TEST_REBID_PRICE_STEP_BPS: u32 = 5000;
     const TEST_REBID_MAX_ATTEMPTS: u32 = 4;
+
+    #[derive(Default)]
+    struct RecordingProgressObserver {
+        fail_writes: bool,
+        writes: Mutex<Vec<ProverProgress>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProverProgressObserver for RecordingProgressObserver {
+        async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()> {
+            if self.fail_writes {
+                return Err(RaikoError::Store(
+                    "injected progress write failure".to_string(),
+                ));
+            }
+            self.writes
+                .lock()
+                .expect("progress writes lock")
+                .push(progress.clone());
+            Ok(())
+        }
+    }
 
     const STORAGE_ENV_VARS: &[&str] = &[
         "BOUNDLESS_STORAGE_UPLOADER",
@@ -3947,6 +4066,123 @@ mod tests {
         .expect_err("cap conflict cannot produce the type accepted by either submit path");
 
         assert!(err.to_string().contains("previous Boundless max price"));
+    }
+
+    #[tokio::test]
+    async fn observer_write_failure_prevents_boundless_dispatch() {
+        let observer: Arc<dyn ProverProgressObserver> = Arc::new(RecordingProgressObserver {
+            fail_writes: true,
+            ..Default::default()
+        });
+        let submission = test_submission(2, 3);
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let dispatch_flag = Arc::clone(&dispatched);
+
+        let err = dispatch_after_boundless_progress_ack(
+            Some(&observer),
+            &submission,
+            "0ximage",
+            "base",
+            true,
+            6_000,
+            12_345,
+            move || async move {
+                dispatch_flag.store(true, Ordering::SeqCst);
+                Ok::<_, RaikoError>(())
+            },
+        )
+        .await
+        .expect_err("failed acknowledgement must abort before dispatch");
+
+        assert!(err.to_string().contains("injected progress write failure"));
+        assert!(!dispatched.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn offchain_lost_ack_polls_finalized_id_with_exact_snapshot() {
+        let prover = BoundlessProver::new(BoundlessConfig {
+            rebid_price_step_bps: TEST_REBID_PRICE_STEP_BPS,
+            rebid_max_attempts: TEST_REBID_MAX_ATTEMPTS,
+            ..BoundlessConfig::default()
+        });
+        let request = market_request(777, 7);
+        let expected_id = request.id;
+        let expected_expires_at = request.expires_at();
+        let expected_lock_expires_at = request.lock_expires_at();
+        let finalized = FinalizedProofRequest(request);
+        let recorder = Arc::new(RecordingProgressObserver::default());
+        let observer: Arc<dyn ProverProgressObserver> = recorder.clone();
+
+        let submission = prover
+            .submit_request_offchain_with(
+                &finalized,
+                Some(&observer),
+                "0ximage",
+                "base",
+                6_000,
+                12_345,
+                3,
+                || async {
+                    Err::<U256, _>(RaikoError::Guest(
+                        "order accepted but acknowledgement lost".to_string(),
+                    ))
+                },
+            )
+            .await
+            .expect("uncertain offchain result must poll the acknowledged request");
+
+        assert_eq!(submission.market_request_id, expected_id);
+        assert_eq!(submission.provider_request_id, format!("0x{expected_id:x}"));
+        assert_eq!(submission.expires_at, expected_expires_at);
+        assert_eq!(submission.lock_expires_at, expected_lock_expires_at);
+        assert_eq!(submission.max_price_wei, U256::from(777));
+        assert_eq!(submission.attempt, 3);
+
+        let writes = recorder.writes.lock().expect("progress writes lock");
+        assert_eq!(writes.len(), 1);
+        let ProverProgress::BoundlessSubmission(progress) = &writes[0] else {
+            panic!("expected Boundless progress");
+        };
+        assert_eq!(progress.provider_request_id, format!("0x{expected_id:x}"));
+        assert_eq!(progress.expires_at, expected_expires_at);
+        assert_eq!(progress.lock_expires_at, expected_lock_expires_at);
+        assert_eq!(progress.max_price_wei.as_deref(), Some("777"));
+        assert_eq!(progress.rebid_attempt, 3);
+    }
+
+    #[tokio::test]
+    async fn offchain_returned_id_mismatch_is_rejected_after_expected_id_ack() {
+        let prover = BoundlessProver::new(BoundlessConfig::default());
+        let request = market_request(100, 10);
+        let expected_id = request.id;
+        let finalized = FinalizedProofRequest(request);
+        let recorder = Arc::new(RecordingProgressObserver::default());
+        let observer: Arc<dyn ProverProgressObserver> = recorder.clone();
+        let returned_id = expected_id.saturating_add(U256::from(1));
+
+        let err = prover
+            .submit_request_offchain_with(
+                &finalized,
+                Some(&observer),
+                "0ximage",
+                "base",
+                6_000,
+                12_345,
+                1,
+                || async { Ok(returned_id) },
+            )
+            .await
+            .expect_err("a different returned request id must fail closed");
+
+        let message = err.to_string();
+        assert!(message.contains(&format!("0x{expected_id:x}")), "{message}");
+        assert!(message.contains(&format!("0x{returned_id:x}")), "{message}");
+        let writes = recorder.writes.lock().expect("progress writes lock");
+        assert_eq!(writes.len(), 1);
+        let ProverProgress::BoundlessSubmission(progress) = &writes[0] else {
+            panic!("expected Boundless progress");
+        };
+        assert_eq!(progress.provider_request_id, format!("0x{expected_id:x}"));
     }
 
     #[test]

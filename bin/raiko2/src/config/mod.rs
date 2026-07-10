@@ -226,7 +226,7 @@ mod tests {
             .join(path)
     }
 
-    fn validate_rpc_config(rpc: RpcConfig) -> Result<()> {
+    fn validate_rpc_config(rpc: &RpcConfig) -> Result<()> {
         let resolved_pairs = rpc.resolved_pairs(&BoundlessConfig::default())?;
         rpc.validate_resolved(&resolved_pairs)
     }
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn test_rpc_config_default() {
         let config = RpcConfig::default();
-        assert!(validate_rpc_config(config).is_ok());
+        assert!(validate_rpc_config(&config).is_ok());
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(validate_rpc_config(config).is_ok());
+        assert!(validate_rpc_config(&config).is_ok());
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let result = validate_rpc_config(config);
+        let result = validate_rpc_config(&config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("l1_rpc"));
     }
@@ -512,7 +512,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_rpc_config(config);
+        let result = validate_rpc_config(&config);
         assert!(result.is_err());
         assert!(
             result
@@ -542,7 +542,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(validate_rpc_config(config).is_ok());
+        assert!(validate_rpc_config(&config).is_ok());
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_rpc_config(config);
+        let result = validate_rpc_config(&config);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains(
@@ -580,7 +580,7 @@ mod tests {
             pairs: Vec::new(),
             ..Default::default()
         };
-        assert!(validate_rpc_config(config).is_err());
+        assert!(validate_rpc_config(&config).is_err());
     }
 
     #[test]

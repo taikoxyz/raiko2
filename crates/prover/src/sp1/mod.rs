@@ -42,6 +42,7 @@ use sp1_sdk::{
     },
 };
 use std::collections::HashMap;
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -1567,17 +1568,46 @@ async fn notify_sp1_network_submission(
     observer: Option<&Arc<dyn ProverProgressObserver>>,
     provider_request_id: String,
     config: &Sp1Config,
-) {
+) -> RaikoResult<()> {
     if let Some(observer) = observer {
         observer
             .on_progress(&ProverProgress::Sp1NetworkSubmission(
                 sp1_network_submission_progress(provider_request_id, config),
             ))
-            .await;
+            .await?;
     }
+    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+async fn continue_after_sp1_progress<T, F, Fut>(
+    observer: Option<&Arc<dyn ProverProgressObserver>>,
+    provider_request_id: String,
+    config: &Sp1Config,
+    stage: &str,
+    continuation: F,
+) -> (String, T)
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = T>,
+{
+    // SP1 exposes its request id only after the external request is accepted. A persistence error
+    // cannot undo that dispatch, so keep the known id in this attempt and continue polling it;
+    // exiting here would let a task retry mint a second request.
+    if let Err(error) =
+        notify_sp1_network_submission(observer, provider_request_id.clone(), config).await
+    {
+        tracing::warn!(
+            stage,
+            request_id = %provider_request_id,
+            error = %error,
+            "Failed to persist SP1 network submission progress; continuing to poll accepted request id"
+        );
+    }
+    let result = continuation(provider_request_id.clone()).await;
+    (provider_request_id, result)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn request_network_proof(
     client: &NetworkProver,
     status_tracker: &RemoteStatusTracker,
@@ -1602,9 +1632,6 @@ async fn request_network_proof(
 
     loop {
         let request_id_string = if let Some(request_id_string) = stored_request_id.take() {
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
-
             tracing::info!(
                 stage,
                 request_id = %request_id_string,
@@ -1644,9 +1671,6 @@ async fn request_network_proof(
             })?;
 
             let request_id_string = request_id.to_string();
-            notify_sp1_network_submission(observer.as_ref(), request_id_string.clone(), config)
-                .await;
-
             tracing::info!(
                 stage,
                 request_id = %request_id_string,
@@ -1657,21 +1681,30 @@ async fn request_network_proof(
             request_id_string
         };
 
-        let request_id = B256::from_str(&request_id_string).map_err(|e| {
-            RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
-        })?;
-        match wait_sp1_network_proof(
-            client,
-            status_tracker,
-            status_registry,
-            request_id,
-            timeout,
-            auction_timeout,
+        let (request_id_string, wait_result) = continue_after_sp1_progress(
+            observer.as_ref(),
+            request_id_string,
+            config,
             stage,
-            &request_id_string,
+            |request_id_string| async move {
+                let request_id = B256::from_str(&request_id_string).map_err(|e| {
+                    RaikoError::Guest(format!("Invalid stored SP1 {stage} request id: {e}"))
+                })?;
+                wait_sp1_network_proof(
+                    client,
+                    status_tracker,
+                    status_registry,
+                    request_id,
+                    timeout,
+                    auction_timeout,
+                    stage,
+                    &request_id_string,
+                )
+                .await
+            },
         )
-        .await?
-        {
+        .await;
+        match wait_result? {
             Sp1NetworkWaitOutcome::Fulfilled(proof) => {
                 return Ok(NetworkProofRequestResult {
                     request_id: request_id_string,
@@ -1852,16 +1885,17 @@ fn insert_sp1_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_execution_status, decode_fulfillment_status, default_sp1_network_rpc_url,
-        encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
+        continue_after_sp1_progress, decode_execution_status, decode_fulfillment_status,
+        default_sp1_network_rpc_url, encode_sp1_onchain_payload, load_sp1_subproof_for_aggregation,
         remote_verifier_program_vkey, remote_verifier_proof_bytes, resolve_sp1_network_rpc_url,
         sp1_sdk_network_mode, sp1_transient_poll_status, sp1_vk_uuid,
     };
+    use crate::{ProverProgress, ProverProgressObserver};
     use alloy_primitives::B256;
     use raiko2_guests::{Sp1ShastaGuestElves, load_sp1_shasta_guest_elves};
     use raiko2_pipeline::ProofStage;
     use raiko2_pipeline::forks::shasta::sp1_shasta_backend_from_elves;
-    use raiko2_primitives::Proof;
+    use raiko2_primitives::{Proof, RaikoError, RaikoResult};
     use raiko2_primitives_shasta::instance::{sp1_contract_block_program_id, words_to_bytes_le};
     use raiko2_remote_poller::{RemoteStatus, RemoteSubmissionId};
     use sp1_sdk::{
@@ -1871,7 +1905,24 @@ mod tests {
         network::NetworkMode as Sp1SdkNetworkMode,
         network::proto::types::{ExecutionStatus, FulfillmentStatus},
     };
-    use std::str::FromStr;
+    use std::{
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    struct FailingProgressObserver;
+
+    #[async_trait::async_trait]
+    impl ProverProgressObserver for FailingProgressObserver {
+        async fn on_progress(&self, _progress: &ProverProgress) -> RaikoResult<()> {
+            Err(RaikoError::Store(
+                "injected SP1 progress write failure".to_string(),
+            ))
+        }
+    }
 
     fn sp1_test_elves() -> Sp1ShastaGuestElves {
         load_sp1_shasta_guest_elves().expect("load SP1 Shasta guest ELFs")
@@ -1886,6 +1937,33 @@ mod tests {
         assert_eq!(status.submission_id, submission_id);
         assert_eq!(status.status, RemoteStatus::Pending);
         assert!(status.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_sp1_request_continues_same_id_after_progress_write_failure() {
+        let dispatches = AtomicUsize::new(0);
+        let accepted_request_id = B256::repeat_byte(0x42).to_string();
+        dispatches.fetch_add(1, Ordering::SeqCst);
+        let observer: Arc<dyn ProverProgressObserver> = Arc::new(FailingProgressObserver);
+        let waited = Arc::new(AtomicBool::new(false));
+        let wait_flag = Arc::clone(&waited);
+
+        let (continued_request_id, waited_request_id) = continue_after_sp1_progress(
+            Some(&observer),
+            accepted_request_id.clone(),
+            &super::Sp1Config::default(),
+            "proposal",
+            move |request_id| async move {
+                wait_flag.store(true, Ordering::SeqCst);
+                request_id
+            },
+        )
+        .await;
+
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert!(waited.load(Ordering::SeqCst));
+        assert_eq!(continued_request_id, accepted_request_id);
+        assert_eq!(waited_request_id, accepted_request_id);
     }
 
     #[test]

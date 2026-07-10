@@ -4,6 +4,7 @@ use raiko2_engine::{
     EngineObserver, EngineTaskId, EngineTaskKey, EngineTaskSuccess, ProposalStage,
     tasks::EngineTask,
 };
+use raiko2_primitives::{RaikoError, RaikoResult};
 use raiko2_prover::{BoundlessSubmissionSnapshot, ProverProgress};
 use raiko2_runtime::{ProofArtifactRegistration, RunnerStatus, RuntimeManager, RuntimeTaskRecord};
 use std::collections::{HashMap, HashSet};
@@ -600,7 +601,7 @@ impl EngineObserver for RuntimeObserver {
         id: &EngineTaskId,
         task: &EngineTask,
         progress: &ProverProgress,
-    ) {
+    ) -> RaikoResult<()> {
         let stage = Self::stage_name(task);
         match self.load_root_record(id).await {
             Ok(Some(record)) => match Self::metric_context(&record) {
@@ -622,63 +623,55 @@ impl EngineObserver for RuntimeObserver {
                 );
             }
         }
-        let result = self
-            .update_retry_root_records(id, |record, updated_at, _observed_at_ms| {
-                record.runner_status = RunnerStatus::Allocated;
-                record.error = None;
-                record.provider_request_id = match progress {
-                    ProverProgress::BoundlessSubmission(submission) => {
-                        Some(submission.provider_request_id.clone())
-                    }
-                    ProverProgress::Sp1NetworkSubmission(submission) => {
-                        Some(submission.provider_request_id.clone())
-                    }
-                };
-                let task_id = Self::root_task_ref(id);
-                update_task_metadata(record, |metadata| {
-                    metadata.runtime.active_stage = Some(stage.to_string());
-                    metadata.runtime.last_event = Some("submission_registered".to_string());
-                    match progress {
-                        ProverProgress::BoundlessSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_runtime(&task_id, submission, updated_at);
-                            }
-                            EngineTask::Aggregate { .. } => {
-                                metadata.upsert_aggregate_runtime(submission, updated_at);
-                            }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
-                        ProverProgress::Sp1NetworkSubmission(submission) => match task {
-                            EngineTask::ProveProposal { .. } => {
-                                metadata.upsert_proposal_sp1_network_runtime(
-                                    &task_id, submission, updated_at,
-                                );
-                            }
-                            EngineTask::Aggregate { .. } => {
-                                metadata
-                                    .upsert_aggregate_sp1_network_runtime(submission, updated_at);
-                            }
-                            EngineTask::Preflight { .. }
-                            | EngineTask::Validate { .. }
-                            | EngineTask::Encode { .. }
-                            | EngineTask::Proposal { .. } => {}
-                        },
-                    }
-                })?;
-                record.updated_at = updated_at;
-                Ok(())
-            })
-            .await;
-        if let Err(err) = result {
-            tracing::warn!(
-                task = ?id,
-                error = %err,
-                "failed to sync runtime task progress"
-            );
-        }
+        self.update_retry_root_records(id, |record, updated_at, _observed_at_ms| {
+            record.runner_status = RunnerStatus::Allocated;
+            record.error = None;
+            record.provider_request_id = match progress {
+                ProverProgress::BoundlessSubmission(submission) => {
+                    Some(submission.provider_request_id.clone())
+                }
+                ProverProgress::Sp1NetworkSubmission(submission) => {
+                    Some(submission.provider_request_id.clone())
+                }
+            };
+            let task_id = Self::root_task_ref(id);
+            update_task_metadata(record, |metadata| {
+                metadata.runtime.active_stage = Some(stage.to_string());
+                metadata.runtime.last_event = Some("submission_registered".to_string());
+                match progress {
+                    ProverProgress::BoundlessSubmission(submission) => match task {
+                        EngineTask::ProveProposal { .. } => {
+                            metadata.upsert_proposal_runtime(&task_id, submission, updated_at);
+                        }
+                        EngineTask::Aggregate { .. } => {
+                            metadata.upsert_aggregate_runtime(submission, updated_at);
+                        }
+                        EngineTask::Preflight { .. }
+                        | EngineTask::Validate { .. }
+                        | EngineTask::Encode { .. }
+                        | EngineTask::Proposal { .. } => {}
+                    },
+                    ProverProgress::Sp1NetworkSubmission(submission) => match task {
+                        EngineTask::ProveProposal { .. } => {
+                            metadata.upsert_proposal_sp1_network_runtime(
+                                &task_id, submission, updated_at,
+                            );
+                        }
+                        EngineTask::Aggregate { .. } => {
+                            metadata.upsert_aggregate_sp1_network_runtime(submission, updated_at);
+                        }
+                        EngineTask::Preflight { .. }
+                        | EngineTask::Validate { .. }
+                        | EngineTask::Encode { .. }
+                        | EngineTask::Proposal { .. } => {}
+                    },
+                }
+            })?;
+            record.updated_at = updated_at;
+            Ok(())
+        })
+        .await
+        .map_err(RaikoError::from)
     }
 
     async fn on_task_succeeded(
@@ -837,20 +830,22 @@ impl EngineObserver for RuntimeObserver {
         &self,
         id: &EngineTaskId,
         task: &EngineTask,
-    ) -> Option<BoundlessSubmissionSnapshot> {
+    ) -> RaikoResult<Option<BoundlessSubmissionSnapshot>> {
         let record = match task {
-            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => self
-                .load_root_record_for_resume(id, task)
-                .await
-                .ok()
-                .flatten(),
+            EngineTask::ProveProposal { .. } | EngineTask::Aggregate { .. } => {
+                self.load_root_record_for_resume(id, task).await?
+            }
             EngineTask::Preflight { .. }
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
-            | EngineTask::Proposal { .. } => None,
-        }?;
+            | EngineTask::Proposal { .. } => return Ok(None),
+        };
+        let Some(record) = record else {
+            return Ok(None);
+        };
 
-        let metadata: TaskMetadata = serde_json::from_value(record.metadata).ok()?;
+        let metadata: TaskMetadata =
+            serde_json::from_value(record.metadata).context("failed to parse task metadata")?;
         let task_id = Self::root_task_ref(id);
         let runtime = match task {
             EngineTask::ProveProposal { .. } => metadata.proposal_runtime(&task_id),
@@ -859,14 +854,17 @@ impl EngineObserver for RuntimeObserver {
             | EngineTask::Validate { .. }
             | EngineTask::Encode { .. }
             | EngineTask::Proposal { .. } => None,
-        }?;
+        };
+        let Some(runtime) = runtime else {
+            return Ok(None);
+        };
 
         // Expired records must still reach the prover: it gives them one final market status
         // read (an expired-but-fulfilled request still reports Fulfilled, recovering a proof
         // that is already paid for) and otherwise counts the stored attempt against the rebid
         // budget. Dropping them here would reset the budget and the price-escalation ladder on
         // every restart after expiry.
-        runtime.boundless_submission_for_resume(now_secs())
+        Ok(runtime.boundless_submission_for_resume(now_secs()))
     }
 }
 
@@ -1044,6 +1042,136 @@ mod tests {
         Ok(())
     }
 
+    fn proposal_prove_task(id: &EngineTaskId) -> EngineTask {
+        EngineTask::ProveProposal {
+            request: proposal_request(),
+            input_task: id.clone(),
+        }
+    }
+
+    fn boundless_progress() -> ProverProgress {
+        let expires_at = now_secs().saturating_add(3_600);
+        ProverProgress::BoundlessSubmission(BoundlessSubmissionProgress {
+            snapshot: BoundlessSubmissionSnapshot::new(
+                "0x1234".to_string(),
+                None,
+                expires_at,
+                expires_at.saturating_sub(600),
+                expires_at.saturating_sub(300),
+                2,
+                "777".to_string(),
+                3,
+            ),
+            image_ref: "0ximage".to_string(),
+            deployment: "base".to_string(),
+            offchain: true,
+            quoted_mcycles_count: Some(6_000),
+            evaluated_mcycles_count: Some(12_345),
+        })
+    }
+
+    #[tokio::test]
+    async fn runtime_observer_progress_write_errors_propagate() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-progress-error",
+        ))?);
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: proposal_request(),
+        });
+
+        let err = observer
+            .on_task_progress(&id, &proposal_prove_task(&id), &boundless_progress())
+            .await
+            .expect_err("missing runtime record must be observable to the prover");
+
+        assert!(
+            err.to_string().contains("runtime task not registered"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn boundless_resume_runtime_read_errors_propagate() -> Result<()> {
+        let root = unique_runtime_root("runtime-observer-read-error");
+        let runtime = Arc::new(RuntimeManager::new(root.clone())?);
+        std::fs::create_dir(root.join("state/runtime.sqlite"))?;
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: proposal_request(),
+        });
+
+        let err = observer
+            .load_boundless_submission(&id, &proposal_prove_task(&id))
+            .await
+            .expect_err("runtime database read failure must not become no resume state");
+
+        assert!(err.to_string().contains("runtime sqlite database"), "{err}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn boundless_resume_metadata_decode_errors_propagate() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-metadata-error",
+        ))?);
+        let request = proposal_request();
+        register_observer_task(
+            &runtime,
+            "task_metadata_error",
+            "taiko_dev/ethereum",
+            PipelineKey::ShastaNative,
+            &request,
+            RunnerStatus::Allocated,
+        )
+        .await?;
+        let mut record = runtime
+            .get_task("task_metadata_error")
+            .await?
+            .expect("runtime task");
+        record.metadata = serde_json::json!({"network_pair": "taiko_dev/ethereum"});
+        runtime.upsert_task(&record).await?;
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaNative,
+            request,
+        });
+
+        let err = observer
+            .load_boundless_submission(&id, &proposal_prove_task(&id))
+            .await
+            .expect_err("metadata decode failure must not become no resume state");
+
+        assert!(
+            err.to_string()
+                .contains("failed to parse runtime task metadata"),
+            "{err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn boundless_resume_genuine_absence_is_allowed() -> Result<()> {
+        let runtime = Arc::new(RuntimeManager::new(unique_runtime_root(
+            "runtime-observer-no-resume-record",
+        ))?);
+        let observer = RuntimeObserver::new(runtime, "taiko_dev/ethereum".to_string());
+        let id = EngineTaskId::new(EngineTaskKey::Proposal {
+            pipeline: PipelineKey::ShastaRisc0Network,
+            request: proposal_request(),
+        });
+
+        let submission = observer
+            .load_boundless_submission(&id, &proposal_prove_task(&id))
+            .await?;
+
+        assert!(submission.is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn runtime_observer_records_boundless_submission_metadata_immediately() -> Result<()> {
@@ -1119,7 +1247,7 @@ mod tests {
                     evaluated_mcycles_count: Some(12_345),
                 }),
             )
-            .await;
+            .await?;
 
         let record = runtime
             .get_task("task_public")
@@ -1163,6 +1291,7 @@ mod tests {
                 },
             )
             .await
+            .expect("boundless resume load succeeds")
             .expect("boundless submission can resume");
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.remote_tx_hash.as_deref(), Some("0xabcd"));
@@ -1201,6 +1330,7 @@ mod tests {
                 },
             )
             .await
+            .expect("legacy boundless resume load succeeds")
             .expect("legacy boundless submission can resume");
         let after_legacy_resume = now_secs();
         assert_eq!(resumed.provider_request_id, "0x1234");
@@ -1237,6 +1367,7 @@ mod tests {
                 },
             )
             .await
+            .expect("expired boundless resume load succeeds")
             .expect("expired boundless submission still resumes");
         assert_eq!(resumed.provider_request_id, "0x1234");
         assert_eq!(resumed.expires_at, expired_at);
@@ -1667,7 +1798,7 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await?;
 
         let record = runtime
             .get_task("task_public_sp1")
@@ -1800,7 +1931,7 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await?;
 
         assert_eq!(
             observer
@@ -1912,7 +2043,7 @@ mod tests {
                     auction_timeout_secs: Some(120),
                 }),
             )
-            .await;
+            .await?;
 
         assert_eq!(
             observer

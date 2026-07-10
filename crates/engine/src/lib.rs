@@ -27,7 +27,7 @@ use std::time::Duration;
 use crate::worker::WorkerConfig;
 use async_trait::async_trait;
 use raiko2_pipeline::{Pipeline, PipelineSpec, PipelineStage, PipelineStageResult, ProverBackend};
-use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, ShastaRequest};
+use raiko2_primitives::{AggregationGuestInput, Proof, ProofContext, RaikoResult, ShastaRequest};
 use raiko2_prover::{BoundlessSubmissionSnapshot, Prover, ProverProgress, ProverProgressObserver};
 use raiko2_provider::Provider;
 use raiko2_queue::{
@@ -76,7 +76,8 @@ pub trait EngineObserver: Send + Sync {
         _id: &EngineTaskId,
         _task: &EngineTask,
         _progress: &ProverProgress,
-    ) {
+    ) -> RaikoResult<()> {
+        Ok(())
     }
 
     async fn on_task_succeeded(
@@ -103,8 +104,8 @@ pub trait EngineObserver: Send + Sync {
         &self,
         _id: &EngineTaskId,
         _task: &EngineTask,
-    ) -> Option<BoundlessSubmissionSnapshot> {
-        None
+    ) -> RaikoResult<Option<BoundlessSubmissionSnapshot>> {
+        Ok(None)
     }
 }
 
@@ -154,10 +155,10 @@ enum LeaseInterruption {
 
 #[async_trait]
 impl ProverProgressObserver for EngineProgressObserver {
-    async fn on_progress(&self, progress: &ProverProgress) {
+    async fn on_progress(&self, progress: &ProverProgress) -> RaikoResult<()> {
         self.observer
             .on_task_progress(&self.task_id, &self.task, progress)
-            .await;
+            .await
     }
 
     async fn load_sp1_network_request_id(&self) -> Option<String> {
@@ -166,7 +167,7 @@ impl ProverProgressObserver for EngineProgressObserver {
             .await
     }
 
-    async fn load_boundless_submission(&self) -> Option<BoundlessSubmissionSnapshot> {
+    async fn load_boundless_submission(&self) -> RaikoResult<Option<BoundlessSubmissionSnapshot>> {
         self.observer
             .load_boundless_submission(&self.task_id, &self.task)
             .await

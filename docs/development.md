@@ -140,13 +140,24 @@ CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
   cargo run -r -p xtask-build-guest --bin xtask-build-guest -- all
 ```
 
-`build-guest` updates checked-in ELF artifacts under `crates/guests/elf` when guest sources,
-toolchain inputs, or current ELF bytes change. When the fingerprint already matches, it prints a
-backend skip message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
+`build-guest` updates checked-in ELF artifacts and deterministic provenance manifests under
+`crates/guests/elf` when guest sources, transitive local dependencies, toolchain inputs, or current
+artifact bytes change. When the tracked provenance already matches, it prints a backend skip
+message instead of rebuilding. Use `--force` when you intentionally need a rebuild:
 
 ```bash
 just build-guest sp1 --force
 ```
+
+Verify both checked-in guest families without invoking Docker:
+
+```bash
+cargo run -p xtask-build-guest --bin xtask-build-guest -- all --check
+```
+
+Check mode exits nonzero when a source input, artifact, or provenance manifest is missing or stale.
+Refresh locally with `just build-guest <backend>`, or dispatch the manual `sync-guest-elf` workflow
+when the required guest toolchain is not available locally.
 
 The host loads those files from that fixed path at process startup; they are not embedded into
 the `raiko2` binary. Set `RAIKO2_GUEST_ELF_DIR` when running a packaged binary from a layout that
@@ -208,7 +219,7 @@ time just build-guest sp1
 ```
 
 The first two commands measure guest rebuild behavior with increasingly warm Docker Cargo and
-`sccache` volumes. The third command exercises the guest fingerprint skip path and prints
+`sccache` volumes. The third command exercises the guest provenance skip path and prints
 per-backend elapsed time when the checked-in ELFs already match the current sources and build
 inputs.
 RISC0 and SP1 Docker-image rebuilds also print `sccache --show-stats` output so cache hit/miss

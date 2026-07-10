@@ -1437,7 +1437,7 @@ mod tests {
         assert!(err.to_string().contains("fork l1 contract is not active"));
         assert_eq!(
             spec.get_fork_verifier_address(5_412_478, mainnet_shasta_timestamp(), ProofType::Sgx)?,
-            address!("a1018Ba2e22139076f91dA2A856B2CAB22d968F6")
+            address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8")
         );
         assert_eq!(
             spec.get_fork_verifier_address(
@@ -1456,16 +1456,28 @@ mod tests {
 
     #[cfg(feature = "chain-spec-json")]
     #[test]
-    fn taiko_mainnet_raw_spec_keeps_sgx_geth_shasta_verifier() -> Result<()> {
-        let list: Vec<Value> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
+    fn taiko_mainnet_unzen_inherits_current_shasta_verifiers() -> Result<()> {
+        let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
-            .iter()
-            .find(|spec| spec["name"] == "taiko_mainnet")
+            .into_iter()
+            .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
         assert_eq!(
-            spec["verifier_address_forks"]["SHASTA"]["SGXGETH"].as_str(),
-            Some("0x08568Df252ecf37D6C3eFD24f6ca3688118697F1")
+            spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP, ProofType::Sgx)?,
+            address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP, ProofType::SgxGeth)?,
+            address!("41e79EB4F03aBB5DF8716B759528dc5d8f6a84Ee")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP, ProofType::Risc0)?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
+        assert_eq!(
+            spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP, ProofType::Sp1)?,
+            address!("73A0Db393ef87ce781ac7957bE10D6628432100F")
         );
         Ok(())
     }

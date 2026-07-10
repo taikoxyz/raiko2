@@ -1456,13 +1456,42 @@ mod tests {
 
     #[cfg(feature = "chain-spec-json")]
     #[test]
-    fn taiko_mainnet_unzen_inherits_current_shasta_verifiers() -> Result<()> {
+    fn taiko_mainnet_unzen_uses_configured_verifier_addresses() -> Result<()> {
         let list: Vec<ChainSpec> = serde_json::from_str(DEFAULT_CHAIN_SPECS)?;
         let spec = list
             .into_iter()
             .find(|spec| spec.name == "taiko_mainnet")
             .ok_or_else(|| anyhow!("missing taiko_mainnet spec"))?;
 
+        // Mainnet reuses the current Shasta verifier set for Unzen, but the addresses must be
+        // configured under the UNZEN fork key (same shape as Hoodi) so the post-activation path
+        // does not depend on SHASTA fallback alone.
+        let unzen_verifiers = spec
+            .verifier_address_forks
+            .get(&ForkId::Taiko(TaikoFork::Unzen))
+            .ok_or_else(|| anyhow!("taiko_mainnet missing UNZEN verifier_address_forks"))?;
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::Sgx).copied().flatten(),
+            Some(address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8"))
+        );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::SgxGeth).copied().flatten(),
+            Some(address!("41e79EB4F03aBB5DF8716B759528dc5d8f6a84Ee"))
+        );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::Risc0).copied().flatten(),
+            Some(address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b"))
+        );
+        assert_eq!(
+            unzen_verifiers.get(&ProofType::Sp1).copied().flatten(),
+            Some(address!("73A0Db393ef87ce781ac7957bE10D6628432100F"))
+        );
+
+        // Pre-Unzen still resolves SHASTA; at/after activation resolves the UNZEN map.
+        assert_eq!(
+            spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP - 1, ProofType::Risc0)?,
+            address!("059dAF31F571da48Ab4e74Ae12F64f907681Cd8b")
+        );
         assert_eq!(
             spec.get_fork_verifier_address(0, MAINNET_UNZEN_TIMESTAMP, ProofType::Sgx)?,
             address!("9D3C595BFf6Ff7D2b2CbdEcF94aD917eB2fCFFd8")

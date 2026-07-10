@@ -1,11 +1,13 @@
 //! Guest-specific crypto hooks for SP1 proofs.
 //!
-//! Cycle-sensitive paths must use SP1-patched crates (or kzg-rs on the SP1 BLS
-//! backend). Do not reimplement BN254 / BLS / KZG in pure software here — that
-//! bypasses precompiles and inflates prove cost.
+//! Cycle-sensitive paths must use SP1-patched crates. Do not reimplement BN254
+//! in pure software here — that bypasses precompiles and inflates prove cost.
+//!
+//! EVM precompile `0x0a` (point evaluation) intentionally keeps revm's default
+//! arkworks path: routing it through kzg-rs + BLS syscalls measured ~5× more
+//! SP1 instructions on the lab KZG vector than arkworks.
 
 use alloy_primitives::keccak256;
-use raiko2_primitives::blob::verify_kzg_point_evaluation_proof;
 use revm_precompile::{install_crypto, Crypto, PrecompileHalt};
 
 #[derive(Debug)]
@@ -44,25 +46,12 @@ impl Crypto for Sp1GuestCrypto {
         Ok(*hash)
     }
 
-    /// Route EIP-4844 point evaluation through shared kzg-rs helper so SP1's
-    /// patched `bls12_381` backend is used instead of revm's arkworks fallback.
-    fn verify_kzg_proof(
-        &self,
-        z: &[u8; 32],
-        y: &[u8; 32],
-        commitment: &[u8; 48],
-        proof: &[u8; 48],
-    ) -> Result<(), PrecompileHalt> {
-        if verify_kzg_point_evaluation_proof(z, y, commitment, proof) {
-            Ok(())
-        } else {
-            Err(PrecompileHalt::BlobVerifyKzgProofFailed)
-        }
-    }
-
     // bn254_g1_add / bn254_g1_mul / bn254_pairing_check intentionally use the
     // trait defaults → revm substrate-bn backend, which is Cargo-patched to
     // sp1-patches/bn and hits SP1 BN254 syscalls.
+    //
+    // verify_kzg_proof intentionally uses the trait default (arkworks). Do not
+    // override with kzg-rs for EVM 0x0a without re-benchmarking — see module docs.
 }
 
 pub fn install_guest_crypto() {
@@ -153,7 +142,7 @@ mod tests {
             doubled
         );
 
-        // EIP-4844 point-evaluation vector (revm-precompile test case).
+        // EVM 0x0a via trait-default arkworks (revm-precompile test vector).
         let commitment = hex!("8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca25f26936857bc3a7c2539ea8ec3a952b7");
         let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
         let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");

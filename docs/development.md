@@ -202,14 +202,16 @@ local toolchain images:
 Native C crates that are **actually linked** into a guest ELF compile through
 `CC_riscv32im_risc0_zkvm_elf` / `CC_riscv64im_succinct_zkvm_elf` and therefore land in the
 sccache layer above. Today that means RISC0 **`blst`** (EVM BLS12-381 via
-`revm-precompile` features `blst` + `portable`). `c-kzg` may appear in guest lockfiles as an
-optional or host-side transitive dep (e.g. alloy-consensus, or revm-precompile's optional
-`c-kzg` feature which we do **not** enable — EIP-4844 point evaluation uses kzg-rs instead);
-it is only a guest C-build concern if a feature actually activates it. After changing
-`blst`/`c-kzg` patches, tags, or `portable` features, expect a cold C rebuild on the first
-`just build-guest` (watch `sccache --show-stats` in the log); subsequent forced rebuilds should
-show C/C++ cache hits if the sccache volume is retained. Do not disable
-`DOCKER_SCCACHE_CACHE` for routine guest packaging — cold `blst` compiles dominate wall time.
+`revm-precompile` features `blst` + `portable`).
+
+Cargo.lock may list `c-kzg` under `revm-precompile` because it is an **optional** crate
+dependency in that package's manifest; our guest does **not** enable the `c-kzg` feature
+(EVM `0x0a` stays on revm arkworks; blob PoE uses kzg-rs). Verify with
+`cargo tree -p raiko2-guest-risc0 -i c-kzg` (should print nothing for the guest link set).
+alloy-consensus may still reference `c-kzg` for host-side types. After changing `blst`
+patches/tags/`portable`, expect a cold C rebuild on the first `just build-guest` (watch
+`sccache --show-stats`); subsequent forced rebuilds should show C/C++ cache hits if the
+sccache volume is retained. Do not disable `DOCKER_SCCACHE_CACHE` for routine packaging.
 
 Custom `RISC0_TOOLCHAIN_IMAGE` or `SP1_TOOLCHAIN_IMAGE` values do not enable `sccache` by default,
 because the image may not contain the `sccache` binary. Set `DOCKER_SCCACHE_CACHE=volume` or

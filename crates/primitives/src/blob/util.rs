@@ -201,10 +201,16 @@ pub fn verify_blob_kzg_proof(
     Ok(())
 }
 
-/// Verify an EIP-4844 **point evaluation** proof (EVM precompile `0x0a` inputs).
+/// Verify an EIP-4844 **point evaluation** proof via kzg-rs.
 ///
-/// Shared by zkVM guests so SP1/RISC0 route through the same kzg-rs settings and
-/// error mapping instead of revm's arkworks fallback.
+/// **Not used for EVM precompile `0x0a` in guests.** zkVM lab measurements showed
+/// routing `Crypto::verify_kzg_proof` through kzg-rs (BLS syscalls) is much more
+/// expensive than revm's arkworks default on both SP1 and RISC0. Keep EVM `0x0a`
+/// on arkworks; use this helper only when a caller explicitly wants the kzg-rs
+/// point-evaluation path (e.g. experiments).
+///
+/// Blob proof-of-equivalence still uses [`verify_blob_kzg_proof`] /
+/// `verify_kzg_proof_impl`, which benefit from patched `bls12_381` on RISC0.
 ///
 /// Returns `true` only when the proof is valid; malformed inputs return `false`.
 #[must_use]

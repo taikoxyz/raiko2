@@ -29,9 +29,10 @@ num-bigint = { version = "=0.4.6", default-features = false }
 # bn: BN254 via patched substrate-bn.
 # blst: EVM BLS12-381 (EIP-2537 0x0b–0x13) via official risc0/blst instead of arkworks.
 # portable: required for blst on rv32im (no host ADX/SIMD).
-# Do NOT enable revm-precompile's `c-kzg` feature: EIP-4844 point evaluation is routed
-# through kzg-rs (Crypto::verify_kzg_proof). `c-kzg` may still appear in Cargo.lock as an
-# optional package entry for revm-precompile / alloy, but it is not feature-activated here.
+# Do NOT enable revm-precompile's `c-kzg` feature. EVM 0x0a uses revm arkworks; blob PoE
+# uses kzg-rs. Cargo.lock may still list optional `c-kzg` under revm-precompile (manifest
+# optional dep) / alloy — that is not the same as linking it. Check with
+# `cargo tree -p raiko2-guest-risc0 -i c-kzg`.
 revm-precompile = { version = "=34.0.0", default-features = false, features = [
     "bn",
     "blst",
